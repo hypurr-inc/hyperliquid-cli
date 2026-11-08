@@ -16,7 +16,7 @@
 
 ## Key Capabilities
 - **Perpetuals & Spot Trading**: Limit, market, trigger (stop loss, take profit), bracket orders, TWAP with randomization (`--randomize`), and trailing stops.
-- **Agent Safety**: Mandatory `--dry-run` inspection, non-interactive JSON responses, schema discovery (`hyperliquid schema --json`), withdrawal-proof agent API wallets.
+- **Agent Safety**: Supported `--dry-run` previews, non-interactive JSON responses, schema discovery (`hyperliquid schema --json`), withdrawal-proof agent API wallets. The agent workflow requires a dry-run preview and explicit operator approval before live mutation; a prior preview is not enforced by the CLI's `orders create` path. Mainnet order creation requires confirmation unless `--yes` is passed; testnet order creation does not prompt.
 - **HIP-3 DEXes & Staking**: Full support for HIP-3 DEX markets, validator staking, and vault deposits/withdrawals.
 
 ## Structured Interfaces for Agents
