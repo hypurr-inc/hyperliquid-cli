@@ -1,0 +1,30 @@
+{
+  "name": "Hyperliquid CLI Pack",
+  "version": "1.0.0",
+  "description": "Read-only Hyperliquid monitoring through the hyperliquid CLI: a daily account and risk brief, and a watchlist monitor for price, funding and open-interest moves.",
+  "author": "hypurr-inc",
+  "license": "MIT",
+  "homepage": "https://github.com/hypurr-inc/hyperliquid-cli",
+  "skills": [
+    {
+      "slug": "hyperliquid-account-brief",
+      "path": "skills/hyperliquid-account-brief",
+      "description": "Daily Hyperliquid account brief: equity, withdrawable, margin use, per-position PnL and liquidation price, open orders, and 24h realized PnL and fees. Read-only.",
+      "category": "crypto",
+      "schedule": "0 13 * * *",
+      "default_enabled": false,
+      "secrets_required": [],
+      "capabilities": ["read_only", "external_api", "sends_notifications"]
+    },
+    {
+      "slug": "hyperliquid-market-monitor",
+      "path": "skills/hyperliquid-market-monitor",
+      "description": "Watch Hyperliquid perps by 24h move, funding rate and open interest, and notify only when a threshold is crossed. Read-only.",
+      "category": "crypto",
+      "schedule": "0 * * * *",
+      "default_enabled": false,
+      "secrets_required": [],
+      "capabilities": ["read_only", "external_api", "sends_notifications"]
+    }
+  ]
+}
