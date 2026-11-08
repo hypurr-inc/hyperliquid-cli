@@ -4,6 +4,7 @@
 
 - HIP-3 reads: `book`, `candles`, `spread`, `funding`, and `subscribe trades|orderbook|candles` accept a DEX-qualified market (`xyz:XYZ100`) by looking the market up on its dex, so a HIP-3 book, tape and funding rate no longer fail with `asset not found`.
 - `mids`, `positions list`, `orders open`, and `account portfolio` take `--dex <NAME>` to scope the read to a builder-deployed perp DEX. `account portfolio --dex` reports that dex's perp account only; spot balances and vault equities stay on the default-dex view.
+- A `--dex` name is validated against `perpDexs` before the read: an unknown DEX exits `13` with `Unknown DEX` instead of returning an empty account or empty mid map, and the canonical spelling is used in every request. A blank `--dex` behaves like no flag.
 
 ## 0.17.0 - 2026-11-09
 

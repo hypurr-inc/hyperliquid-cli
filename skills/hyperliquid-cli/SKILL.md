@@ -379,7 +379,10 @@ hyperliquid --format json account portfolio 0x... --dex xyz
 ```
 
 `account portfolio --dex` reads that DEX's perp account only; spot balances and
-vault equities are account-wide and are reported by the default-dex run.
+vault equities are account-wide and are reported by the default-dex run. A
+`--dex` name is checked against `perpDexs` first: an unknown name fails with
+"Unknown DEX" instead of reading an empty account, and the canonical spelling is
+what every request uses.
 
 Trade by DEX-qualified symbol or `--dex`:
 

@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::assets::{AssetResolver, Market};
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, StreamBound, arg};
 use crate::commands::outcomes;
-use crate::commands::support::normalize_dex;
+use crate::commands::support::{canonical_dex, normalize_dex};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
@@ -498,7 +498,9 @@ pub async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> 
 
 pub async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Error> {
     let selected = inv.session().json_options().selected_fields();
-    inv.print(&mids_snapshot(inv.remote()?.api().sdk(), dex, selected).await?);
+    let client = inv.remote()?.api().sdk();
+    let dex = canonical_dex(client, dex).await?;
+    inv.print(&mids_snapshot(client, dex.as_deref(), selected).await?);
     Ok(())
 }
 
@@ -892,7 +894,7 @@ async fn watch_mids(
     let remote = inv.remote()?;
     let client = remote.api().sdk();
     let selected = inv.session().json_options().selected_fields();
-    let dex = dex.map(str::to_string);
+    let dex = canonical_dex(client, dex).await?;
 
     crate::watch::run_snapshot_watch(
         inv.session(),

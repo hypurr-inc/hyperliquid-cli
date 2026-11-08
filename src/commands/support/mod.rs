@@ -26,6 +26,26 @@ pub(crate) fn normalize_dex(dex: Option<&str>) -> Option<&str> {
     dex.map(str::trim).filter(|dex| !dex.is_empty())
 }
 
+/// Validate a `--dex` value against the exchange and return its canonical name.
+///
+/// An unknown DEX is explicit invalid input: it fails here instead of reading an
+/// empty account or an empty mid map, and the canonical spelling is what every
+/// later request uses.
+pub(crate) async fn canonical_dex(
+    client: &hypersdk::hypercore::HttpClient,
+    dex: Option<&str>,
+) -> Result<Option<String>, CliError> {
+    match normalize_dex(dex) {
+        Some(dex) => Ok(Some(
+            crate::assets::find_perp_dex(client, dex)
+                .await?
+                .name()
+                .to_string(),
+        )),
+        None => Ok(None),
+    }
+}
+
 pub fn urlencoding(input: &str) -> String {
     let mut out = String::new();
     for b in input.bytes() {

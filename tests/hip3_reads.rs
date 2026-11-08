@@ -44,7 +44,7 @@ async fn mount_resolver_metadata(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/info"))
         .and(body_json(json!({ "type": "perpDexs" })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([null, { "name": "xyz" }])))
         .mount(server)
         .await;
 }
@@ -59,6 +59,13 @@ async fn mids_scopes_all_mids_to_a_dex() {
         .and(path("/info"))
         .and(body_json(json!({ "type": "allMids" })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "BTC": "50000" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_json(json!({ "type": "perpDexs" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([null, { "name": "xyz" }])))
+        .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("POST"))
@@ -90,6 +97,7 @@ async fn positions_list_scopes_clearinghouse_state_to_a_dex() {
     let server = MockServer::start().await;
     // The loopback API override probes the endpoint with an unqualified allMids.
     mount_override_healthcheck(&server).await;
+    mount_resolver_metadata(&server).await;
     Mock::given(method("POST"))
         .and(path("/info"))
         .and(body_partial_json(
@@ -175,6 +183,7 @@ async fn portfolio_dex_view_skips_account_wide_reads() {
     let server = MockServer::start().await;
     // The loopback API override probes the endpoint with an unqualified allMids.
     mount_override_healthcheck(&server).await;
+    mount_resolver_metadata(&server).await;
     Mock::given(method("POST"))
         .and(path("/info"))
         .and(body_partial_json(
@@ -344,5 +353,57 @@ async fn blank_dex_keeps_account_wide_portfolio_rows() {
     let portfolio = json_stdout(output);
     assert_eq!(portfolio["summary"]["account_value"], "11");
     assert_eq!(portfolio["spot_balances"].as_array().unwrap().len(), 1);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn unknown_dex_fails_before_reading() {
+    let env = IsolatedHome::new();
+    let server = MockServer::start().await;
+    mount_override_healthcheck(&server).await;
+    mount_resolver_metadata(&server).await;
+
+    env.command_with_server(&server)
+        .args(["--format", "json", "mids", "--dex", "nope"])
+        .assert()
+        .code(13)
+        .stdout(predicate::str::contains("Unknown DEX"));
+
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn dex_is_sent_in_its_canonical_spelling() {
+    let env = IsolatedHome::new();
+    let server = MockServer::start().await;
+    // Exact body: the generic healthcheck mock would also match the scoped call.
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_json(json!({ "type": "allMids" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "BTC": "1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_json(json!({ "type": "perpDexs" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([null, { "name": "xyz" }])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
+            json!({ "type": "allMids", "dex": "xyz" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "xyz:XYZ100": "1" })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    env.command_with_server(&server)
+        .args(["--format", "json", "mids", "--dex", "XYZ"])
+        .assert()
+        .success();
+
     server.verify().await;
 }

@@ -20,7 +20,7 @@ use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, Risk, a
 use crate::commands::actions;
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
 use crate::commands::support::{
-    dry_run_signed_details, dry_run_signer_address, normalize_dex, print_dry_run,
+    canonical_dex, dry_run_signed_details, dry_run_signer_address, print_dry_run,
 };
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -278,8 +278,9 @@ pub async fn portfolio(
     let api = inv.remote()?.api();
     let client = api.sdk();
     let user = parse_address(address)?;
+    let dex = canonical_dex(client, dex).await?;
     let state = client
-        .clearinghouse_state(user, dex.map(str::to_string))
+        .clearinghouse_state(user, dex.clone())
         .await
         .map_err(from_sdk)?;
     // Spot balances and vault equities are account-wide, not per-dex: report
@@ -1438,7 +1439,7 @@ impl CliCommand for AccountPortfolio {
 
     async fn run(inv: &Invocation, args: &PortfolioArgs) -> Result<(), anyhow::Error> {
         let address = inv.resolve_user(args.address.as_deref())?.to_string();
-        portfolio(inv, &address, normalize_dex(args.dex.as_deref())).await
+        portfolio(inv, &address, args.dex.as_deref()).await
     }
 }
 
