@@ -98,6 +98,18 @@ const ENV_HELP: &[(&str, &str)] = &[
         "Network to use: mainnet or testnet. --testnet overrides it.",
     ),
     (
+        env::HOME_DIR,
+        "Home used for Bankr credentials and the default OWS vault, instead of platform discovery.",
+    ),
+    (
+        env::CONFIG_DIR,
+        "Config directory, including the hyperliquid component, instead of platform discovery.",
+    ),
+    (
+        env::DATA_DIR,
+        "Data directory, including the hyperliquid component, instead of platform discovery.",
+    ),
+    (
         env::BANKR_API_KEY,
         "Bankr API key for --bankr, shared with the Bankr CLI. `wallet login` stores one instead.",
     ),

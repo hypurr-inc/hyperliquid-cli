@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.17.0 - 2026-11-09
 
 Highlights:
 
@@ -8,6 +8,13 @@ Highlights:
 - `BANKR_API_KEY`, `BANKR_API_URL`, and an existing Bankr CLI login in `~/.bankr/config.json` are read, so `--bankr` works without repeating `wallet login`.
 - Bankr signs trading actions as EIP-712 typed data (`POST /wallet/sign`, `eth_signTypedData_v4`). Actions whose signature hypersdk derives from a per-action schema (withdrawals, third-party transfers, staking, multisig) fail with exit `13` before any request is sent, and every returned signature is recovered locally against the selected address.
 - `AuthRequired` now suggests `hyperliquid wallet login` beside `hyperliquid setup`, and the help lists `BANKR_API_KEY`/`BANKR_API_URL`.
+- Added `HYPERLIQUID_HOME_DIR`, `HYPERLIQUID_CONFIG_DIR`, and `HYPERLIQUID_DATA_DIR` to pin the home, config, and data directories instead of using platform discovery. They are listed in the root help.
+
+Command-line behavior:
+
+- `wallet logout` reports `confirmation: prompt` in its schema, matching the prompt it already asked for.
+- `BANKR_API_KEY` and `BANKR_API_URL` are read trimmed, so a whitespace-only value no longer shadows the stored config or the Bankr CLI credentials.
+- A Bankr request never follows an HTTP redirect, and the cached wallet address is reused only for the endpoint `wallet login` recorded.
 
 ## 0.16.0 - 2026-11-08
 
