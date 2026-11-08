@@ -253,6 +253,12 @@ mod tests {
             err.to_string()
                 .contains("update is not supported on windows/x86_64")
         );
+        let err_arm = release_asset_for("windows", "aarch64").unwrap_err();
+        assert!(
+            err_arm
+                .to_string()
+                .contains("update is not supported on windows/aarch64")
+        );
     }
 
     #[test]

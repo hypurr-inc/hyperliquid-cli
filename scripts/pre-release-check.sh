@@ -85,6 +85,7 @@ check_file_contains .github/workflows/release.yml 'hyperliquid-linux-aarch64\.ta
 check_file_contains .github/workflows/release.yml 'hyperliquid-macos-x86_64\.tar\.gz' "release workflow must package macOS x86_64 with a friendly asset name"
 check_file_contains .github/workflows/release.yml 'hyperliquid-macos-aarch64\.tar\.gz' "release workflow must package macOS aarch64 with a friendly asset name"
 check_file_contains .github/workflows/release.yml 'hyperliquid-windows-x86_64\.zip' "release workflow must package Windows x86_64 with a friendly asset name"
+check_file_contains .github/workflows/release.yml 'hyperliquid-windows-aarch64\.zip' "release workflow must package Windows aarch64 with a friendly asset name"
 check_file_contains .github/workflows/release.yml '\$asset\.sha256' "release workflow must produce per-archive .sha256 files"
 check_file_contains install.sh 'asset="\$\{BINARY_NAME\}-\$\{platform\}-\$\{arch_target\}\.\$\{archive_ext\}"' "install.sh asset name must match release workflow archive naming"
 check_file_contains install.sh 'platform="windows"' "install.sh must support the Windows release target"

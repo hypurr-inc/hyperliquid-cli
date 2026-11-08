@@ -116,11 +116,6 @@ case "$arch" in
     ;;
 esac
 
-if [ "$windows" -eq 1 ] && [ "$arch_target" != "x86_64" ]; then
-  echo "error: unsupported Windows architecture '$arch' (supported: x86_64)" >&2
-  exit 1
-fi
-
 target="${platform}-${arch_target}"
 
 if [ "$CHECK" -eq 0 ]; then
