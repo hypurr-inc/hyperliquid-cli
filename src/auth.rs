@@ -121,16 +121,19 @@ impl SignerSelection {
     }
 }
 
+/// Parse a 0x-prefixed 32-byte private key into a signer.
 pub fn parse_private_key(private_key: &str) -> Result<PrivateKeySigner, CliError> {
     private_key.parse::<PrivateKeySigner>().map_err(|_| {
         CliError::InvalidAuth("private key must be a 32-byte 0x-prefixed hex string".to_string())
     })
 }
 
+/// The 0x-prefixed hex form of `signer`'s key.
 pub fn signer_private_key_hex(signer: &PrivateKeySigner) -> String {
     format!("0x{}", hex::encode(signer.to_bytes()))
 }
 
+/// Resolve the run's signer inputs into one signer, first match wins.
 pub fn resolve_signer(
     selection: &SignerSelection,
     settings: &Settings,
@@ -182,15 +185,36 @@ pub fn resolve_signer(
 /// environment variable, or the Bankr CLI's own config) is looked up once.
 fn resolve_bankr(settings: &Settings) -> Result<ResolvedSigner, anyhow::Error> {
     let (client, source) = BankrClient::from_settings(settings)?;
-    // Only a key stored by `wallet login` has a matching cached address; a key
-    // from the environment or the Bankr CLI may belong to another wallet.
-    let address = match (source, settings.bankr_address()?) {
-        (KeySource::Config, Some(address)) => address,
-        _ => client.blocking_wallet()?.address,
+    // The cached address belongs to the key `wallet login` stored, against the
+    // endpoint it stored. A key from the environment or the Bankr CLI, or a run
+    // pointed at another endpoint, may belong to another wallet.
+    let cached = match (source, settings.bankr_address()?) {
+        (KeySource::Config, Some(address))
+            if bankr_login_endpoint(settings)? == client.api_url() =>
+        {
+            Some(address)
+        }
+        _ => None,
+    };
+    let address = match cached {
+        Some(address) => address,
+        None => client.blocking_wallet()?.address,
     };
     Ok(ResolvedSigner::new(SelectedSigner::bankr(client, address)))
 }
 
+/// The endpoint `wallet login` recorded, normalised, so a cached address is only
+/// reused for the API that produced it.
+fn bankr_login_endpoint(settings: &Settings) -> Result<String, CliError> {
+    let stored = settings
+        .config()?
+        .and_then(|config| config.bankr_api_url.clone())
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty());
+    crate::bankr::validate_api_url(stored.as_deref().unwrap_or(crate::bankr::DEFAULT_API_URL))
+}
+
+/// A resolved vault wallet behind the OWS signing config.
 fn ows_signer(
     selector: String,
     wallet: &WalletInfo,
@@ -247,6 +271,7 @@ fn find_vault_account(
     Ok(Some((wallet, account)))
 }
 
+/// A vault wallet or legacy account named by `--account`.
 fn resolve_account(
     selector: &str,
     settings: &Settings,
@@ -271,6 +296,7 @@ fn resolve_account(
     legacy_signer(&store, account)
 }
 
+/// The configured default wallet, else the only vault wallet.
 fn resolve_default(settings: &Settings, mode: &Mode) -> Result<ResolvedSigner, anyhow::Error> {
     let vault = Vault::from_settings(settings);
     match vault.default_wallet(settings.default_wallet_id()?) {
@@ -295,6 +321,7 @@ fn resolve_default(settings: &Settings, mode: &Mode) -> Result<ResolvedSigner, a
     legacy_signer(&store, account)
 }
 
+/// A signer from a pre-OWS stored account.
 fn legacy_signer(
     store: &LegacyAccounts,
     account: LegacyAccount,

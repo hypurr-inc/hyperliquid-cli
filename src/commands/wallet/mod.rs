@@ -137,6 +137,7 @@ fn print_wallet_change_with(
     print_receipt(inv, store.settings(), store.vault(), receipt);
 }
 
+/// Create a vault wallet and make it the default.
 pub fn create(inv: &Invocation) -> Result<(), anyhow::Error> {
     let store = WalletStore::open();
     let new = store.add(
@@ -148,6 +149,7 @@ pub fn create(inv: &Invocation) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Import a private key into the vault and make it the default.
 pub fn import(inv: &Invocation, private_key: Option<&str>) -> Result<(), anyhow::Error> {
     let private_key = match private_key {
         Some(private_key) => {
@@ -169,6 +171,7 @@ pub fn import(inv: &Invocation, private_key: Option<&str>) -> Result<(), anyhow:
     Ok(())
 }
 
+/// Import a BIP-39 mnemonic into the vault and make it the default.
 pub fn import_mnemonic(
     inv: &Invocation,
     mnemonic: Option<&str>,
@@ -277,10 +280,26 @@ pub fn login(inv: &Invocation, args: &WalletLoginArgs) -> Result<(), anyhow::Err
 /// `wallet logout`: forget the stored Bankr key and address.
 pub fn logout(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
     let settings = Settings::from_process();
-    let Some(file) = settings.config_file().filter(|file| file.exists()) else {
+    let Some(file) = settings.config_file() else {
         print_status(inv, "noop", "No Bankr login is stored");
         return Ok(());
     };
+    match std::fs::metadata(file.path()) {
+        Ok(_) => {}
+        // Only a genuinely absent file is "nothing to log out of"; anything else
+        // (permissions, an I/O failure) is a real error, not a silent no-op.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            print_status(inv, "noop", "No Bankr login is stored");
+            return Ok(());
+        }
+        Err(err) => {
+            return Err(CliError::Configuration(format!(
+                "failed to inspect config file {}: {err}",
+                file.path().display()
+            ))
+            .into());
+        }
+    }
 
     if !yes {
         require_promptable("--yes", inv.format(), inv.mode())?;
@@ -375,10 +394,12 @@ pub fn show(
     print_receipt(inv, settings, &vault, receipt);
 }
 
+/// Print the selected signer's address.
 pub fn address(inv: &Invocation, signer: &ResolvedSigner) {
     print_wallet_address(inv, &signer.address().to_string());
 }
 
+/// Delete the config file, leaving vault wallets in place.
 pub fn reset(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
     let settings = Settings::from_process();
     let Some(file) = settings.config_file().filter(|file| file.exists()) else {
@@ -409,6 +430,7 @@ pub fn reset(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Add a signing wallet, prompted or from an explicit key.
 pub fn account_add(
     inv: &Invocation,
     private_key: Option<&str>,
@@ -461,6 +483,7 @@ pub fn account_add(
     Ok(())
 }
 
+/// List the vault wallets that can sign for Hyperliquid.
 pub fn account_ls(inv: &Invocation) -> Result<(), anyhow::Error> {
     let store = WalletStore::open();
     let mut listed = Vec::new();
@@ -513,6 +536,7 @@ fn choose_wallet(
     Ok(WalletStore::find(wallets, &selector)?)
 }
 
+/// Make one stored wallet the default signer.
 pub fn account_set_default(inv: &Invocation, selector: Option<&str>) -> Result<(), anyhow::Error> {
     let store = WalletStore::open();
     let wallet = choose_wallet(inv, &store, selector)?;
@@ -520,6 +544,7 @@ pub fn account_set_default(inv: &Invocation, selector: Option<&str>) -> Result<(
     print_wallet_change(inv, &store, "Default account set", &wallet)
 }
 
+/// Delete a wallet from the vault after confirmation.
 pub fn account_remove(
     inv: &Invocation,
     selector: Option<&str>,
@@ -586,6 +611,7 @@ pub fn delete(inv: &Invocation, selector: &str, yes: bool) -> Result<(), anyhow:
     account_remove(inv, Some(selector), yes)
 }
 
+/// Rename a stored wallet.
 pub fn rename(inv: &Invocation, selector: &str, new_name: &str) -> Result<(), anyhow::Error> {
     let store = WalletStore::open();
     let wallet = store.rename(selector, new_name)?;

@@ -270,3 +270,73 @@ async fn bankr_requests_do_not_follow_redirects() {
     assert!(client.wallet().await.is_err());
     destination.verify().await;
 }
+
+fn wallet_me_body_with_address(address: &str) -> Value {
+    serde_json::json!({
+        "success": true,
+        "wallets": [{"chain": "evm", "address": address}]
+    })
+}
+
+#[tokio::test]
+async fn a_cached_address_survives_only_for_the_login_endpoint() {
+    let env = IsolatedHome::new();
+    let login_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wallet/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
+        .expect(1)
+        .mount(&login_server)
+        .await;
+
+    env.command()
+        .args([
+            "wallet",
+            "login",
+            "--api-key",
+            BANKR_KEY,
+            "--api-url",
+            login_server.uri().as_str(),
+        ])
+        .assert()
+        .success();
+
+    // Same endpoint: the stored address is used without another request.
+    env.command()
+        .args(["--bankr", "wallet", "show"])
+        .env("BANKR_API_URL", login_server.uri())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(BANKR_ADDRESS));
+    login_server.verify().await;
+
+    // A different endpoint can hold a different wallet, so the address is
+    // re-resolved instead of reusing the cached one.
+    let other = "0x00000000000000000000000000000000000000aa";
+    let other_display = "0x00000000000000000000000000000000000000AA";
+    let other_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wallet/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body_with_address(other)))
+        .expect(1)
+        .mount(&other_server)
+        .await;
+
+    env.command()
+        .args(["--bankr", "wallet", "show"])
+        .env("BANKR_API_URL", other_server.uri())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(other_display));
+    other_server.verify().await;
+}
+
+#[test]
+fn wallet_logout_without_a_config_file_is_a_noop() {
+    let env = IsolatedHome::new();
+    env.command()
+        .args(["wallet", "logout", "--yes"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No Bankr login is stored"));
+}
