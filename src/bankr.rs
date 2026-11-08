@@ -208,28 +208,28 @@ impl BankrClient {
     /// then the Bankr CLI's own `~/.bankr/config.json`, so an existing login works
     /// without repeating it. `BANKR_API_URL` overrides the host in every case.
     pub fn from_settings(settings: &Settings) -> Result<(Self, KeySource), CliError> {
-        let env_url = settings.env().get_non_empty(API_URL_ENV);
+        let env_url = settings.env().get_trimmed(API_URL_ENV);
         let stored_url = settings
             .config()?
             .and_then(|config| config.bankr_api_url.clone())
             .map(|url| url.trim().to_string())
             .filter(|url| !url.is_empty());
 
-        let (api_key, file_url, source) =
-            if let Some(key) = settings.env().get_non_empty(API_KEY_ENV) {
-                (key, stored_url, KeySource::Environment)
-            } else if let Some(key) = settings
-                .config()?
-                .and_then(|config| config.bankr_api_key.clone())
-                .map(|key| key.trim().to_string())
-                .filter(|key| !key.is_empty())
-            {
-                (key, stored_url, KeySource::Config)
-            } else if let Some((key, url)) = bankr_cli_credentials() {
-                (key, url.or(stored_url), KeySource::BankrCli)
-            } else {
-                return Err(CliError::AuthRequired);
-            };
+        let (api_key, file_url, source) = if let Some(key) = settings.env().get_trimmed(API_KEY_ENV)
+        {
+            (key, stored_url, KeySource::Environment)
+        } else if let Some(key) = settings
+            .config()?
+            .and_then(|config| config.bankr_api_key.clone())
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+        {
+            (key, stored_url, KeySource::Config)
+        } else if let Some((key, url)) = bankr_cli_credentials() {
+            (key, url.or(stored_url), KeySource::BankrCli)
+        } else {
+            return Err(CliError::AuthRequired);
+        };
 
         let api_url = validate_api_url(
             &env_url
@@ -673,6 +673,29 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn blank_environment_keys_do_not_shadow_stored_credentials() {
+        use crate::config::Config;
+        use crate::settings::{EnvSource, Settings};
+
+        let config = Config {
+            bankr_api_key: Some("bk_from_config".to_string()),
+            ..Config::default()
+        };
+        let settings = Settings::detached(
+            EnvSource::fixed([(API_KEY_ENV, "   "), (API_URL_ENV, "  ")]),
+            Some(config),
+        );
+        let (client, source) = BankrClient::from_settings(&settings).unwrap();
+        assert_eq!(source, KeySource::Config);
+        assert_eq!(client.api_url(), DEFAULT_API_URL);
+
+        // A padded key is selected trimmed, so authentication sees the key itself.
+        let padded = Settings::detached(EnvSource::fixed([(API_KEY_ENV, "  bk_padded  ")]), None);
+        let (_, source) = BankrClient::from_settings(&padded).unwrap();
+        assert_eq!(source, KeySource::Environment);
     }
 
     #[test]

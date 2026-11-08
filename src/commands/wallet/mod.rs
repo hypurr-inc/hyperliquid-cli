@@ -238,7 +238,7 @@ pub fn login(inv: &Invocation, args: &WalletLoginArgs) -> Result<(), anyhow::Err
         .or_else(|| {
             settings
                 .env()
-                .get_non_empty(crate::settings::env::BANKR_API_URL)
+                .get_trimmed(crate::settings::env::BANKR_API_URL)
         });
 
     let api_url = crate::bankr::validate_api_url(
@@ -338,7 +338,7 @@ pub fn logout(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
 
     if settings
         .env()
-        .get_non_empty(crate::settings::env::BANKR_API_KEY)
+        .get_trimmed(crate::settings::env::BANKR_API_KEY)
         .is_some()
     {
         out::warn("BANKR_API_KEY is still set in the environment, so --bankr keeps working.");
@@ -1108,6 +1108,7 @@ impl CliCommand for WalletLogout {
     .risk(Risk::LocalState)
     .dry_run(DryRunPolicy::Optional)
     .ows(OwsSupport::NotApplicable)
+    .prompt()
     .local()
     .args(&[arg("yes")]);
 

@@ -8310,7 +8310,7 @@
         "wallet",
         "logout"
       ],
-      "confirmation": "none",
+      "confirmation": "prompt",
       "dangerous": false,
       "description": "Remove the Bankr API key and address from the config file.",
       "dry_run": "optional",

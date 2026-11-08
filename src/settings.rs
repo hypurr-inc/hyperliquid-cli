@@ -503,11 +503,7 @@ impl Settings {
 
     /// Whether any Bankr credential is available to this run.
     pub fn has_bankr_credentials(&self) -> Result<bool, CliError> {
-        if self
-            .env
-            .get_non_empty(env::BANKR_API_KEY)
-            .is_some_and(|key| !key.trim().is_empty())
-        {
+        if self.env.get_trimmed(env::BANKR_API_KEY).is_some() {
             return Ok(true);
         }
         Ok(self.config()?.is_some_and(|config| {

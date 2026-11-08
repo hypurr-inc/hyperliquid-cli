@@ -2804,7 +2804,7 @@
         "wallet",
         "logout"
       ],
-      "confirmation": "none",
+      "confirmation": "prompt",
       "dangerous": false,
       "dry_run": "optional",
       "group": "wallet",

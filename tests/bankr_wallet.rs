@@ -376,3 +376,24 @@ fn wallet_logout_without_a_config_file_is_a_noop() {
         .success()
         .stdout(predicate::str::contains("No Bankr login is stored"));
 }
+
+#[tokio::test]
+async fn logout_declares_the_confirmation_it_asks_for() {
+    let env = IsolatedHome::new();
+    let schema = env
+        .command()
+        .args(["--format", "json", "schema", "wallet", "logout"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let schema: Value = serde_json::from_slice(&schema).unwrap();
+    assert_eq!(schema["confirmation"], "prompt");
+
+    // A machine run without --yes is the same blocked command the schema names.
+    env.command()
+        .args(["--format", "json", "wallet", "logout"])
+        .assert()
+        .code(13);
+}

@@ -708,7 +708,7 @@
     {
       "auth_required": false,
       "command": "hyperliquid wallet logout",
-      "confirmation": "none",
+      "confirmation": "prompt",
       "dangerous": false,
       "dry_run": "optional",
       "lifecycle": "interactive_local",
