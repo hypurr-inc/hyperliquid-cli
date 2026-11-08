@@ -137,6 +137,12 @@ async fn maybe_auto_update(cache_path: &Path) {
     if !crate::update::is_newer_version(&cache.latest_version, current_version) {
         return;
     }
+    let now = now_unix_seconds();
+    if let Some(last_attempt) = cache.last_notified_at
+        && now.saturating_sub(last_attempt) < NOTICE_INTERVAL.as_secs() as i64
+    {
+        return;
+    }
     let Ok(current_exe) = std::env::current_exe() else {
         return;
     };
@@ -151,11 +157,19 @@ async fn maybe_auto_update(cache_path: &Path) {
         "Automatically updating hyperliquid from {current_version} to {}...",
         cache.latest_version
     );
-    if let Err(e) =
-        crate::update::download_and_replace_binary(&client, &cache.latest_version, &current_exe)
-            .await
+    let auto_update_timeout = Some(Duration::from_secs(30));
+    if let Err(e) = crate::update::download_and_replace_binary(
+        &client,
+        &cache.latest_version,
+        &current_exe,
+        auto_update_timeout,
+    )
+    .await
     {
         eprintln!("Automatic update failed: {e}");
+        let _ = update_version_cache(cache_path, |c| {
+            c.last_notified_at = Some(now_unix_seconds());
+        });
     } else {
         eprintln!(
             "Successfully updated hyperliquid to {}.",
@@ -419,5 +433,17 @@ mod tests {
         assert!(update_notice(&cache_with("v0.11.1", None), "0.11.1", 0, "x").is_none());
         assert!(update_notice(&cache_with("v0.10.0", None), "0.11.1", 0, "x").is_none());
         assert!(update_notice(&cache_with("", None), "0.11.1-rc.1", 0, "x").is_none());
+    }
+
+    #[test]
+    fn auto_update_honors_retry_interval() {
+        let now = 10 * 24 * 60 * 60;
+        let cache_recent = cache_with("v0.12.0", Some(now - 60));
+        let elapsed = now.saturating_sub(cache_recent.last_notified_at.unwrap());
+        assert!(elapsed < NOTICE_INTERVAL.as_secs() as i64);
+
+        let cache_old = cache_with("v0.12.0", Some(now - 25 * 3600));
+        let elapsed_old = now.saturating_sub(cache_old.last_notified_at.unwrap());
+        assert!(elapsed_old >= NOTICE_INTERVAL.as_secs() as i64);
     }
 }

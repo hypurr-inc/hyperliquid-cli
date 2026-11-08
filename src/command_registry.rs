@@ -188,6 +188,17 @@ impl CommandRegistry {
                 .eq(path.iter().copied())
         })
     }
+
+    pub fn find_matching_path(&self, args: &[String]) -> Option<String> {
+        for len in (1..=args.len()).rev() {
+            let slice = &args[..len];
+            let refs: Vec<&str> = slice.iter().map(String::as_str).collect();
+            if let Some(cmd) = self.find_path(&refs) {
+                return Some(cmd.command_path.join(" "));
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

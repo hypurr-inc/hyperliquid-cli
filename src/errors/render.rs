@@ -55,7 +55,16 @@ pub fn print_json_error(err: &CliError) {
 
 fn record_error_to_disk(err: &CliError) {
     if let Some(path) = crate::paths::last_error_file() {
-        let envelope = ErrorEnvelope::from_cli_error(err);
+        let mut envelope = ErrorEnvelope::from_cli_error(err);
+        let raw_args: Vec<String> = std::env::args()
+            .skip(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .collect();
+        if let Some(cmd) =
+            crate::command_registry::CommandRegistry::get().find_matching_path(&raw_args)
+        {
+            envelope.data.insert("command".into(), cmd.into());
+        }
         if let Ok(json_str) = serde_json::to_string_pretty(&envelope) {
             let _ = crate::private_fs::write_atomic(&path, json_str.as_bytes());
         }

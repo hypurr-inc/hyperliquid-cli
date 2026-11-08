@@ -93,7 +93,7 @@ impl CliCommand for Feedback {
 
         let encoded_title = urlencoding(&title);
         let encoded_body = urlencoding(&body);
-        let label = format!("feedback,{}", args.category);
+        let label = urlencoding(&format!("feedback,{}", args.category));
         let url = format!(
             "https://github.com/{REPORT_REPO}/issues/new?title={encoded_title}&body={encoded_body}&labels={label}"
         );

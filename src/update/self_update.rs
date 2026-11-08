@@ -2,6 +2,7 @@
 //! checksum and replace the running binary.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::Serialize;
 
@@ -68,7 +69,7 @@ pub async fn update(inv: &Invocation) -> Result<(), anyhow::Error> {
         return Ok(());
     }
 
-    download_and_replace_binary(&client, &latest_version, &current_exe).await?;
+    download_and_replace_binary(&client, &latest_version, &current_exe, None).await?;
     report("updated", current_exe);
     Ok(())
 }
@@ -78,11 +79,14 @@ pub async fn download_and_replace_binary(
     client: &ReleaseClient,
     latest_version: &str,
     current_exe: &Path,
+    timeout: Option<Duration>,
 ) -> Result<(), anyhow::Error> {
     let asset = current_release_asset()?;
     let base_url = format!("https://github.com/{REPO}/releases/download/{latest_version}/{asset}");
-    let archive = client.download_bytes(&base_url).await?;
-    let checksum = client.download_text(&format!("{base_url}.sha256")).await?;
+    let archive = client.download_bytes(&base_url, timeout).await?;
+    let checksum = client
+        .download_text(&format!("{base_url}.sha256"), timeout)
+        .await?;
     verify_sha256(&archive, asset, &checksum)?;
 
     let tmpdir = create_temp_dir()?;

@@ -50,8 +50,8 @@ pub fn open_in_browser(url: &str) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", url])
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
             .status()
             .is_ok()
     }

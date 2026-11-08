@@ -81,14 +81,9 @@ impl CliCommand for ReportIncident {
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
 
-        let mut last_error_json = None;
-        if let Some(path) = crate::paths::last_error_file() {
-            if let Ok(content) = std::fs::read_to_string(path) {
-                if let Ok(v) = serde_json::from_str::<Value>(&content) {
-                    last_error_json = Some(v);
-                }
-            }
-        }
+        let last_error_json: Option<Value> = crate::paths::last_error_file()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|content| serde_json::from_str::<Value>(&content).ok());
 
         let cmd_str = args
             .command
@@ -107,11 +102,18 @@ impl CliCommand for ReportIncident {
             .error
             .clone()
             .or_else(|| {
-                last_error_json
-                    .as_ref()
-                    .and_then(|j| j.get("error"))
-                    .and_then(|e| e.as_str())
-                    .map(ToString::to_string)
+                last_error_json.as_ref().map(|j| {
+                    let category = j
+                        .get("category")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("unknown");
+                    let reason = j
+                        .get("reason")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("unspecified");
+                    let exit_code = j.get("exit_code").and_then(|e| e.as_i64()).unwrap_or(1);
+                    format!("{category} / {reason} (exit {exit_code})")
+                })
             })
             .unwrap_or_else(|| "unspecified error".to_string());
 
@@ -120,7 +122,24 @@ impl CliCommand for ReportIncident {
 
         let context_str = args.context.clone().unwrap_or_else(|| {
             if let Some(j) = &last_error_json {
-                serde_json::to_string_pretty(j).unwrap_or_else(|_| "N/A".to_string())
+                let mut sanitized = serde_json::Map::new();
+                if let Some(v) = j.get("category") {
+                    sanitized.insert("category".into(), v.clone());
+                }
+                if let Some(v) = j.get("reason") {
+                    sanitized.insert("reason".into(), v.clone());
+                }
+                if let Some(v) = j.get("exit_code") {
+                    sanitized.insert("exit_code".into(), v.clone());
+                }
+                if let Some(v) = j.get("retryable") {
+                    sanitized.insert("retryable".into(), v.clone());
+                }
+                if let Some(v) = j.get("data") {
+                    sanitized.insert("data".into(), v.clone());
+                }
+                serde_json::to_string_pretty(&Value::Object(sanitized))
+                    .unwrap_or_else(|_| "N/A".to_string())
             } else {
                 "N/A".to_string()
             }
