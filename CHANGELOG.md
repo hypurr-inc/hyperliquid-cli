@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.16.0 - 2026-11-08
+
+Highlights:
+
+- Added `hyperliquid mcp`: a stdio JSON-RPC 2.0 Model Context Protocol server that exposes every registered command as an agent tool with its schema. Mutating tools require `HYPERLIQUID_MCP_ALLOW_UNSAFE=1`, and every tool call is bounded by `HYPERLIQUID_MCP_TIMEOUT_MS`.
+- Added in-place background self-update with `HYPERLIQUID_AUTO_UPDATE=1`. Standalone installs verify the release SHA-256 before replacing the binary; Homebrew and Cargo installs are never touched. A failed attempt is throttled for 24 hours instead of retrying on every command.
+- Replaced the hosted feedback service with `hyperliquid feedback` and `hyperliquid report-incident`, which open pre-filled GitHub issues on `hypurr-inc/hyperliquid-cli`. The Cloudflare Worker, its D1 migrations, and its build-time secrets are gone.
+- Every failing command now records a sanitized envelope in the last-error file, including the command path and the `category`/`reason`/`exit_code` triple, so `report-incident` can attach diagnostics without leaking arguments.
+- Release packaging now covers Windows ARM64 (`hyperliquid-windows-aarch64.zip`), and `install.sh` supports it.
+
+Command-line behavior:
+
+- `hyperliquid feedback` URL-encodes the issue title, body, and labels, so categories containing spaces, `&`, `#`, or `=` no longer truncate the generated URL.
+- `hyperliquid feedback --open` and `hyperliquid report-incident --open` hand the URL to `rundll32 url.dll,FileProtocolHandler` on Windows instead of `cmd /C start`, so the URL is never parsed by a shell.
+- Fixed nested `if` and formatting lints so the CI quality gates pass with `-D warnings`.
+
 ## 0.15.0 - 2026-11-08
 
 Highlights:

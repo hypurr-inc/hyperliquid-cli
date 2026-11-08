@@ -1,6 +1,6 @@
 # Hyperliquid CLI
 
-[![Crates.io](https://img.shields.io/badge/crates.io-v0.15.0-orange.svg)](https://crates.io/crates/hyperliquid-cli)
+[![Crates.io](https://img.shields.io/badge/crates.io-v0.16.0-orange.svg)](https://crates.io/crates/hyperliquid-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.93%2B-blue.svg)](https://www.rust-lang.org)
 [![Built on hypersdk](https://img.shields.io/badge/built%20on-hypersdk-blueviolet.svg)](https://github.com/infinitefield/hypersdk)
@@ -30,7 +30,7 @@ sh install.sh
 hyperliquid --version
 ```
 
-安裝器會在把二進制文件複製到 `~/.local/bin` 之前驗證 SHA-256 校驗和。默認安裝最新 release；可使用 `HYPERLIQUID_CLI_REPO=OWNER/REPO`、`HYPERLIQUID_CLI_VERSION=v0.15.0` 和 `BIN_DIR=/path/to/bin` 覆蓋倉庫、固定版本或安裝目錄。
+安裝器會在把二進制文件複製到 `~/.local/bin` 之前驗證 SHA-256 校驗和。默認安裝最新 release；可使用 `HYPERLIQUID_CLI_REPO=OWNER/REPO`、`HYPERLIQUID_CLI_VERSION=v0.16.0` 和 `BIN_DIR=/path/to/bin` 覆蓋倉庫、固定版本或安裝目錄。
 
 從源碼安裝：
 
