@@ -132,12 +132,6 @@ impl CliCommand for ReportIncident {
                 if let Some(v) = j.get("exit_code") {
                     sanitized.insert("exit_code".into(), v.clone());
                 }
-                if let Some(v) = j.get("retryable") {
-                    sanitized.insert("retryable".into(), v.clone());
-                }
-                if let Some(v) = j.get("data") {
-                    sanitized.insert("data".into(), v.clone());
-                }
                 serde_json::to_string_pretty(&Value::Object(sanitized))
                     .unwrap_or_else(|_| "N/A".to_string())
             } else {
