@@ -14,6 +14,7 @@ pub mod http_api;
 pub mod input_hardening;
 pub mod invocation;
 pub mod legacy_accounts;
+pub mod mcp;
 pub mod mode;
 pub mod network;
 pub mod output;

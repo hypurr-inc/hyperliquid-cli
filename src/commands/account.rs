@@ -471,11 +471,7 @@ pub async fn set_abstraction(
     Ok(())
 }
 
-fn parse_address(address: &str) -> Result<Address, CliError> {
-    address
-        .parse::<Address>()
-        .map_err(|_| CliError::Unsupported(format!("Invalid address: {address}")))
-}
+use super::support::parse_address;
 
 fn normalize_abstraction_mode(raw: &str) -> &'static str {
     match raw {

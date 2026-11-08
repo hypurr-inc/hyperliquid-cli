@@ -24,7 +24,7 @@ struct ReleaseInfo {
 }
 
 /// One HTTP client for every release request of a run.
-pub(super) struct ReleaseClient {
+pub struct ReleaseClient {
     client: reqwest::Client,
 }
 
@@ -74,8 +74,12 @@ impl ReleaseClient {
         Ok(release.tag_name)
     }
 
-    pub async fn download_bytes(&self, url: &str) -> Result<Vec<u8>, CliError> {
-        self.get(url, "download failed", None)
+    pub async fn download_bytes(
+        &self,
+        url: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Vec<u8>, CliError> {
+        self.get(url, "download failed", timeout)
             .await?
             .bytes()
             .await
@@ -83,8 +87,12 @@ impl ReleaseClient {
             .map_err(|err| CliError::Unavailable(format!("download failed: {err}")))
     }
 
-    pub async fn download_text(&self, url: &str) -> Result<String, CliError> {
-        self.get(url, "download failed", None)
+    pub async fn download_text(
+        &self,
+        url: &str,
+        timeout: Option<Duration>,
+    ) -> Result<String, CliError> {
+        self.get(url, "download failed", timeout)
             .await?
             .text()
             .await
@@ -92,7 +100,7 @@ impl ReleaseClient {
     }
 }
 
-pub(super) fn is_newer_version(candidate: &str, current: &str) -> bool {
+pub fn is_newer_version(candidate: &str, current: &str) -> bool {
     let candidate = ParsedVersion::parse(candidate);
     let current = ParsedVersion::parse(current);
     for index in 0..candidate.parts.len().max(current.parts.len()) {

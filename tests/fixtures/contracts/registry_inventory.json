@@ -7936,103 +7936,6 @@
     {
       "aliases": [],
       "auth_required": false,
-      "command": "hyperliquid feedback",
-      "command_path": [
-        "feedback"
-      ],
-      "confirmation": "none",
-      "dangerous": false,
-      "description": "Send structured CLI feedback as a scenario JSON object to the configured feedback service.",
-      "dry_run": "not_supported",
-      "group": "system",
-      "inputs": [
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Structured scenario JSON object describing the command, context, expected behavior, and actual behavior. May include agent_address, signer_address, or wallet_address for feedback rate-limit attribution. Mutually exclusive with scenario_file.",
-          "enum_values": [],
-          "id": "scenario_json",
-          "kind": "json_object",
-          "long": "scenario-json",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Path to a structured scenario JSON object, or '-' to read from stdin. Scenario may include agent_address, signer_address, or wallet_address for feedback rate-limit attribution. Mutually exclusive with scenario_json.",
-          "enum_values": [],
-          "id": "scenario_file",
-          "kind": "file_path",
-          "long": "scenario-file",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Optional contact handle or email to include with the feedback.",
-          "enum_values": [],
-          "id": "contact",
-          "kind": "identifier",
-          "long": "contact",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Optional comma-separated labels such as bug,docs,agent.",
-          "enum_values": [],
-          "id": "tags",
-          "kind": "identifier",
-          "long": "tags",
-          "multiple": true,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Feedback API endpoint. Defaults to runtime or build-time HYPERLIQUID_FEEDBACK_URL.",
-          "enum_values": [],
-          "id": "url",
-          "kind": "url",
-          "long": "url",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        }
-      ],
-      "lifecycle": "live_mutating",
-      "mutability": "live_mutating",
-      "one_of_required": [
-        [
-          "scenario_json"
-        ],
-        [
-          "scenario_file"
-        ]
-      ],
-      "output_contract": "json_value",
-      "ows_signer": "not_required",
-      "raw_payload": "unsupported",
-      "risk": "none",
-      "transport": [
-        "cli_process"
-      ]
-    },
-    {
-      "aliases": [],
-      "auth_required": false,
       "command": "hyperliquid schema",
       "command_path": [
         "schema"
@@ -8088,6 +7991,83 @@
       "ows_signer": "not_required",
       "raw_payload": "unsupported",
       "risk": "local_state",
+      "transport": [
+        "cli_interactive"
+      ]
+    },
+    {
+      "aliases": [],
+      "auth_required": false,
+      "command": "hyperliquid feedback <MESSAGE>",
+      "command_path": [
+        "feedback"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "description": "Generates a pre-filled GitHub issue URL for user suggestions and feature requests with CLI version and platform context. Agents can read the issue URL and markdown body directly from JSON.",
+      "dry_run": "not_supported",
+      "group": "system",
+      "inputs": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Message or feature description.",
+          "enum_values": [],
+          "id": "message",
+          "kind": "identifier",
+          "long": null,
+          "multiple": false,
+          "positional_index": 0,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": "general",
+          "description": "Category or tag for the feedback (e.g. feature, docs, ux).",
+          "enum_values": [],
+          "id": "category",
+          "kind": "identifier",
+          "long": "category",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Title for the GitHub issue.",
+          "enum_values": [],
+          "id": "title",
+          "kind": "identifier",
+          "long": "title",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Open issue in web browser if running in an interactive terminal.",
+          "enum_values": [],
+          "id": "open",
+          "kind": null,
+          "long": "open",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "lifecycle": "interactive_local",
+      "mutability": "local_only",
+      "one_of_required": [],
+      "output_contract": "interactive_local",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
       "transport": [
         "cli_interactive"
       ]
@@ -8152,6 +8132,120 @@
       "ows_signer": "not_applicable",
       "raw_payload": "unsupported",
       "risk": "local_secret",
+      "transport": [
+        "cli_interactive"
+      ]
+    },
+    {
+      "aliases": [],
+      "auth_required": false,
+      "command": "hyperliquid mcp",
+      "command_path": [
+        "mcp"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "description": "Run the Model Context Protocol (MCP) server over standard input and output (stdio), exposing all Hyperliquid CLI commands as tools for AI agents.",
+      "dry_run": "not_supported",
+      "group": "system",
+      "inputs": [],
+      "lifecycle": "interactive_local",
+      "mutability": "local_only",
+      "one_of_required": [],
+      "output_contract": "interactive_local",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_interactive"
+      ]
+    },
+    {
+      "aliases": [],
+      "auth_required": false,
+      "command": "hyperliquid report-incident",
+      "command_path": [
+        "report-incident"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "description": "Generates a pre-filled GitHub issue URL with CLI version, environment details, and error diagnostics. If not provided, inspects the last error recorded by the CLI. Agents can inspect the issue URL and markdown body directly from JSON.",
+      "dry_run": "not_supported",
+      "group": "system",
+      "inputs": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Command that failed or encountered an issue.",
+          "enum_values": [],
+          "id": "command",
+          "kind": "identifier",
+          "long": "command",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Error message, code, or description.",
+          "enum_values": [],
+          "id": "error",
+          "kind": "identifier",
+          "long": "error",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Short title for the issue.",
+          "enum_values": [],
+          "id": "title",
+          "kind": "identifier",
+          "long": "title",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Additional details or reproduction context.",
+          "enum_values": [],
+          "id": "context",
+          "kind": "identifier",
+          "long": "context",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Open issue in web browser if running in an interactive terminal.",
+          "enum_values": [],
+          "id": "open",
+          "kind": null,
+          "long": "open",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "lifecycle": "interactive_local",
+      "mutability": "local_only",
+      "one_of_required": [],
+      "output_contract": "interactive_local",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
       "transport": [
         "cli_interactive"
       ]

@@ -1,11 +1,65 @@
-//! Helpers every command's `run` shares: dry-run envelopes and acting-account lookup.
+//! Helpers every command's `run` shares: dry-run envelopes, address parsing,
+//! GitHub issue link helpers, and acting-account lookup.
 
 use hypersdk::Address;
 
 use crate::dry_run::{
     ActionPlan, ActionReversibility, DryRunEnvelope, DryRunSigningContext, LiveSubmissionPolicy,
 };
+use crate::errors::CliError;
 use crate::invocation::Invocation;
+
+pub const REPORT_REPO: &str = "hypurr-inc/hyperliquid-cli";
+
+/// Parse a raw address string strictly as an Ethereum 40-hex-character address.
+pub fn parse_address(raw: &str) -> Result<Address, CliError> {
+    raw.trim()
+        .parse::<Address>()
+        .map_err(|_| CliError::Unsupported(format!("Invalid address: {}", raw.trim())))
+}
+
+/// URL encode a UTF-8 string for query parameters.
+pub fn urlencoding(input: &str) -> String {
+    let mut out = String::new();
+    for b in input.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                out.push_str(&format!("%{:02X}", b));
+            }
+        }
+    }
+    out
+}
+
+/// Open a URL in the platform default web browser.
+pub fn open_in_browser(url: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).status().is_ok()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .status()
+            .is_ok()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .status()
+            .is_ok()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        false
+    }
+}
 
 pub(crate) fn print_dry_run(
     inv: &Invocation,

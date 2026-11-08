@@ -3,6 +3,13 @@
 use super::{CliError, ErrorEnvelope};
 use crate::output::colors;
 
+static COMMAND_PATH: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Record the command path resolved by clap for error diagnostics.
+pub fn set_command_path(path: &[String]) {
+    let _ = COMMAND_PATH.set(path.to_vec());
+}
+
 /// Where an error goes: the JSON envelope on stdout, or a human block on stderr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorOutput {
@@ -46,15 +53,31 @@ pub fn render_human_error(err: &CliError, rich: bool) -> String {
 /// [`CliError::PartialResults`] prints nothing: the command that raised it
 /// already wrote its own single JSON document with per-item results.
 pub fn print_json_error(err: &CliError) {
+    record_error_to_disk(err);
     if matches!(err, CliError::PartialResults(_)) {
         return;
     }
     println!("{}", ErrorEnvelope::from_cli_error(err).to_json());
 }
 
+fn record_error_to_disk(err: &CliError) {
+    if let Some(path) = crate::paths::last_error_file() {
+        let mut envelope = ErrorEnvelope::from_cli_error(err);
+        if let Some(cmd) = COMMAND_PATH.get().and_then(|path| {
+            crate::command_registry::CommandRegistry::get().find_matching_path(path)
+        }) {
+            envelope.data.insert("command".into(), cmd.into());
+        }
+        if let Ok(json_str) = serde_json::to_string_pretty(&envelope) {
+            let _ = crate::private_fs::write_atomic(&path, json_str.as_bytes());
+        }
+    }
+}
+
 /// Print the human error block to **stderr** (`✗ ...` when stderr supports
 /// styling, `Error: ...` otherwise).
 pub fn print_human_error(err: &CliError) {
+    record_error_to_disk(err);
     eprintln!("{}", render_human_error(err, colors::stderr_enabled()));
 }
 

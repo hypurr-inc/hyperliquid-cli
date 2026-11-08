@@ -143,6 +143,7 @@ async fn main() {
     output::colors::init(parsed.cli.no_color);
     if let Some(path) = parsed.registry_path.as_deref() {
         let _ = PANIC_COMMAND.set(path.join(" "));
+        errors::set_command_path(path);
     }
     let env = output::terminal::OutputEnv::probe(parsed.explicit_format);
     let effective_format = if parsed.cli.json {

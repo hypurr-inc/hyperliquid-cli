@@ -87,7 +87,7 @@ impl InfoReply {
 }
 
 /// The error for a non-2xx reply from a service the CLI calls once, such as the
-/// feedback worker or the release host: a rate limit, else the failure status.
+/// release host: a rate limit, else the failure status.
 #[must_use]
 pub(crate) fn failed_reply(status: StatusCode, body: &str) -> CliError {
     if http_response_indicates_rate_limit(status.as_u16(), body) {
