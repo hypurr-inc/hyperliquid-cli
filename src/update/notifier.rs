@@ -121,7 +121,49 @@ async fn settle_refresh(check: &mut UpdateCheck) {
 pub async fn flush_update_check(mut check: UpdateCheck) {
     settle_refresh(&mut check).await;
     if let Some(cache_path) = check.cache_path.as_deref() {
-        notify_if_due(cache_path);
+        if terminal::env_flag(env::AUTO_UPDATE) == terminal::EnvFlag::On {
+            maybe_auto_update(cache_path).await;
+        } else {
+            notify_if_due(cache_path);
+        }
+    }
+}
+
+async fn maybe_auto_update(cache_path: &Path) {
+    let Some(cache) = read_version_cache(cache_path) else {
+        return;
+    };
+    let current_version = env!("CARGO_PKG_VERSION");
+    if !crate::update::is_newer_version(&cache.latest_version, current_version) {
+        return;
+    }
+    let Ok(current_exe) = std::env::current_exe() else {
+        return;
+    };
+    let install_method = InstallMethod::detect(&current_exe);
+    if install_method != InstallMethod::Standalone {
+        return;
+    }
+    let Ok(client) = ReleaseClient::new() else {
+        return;
+    };
+    eprintln!(
+        "Automatically updating hyperliquid from {current_version} to {}...",
+        cache.latest_version
+    );
+    if let Err(e) =
+        crate::update::download_and_replace_binary(&client, &cache.latest_version, &current_exe)
+            .await
+    {
+        eprintln!("Automatic update failed: {e}");
+    } else {
+        eprintln!(
+            "Successfully updated hyperliquid to {}.",
+            cache.latest_version
+        );
+        let _ = update_version_cache(cache_path, |c| {
+            c.last_notified_at = Some(now_unix_seconds());
+        });
     }
 }
 

@@ -590,13 +590,7 @@ fn validated_agent_name(
     }
     Ok(Some(name.to_string()))
 }
-
-fn parse_address(raw: &str) -> Result<Address, CliError> {
-    raw.trim()
-        .parse::<Address>()
-        .map_err(|_| CliError::Unsupported(format!("Invalid address: {}", raw.trim())))
-}
-
+use super::support::parse_address;
 fn print_action_output(inv: &Invocation, row: ApiWalletActionRow) {
     inv.print_untimed(&ApiWalletActionOutput { row });
 }

@@ -136,10 +136,12 @@ const SCHEMA_ORDER: &[&str] = &[
     "subscribe all-mids",
     "subscribe order-updates",
     "subscribe fills",
-    "feedback",
     "schema",
     "update",
+    "feedback",
     "setup",
+    "mcp",
+    "report-incident",
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -499,7 +501,7 @@ mod tests {
     #[test]
     fn registry_enumerates_every_registered_command() {
         let registry = CommandRegistry::get();
-        assert_eq!(registry.commands().len(), 121);
+        assert_eq!(registry.commands().len(), 123);
         for path in [
             &["asset", "decode"][..],
             &["asset", "search"],
@@ -511,7 +513,7 @@ mod tests {
             &["watch", "risk"],
             &["orders", "create"],
             &["wallet", "create"],
-            &["feedback"],
+            &["report-incident"],
             &["schema"],
         ] {
             assert!(registry.find_path(path).is_some(), "{path:?}");

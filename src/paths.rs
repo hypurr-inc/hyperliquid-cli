@@ -24,6 +24,12 @@ pub fn version_cache_file() -> Option<PathBuf> {
     config_dir().map(|dir| dir.join("version.json"))
 }
 
+/// File where the most recent error envelope is recorded for `report-incident`.
+#[must_use]
+pub fn last_error_file() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("last_error.json"))
+}
+
 fn data_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|dir| dir.join(APP_DIR))
 }

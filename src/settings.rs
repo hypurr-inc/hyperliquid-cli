@@ -34,6 +34,7 @@ pub mod env {
     pub const DEFAULT_REFERRAL_CODE: &str = "HYPERLIQUID_DEFAULT_REFERRAL_CODE";
     pub const NO_UPDATE_CHECK: &str = "HYPERLIQUID_NO_UPDATE_CHECK";
     pub const NO_UPDATE_NOTIFIER: &str = "NO_UPDATE_NOTIFIER";
+    pub const AUTO_UPDATE: &str = "HYPERLIQUID_AUTO_UPDATE";
     pub const CARGO_HOME: &str = "CARGO_HOME";
 }
 
@@ -105,6 +106,10 @@ const ENV_HELP: &[(&str, &str)] = &[
     (
         env::NO_UPDATE_CHECK,
         "Set to 1 to skip release update checks.",
+    ),
+    (
+        env::AUTO_UPDATE,
+        "Set to 1 to automatically update binary in place when a newer release is detected.",
     ),
     (
         "HYPERLIQUID_WATCH_MAX_TICKS",

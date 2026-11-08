@@ -927,13 +927,8 @@ mod tests {
             ),
             (&["hyperliquid", "wallet", "show"][..], "wallet show"),
             (
-                &[
-                    "hyperliquid",
-                    "feedback",
-                    "--scenario-json",
-                    "{\"command\":\"mids\",\"actual\":\"ok\"}",
-                ][..],
-                "feedback",
+                &["hyperliquid", "report-incident", "--command", "mids"][..],
+                "report-incident",
             ),
             (
                 &["hyperliquid", "subscribe", "fills"][..],

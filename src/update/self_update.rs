@@ -68,6 +68,17 @@ pub async fn update(inv: &Invocation) -> Result<(), anyhow::Error> {
         return Ok(());
     }
 
+    download_and_replace_binary(&client, &latest_version, &current_exe).await?;
+    report("updated", current_exe);
+    Ok(())
+}
+
+/// Download and replace the current binary in-place with `latest_version`.
+pub async fn download_and_replace_binary(
+    client: &ReleaseClient,
+    latest_version: &str,
+    current_exe: &Path,
+) -> Result<(), anyhow::Error> {
     let asset = current_release_asset()?;
     let base_url = format!("https://github.com/{REPO}/releases/download/{latest_version}/{asset}");
     let archive = client.download_bytes(&base_url).await?;
@@ -79,9 +90,7 @@ pub async fn update(inv: &Invocation) -> Result<(), anyhow::Error> {
     std::fs::write(&archive_path, archive)?;
     extract_archive(&archive_path, tmpdir.path()).await?;
     let new_binary = find_extracted_binary(tmpdir.path())?;
-    replace_current_binary(&current_exe, &new_binary)?;
-
-    report("updated", current_exe);
+    replace_current_binary(current_exe, &new_binary)?;
     Ok(())
 }
 

@@ -24,7 +24,7 @@ struct ReleaseInfo {
 }
 
 /// One HTTP client for every release request of a run.
-pub(super) struct ReleaseClient {
+pub struct ReleaseClient {
     client: reqwest::Client,
 }
 
@@ -92,7 +92,7 @@ impl ReleaseClient {
     }
 }
 
-pub(super) fn is_newer_version(candidate: &str, current: &str) -> bool {
+pub fn is_newer_version(candidate: &str, current: &str) -> bool {
     let candidate = ParsedVersion::parse(candidate);
     let current = ParsedVersion::parse(current);
     for index in 0..candidate.parts.len().max(current.parts.len()) {

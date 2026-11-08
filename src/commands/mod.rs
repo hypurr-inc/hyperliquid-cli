@@ -7,6 +7,7 @@ pub mod asset;
 pub mod borrowlend;
 pub mod builder;
 pub mod feedback;
+pub mod mcp;
 pub mod meta;
 pub mod orderbook;
 pub mod orders;
@@ -15,6 +16,7 @@ pub mod perps;
 pub mod positions;
 pub mod prio;
 pub mod referral;
+pub mod report_incident;
 pub mod schema;
 pub mod setup;
 pub mod spot;
@@ -161,6 +163,8 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<setup::Setup>(),
             Entry::of::<feedback::Feedback>(),
             Entry::of::<update::Update>(),
+            Entry::of::<mcp::Mcp>(),
+            Entry::of::<report_incident::ReportIncident>(),
         ]
     });
     &ENTRIES
