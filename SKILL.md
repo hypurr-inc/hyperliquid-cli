@@ -1,14 +1,14 @@
 ---
 name: hyperliquid-cli
 version: 1.1.0
-description: "Agent guide for trading different assets on Hyperliquid with the Hyperliquid CLI: discover markets, query state, plan safely, dry-run mutations, and execute approved workflows."
+description: "Trade spot and perpetuals on Hyperliquid via hyperliquid CLI: inspect orderbooks, account state, and clearinghouse balances, calculate execution bounds, dry-run mutations, place bracket or trailing orders, transfer assets, and manage vaults."
 license: MIT
 compatibility: "Requires a shell environment. Installs or uses the hyperliquid CLI. Wallets can be created or imported locally through the encrypted Open Wallet Standard vault."
 metadata:
   openclaw:
     requires:
       bins: ["curl", "tar"]
-    homepage: https://github.com/hypurrclaw/hyperliquid-cli
+    homepage: https://github.com/hypurr-inc/hyperliquid-cli
   hermes:
     category: crypto
     tags: [hyperliquid, hyperliquid-cli, trading, cli, crypto, finance, defi, dex, market-data, wallets, orders, automation, agents, testnet]
@@ -22,15 +22,14 @@ The CLI is designed for agents. Prefer structured JSON, command schemas, bounded
 
 ## Operating Rules for Agents
 
-1. **Default to JSON.** Use `--json`, `--format json`, or set `HYPERLIQUID_AGENT=1`.
-2. **Discover before acting.** Use `schema`, `--help`, and read-only commands before composing mutations.
-3. **Dry-run every mutation first** unless the user explicitly asks for funded-live validation and has authorized it.
-4. **Never request secrets in chat.** Private keys, mnemonics, keystore passwords, and OWS passphrases must be entered locally by the operator or supplied through existing secure environment/config.
-5. **Use precise selectors.** `USER` means protocol user address for account reads. `ACCOUNT_SELECTOR` means stored local account alias/id/address. `*_ADDRESS` means protocol object address and should not be resolved from local aliases.
-6. **Bound streams.** Any watch or subscribe command in agent contexts must use `--max-ticks`, `--max-events`, or an idle timeout.
-7. **Label live side effects.** Trading, transfers, staking, vault, builder, referral, API wallet, and account-abstraction commands mutate state.
-8. **Cleanup after live tests.** Finish with `orders open`, `positions list`, and account/portfolio checks.
-9. **Use `-y` deliberately.** See [When to Use `-y` / `--yes`](#when-to-use--y----yes).
+1. **Structured JSON by default.** Pass `--json`, `--format json`, or export `HYPERLIQUID_AGENT=1`.
+2. **Discover before acting.** Query `schema`, `--help`, and read-only commands before composing mutations.
+3. **Dry-run before mutation.** Execute `--dry-run` to inspect raw transaction envelope, asset id, and fee impact before proposing live execution.
+4. **Isolated key management.** Resolve credentials via local OWS keystore records or environment variables. Secrets, mnemonics, and passphrases remain on the local host and are never printed or surfaced in chat.
+5. **Strict selectors.** Use `USER` for remote protocol account queries, `ACCOUNT_SELECTOR` for local wallet store aliases, and `*_ADDRESS` for remote targets (recipients, builders, vaults).
+6. **Bounded streams.** Terminate subscriptions with `--max-ticks`, `--max-events`, or an explicit `--idle-timeout-ms`.
+7. **Two-phase mutation.** Plan via dry-run, present the concrete side effects, and obtain explicit operator approval before adding `-y`.
+8. **Audited post-execution state.** Confirm completed execution and zero residual exposure via `orders open` and `positions list`.
 
 ## When to Use `-y` / `--yes`
 
@@ -56,7 +55,7 @@ When in doubt, dry-run first, surface the planned action and amounts to the user
 If `hyperliquid` is not installed:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/hypurrclaw/hyperliquid-cli/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/hypurr-inc/hyperliquid-cli/main/install.sh
 sh install.sh --json --quiet
 ```
 
