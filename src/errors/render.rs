@@ -3,6 +3,13 @@
 use super::{CliError, ErrorEnvelope};
 use crate::output::colors;
 
+static COMMAND_PATH: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Record the command path resolved by clap for error diagnostics.
+pub fn set_command_path(path: &[String]) {
+    let _ = COMMAND_PATH.set(path.to_vec());
+}
+
 /// Where an error goes: the JSON envelope on stdout, or a human block on stderr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorOutput {
@@ -56,13 +63,9 @@ pub fn print_json_error(err: &CliError) {
 fn record_error_to_disk(err: &CliError) {
     if let Some(path) = crate::paths::last_error_file() {
         let mut envelope = ErrorEnvelope::from_cli_error(err);
-        let raw_args: Vec<String> = std::env::args()
-            .skip(1)
-            .filter(|arg| !arg.starts_with('-'))
-            .collect();
-        if let Some(cmd) =
-            crate::command_registry::CommandRegistry::get().find_matching_path(&raw_args)
-        {
+        if let Some(cmd) = COMMAND_PATH.get().and_then(|path| {
+            crate::command_registry::CommandRegistry::get().find_matching_path(path)
+        }) {
             envelope.data.insert("command".into(), cmd.into());
         }
         if let Ok(json_str) = serde_json::to_string_pretty(&envelope) {

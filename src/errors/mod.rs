@@ -54,6 +54,7 @@ pub use envelope::ErrorEnvelope;
 pub use recovery::{NextCommand, Recovery};
 pub use render::{
     ErrorOutput, exit_with_error, print_human_error, print_json_error, render_human_error,
+    set_command_path,
 };
 pub use transport::{network_error, transport_cause};
 
