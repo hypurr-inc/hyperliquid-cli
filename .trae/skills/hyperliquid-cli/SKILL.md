@@ -1,0 +1,1 @@
+../../../skills/hyperliquid-cli/SKILL.md

@@ -17,11 +17,19 @@
     "dex",
     "perps",
     "defi",
-    "cli"
+    "cli",
+    "quant",
+    "bot",
+    "openclaw",
+    "nanoclaw",
+    "trae"
   ],
   "extensions": {
     "com.anthropic.claude": {
       "pluginManifest": ".claude-plugin/plugin.json"
+    },
+    "ai.trae": {
+      "skills": ["skills/hyperliquid-cli/SKILL.md"]
     }
   }
 }

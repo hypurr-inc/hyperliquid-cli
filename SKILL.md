@@ -1,7 +1,7 @@
 ---
 name: hyperliquid-cli
 version: 1.1.0
-description: "Trade spot and perpetuals on Hyperliquid via hyperliquid CLI: inspect orderbooks, account state, and clearinghouse balances, calculate execution bounds, dry-run mutations, place bracket or trailing orders, transfer assets, and manage vaults."
+description: "Trade spot and perpetuals on Hyperliquid via hyperliquid CLI: inspect orderbooks, account state, and clearinghouse balances, calculate execution bounds, dry-run mutations, place bracket or trailing orders, transfer assets, and manage vaults. Supports quantitative and autonomous trading workflows for OpenClaw, NanoClaw, Trae, Claude, and Hermes (Hyperliquid 量化交易 / 永续合约 / 现货交易 / 자동매매 / ハイパーリキッド)."
 license: MIT
 compatibility: "Requires a shell environment. Installs or uses the hyperliquid CLI. Wallets can be created or imported locally through the encrypted Open Wallet Standard vault."
 metadata:
@@ -11,8 +11,11 @@ metadata:
     homepage: https://github.com/hypurr-inc/hyperliquid-cli
   hermes:
     category: crypto
-    tags: [hyperliquid, hyperliquid-cli, trading, cli, crypto, finance, defi, dex, market-data, wallets, orders, automation, agents, testnet]
+    tags: [hyperliquid, hyperliquid-cli, trading, cli, crypto, finance, defi, dex, market-data, wallets, orders, automation, agents, testnet, 量化交易, 永续合约, 现货, 交易机器人, 자동매매, ハイパーリキッド]
     requires_toolsets: [terminal]
+  trae:
+    category: finance
+    tags: [hyperliquid, crypto, trading, quant, defi, perps]
 ---
 
 # Hyperliquid CLI Agent Guide
