@@ -21,6 +21,7 @@ use serde::Serialize;
 use crate::assets::{AssetResolver, Market};
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, StreamBound, arg};
 use crate::commands::outcomes;
+use crate::commands::support::normalize_dex;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
@@ -395,7 +396,12 @@ pub async fn book_snapshot(
     coin: &str,
 ) -> Result<BookSnapshot, anyhow::Error> {
     let coin = resolve_market_coin(client, resolver, coin).await?;
-    let book = fetch_l2_book(chain, &coin).await?;
+    book_snapshot_for(chain, &coin).await
+}
+
+/// One L2 book snapshot for an already-resolved info coin.
+async fn book_snapshot_for(chain: Chain, coin: &str) -> Result<BookSnapshot, anyhow::Error> {
+    let book = fetch_l2_book(chain, coin).await?;
     Ok(BookSnapshot::from(book))
 }
 
@@ -422,6 +428,17 @@ pub async fn candles_snapshot(
     limit: usize,
 ) -> Result<CandlesOutput, anyhow::Error> {
     let coin = resolve_perp_coin_or_fetch(client, resolver, coin).await?;
+    candles_snapshot_for(client, &coin, interval, limit).await
+}
+
+/// Candle history for an already-resolved info coin.
+async fn candles_snapshot_for(
+    client: &HttpClient,
+    coin: &str,
+    interval: CandleInterval,
+    limit: usize,
+) -> Result<CandlesOutput, anyhow::Error> {
+    let coin = coin.to_string();
     let end_time = Utc::now().timestamp_millis() as u64;
     let interval_ms = interval.to_duration().as_millis() as u64;
     let lookback = interval_ms.saturating_mul(limit.saturating_add(2) as u64);
@@ -743,9 +760,14 @@ impl CliCommand for Mids {
 
     async fn run(inv: &Invocation, args: &MidsArgs) -> Result<(), anyhow::Error> {
         if args.watch.watch {
-            watch_mids(inv, args.dex.as_deref(), args.watch.max_ticks).await
+            watch_mids(
+                inv,
+                normalize_dex(args.dex.as_deref()),
+                args.watch.max_ticks,
+            )
+            .await
         } else {
-            mids(inv, args.dex.as_deref()).await
+            mids(inv, normalize_dex(args.dex.as_deref())).await
         }
     }
 }
@@ -840,7 +862,7 @@ async fn watch_book(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let chain = remote.chain();
-    let resolver = std::sync::Arc::new(inv.asset_resolver().await?);
+    let resolver = inv.asset_resolver().await?;
     let subscription_coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
 
     crate::watch::run_snapshot_watch(
@@ -848,15 +870,15 @@ async fn watch_book(
         &format!("Live order book: {subscription_coin}"),
         chain,
         vec![Subscription::L2Book {
-            coin: subscription_coin,
+            coin: subscription_coin.clone(),
             n_sig_figs: None,
             mantissa: None,
             fast: false,
         }],
         max_ticks,
         move || {
-            let resolver = std::sync::Arc::clone(&resolver);
-            async move { book_snapshot(remote.api().sdk(), chain, &resolver, coin).await }
+            let coin = subscription_coin.clone();
+            async move { book_snapshot_for(chain, &coin).await }
         },
     )
     .await
@@ -895,7 +917,7 @@ async fn watch_candles(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let client = remote.api().sdk();
-    let resolver = std::sync::Arc::new(inv.asset_resolver().await?);
+    let resolver = inv.asset_resolver().await?;
     let subscription_coin = resolve_market_coin(client, &resolver, coin).await?;
 
     crate::watch::run_snapshot_watch(
@@ -903,13 +925,13 @@ async fn watch_candles(
         &format!("Live candles: {subscription_coin} {interval}"),
         remote.chain(),
         vec![Subscription::Candle {
-            coin: subscription_coin,
+            coin: subscription_coin.clone(),
             interval: interval.to_string(),
         }],
         max_ticks,
         move || {
-            let resolver = std::sync::Arc::clone(&resolver);
-            async move { candles_snapshot(client, &resolver, coin, interval, limit).await }
+            let coin = subscription_coin.clone();
+            async move { candles_snapshot_for(client, &coin, interval, limit).await }
         },
     )
     .await

@@ -242,3 +242,107 @@ async fn portfolio_dex_view_skips_account_wide_reads() {
     assert_eq!(portfolio["spot_balances"].as_array().unwrap().len(), 0);
     server.verify().await;
 }
+
+#[tokio::test]
+async fn blank_dex_is_the_default_dex() {
+    let env = IsolatedHome::new();
+    let server = MockServer::start().await;
+    // Both the override probe and the command send an unqualified allMids: a
+    // blank --dex must not add a dex field.
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_json(json!({ "type": "allMids" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "BTC": "50000" })))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let output = env
+        .command_with_server(&server)
+        .args(["--format", "json", "mids", "--dex", ""])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    assert_eq!(json_stdout(output)["BTC"], "50000");
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn blank_dex_keeps_account_wide_portfolio_rows() {
+    let env = IsolatedHome::new();
+    let server = MockServer::start().await;
+    mount_override_healthcheck(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_json(
+            json!({ "type": "clearinghouseState", "user": USER }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "marginSummary": {
+                "accountValue": "11",
+                "totalNtlPos": "0",
+                "totalRawUsd": "11",
+                "totalMarginUsed": "0"
+            },
+            "crossMarginSummary": {
+                "accountValue": "11",
+                "totalNtlPos": "0",
+                "totalRawUsd": "11",
+                "totalMarginUsed": "0"
+            },
+            "crossMaintenanceMarginUsed": "0",
+            "withdrawable": "11",
+            "assetPositions": [],
+            "time": 1_700_000_000_000_u64
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_json(
+            json!({ "type": "spotClearinghouseState", "user": USER }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "balances": [{
+                "coin": "USDC", "token": 0, "hold": "0", "total": "7", "entryNtl": "0"
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_json(
+            json!({ "type": "userVaultEquities", "user": USER }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let output = env
+        .command_with_server(&server)
+        .args([
+            "--format",
+            "json",
+            "account",
+            "portfolio",
+            USER,
+            "--dex",
+            "",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let portfolio = json_stdout(output);
+    assert_eq!(portfolio["summary"]["account_value"], "11");
+    assert_eq!(portfolio["spot_balances"].as_array().unwrap().len(), 1);
+    server.verify().await;
+}

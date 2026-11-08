@@ -19,6 +19,13 @@ pub fn parse_address(raw: &str) -> Result<Address, CliError> {
 }
 
 /// URL encode a UTF-8 string for query parameters.
+/// A `--dex` value, or `None` for the default dex. The exchange treats the empty
+/// dex name as the first perp dex, so a blank flag must behave like no flag.
+#[must_use]
+pub(crate) fn normalize_dex(dex: Option<&str>) -> Option<&str> {
+    dex.map(str::trim).filter(|dex| !dex.is_empty())
+}
+
 pub fn urlencoding(input: &str) -> String {
     let mut out = String::new();
     for b in input.bytes() {

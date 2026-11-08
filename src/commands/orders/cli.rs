@@ -51,11 +51,16 @@ impl CliCommand for OrdersOpen {
 
     async fn run(inv: &Invocation, args: &OpenOrdersArgs) -> Result<(), anyhow::Error> {
         if args.watch.watch {
-            watch_open_orders(inv, args.dex.as_deref(), args.watch.max_ticks).await
+            watch_open_orders(
+                inv,
+                normalize_dex(args.dex.as_deref()),
+                args.watch.max_ticks,
+            )
+            .await
         } else {
             let resolver = inv.asset_resolver().await?;
             let user = inv.resolve_signer()?.query_address();
-            open(inv, &resolver, user, args.dex.as_deref()).await
+            open(inv, &resolver, user, normalize_dex(args.dex.as_deref())).await
         }
     }
 }

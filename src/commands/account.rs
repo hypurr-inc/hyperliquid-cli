@@ -19,7 +19,9 @@ use serde::Serialize;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
 use crate::commands::actions;
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
-use crate::commands::support::{dry_run_signed_details, dry_run_signer_address, print_dry_run};
+use crate::commands::support::{
+    dry_run_signed_details, dry_run_signer_address, normalize_dex, print_dry_run,
+};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
@@ -1436,7 +1438,7 @@ impl CliCommand for AccountPortfolio {
 
     async fn run(inv: &Invocation, args: &PortfolioArgs) -> Result<(), anyhow::Error> {
         let address = inv.resolve_user(args.address.as_deref())?.to_string();
-        portfolio(inv, &address, args.dex.as_deref()).await
+        portfolio(inv, &address, normalize_dex(args.dex.as_deref())).await
     }
 }
 

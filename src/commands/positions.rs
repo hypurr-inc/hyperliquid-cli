@@ -12,7 +12,9 @@ use hypersdk::hypercore::types::{Action, AssetPosition, LeverageType};
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, StreamBound, arg,
 };
-use crate::commands::support::{dry_run_signed_details, dry_run_signing_addresses, print_dry_run};
+use crate::commands::support::{
+    dry_run_signed_details, dry_run_signing_addresses, normalize_dex, print_dry_run,
+};
 use crate::signing::SelectedSigner;
 use crate::stream::SnapshotWatchArgs;
 use serde::Serialize;
@@ -530,10 +532,15 @@ impl CliCommand for PositionsList {
 
     async fn run(inv: &Invocation, args: &PositionsListArgs) -> Result<(), anyhow::Error> {
         if args.watch.watch {
-            watch_positions(inv, args.dex.as_deref(), args.watch.max_ticks).await
+            watch_positions(
+                inv,
+                normalize_dex(args.dex.as_deref()),
+                args.watch.max_ticks,
+            )
+            .await
         } else {
             let user = inv.resolve_signer()?.query_address();
-            list(inv, user, args.dex.as_deref()).await
+            list(inv, user, normalize_dex(args.dex.as_deref())).await
         }
     }
 }
