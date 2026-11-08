@@ -153,6 +153,9 @@ async fn maybe_auto_update(cache_path: &Path) {
     let Ok(client) = ReleaseClient::new() else {
         return;
     };
+    if !claim_auto_update_attempt(cache_path, now).unwrap_or(false) {
+        return;
+    }
     eprintln!(
         "Automatically updating hyperliquid from {current_version} to {}...",
         cache.latest_version
@@ -167,18 +170,28 @@ async fn maybe_auto_update(cache_path: &Path) {
     .await
     {
         eprintln!("Automatic update failed: {e}");
-        let _ = update_version_cache(cache_path, |c| {
-            c.last_notified_at = Some(now_unix_seconds());
-        });
     } else {
         eprintln!(
             "Successfully updated hyperliquid to {}.",
             cache.latest_version
         );
-        let _ = update_version_cache(cache_path, |c| {
-            c.last_notified_at = Some(now_unix_seconds());
-        });
     }
+}
+
+/// Persist the attempt before downloading, checking the timestamp under the cache lock.
+fn claim_auto_update_attempt(cache_path: &Path, now: i64) -> Result<bool, anyhow::Error> {
+    let mut claimed = false;
+    update_version_cache(cache_path, |cache| {
+        if cache
+            .last_notified_at
+            .is_some_and(|last| now.saturating_sub(last) < NOTICE_INTERVAL.as_secs() as i64)
+        {
+            return;
+        }
+        cache.last_notified_at = Some(now);
+        claimed = true;
+    })?;
+    Ok(claimed)
 }
 
 /// Finish the passive check after a failed command: same bounded wait, no notice.
@@ -232,6 +245,8 @@ fn update_version_cache(
     cache_path: &Path,
     change: impl FnOnce(&mut VersionCache),
 ) -> Result<(), anyhow::Error> {
+    let _lock = crate::private_fs::FileLock::acquire(cache_path, Duration::ZERO)
+        .map_err(|err| anyhow::anyhow!("version cache lock: {err:?}"))?;
     let mut cache = read_version_cache(cache_path).unwrap_or_default();
     change(&mut cache);
     let contents = format!("{}\n", serde_json::to_string(&cache)?);
@@ -433,6 +448,28 @@ mod tests {
         assert!(update_notice(&cache_with("v0.11.1", None), "0.11.1", 0, "x").is_none());
         assert!(update_notice(&cache_with("v0.10.0", None), "0.11.1", 0, "x").is_none());
         assert!(update_notice(&cache_with("", None), "0.11.1-rc.1", 0, "x").is_none());
+    }
+
+    #[test]
+    fn auto_update_attempt_is_persisted_and_throttles_other_invocations() {
+        let tmpdir = TempDir::new().unwrap();
+        let path = tmpdir.path().join("version.json");
+        update_version_cache(&path, |cache| {
+            cache.latest_version = "v99.0.0".into();
+            cache.last_checked_at = 123;
+        })
+        .unwrap();
+        let now = 1_000_000;
+        assert!(claim_auto_update_attempt(&path, now).unwrap());
+        let cache = read_version_cache(&path).unwrap();
+        assert_eq!(cache.last_notified_at, Some(now));
+        assert_eq!(cache.latest_version, "v99.0.0");
+        assert_eq!(cache.last_checked_at, 123);
+        assert!(!claim_auto_update_attempt(&path, now + 1).unwrap());
+        let lock = crate::private_fs::FileLock::acquire(&path, Duration::ZERO).unwrap();
+        assert!(claim_auto_update_attempt(&path, now + 86400).is_err());
+        drop(lock);
+        assert!(claim_auto_update_attempt(&path, now + 86400).unwrap());
     }
 
     #[test]
