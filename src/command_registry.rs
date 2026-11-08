@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn registry_enumerates_every_registered_command() {
         let registry = CommandRegistry::get();
-        assert_eq!(registry.commands().len(), 123);
+        assert_eq!(registry.commands().len(), 125);
         for path in [
             &["asset", "decode"][..],
             &["asset", "search"],

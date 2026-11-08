@@ -138,6 +138,21 @@ hyperliquid --account alice orders open
 hyperliquid --ows-signer 0xabc... positions list
 ```
 
+### Bankr hosted wallet
+
+[Bankr](https://bankr.bot) keeps the key on its side; the CLI signs Hyperliquid actions by asking Bankr. Log in once, then select it per command:
+
+```bash
+hyperliquid wallet login                # paste a bk_... key (hidden prompt), checked before it is stored
+hyperliquid --bankr orders open         # sign with the linked Bankr wallet
+hyperliquid --bankr transfer spot-to-perp --amount 10
+hyperliquid wallet logout               # forget the stored key
+```
+
+`wallet login` validates the key against `GET /wallet/me`, stores it owner-only in the config file, and records the EVM address so later runs resolve the signer offline. `BANKR_API_KEY` (shared with the Bankr CLI) and the Bankr CLI's own `~/.bankr/config.json` are also read, so an existing Bankr login works without repeating it.
+
+What Bankr signs: trading actions (orders, cancels, modifies, leverage, margin, trailing stops, TWAP, vault and subaccount actions) and spot↔perp USDC moves, as EIP-712 typed data. Anything else that needs a user-signed payload — withdrawals, spot/asset sends, staking, agent or builder approvals, multisig — fails with exit `13` before a request is sent; use a local key, keystore, or OWS wallet for those. Every returned signature is recovered locally against the selected address before it is used.
+
 ### API / agent wallets
 
 API wallets (aka agent wallets) are delegated Hyperliquid trading keys approved by a master account. They can trade but cannot withdraw — ideal for handing a bounded signer to an automation or AI agent:

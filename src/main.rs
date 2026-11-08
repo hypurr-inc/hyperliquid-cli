@@ -84,6 +84,15 @@ struct Cli {
     )]
     ows_signer: Option<String>,
 
+    /// Sign with the Bankr wallet linked by `wallet login` (or BANKR_API_KEY)
+    #[arg(
+        long,
+        global = true,
+        help_heading = GLOBAL_OPTIONS,
+        conflicts_with_all = ["private_key", "keystore", "keystore_password", "account", "ows_signer"]
+    )]
+    bankr: bool,
+
     /// Use testnet instead of mainnet
     #[arg(long, global = true, help_heading = GLOBAL_OPTIONS)]
     testnet: bool,
@@ -175,6 +184,7 @@ async fn main() {
             non_interactive: parsed.cli.non_interactive,
             payload_from_stdin: parsed.cli.payload_file.as_deref() == Some("-"),
             signer: SignerFlags {
+                bankr: parsed.cli.bankr,
                 private_key: parsed.cli.private_key.clone(),
                 keystore: parsed.cli.keystore.clone(),
                 keystore_password: parsed.cli.keystore_password.clone(),

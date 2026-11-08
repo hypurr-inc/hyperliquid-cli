@@ -693,6 +693,28 @@
       "ows_signer": "not_applicable",
       "raw_payload": "unsupported",
       "risk": "local_secret"
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid wallet login",
+      "confirmation": "prompt",
+      "dangerous": true,
+      "dry_run": "optional",
+      "lifecycle": "interactive_local",
+      "ows_signer": "not_applicable",
+      "raw_payload": "unsupported",
+      "risk": "local_secret"
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid wallet logout",
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "optional",
+      "lifecycle": "interactive_local",
+      "ows_signer": "not_applicable",
+      "raw_payload": "unsupported",
+      "risk": "local_state"
     }
   ],
   "review_required_to_update": true

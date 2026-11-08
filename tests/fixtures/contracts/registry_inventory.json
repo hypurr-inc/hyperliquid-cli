@@ -8249,6 +8249,97 @@
       "transport": [
         "cli_interactive"
       ]
+    },
+    {
+      "aliases": [],
+      "auth_required": false,
+      "command": "hyperliquid wallet login",
+      "command_path": [
+        "wallet",
+        "login"
+      ],
+      "confirmation": "prompt",
+      "dangerous": true,
+      "description": "Store a Bankr API key and the wallet address it reports.",
+      "dry_run": "optional",
+      "group": "wallet",
+      "inputs": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Bankr API key (bk_...). Omit in human contexts to use the hidden prompt.",
+          "enum_values": [],
+          "id": "api_key",
+          "kind": null,
+          "long": "api-key",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Bankr API host. Defaults to https://api.bankr.bot.",
+          "enum_values": [],
+          "id": "api_url",
+          "kind": null,
+          "long": "api-url",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "lifecycle": "interactive_local",
+      "mutability": "local_only",
+      "one_of_required": [],
+      "output_contract": "interactive_local",
+      "ows_signer": "not_applicable",
+      "raw_payload": "unsupported",
+      "risk": "local_secret",
+      "transport": [
+        "cli_interactive"
+      ]
+    },
+    {
+      "aliases": [],
+      "auth_required": false,
+      "command": "hyperliquid wallet logout",
+      "command_path": [
+        "wallet",
+        "logout"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "description": "Remove the Bankr API key and address from the config file.",
+      "dry_run": "optional",
+      "group": "wallet",
+      "inputs": [
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Confirm logout without prompting.",
+          "enum_values": [],
+          "id": "yes",
+          "kind": null,
+          "long": "yes",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": "y"
+        }
+      ],
+      "lifecycle": "interactive_local",
+      "mutability": "local_only",
+      "one_of_required": [],
+      "output_contract": "interactive_local",
+      "ows_signer": "not_applicable",
+      "raw_payload": "unsupported",
+      "risk": "local_state",
+      "transport": [
+        "cli_interactive"
+      ]
     }
   ],
   "review_required_to_update": true

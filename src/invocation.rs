@@ -25,6 +25,7 @@ use crate::settings::Settings;
 /// Signer flags exactly as parsed from the command line.
 #[derive(Debug, Clone, Default)]
 pub struct SignerFlags {
+    pub bankr: bool,
     pub private_key: Option<String>,
     pub keystore: Option<PathBuf>,
     pub keystore_password: Option<String>,
@@ -73,6 +74,7 @@ impl Remote {
             signer.keystore_password.clone(),
             signer.account.clone(),
             signer.ows_signer.clone(),
+            signer.bankr,
         )?;
         let api = ApiClient::from_settings(&settings, network, announce_retries)?;
         Ok(Self {

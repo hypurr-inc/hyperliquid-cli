@@ -281,6 +281,71 @@ pub(super) fn print_declined(inv: &Invocation, message: &str) {
     }
 }
 
+/// What `wallet login` and `wallet logout` report about the Bankr link.
+pub(super) struct BankrReceipt {
+    pub status: &'static str,
+    pub message: String,
+    pub address: Option<String>,
+    pub api_url: Option<String>,
+    pub config_path: String,
+    pub config_keys_written: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct BankrStatusOutput {
+    status: String,
+    message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    address: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api_url: Option<String>,
+    config_path: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    config_keys_written: Vec<String>,
+}
+
+impl TableData for BankrStatusOutput {
+    fn headers(&self) -> Vec<&str> {
+        vec!["Field", "Value"]
+    }
+
+    fn rows(&self) -> Vec<Vec<String>> {
+        let mut rows = vec![
+            vec!["Status".to_string(), self.status.clone()],
+            vec!["Message".to_string(), self.message.clone()],
+        ];
+        if let Some(address) = &self.address {
+            rows.push(vec!["Address".to_string(), address.clone()]);
+        }
+        if let Some(api_url) = &self.api_url {
+            rows.push(vec!["Bankr API".to_string(), api_url.clone()]);
+        }
+        rows.push(vec!["Config".to_string(), self.config_path.clone()]);
+        if !self.config_keys_written.is_empty() {
+            rows.push(vec![
+                "Config keys written".to_string(),
+                self.config_keys_written.join(", "),
+            ]);
+        }
+        rows
+    }
+
+    fn to_json_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+    }
+}
+
+pub(super) fn print_bankr_receipt(inv: &Invocation, receipt: BankrReceipt) {
+    inv.print_untimed(&BankrStatusOutput {
+        status: receipt.status.to_string(),
+        message: receipt.message,
+        address: receipt.address,
+        api_url: receipt.api_url,
+        config_path: receipt.config_path,
+        config_keys_written: receipt.config_keys_written,
+    });
+}
+
 /// Quote a value for display in a copy-pasteable shell command.
 pub(super) fn shell_arg(value: &str) -> String {
     let plain = !value.is_empty()

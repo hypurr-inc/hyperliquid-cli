@@ -37,8 +37,14 @@ impl CliError {
         match self {
             Self::AuthRequired => Some(Recovery {
                 instruction: "Set up a wallet:".into(),
-                commands: vec![NextCommand::new("hyperliquid setup")],
-                note: Some("Or set HYPERLIQUID_PRIVATE_KEY for this run.".into()),
+                commands: vec![
+                    NextCommand::new("hyperliquid setup"),
+                    NextCommand::new("hyperliquid wallet login"),
+                ],
+                note: Some(
+                    "Or set HYPERLIQUID_PRIVATE_KEY, or BANKR_API_KEY with --bankr, for this run."
+                        .into(),
+                ),
             }),
             Self::UnknownOutcome(_) => Some(Recovery {
                 instruction: "Check open orders and recent fills:".into(),

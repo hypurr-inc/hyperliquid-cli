@@ -29,7 +29,8 @@ use crate::prompt;
 use crate::settings::Settings;
 use crate::wallet_store::{ConfigEdit, NewWallet, StoredWallet, WalletName, WalletStore};
 use output::{
-    Receipt, print_declined, print_receipt, print_status, print_wallet_address, shell_arg,
+    BankrReceipt, Receipt, print_bankr_receipt, print_declined, print_receipt, print_status,
+    print_wallet_address, shell_arg,
 };
 
 const OWS_WALLET_SOURCE: &str = "OWS wallet";
@@ -204,6 +205,139 @@ pub fn import_mnemonic(
     Ok(())
 }
 
+/// `wallet login`: check a Bankr API key against the API, then store it with the
+/// wallet address it reports so later runs resolve the signer without a request.
+pub fn login(inv: &Invocation, args: &WalletLoginArgs) -> Result<(), anyhow::Error> {
+    let settings = Settings::from_process();
+    let api_key = match args.api_key.as_deref() {
+        Some(key) => {
+            out::warn(
+                "passing a Bankr API key as an argument can expose it in OS process listings and shell history. Prefer `hyperliquid wallet login` and paste the key at the hidden prompt.",
+            );
+            key.trim().to_string()
+        }
+        None => prompt::read_secret(inv.mode(), "Bankr API key: ", "a Bankr API key on stdin")?
+            .trim()
+            .to_string(),
+    };
+    if api_key.is_empty() {
+        return Err(CliError::MissingInput(
+            "bankr api key is empty; get one at https://bankr.bot/api-keys".to_string(),
+        )
+        .into());
+    }
+    let api_url = args
+        .api_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            settings
+                .env()
+                .get_non_empty(crate::settings::env::BANKR_API_URL)
+        });
+
+    let api_url = crate::bankr::validate_api_url(
+        &api_url
+            .clone()
+            .unwrap_or_else(|| crate::bankr::DEFAULT_API_URL.to_string()),
+    )?;
+    let client = crate::bankr::BankrClient::new(api_url.clone(), api_key.clone());
+    let wallet = client.blocking_wallet()?;
+    let address = wallet.address.to_string();
+
+    let file = settings.require_config_file()?;
+    let lock = file.lock()?;
+    let mut config = settings.read_config_fresh()?.unwrap_or_default();
+    config.bankr_api_key = Some(api_key);
+    config.bankr_address = Some(address.clone());
+    let mut written = vec!["bankr_api_key".to_string(), "bankr_address".to_string()];
+    config.bankr_api_url = Some(api_url).filter(|url| url != crate::bankr::DEFAULT_API_URL);
+    if config.bankr_api_url.is_some() {
+        written.push("bankr_api_url".to_string());
+    }
+    file.save(&config)?;
+    drop(lock);
+
+    print_bankr_receipt(
+        inv,
+        BankrReceipt {
+            status: "logged_in",
+            message: format!("Logged in to Bankr as {address}"),
+            address: Some(address),
+            api_url: Some(client.api_url().to_string()),
+            config_path: file.path().display().to_string(),
+            config_keys_written: written,
+        },
+    );
+    Ok(())
+}
+
+/// `wallet logout`: forget the stored Bankr key and address.
+pub fn logout(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
+    let settings = Settings::from_process();
+    let Some(file) = settings.config_file().filter(|file| file.exists()) else {
+        print_status(inv, "noop", "No Bankr login is stored");
+        return Ok(());
+    };
+
+    if !yes {
+        require_promptable("--yes", inv.format(), inv.mode())?;
+        eprintln!(
+            "This removes the stored Bankr API key from {}.",
+            file.path().display()
+        );
+        eprintln!("The wallet and its funds stay with Bankr.");
+        if !prompt::confirm(inv.mode(), "Log out of Bankr?", "--yes")? {
+            print_declined(inv, "Logout cancelled");
+            return Ok(());
+        }
+    }
+
+    let lock = file.lock()?;
+    let Some(mut config) = settings.read_config_fresh()? else {
+        print_status(inv, "noop", "No Bankr login is stored");
+        return Ok(());
+    };
+    let mut removed = Vec::new();
+    for (present, key) in [
+        (config.bankr_api_key.take().is_some(), "bankr_api_key"),
+        (config.bankr_api_url.take().is_some(), "bankr_api_url"),
+        (config.bankr_address.take().is_some(), "bankr_address"),
+    ] {
+        if present {
+            removed.push(key.to_string());
+        }
+    }
+    if removed.is_empty() {
+        print_status(inv, "noop", "No Bankr login is stored");
+        return Ok(());
+    }
+    file.save(&config)?;
+    drop(lock);
+
+    if settings
+        .env()
+        .get_non_empty(crate::settings::env::BANKR_API_KEY)
+        .is_some()
+    {
+        out::warn("BANKR_API_KEY is still set in the environment, so --bankr keeps working.");
+    }
+    print_bankr_receipt(
+        inv,
+        BankrReceipt {
+            status: "logged_out",
+            message: "Logged out of Bankr".to_string(),
+            address: None,
+            api_url: None,
+            config_path: file.path().display().to_string(),
+            config_keys_written: removed,
+        },
+    );
+    Ok(())
+}
+
 fn signer_display(source: &SignerSource) -> (Option<String>, String) {
     match source {
         SignerSource::PrivateKey => (None, "private key/config/env".to_string()),
@@ -212,6 +346,7 @@ fn signer_display(source: &SignerSource) -> (Option<String>, String) {
             (Some(alias.clone()), "stored signing account".to_string())
         }
         SignerSource::Ows { selector } => (None, format!("OWS signer ({selector})")),
+        SignerSource::Bankr { address } => (None, format!("Bankr hosted wallet ({address})")),
     }
 }
 
@@ -555,6 +690,23 @@ pub struct WalletImportArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+pub struct WalletLoginArgs {
+    /// Bankr API key (bk_...). Omit to paste it at the hidden prompt.
+    #[arg(long)]
+    pub api_key: Option<String>,
+    /// Bankr API host. Defaults to https://api.bankr.bot
+    #[arg(long)]
+    pub api_url: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct WalletLogoutArgs {
+    /// Confirm logout without prompting.
+    #[arg(long, short = 'y')]
+    pub yes: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 pub struct WalletImportMnemonicArgs {
     /// BIP-39 mnemonic phrase. Omit to use the hidden prompt.
     pub mnemonic: Option<String>,
@@ -866,6 +1018,82 @@ Warning: passing a mnemonic as an argument can expose it in OS process listings 
             );
         }
         import_mnemonic(inv, args.mnemonic.as_deref(), args.alias.as_deref())
+    }
+}
+
+pub struct WalletLogin;
+
+impl CliCommand for WalletLogin {
+    type Args = WalletLoginArgs;
+
+    const SPEC: CommandSpec = CommandSpec::read(
+        &["wallet", "login"],
+        "wallet",
+        "Log in to a Bankr hosted wallet",
+        "Store a Bankr API key and the wallet address it reports.",
+    )
+    .long_about("Log in to a Bankr hosted wallet.\n\
+\n\
+The key is checked against https://api.bankr.bot before it is stored, then saved owner-only in the config file with the wallet address. Signing commands use that wallet with the global --bankr flag.\n\
+\n\
+Recommended for humans: run `hyperliquid wallet login` without --api-key and paste the key at the hidden prompt.")
+    .lifecycle(Lifecycle::InteractiveLocal)
+    .risk(Risk::LocalSecret)
+    .dry_run(DryRunPolicy::Optional)
+    .ows(OwsSupport::NotApplicable)
+    .dangerous(true)
+    .prompt()
+    .local()
+    .args(&[
+        arg("api_key").describe("Bankr API key (bk_...). Omit in human contexts to use the hidden prompt.").secret(),
+        arg("api_url"),
+    ]);
+
+    async fn run(inv: &Invocation, args: &WalletLoginArgs) -> Result<(), anyhow::Error> {
+        if inv.dry_run() {
+            return print_dry_run(
+                inv,
+                "wallet login",
+                serde_json::json!({
+                    "would_execute": "validate_and_store_bankr_api_key",
+                    "args": {
+                        "api_key_supplied": args.api_key.is_some(),
+                        "api_url": args.api_url
+                    }
+                }),
+            );
+        }
+        login(inv, args)
+    }
+}
+
+pub struct WalletLogout;
+
+impl CliCommand for WalletLogout {
+    type Args = WalletLogoutArgs;
+
+    const SPEC: CommandSpec = CommandSpec::read(
+        &["wallet", "logout"],
+        "wallet",
+        "Forget the stored Bankr login",
+        "Remove the Bankr API key and address from the config file.",
+    )
+    .lifecycle(Lifecycle::InteractiveLocal)
+    .risk(Risk::LocalState)
+    .dry_run(DryRunPolicy::Optional)
+    .ows(OwsSupport::NotApplicable)
+    .local()
+    .args(&[arg("yes")]);
+
+    async fn run(inv: &Invocation, args: &WalletLogoutArgs) -> Result<(), anyhow::Error> {
+        if inv.dry_run() {
+            return print_dry_run(
+                inv,
+                "wallet logout",
+                serde_json::json!({"would_execute": "remove_bankr_api_key"}),
+            );
+        }
+        logout(inv, args.yes)
     }
 }
 

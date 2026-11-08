@@ -40,6 +40,18 @@ pub struct Config {
     /// Default referral code to apply when `referral set` is invoked without a code.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_referral_code: Option<String>,
+
+    /// Bankr API key (`bk_...`) stored by `wallet login`. Never printed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bankr_api_key: Option<String>,
+
+    /// Bankr API host, when it isn't the public endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bankr_api_url: Option<String>,
+
+    /// EVM address Bankr reported at login, so signer resolution stays offline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bankr_address: Option<String>,
 }
 
 impl Config {
@@ -92,6 +104,12 @@ impl std::fmt::Debug for Config {
             .field("default_builder_address", &self.default_builder_address)
             .field("default_builder_fee_rate", &self.default_builder_fee_rate)
             .field("default_referral_code", &self.default_referral_code)
+            .field(
+                "bankr_api_key",
+                &self.bankr_api_key.as_ref().map(|_| "[redacted]"),
+            )
+            .field("bankr_api_url", &self.bankr_api_url)
+            .field("bankr_address", &self.bankr_address)
             .finish()
     }
 }

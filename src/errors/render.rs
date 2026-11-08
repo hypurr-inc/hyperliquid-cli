@@ -118,7 +118,7 @@ mod tests {
         let text = render_human_error(&CliError::AuthRequired, false);
         assert_eq!(
             text,
-            "Error: Authentication required.\n\nSet up a wallet:\n    hyperliquid setup\nOr set HYPERLIQUID_PRIVATE_KEY for this run."
+            "Error: Authentication required.\n\nSet up a wallet:\n    hyperliquid setup\n    hyperliquid wallet login\nOr set HYPERLIQUID_PRIVATE_KEY, or BANKR_API_KEY with --bankr, for this run."
         );
     }
 

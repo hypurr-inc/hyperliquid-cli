@@ -20,6 +20,15 @@ metadata:
 
 # Hyperliquid CLI Agent Guide
 
+## Signers
+
+Three signer sources exist. Pick one explicitly and check `wallet show` before a mutation:
+
+- `hyperliquid --bankr <command>`: a hosted Bankr wallet. Requires `wallet login` (or `BANKR_API_KEY`). It signs trading actions and spot↔perp USDC moves; withdrawals, spot/asset sends, staking, agent or builder approvals, and multisig fail with exit `13` — use a local signer for those.
+- `hyperliquid --ows-signer <name|id> <command>`: a wallet in the local encrypted OWS vault.
+- `hyperliquid --private-key` / `--keystore` / `HYPERLIQUID_PRIVATE_KEY`: a local key, for controlled automation only.
+
+
 Use this skill when an agent needs to trade different assets on Hyperliquid through the `hyperliquid` CLI: inspect markets, understand an account, plan orders or transfers, dry-run side effects, or execute an explicitly approved workflow.
 
 The CLI is designed for agents. Prefer structured JSON, command schemas, bounded streams, dry-runs, and explicit cleanup checks. Do not treat this as a feature list; treat it as a workflow for safely reaching an outcome.

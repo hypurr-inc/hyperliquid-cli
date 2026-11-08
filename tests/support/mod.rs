@@ -193,6 +193,30 @@ impl IsolatedHome {
         ]
     }
 
+    /// Write the last-error file wherever this platform's config directory is,
+    /// which is `XDG_CONFIG_HOME` on Linux and `~/Library/Application Support`
+    /// on macOS.
+    #[allow(dead_code)]
+    pub fn write_last_error(&self, value: &serde_json::Value) {
+        for candidate in self.config_file_candidates() {
+            let dir = candidate.parent().unwrap();
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("last_error.json"), value.to_string()).unwrap();
+        }
+    }
+
+    /// The last-error file written by the last command that failed.
+    #[allow(dead_code)]
+    pub fn read_last_error(&self) -> serde_json::Value {
+        for candidate in self.config_file_candidates() {
+            let path = candidate.parent().unwrap().join("last_error.json");
+            if let Ok(text) = std::fs::read_to_string(path) {
+                return serde_json::from_str(&text).unwrap();
+            }
+        }
+        panic!("no last_error.json was recorded");
+    }
+
     #[allow(dead_code)]
     pub fn config_file_path(&self) -> PathBuf {
         self.config_file_candidates()

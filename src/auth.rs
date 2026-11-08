@@ -10,6 +10,7 @@ use hypersdk::Address;
 use hypersdk::hypercore::PrivateKeySigner;
 use ows_lib::types::WalletInfo;
 
+use crate::bankr::{BankrClient, KeySource};
 use crate::errors::CliError;
 use crate::legacy_accounts::{LegacyAccount, LegacyAccounts};
 use crate::mode::Mode;
@@ -63,6 +64,8 @@ impl ResolvedSigner {
 /// The signer inputs of one run.
 #[derive(Debug, Clone, Default)]
 pub struct SignerSelection {
+    /// `--bankr`: sign with the wallet linked to the stored Bankr API key.
+    pub bankr: bool,
     pub ows: Option<String>,
     pub private_key: Option<String>,
     pub keystore: Option<PathBuf>,
@@ -83,13 +86,15 @@ impl SignerSelection {
         keystore_password: Option<String>,
         account: Option<String>,
         ows: Option<String>,
+        bankr: bool,
     ) -> Result<Self, CliError> {
-        let private_key = if account.is_some() || ows.is_some() {
+        let private_key = if bankr || account.is_some() || ows.is_some() {
             None
         } else {
             settings.private_key(cli_private_key)?
         };
         Ok(Self {
+            bankr,
             ows,
             private_key,
             keystore,
@@ -101,7 +106,8 @@ impl SignerSelection {
     /// Whether nothing names a signer, so the default wallet applies.
     #[must_use]
     pub fn picks_default(&self) -> bool {
-        self.ows.is_none()
+        !self.bankr
+            && self.ows.is_none()
             && self.private_key.is_none()
             && self.keystore.is_none()
             && self.account.is_none()
@@ -111,7 +117,7 @@ impl SignerSelection {
     /// as opposed to one named through `--account`.
     #[must_use]
     pub fn names_wallet_directly(&self) -> bool {
-        self.ows.is_some() || self.picks_default()
+        self.bankr || self.ows.is_some() || self.picks_default()
     }
 }
 
@@ -130,6 +136,9 @@ pub fn resolve_signer(
     settings: &Settings,
     mode: &Mode,
 ) -> Result<ResolvedSigner, anyhow::Error> {
+    if selection.bankr {
+        return resolve_bankr(settings);
+    }
     if let Some(selector) = selection.ows.as_deref() {
         return Ok(resolve_ows_flag(selector, settings)?);
     }
@@ -166,6 +175,20 @@ pub fn resolve_signer(
         return resolve_account(selector, settings, mode);
     }
     resolve_default(settings, mode)
+}
+
+/// `--bankr`: the wallet linked to the stored Bankr API key. The address comes
+/// from the config written by `wallet login`; a key that no login recorded (an
+/// environment variable, or the Bankr CLI's own config) is looked up once.
+fn resolve_bankr(settings: &Settings) -> Result<ResolvedSigner, anyhow::Error> {
+    let (client, source) = BankrClient::from_settings(settings)?;
+    // Only a key stored by `wallet login` has a matching cached address; a key
+    // from the environment or the Bankr CLI may belong to another wallet.
+    let address = match (source, settings.bankr_address()?) {
+        (KeySource::Config, Some(address)) => address,
+        _ => client.blocking_wallet()?.address,
+    };
+    Ok(ResolvedSigner::new(SelectedSigner::bankr(client, address)))
 }
 
 fn ows_signer(
@@ -544,12 +567,14 @@ mod tests {
             None,
             Some("main".to_string()),
             None,
+            false,
         )
         .unwrap();
         assert_eq!(named.private_key, None);
         assert!(!named.picks_default());
 
-        let ambient = SignerSelection::from_flags(&settings, None, None, None, None, None).unwrap();
+        let ambient =
+            SignerSelection::from_flags(&settings, None, None, None, None, None, false).unwrap();
         assert_eq!(ambient.private_key.as_deref(), Some(KEY));
         assert!(!ambient.names_wallet_directly());
 
@@ -560,6 +585,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(bare.picks_default());

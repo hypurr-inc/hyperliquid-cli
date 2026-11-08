@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+Highlights:
+
+- Added Bankr hosted-wallet login: `hyperliquid wallet login` validates a `bk_...` key against `GET /wallet/me`, stores it owner-only with the linked EVM address, and `hyperliquid --bankr <command>` signs with that wallet. `hyperliquid wallet logout` forgets it.
+- `BANKR_API_KEY`, `BANKR_API_URL`, and an existing Bankr CLI login in `~/.bankr/config.json` are read, so `--bankr` works without repeating `wallet login`.
+- Bankr signs trading actions as EIP-712 typed data (`POST /wallet/sign`, `eth_signTypedData_v4`). Actions whose signature hypersdk derives from a per-action schema (withdrawals, third-party transfers, staking, multisig) fail with exit `13` before any request is sent, and every returned signature is recovered locally against the selected address.
+- `AuthRequired` now suggests `hyperliquid wallet login` beside `hyperliquid setup`, and the help lists `BANKR_API_KEY`/`BANKR_API_URL`.
+
 ## 0.16.0 - 2026-11-08
 
 Highlights:
