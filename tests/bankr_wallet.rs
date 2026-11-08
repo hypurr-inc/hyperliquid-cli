@@ -44,6 +44,8 @@ async fn wallet_login_stores_the_key_and_address_and_logout_removes_them() {
         .await;
 
     env.command()
+        // The CLI override must win over platform environment discovery.
+        .env("XDG_CONFIG_HOME", env.tmp_path().join("unused-config"))
         .args([
             "wallet",
             "login",
@@ -56,6 +58,10 @@ async fn wallet_login_stores_the_key_and_address_and_logout_removes_them() {
         .success()
         .stdout(predicate::str::contains(BANKR_ADDRESS));
 
+    assert_eq!(
+        env.config_file_path(),
+        env.config.join("hyperliquid").join("config.json")
+    );
     let config = config_json(&env);
     assert_eq!(config["bankr_api_key"], BANKR_KEY);
     assert_eq!(config["bankr_address"], BANKR_ADDRESS);
@@ -79,6 +85,36 @@ async fn wallet_login_stores_the_key_and_address_and_logout_removes_them() {
     assert!(config.get("bankr_api_key").is_none());
     assert!(config.get("bankr_address").is_none());
     assert!(config.get("bankr_api_url").is_none());
+}
+
+#[tokio::test]
+async fn bankr_cli_credentials_are_read_from_the_isolated_home() {
+    let env = IsolatedHome::new();
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wallet/me"))
+        .and(header("X-API-Key", BANKR_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let bankr_dir = env.home.join(".bankr");
+    std::fs::create_dir_all(&bankr_dir).unwrap();
+    std::fs::write(
+        bankr_dir.join("config.json"),
+        serde_json::json!({"apiKey": BANKR_KEY, "apiUrl": server.uri()}).to_string(),
+    )
+    .unwrap();
+
+    env.command()
+        // Read the CLI home override even if the platform env points elsewhere.
+        .env("HOME", env.tmp_path().join("unused-home"))
+        .env("USERPROFILE", env.tmp_path().join("unused-home"))
+        .args(["--bankr", "wallet", "show"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(BANKR_ADDRESS));
 }
 
 #[tokio::test]

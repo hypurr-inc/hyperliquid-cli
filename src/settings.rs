@@ -19,6 +19,12 @@ use crate::errors::CliError;
 use crate::network::Network;
 
 pub mod env {
+    /// Override the home used for Bankr credentials and the default OWS vault.
+    pub const HOME_DIR: &str = "HYPERLIQUID_HOME_DIR";
+    /// Override the CLI config directory, including the hyperliquid component.
+    pub const CONFIG_DIR: &str = "HYPERLIQUID_CONFIG_DIR";
+    /// Override the CLI data directory, including the hyperliquid component.
+    pub const DATA_DIR: &str = "HYPERLIQUID_DATA_DIR";
     pub const PRIVATE_KEY: &str = "HYPERLIQUID_PRIVATE_KEY";
     pub const NETWORK: &str = "HYPERLIQUID_NETWORK";
     pub const API_BASE_URL: &str = "HYPERLIQUID_API_BASE_URL";

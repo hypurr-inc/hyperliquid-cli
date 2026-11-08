@@ -65,13 +65,15 @@ impl IsolatedHome {
     pub fn apply_env(&self, command: &mut Command) {
         command
             .env("HOME", &self.home)
-            // Windows reads these instead of HOME/XDG, and `dirs` ignores XDG
-            // there; without them a test would touch the developer's real config
-            // and `~/.bankr/config.json`.
+            // CLI overrides bypass Windows Known Folders, including the
+            // profile lookup used for Bankr credentials and the OWS vault.
+            .env("HYPERLIQUID_HOME_DIR", &self.home)
             .env("USERPROFILE", &self.home)
             .env("APPDATA", &self.config)
             .env("LOCALAPPDATA", &self.data)
+            .env("HYPERLIQUID_CONFIG_DIR", self.config.join("hyperliquid"))
             .env("XDG_CONFIG_HOME", &self.config)
+            .env("HYPERLIQUID_DATA_DIR", self.data.join("hyperliquid"))
             .env("XDG_DATA_HOME", &self.data)
             .env(FORMAT_ENV, "pretty")
             .env_remove("BANKR_API_KEY")
@@ -116,11 +118,14 @@ impl IsolatedHome {
     ) -> Command {
         let mut command = hyperliquid_command();
         command
+            .env("HYPERLIQUID_HOME_DIR", home)
             .env("HOME", home)
             .env("USERPROFILE", home)
             .env("APPDATA", &self.config)
             .env("LOCALAPPDATA", data)
+            .env("HYPERLIQUID_CONFIG_DIR", self.config.join("hyperliquid"))
             .env("XDG_CONFIG_HOME", &self.config)
+            .env("HYPERLIQUID_DATA_DIR", data.join("hyperliquid"))
             .env("XDG_DATA_HOME", data)
             .env(FORMAT_ENV, "pretty")
             .env(ACCOUNT_KEYCHAIN_DISABLED_ENV, "1")
@@ -206,27 +211,14 @@ impl IsolatedHome {
         command
     }
 
-    /// Every path `paths::config_dir()` can resolve to under this environment:
-    /// XDG on Linux, `~/Library/Application Support` on macOS, and `APPDATA` on
-    /// Windows (where the value is this home's temp directory).
+    /// The config path selected by the explicit CLI directory override.
     #[allow(dead_code)]
-    /// Every config path `dirs` can resolve to under this environment.
     pub fn config_file_candidates(&self) -> Vec<PathBuf> {
-        vec![
-            self.config.join("hyperliquid").join("config.json"),
-            self.home
-                .join("Library")
-                .join("Application Support")
-                .join("hyperliquid")
-                .join("config.json"),
-        ]
+        vec![self.config.join("hyperliquid").join("config.json")]
     }
 
-    /// Write the last-error file wherever this platform's config directory is,
-    /// which is `XDG_CONFIG_HOME` on Linux and `~/Library/Application Support`
-    /// on macOS.
+    /// Write the last-error file in the overridden config directory.
     #[allow(dead_code)]
-    /// Write the last-error file wherever this platform's config directory is.
     pub fn write_last_error(&self, value: &serde_json::Value) {
         for candidate in self.config_file_candidates() {
             let dir = candidate.parent().unwrap();

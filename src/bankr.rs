@@ -479,7 +479,7 @@ pub fn usd_class_transfer_typed_data(
 
 /// Read the key the Bankr CLI stores, when it exists.
 fn bankr_cli_credentials() -> Option<(String, Option<String>)> {
-    let path: PathBuf = dirs::home_dir()?.join(".bankr").join("config.json");
+    let path: PathBuf = crate::paths::home_dir()?.join(".bankr").join("config.json");
     let text = std::fs::read_to_string(path).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;
     let key = value.get("apiKey")?.as_str()?.trim();
