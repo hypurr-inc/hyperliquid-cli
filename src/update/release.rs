@@ -12,9 +12,9 @@ use crate::http_api;
 use crate::settings::env;
 
 /// Must match the repository and archive names the release workflow publishes.
-pub(super) const REPO: &str = "hypurrclaw/hyperliquid-cli";
+pub(super) const REPO: &str = "hypurr-inc/hyperliquid-cli";
 const LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/hypurrclaw/hyperliquid-cli/releases/latest";
+    "https://api.github.com/repos/hypurr-inc/hyperliquid-cli/releases/latest";
 const USER_AGENT: &str = "hyperliquid-cli";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 

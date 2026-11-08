@@ -68,4 +68,4 @@ Any string returned by the exchange is wrapped with `[untrusted remote data]` an
 
 - [features/orders](../features/orders.md)
 - [features/transfers](../features/transfers.md)
-- [SKILL.md](https://github.com/hypurrclaw/hyperliquid-cli/blob/main/SKILL.md)
+- [SKILL.md](https://github.com/hypurr-inc/hyperliquid-cli/blob/main/SKILL.md)

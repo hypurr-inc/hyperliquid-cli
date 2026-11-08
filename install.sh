@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="${HYPERLIQUID_CLI_REPO:-hypurrclaw/hyperliquid-cli}"
+REPO="${HYPERLIQUID_CLI_REPO:-hypurr-inc/hyperliquid-cli}"
 VERSION="${HYPERLIQUID_CLI_VERSION:-latest}"
 BIN_DIR="${BIN_DIR:-${HOME}/.local/bin}"
 BINARY_NAME="hyperliquid"
@@ -14,7 +14,7 @@ usage() {
 Usage: install.sh [--quiet|-q] [--json] [--check]
 
 Environment:
-  HYPERLIQUID_CLI_REPO       GitHub repo (default: hypurrclaw/hyperliquid-cli)
+  HYPERLIQUID_CLI_REPO       GitHub repo (default: hypurr-inc/hyperliquid-cli)
   HYPERLIQUID_CLI_VERSION    Release tag (default: latest)
   BIN_DIR                    Install directory (default: $HOME/.local/bin)
 

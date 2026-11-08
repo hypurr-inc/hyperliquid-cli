@@ -5,7 +5,7 @@ The installer is a POSIX shell script that downloads a release artifact, verifie
 ## Usage
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/hypurrclaw/hyperliquid-cli/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/hypurr-inc/hyperliquid-cli/main/install.sh
 sh install.sh
 hyperliquid --version
 ```
@@ -19,7 +19,7 @@ sh install.sh --json --quiet
 ## What it does
 
 1. Detect platform via `uname -ms` and map to a release asset name.
-2. Resolve the latest release tag from `https://api.github.com/repos/hypurrclaw/hyperliquid-cli/releases/latest` (or `HYPERLIQUID_CLI_VERSION` if pinned).
+2. Resolve the latest release tag from `https://api.github.com/repos/hypurr-inc/hyperliquid-cli/releases/latest` (or `HYPERLIQUID_CLI_VERSION` if pinned).
 3. Download the asset tarball and its `.sha256` companion.
 4. Verify the checksum.
 5. Extract the binary and copy it to `BIN_DIR/hyperliquid` (default `~/.local/bin`).

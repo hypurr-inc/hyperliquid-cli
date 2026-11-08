@@ -20,7 +20,7 @@ use hyperliquid_cli::output;
 use crate::{Cli, GLOBAL_OPTIONS};
 
 const ENV_FORMAT: &str = "HYPERLIQUID_FORMAT";
-const REPORT_URL: &str = "https://github.com/hypurrclaw/hyperliquid-cli/issues/new";
+const REPORT_URL: &str = "https://github.com/hypurr-inc/hyperliquid-cli/issues/new";
 
 pub(super) static PANIC_COMMAND: OnceLock<String> = OnceLock::new();
 

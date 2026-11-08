@@ -25,7 +25,7 @@ Languages: [English](README.md) | [简体中文](README.zh-CN.md) | [日本語](
 ## インストール
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/hypurrclaw/hyperliquid-cli/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/hypurr-inc/hyperliquid-cli/main/install.sh
 sh install.sh
 hyperliquid --version
 ```

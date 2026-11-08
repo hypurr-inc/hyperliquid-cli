@@ -25,7 +25,7 @@ Drop it into your agent's tool belt and it can check prices, place orders, manag
 ## Install
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/hypurrclaw/hyperliquid-cli/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/hypurr-inc/hyperliquid-cli/main/install.sh
 sh install.sh
 hyperliquid --version
 ```

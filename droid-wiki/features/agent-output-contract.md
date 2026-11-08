@@ -80,4 +80,4 @@ If schema metadata and README prose disagree, treat schema `input_kind`, `risk`,
 - To extend the JSON projection grammar, edit the projection helpers in `src/output/mod.rs` and add tests under `tests/output_contracts.rs`.
 - To add a new global agent flag, declare it in `src/main.rs`'s `Cli` struct and thread it through `src/cli_runtime.rs`.
 
-See also: [dry-run](dry-run.md), [systems/error-and-output](../systems/error-and-output.md), [SKILL.md](https://github.com/hypurrclaw/hyperliquid-cli/blob/main/SKILL.md).
+See also: [dry-run](dry-run.md), [systems/error-and-output](../systems/error-and-output.md), [SKILL.md](https://github.com/hypurr-inc/hyperliquid-cli/blob/main/SKILL.md).

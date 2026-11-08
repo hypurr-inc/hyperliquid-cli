@@ -12,6 +12,7 @@ metadata:
   hermes:
     category: crypto
     tags: [hyperliquid, hyperliquid-cli, trading, cli, crypto, finance, defi, dex, market-data, wallets, orders, automation, agents, testnet]
+    requires_toolsets: [terminal]
 ---
 
 # Hyperliquid CLI Agent Guide

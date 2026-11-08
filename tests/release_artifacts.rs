@@ -60,7 +60,7 @@ fn release_install_path_uses_public_repo_and_checksums() {
     let update_check = repo_file("src/update/release.rs");
 
     for required in [
-        "hypurrclaw/hyperliquid-cli",
+        "hypurr-inc/hyperliquid-cli",
         "sh install.sh",
         "cargo install --path . --bin hyperliquid",
     ] {
@@ -68,7 +68,7 @@ fn release_install_path_uses_public_repo_and_checksums() {
     }
 
     for required in [
-        "hypurrclaw/hyperliquid-cli",
+        "hypurr-inc/hyperliquid-cli",
         "sha256_check",
         "${asset}.sha256",
     ] {

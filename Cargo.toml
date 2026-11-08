@@ -6,9 +6,9 @@ description = "Production-grade CLI for Hyperliquid DEX"
 license = "MIT"
 rust-version = "1.94.1"
 readme = "README.md"
-repository = "https://github.com/hypurrclaw/hyperliquid-cli"
-homepage = "https://github.com/hypurrclaw/hyperliquid-cli"
-documentation = "https://github.com/hypurrclaw/hyperliquid-cli#readme"
+repository = "https://github.com/hypurr-inc/hyperliquid-cli"
+homepage = "https://github.com/hypurr-inc/hyperliquid-cli"
+documentation = "https://github.com/hypurr-inc/hyperliquid-cli#readme"
 keywords = ["hyperliquid", "cli", "dex", "trading"]
 categories = ["command-line-utilities"]
 
