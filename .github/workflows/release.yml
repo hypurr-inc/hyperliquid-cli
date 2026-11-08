@@ -35,6 +35,9 @@ jobs:
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             asset: hyperliquid-windows-x86_64.zip
+          - runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            asset: hyperliquid-windows-aarch64.zip
     runs-on: ${{ matrix.runner }}
 
     steps:
@@ -60,7 +63,7 @@ jobs:
         run: cargo build --locked --release --bin hyperliquid --target ${{ matrix.target }}
 
       - name: Package archive (Unix)
-        if: matrix.runner != 'windows-latest'
+        if: "!startsWith(matrix.runner, 'windows-')"
         shell: bash
         run: |
           set -euo pipefail
@@ -76,7 +79,7 @@ jobs:
           fi
 
       - name: Package archive (Windows)
-        if: matrix.runner == 'windows-latest'
+        if: startsWith(matrix.runner, 'windows-')
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist, package | Out-Null
@@ -88,7 +91,7 @@ jobs:
           "$hash  $asset" | Out-File -FilePath "dist/$asset.sha256" -Encoding ascii -NoNewline
 
       - name: Smoke archive (Unix)
-        if: matrix.runner != 'windows-latest'
+        if: "!startsWith(matrix.runner, 'windows-')"
         shell: bash
         run: |
           set -euo pipefail
@@ -97,7 +100,7 @@ jobs:
           "$tmpdir/hyperliquid" --version
 
       - name: Smoke archive (Windows)
-        if: matrix.runner == 'windows-latest'
+        if: startsWith(matrix.runner, 'windows-')
         shell: pwsh
         run: |
           $tmpdir = Join-Path $env:RUNNER_TEMP ([guid]::NewGuid().ToString())

@@ -86,6 +86,7 @@ fn release_install_path_uses_public_repo_and_checksums() {
         "hyperliquid-macos-x86_64.tar.gz",
         "hyperliquid-macos-aarch64.tar.gz",
         "hyperliquid-windows-x86_64.zip",
+        "hyperliquid-windows-aarch64.zip",
         "sha256sum",
         "softprops/action-gh-release",
     ] {
