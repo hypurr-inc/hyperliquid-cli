@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.15.0 - 2026-11-08
+
+Highlights:
+
+- Migrated organization and repositories to `hypurr-inc`.
+- Adopted open [Agent Plugins v1.0.0](https://agent-plugins.org/) standard with root `plugin.json` and canonical `skills/hyperliquid-cli/SKILL.md` packaging.
+- Added native Claude Code plugin adapter with `.claude-plugin/plugin.json` manifest.
+- Added full Hermes Agent compatibility (`metadata.hermes`, `requires_toolsets: [terminal]`) for automated tap and hub discovery.
+- Enhanced Universal Agent install support via `skills.sh`, Claude Code, Cursor, and OpenClaw/ClawHub.
+
 ## 0.12.0 - 2026-11-07
 
 Highlights:
