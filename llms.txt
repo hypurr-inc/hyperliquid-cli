@@ -6,7 +6,7 @@
 - **Documentation**: https://github.com/hypurr-inc/hyperliquid-cli#readme
 - **Repository**: https://github.com/hypurr-inc/hyperliquid-cli
 - **Agent Skill & Plugin**: Follows Agent Plugins v1.0.0 and Agent Skills standard.
-- **Languages**: English, 中文 (README.zh-CN.md), 日本語 (README.ja-JP.md), 한국어 (README.ko-KR.md).
+- **Languages**: English (README.md), 繁體中文 (README.zh-TW.md), 简体中文 (README.zh-CN.md), 日本語 (README.ja-JP.md), 한국어 (README.ko-KR.md).
 
 ## Quick Installation
 - Binary install: `curl -fsSLO https://raw.githubusercontent.com/hypurr-inc/hyperliquid-cli/main/install.sh && sh install.sh`
