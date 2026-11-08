@@ -12,11 +12,19 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use hypersdk::Address;
+
 use crate::config::{Config, ConfigFile};
 use crate::errors::CliError;
 use crate::network::Network;
 
 pub mod env {
+    /// Override the home used for Bankr credentials and the default OWS vault.
+    pub const HOME_DIR: &str = "HYPERLIQUID_HOME_DIR";
+    /// Override the CLI config directory, including the hyperliquid component.
+    pub const CONFIG_DIR: &str = "HYPERLIQUID_CONFIG_DIR";
+    /// Override the CLI data directory, including the hyperliquid component.
+    pub const DATA_DIR: &str = "HYPERLIQUID_DATA_DIR";
     pub const PRIVATE_KEY: &str = "HYPERLIQUID_PRIVATE_KEY";
     pub const NETWORK: &str = "HYPERLIQUID_NETWORK";
     pub const API_BASE_URL: &str = "HYPERLIQUID_API_BASE_URL";
@@ -38,6 +46,9 @@ pub mod env {
     pub const MCP_TIMEOUT_MS: &str = "HYPERLIQUID_MCP_TIMEOUT_MS";
     pub const AUTO_UPDATE: &str = "HYPERLIQUID_AUTO_UPDATE";
     pub const CARGO_HOME: &str = "CARGO_HOME";
+    /// Shared with the Bankr CLI.
+    pub const BANKR_API_KEY: &str = "BANKR_API_KEY";
+    pub const BANKR_API_URL: &str = "BANKR_API_URL";
 }
 
 /// Compile-time builder default captured from the build environment.
@@ -85,6 +96,14 @@ const ENV_HELP: &[(&str, &str)] = &[
     (
         env::NETWORK,
         "Network to use: mainnet or testnet. --testnet overrides it.",
+    ),
+    (
+        env::BANKR_API_KEY,
+        "Bankr API key for --bankr, shared with the Bankr CLI. `wallet login` stores one instead.",
+    ),
+    (
+        env::BANKR_API_URL,
+        "Bankr API host, for a local or alternate endpoint.",
     ),
     (
         env::PRIVATE_KEY,
@@ -467,6 +486,34 @@ impl Settings {
         self.env.get_non_empty(env::KEYSTORE_PASSWORD)
     }
 
+    /// The EVM address Bankr reported at `wallet login`, if any.
+    pub fn bankr_address(&self) -> Result<Option<Address>, CliError> {
+        let Some(text) = self
+            .config()?
+            .and_then(|config| config.bankr_address.as_deref())
+        else {
+            return Ok(None);
+        };
+        text.trim().parse::<Address>().map(Some).map_err(|_| {
+            CliError::Configuration(format!(
+                "invalid bankr_address in the config file: '{text}' is not an EVM address. Run `hyperliquid wallet login` again."
+            ))
+        })
+    }
+
+    /// Whether any Bankr credential is available to this run.
+    pub fn has_bankr_credentials(&self) -> Result<bool, CliError> {
+        if self.env.get_trimmed(env::BANKR_API_KEY).is_some() {
+            return Ok(true);
+        }
+        Ok(self.config()?.is_some_and(|config| {
+            config
+                .bankr_api_key
+                .as_deref()
+                .is_some_and(|key| !key.trim().is_empty())
+        }))
+    }
+
     fn env_builder_default(&self) -> Option<BuilderDefaultSetting> {
         let address = self.env.get_trimmed(env::DEFAULT_BUILDER_ADDRESS);
         let fee_rate = self.env.get_trimmed(env::DEFAULT_BUILDER_FEE_RATE);
@@ -671,6 +718,67 @@ mod tests {
         let err = settings.testnet(false).unwrap_err();
         assert!(err.to_string().contains("invalid config file"));
         assert!(err.to_string().contains("bogus"));
+    }
+
+    #[test]
+    fn bankr_address_is_optional_and_validated() {
+        assert_eq!(settings(&[], None).bankr_address().unwrap(), None);
+
+        let with_space = || {
+            Some(Config {
+                bankr_address: Some("  0x0000000000000000000000000000000000000009  ".to_string()),
+                ..Config::default()
+            })
+        };
+        assert_eq!(
+            settings(&[], with_space()).bankr_address().unwrap(),
+            Some(
+                "0x0000000000000000000000000000000000000009"
+                    .parse()
+                    .unwrap()
+            )
+        );
+
+        let broken = || {
+            Some(Config {
+                bankr_address: Some("0xnot-an-address".to_string()),
+                ..Config::default()
+            })
+        };
+        let err = settings(&[], broken()).bankr_address().unwrap_err();
+        assert!(matches!(err, CliError::Configuration(_)));
+        assert!(err.to_string().contains("bankr_address"));
+        assert!(err.to_string().contains("wallet login"));
+    }
+
+    #[test]
+    fn bankr_credentials_come_from_the_environment_or_a_non_blank_config_key() {
+        assert!(!settings(&[], None).has_bankr_credentials().unwrap());
+
+        let env_key = settings(&[(env::BANKR_API_KEY, "bk_env")], None);
+        assert!(env_key.has_bankr_credentials().unwrap());
+        assert!(
+            !settings(&[(env::BANKR_API_KEY, "  ")], None)
+                .has_bankr_credentials()
+                .unwrap()
+        );
+
+        let config_key = |key: &str| {
+            Some(Config {
+                bankr_api_key: Some(key.to_string()),
+                ..Config::default()
+            })
+        };
+        assert!(
+            settings(&[], config_key("bk_cfg"))
+                .has_bankr_credentials()
+                .unwrap()
+        );
+        assert!(
+            !settings(&[], config_key("   "))
+                .has_bankr_credentials()
+                .unwrap()
+        );
     }
 
     #[test]

@@ -235,7 +235,7 @@ fn auth_required_prints_recovery_block_in_human_mode() {
         .code(10)
         .stderr(predicate::str::starts_with("Error: Authentication required."))
         .stderr(predicate::str::contains(
-            "\n\nSet up a wallet:\n    hyperliquid setup\nOr set HYPERLIQUID_PRIVATE_KEY for this run.",
+            "\n\nSet up a wallet:\n    hyperliquid setup\n    hyperliquid wallet login\nOr set HYPERLIQUID_PRIVATE_KEY, or BANKR_API_KEY with --bankr, for this run.",
         ));
 }
 

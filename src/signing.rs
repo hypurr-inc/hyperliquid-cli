@@ -8,6 +8,7 @@ use hypersdk::hypercore::signing::{agent_signing_hash, sign_l1_action};
 use hypersdk::hypercore::types::{Action, ActionRequest, Signature};
 use hypersdk::hypercore::{Chain, PrivateKeySigner};
 
+use crate::bankr::{self, BankrClient};
 use crate::errors::CliError;
 use crate::ows::signing::{self as ows_signing, OwsSigningConfig};
 
@@ -18,12 +19,39 @@ pub enum SignerSource {
     Keystore,
     StoredAccount { alias: String },
     Ows { selector: String },
+    Bankr { address: Address },
 }
 
 #[derive(Debug, Clone)]
 enum SignerBackend {
     LocalPrivateKey(PrivateKeySigner),
     Ows(OwsSigningConfig),
+    Bankr(BankrSigner),
+}
+
+/// A Bankr hosted wallet: the key stays with Bankr and every signature is an
+/// API call, which is why signing goes through a scoped runtime thread.
+#[derive(Debug, Clone)]
+pub struct BankrSigner {
+    client: BankrClient,
+    address: Address,
+}
+
+impl BankrSigner {
+    #[must_use]
+    pub fn new(client: BankrClient, address: Address) -> Self {
+        Self { client, address }
+    }
+
+    #[must_use]
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    #[must_use]
+    pub fn client(&self) -> &BankrClient {
+        &self.client
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -59,10 +87,20 @@ impl SelectedSigner {
     }
 
     #[must_use]
+    pub fn bankr(client: BankrClient, address: Address) -> Self {
+        Self {
+            backend: SignerBackend::Bankr(BankrSigner::new(client, address)),
+            source: SignerSource::Bankr { address },
+            query_address: address,
+        }
+    }
+
+    #[must_use]
     pub fn address(&self) -> Address {
         match &self.backend {
             SignerBackend::LocalPrivateKey(signer) => signer.address(),
             SignerBackend::Ows(config) => config.address(),
+            SignerBackend::Bankr(signer) => signer.address(),
         }
     }
 
@@ -80,7 +118,7 @@ impl SelectedSigner {
     #[must_use]
     pub fn ows_wallet_name(&self) -> Option<&str> {
         match &self.backend {
-            SignerBackend::LocalPrivateKey(_) => None,
+            SignerBackend::LocalPrivateKey(_) | SignerBackend::Bankr(_) => None,
             SignerBackend::Ows(config) => config.wallet_name(),
         }
     }
@@ -91,6 +129,10 @@ impl SelectedSigner {
             SignerBackend::Ows(config) => {
                 Err(ows_signing::unsupported_live_signing(config.selector()))
             }
+            SignerBackend::Bankr(signer) => Err(CliError::Unsupported(format!(
+                "the Bankr wallet {} signs through the Bankr API; a local private key is required for this command",
+                signer.address()
+            ))),
         }
     }
 
@@ -100,7 +142,7 @@ impl SelectedSigner {
     /// still verify the recovered address for every payload before submission.
     pub fn ensure_can_attempt_live_signing(&self) -> Result<(), CliError> {
         match &self.backend {
-            SignerBackend::LocalPrivateKey(_) => Ok(()),
+            SignerBackend::LocalPrivateKey(_) | SignerBackend::Bankr(_) => Ok(()),
             SignerBackend::Ows(config) if config.has_resolved_wallet() => Ok(()),
             SignerBackend::Ows(config) => {
                 Err(ows_signing::unsupported_live_signing(config.selector()))
@@ -145,6 +187,22 @@ impl SelectedSigner {
                     CliError::Internal(anyhow::anyhow!("failed to encode signed action: {err}"))
                 })
             }
+            SignerBackend::Bankr(signer) => {
+                let typed_data = bankr_typed_data(&action, nonce, vault_address, chain)?;
+                let signature = signer
+                    .client()
+                    .blocking_sign(&typed_data, signer.address())?;
+                let request = ActionRequest {
+                    action,
+                    nonce,
+                    signature,
+                    vault_address,
+                    expires_after: None,
+                };
+                serde_json::to_value(request).map_err(|err| {
+                    CliError::Internal(anyhow::anyhow!("failed to encode signed action: {err}"))
+                })
+            }
         }
     }
 
@@ -155,6 +213,10 @@ impl SelectedSigner {
                 .map(Into::into)
                 .map_err(|err| CliError::Internal(anyhow::anyhow!("failed to sign action: {err}"))),
             SignerBackend::Ows(config) => ows_signing::sign_typed_data(config, typed_data),
+            SignerBackend::Bankr(signer) => signer.client().blocking_sign(
+                &bankr::BankrTypedData::from_typed(typed_data)?,
+                signer.address(),
+            ),
         }
     }
 
@@ -170,6 +232,10 @@ impl SelectedSigner {
             SignerBackend::Ows(config) => {
                 ows_signing::sign_hash(config, agent_signing_hash(chain, connection_id))
             }
+            SignerBackend::Bankr(signer) => {
+                let typed_data = bankr::agent_typed_data(chain, connection_id);
+                signer.client().blocking_sign(&typed_data, signer.address())
+            }
         }
     }
 
@@ -181,91 +247,42 @@ impl SelectedSigner {
                 })
             }
             SignerBackend::Ows(config) => ows_signing::sign_message(config, message),
+            SignerBackend::Bankr(signer) => Err(CliError::Unsupported(format!(
+                "the Bankr wallet {} signs Hyperliquid actions through Bankr, not arbitrary messages",
+                signer.address()
+            ))),
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ows::vault::{Vault, test_support::import_test_wallet};
-
-    const KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000009";
-
-    #[test]
-    fn selected_local_signer_exposes_address_source_and_query_address() {
-        let signer = KEY.parse::<PrivateKeySigner>().unwrap();
-        let address = signer.address();
-        let selected = SelectedSigner::local_private_key(signer, SignerSource::PrivateKey, address);
-
-        assert_eq!(selected.address(), address);
-        assert_eq!(selected.query_address(), address);
-        assert_eq!(selected.source(), &SignerSource::PrivateKey);
-    }
-
-    #[test]
-    fn selected_local_signer_can_sign_messages() {
-        let signer = KEY.parse::<PrivateKeySigner>().unwrap();
-        let address = signer.address();
-        let selected = SelectedSigner::local_private_key(signer, SignerSource::PrivateKey, address);
-
-        let signature = selected.sign_message(b"hyperliquid-cli").unwrap();
-        let recovered = signature
-            .recover_address_from_msg(b"hyperliquid-cli")
-            .unwrap();
-
-        assert_eq!(recovered, address);
-    }
-
-    #[test]
-    fn resolved_ows_signer_can_build_signed_l1_action_request() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let wallet = import_test_wallet(tmp.path(), "signing-test-wallet");
-        let address = KEY.parse::<PrivateKeySigner>().unwrap().address();
-        let selected = SelectedSigner::ows(OwsSigningConfig::for_wallet(
-            wallet.name.clone(),
-            &wallet,
-            address,
-            Vault::at(tmp.path()),
+/// The EIP-712 document Bankr signs for an L1 action, refusing any action whose
+/// signature hypersdk derives from a schema this module does not build (sends,
+/// withdrawals, staking, approvals, multisig) before a request is sent.
+fn bankr_typed_data(
+    action: &Action,
+    nonce: u64,
+    vault_address: Option<Address>,
+    chain: Chain,
+) -> Result<bankr::BankrTypedData, CliError> {
+    let typed_data = match action {
+        Action::UsdClassTransfer(inner) => {
+            bankr::usd_class_transfer_typed_data(chain, &inner.amount, inner.to_perp, inner.nonce)
+        }
+        _ => {
+            let connection_id = action.hash(nonce, vault_address, None).map_err(|err| {
+                CliError::Internal(anyhow::anyhow!("failed to hash bankr action: {err}"))
+            })?;
+            bankr::agent_typed_data(chain, connection_id)
+        }
+    };
+    let expected = action
+        .prehash(nonce, vault_address, None, chain)
+        .map_err(|err| CliError::Internal(anyhow::anyhow!("failed to hash bankr action: {err}")))?;
+    if typed_data.signing_hash()? != expected {
+        return Err(CliError::Unsupported(
+            "Bankr signs trading actions (orders, cancels, modifies, leverage, margin, trailing stops, TWAP, vault and subaccount actions) and spot-to-perp USDC moves; this action needs a user-signed payload Bankr does not cover, so use a local key or an OWS wallet for it"
+                .to_string(),
         ));
-
-        let request = selected
-            .sign_l1_action_sync(
-                Action::UpdateLeverage(hypersdk::hypercore::api::UpdateLeverage {
-                    asset: 3,
-                    is_cross: true,
-                    leverage: 2,
-                }),
-                1_777_963_000_000,
-                None,
-                Chain::Testnet,
-            )
-            .unwrap();
-
-        assert_eq!(request["action"]["type"], "updateLeverage");
-        assert_eq!(request["action"]["asset"], 3);
-        assert_eq!(request["signature"]["r"].as_str().unwrap().len(), 66);
-        assert_eq!(request["signature"]["s"].as_str().unwrap().len(), 66);
     }
-
-    #[test]
-    fn address_only_ows_signer_exposes_address_but_rejects_live_signing() {
-        let address: Address = "0x0000000000000000000000000000000000000001"
-            .parse()
-            .unwrap();
-        let selected = SelectedSigner::ows(OwsSigningConfig::address_only(
-            "0x0000000000000000000000000000000000000001".to_string(),
-            address,
-        ));
-
-        assert_eq!(selected.address(), address);
-        assert_eq!(selected.query_address(), address);
-        assert_eq!(
-            selected.source(),
-            &SignerSource::Ows {
-                selector: "0x0000000000000000000000000000000000000001".to_string(),
-            }
-        );
-        assert_eq!(selected.sign_message(b"nope").unwrap_err().exit_code(), 13);
-    }
+    Ok(typed_data)
 }

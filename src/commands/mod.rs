@@ -108,6 +108,8 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<wallet::WalletDelete>(),
             Entry::of::<wallet::WalletExport>(),
             Entry::of::<wallet::WalletReset>(),
+            Entry::of::<wallet::WalletLogin>(),
+            Entry::of::<wallet::WalletLogout>(),
             Entry::of::<api_wallet::ApiWalletCreate>(),
             Entry::of::<api_wallet::ApiWalletApprove>(),
             Entry::of::<api_wallet::ApiWalletList>(),

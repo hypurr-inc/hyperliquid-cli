@@ -31,6 +31,7 @@ pub struct IsolatedHome {
 }
 
 impl IsolatedHome {
+    /// An isolated home, config, and data directory under a temp dir.
     pub fn new() -> Self {
         let tmp = TempDir::new().unwrap();
         let home = tmp.path().join("home");
@@ -48,22 +49,35 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// The temp directory that owns every path of this fixture.
     pub fn tmp_path(&self) -> &Path {
         self._tmp.path()
     }
 
+    /// A CLI command bound to this fixture's directories.
     pub fn command(&self) -> Command {
         let mut command = hyperliquid_command();
         self.apply_env(&mut command);
         command
     }
 
+    /// Point `command` at this fixture's directories and clear ambient settings.
     pub fn apply_env(&self, command: &mut Command) {
         command
             .env("HOME", &self.home)
+            // CLI overrides bypass Windows Known Folders, including the
+            // profile lookup used for Bankr credentials and the OWS vault.
+            .env("HYPERLIQUID_HOME_DIR", &self.home)
+            .env("USERPROFILE", &self.home)
+            .env("APPDATA", &self.config)
+            .env("LOCALAPPDATA", &self.data)
+            .env("HYPERLIQUID_CONFIG_DIR", self.config.join("hyperliquid"))
             .env("XDG_CONFIG_HOME", &self.config)
+            .env("HYPERLIQUID_DATA_DIR", self.data.join("hyperliquid"))
             .env("XDG_DATA_HOME", &self.data)
             .env(FORMAT_ENV, "pretty")
+            .env_remove("BANKR_API_KEY")
+            .env_remove("BANKR_API_URL")
             .env_remove(PRIVATE_KEY_ENV)
             .env_remove(NETWORK_ENV)
             .env_remove(API_OVERRIDE_ENV)
@@ -80,6 +94,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// A CLI command with the legacy-account passphrase set.
     pub fn account_command(&self, passphrase: &str) -> Command {
         let mut command = self.command();
         self.apply_account_env(&mut command, Some(passphrase));
@@ -87,6 +102,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// A CLI command with no account passphrase.
     pub fn account_command_without_passphrase(&self) -> Command {
         let mut command = self.command();
         self.apply_account_env(&mut command, None);
@@ -94,6 +110,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// A CLI command over explicit home and data paths, with no passphrase.
     pub fn account_command_for_paths_without_passphrase(
         &self,
         home: &Path,
@@ -101,8 +118,14 @@ impl IsolatedHome {
     ) -> Command {
         let mut command = hyperliquid_command();
         command
+            .env("HYPERLIQUID_HOME_DIR", home)
             .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env("APPDATA", &self.config)
+            .env("LOCALAPPDATA", data)
+            .env("HYPERLIQUID_CONFIG_DIR", self.config.join("hyperliquid"))
             .env("XDG_CONFIG_HOME", &self.config)
+            .env("HYPERLIQUID_DATA_DIR", data.join("hyperliquid"))
             .env("XDG_DATA_HOME", data)
             .env(FORMAT_ENV, "pretty")
             .env(ACCOUNT_KEYCHAIN_DISABLED_ENV, "1")
@@ -114,6 +137,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// Set or clear the legacy-account environment for `command`.
     pub fn apply_account_env(&self, command: &mut Command, passphrase: Option<&str>) {
         command
             .env(ACCOUNT_KEYCHAIN_DISABLED_ENV, "1")
@@ -129,6 +153,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// A CLI command pointed at an API base URL override.
     pub fn command_with_api_url(&self, url: impl AsRef<str>) -> Command {
         let mut command = self.command();
         command.env(API_OVERRIDE_ENV, url.as_ref());
@@ -136,11 +161,13 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// A CLI command pointed at a mock Hyperliquid server.
     pub fn command_with_server(&self, server: &MockServer) -> Command {
         self.command_with_api_url(server.uri())
     }
 
     #[allow(dead_code)]
+    /// A CLI command whose testnet endpoint is `server`.
     pub fn command_with_testnet_server(&self, server: &MockServer) -> Command {
         let mut command = self.command();
         command.env(TESTNET_API_OVERRIDE_ENV, server.uri());
@@ -148,6 +175,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// A CLI command with separate mainnet and testnet mock servers.
     pub fn command_with_mainnet_and_testnet(
         &self,
         mainnet_server: &MockServer,
@@ -161,6 +189,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// An account command pointed at a mock Hyperliquid server.
     pub fn account_command_with_server(&self, passphrase: &str, server: &MockServer) -> Command {
         let mut command = self.account_command(passphrase);
         command.env(API_OVERRIDE_ENV, server.uri());
@@ -168,6 +197,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// An account command with separate mainnet and testnet mock servers.
     pub fn account_command_with_mainnet_and_testnet(
         &self,
         passphrase: &str,
@@ -181,19 +211,37 @@ impl IsolatedHome {
         command
     }
 
+    /// The config path selected by the explicit CLI directory override.
     #[allow(dead_code)]
     pub fn config_file_candidates(&self) -> Vec<PathBuf> {
-        vec![
-            self.config.join("hyperliquid").join("config.json"),
-            self.home
-                .join("Library")
-                .join("Application Support")
-                .join("hyperliquid")
-                .join("config.json"),
-        ]
+        vec![self.config.join("hyperliquid").join("config.json")]
+    }
+
+    /// Write the last-error file in the overridden config directory.
+    #[allow(dead_code)]
+    pub fn write_last_error(&self, value: &serde_json::Value) {
+        for candidate in self.config_file_candidates() {
+            let dir = candidate.parent().unwrap();
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("last_error.json"), value.to_string()).unwrap();
+        }
+    }
+
+    /// The last-error file written by the last command that failed.
+    #[allow(dead_code)]
+    /// The last-error file written by the last command that failed.
+    pub fn read_last_error(&self) -> serde_json::Value {
+        for candidate in self.config_file_candidates() {
+            let path = candidate.parent().unwrap().join("last_error.json");
+            if let Ok(text) = std::fs::read_to_string(path) {
+                return serde_json::from_str(&text).unwrap();
+            }
+        }
+        panic!("no last_error.json was recorded");
     }
 
     #[allow(dead_code)]
+    /// The config file written by the last command that saved one.
     pub fn config_file_path(&self) -> PathBuf {
         self.config_file_candidates()
             .into_iter()
@@ -202,6 +250,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// Every legacy `accounts.db` path `dirs` can resolve to here.
     pub fn accounts_db_candidates(&self) -> Vec<PathBuf> {
         vec![
             self.data.join("hyperliquid").join("accounts.db"),
@@ -214,6 +263,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// The legacy `accounts.db` written by the last command that created one.
     pub fn accounts_db_path(&self) -> PathBuf {
         self.accounts_db_candidates()
             .into_iter()
@@ -222,6 +272,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// The data directory for this fixture.
     pub fn data_dir_path(&self) -> PathBuf {
         self.accounts_db_candidates()[0]
             .parent()
@@ -230,11 +281,13 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// The legacy plaintext account key path for this fixture.
     pub fn legacy_accounts_key_path(&self) -> PathBuf {
         self.data_dir_path().join("accounts.key")
     }
 
     #[allow(dead_code)]
+    /// Every OWS vault path the CLI can use under this environment.
     pub fn ows_vault_candidates(&self) -> Vec<PathBuf> {
         vec![
             self.home.join(".hyperliquid"),
@@ -243,6 +296,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// The OWS vault directory created by the last command that wrote one.
     pub fn ows_vault_path(&self) -> PathBuf {
         self.ows_vault_candidates()
             .into_iter()
@@ -251,6 +305,7 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
+    /// Every removed account-data key path the CLI must not recreate.
     pub fn deprecated_config_key_candidates(&self) -> Vec<PathBuf> {
         vec![
             self.config.join("hyperliquid").join("account-data.key"),
@@ -263,6 +318,7 @@ impl IsolatedHome {
     }
 }
 
+/// A bare CLI command with ambient prompt and color settings cleared.
 pub fn hyperliquid_command() -> Command {
     let mut command = Command::cargo_bin("hyperliquid").unwrap();
     // The suite runs under CI and agent harnesses. Prompt and color behavior
@@ -276,6 +332,7 @@ pub fn hyperliquid_command() -> Command {
 }
 
 #[allow(dead_code)]
+/// The address `private_key` signs as.
 pub fn expected_address(private_key: &str) -> String {
     private_key
         .parse::<hypersdk::hypercore::PrivateKeySigner>()
@@ -285,6 +342,7 @@ pub fn expected_address(private_key: &str) -> String {
 }
 
 #[allow(dead_code)]
+/// Recursively copy `src` into `dst`.
 pub fn copy_dir_all(src: &Path, dst: &Path) {
     std::fs::create_dir_all(dst).unwrap();
     for entry in std::fs::read_dir(src).unwrap() {
@@ -300,6 +358,7 @@ pub fn copy_dir_all(src: &Path, dst: &Path) {
 }
 
 #[allow(dead_code)]
+/// An `allMids` payload with BTC and ETH.
 pub fn fixture_all_mids() -> serde_json::Value {
     serde_json::json!({
         "BTC": "50000",
@@ -308,6 +367,7 @@ pub fn fixture_all_mids() -> serde_json::Value {
 }
 
 #[allow(dead_code)]
+/// Perp metadata listing BTC and ETH.
 pub fn fixture_perp_meta_btc_eth() -> serde_json::Value {
     serde_json::json!({
         "universe": [
@@ -333,6 +393,7 @@ pub fn fixture_perp_meta_btc_eth() -> serde_json::Value {
 }
 
 #[allow(dead_code)]
+/// Perp metadata listing only BTC.
 pub fn fixture_perp_meta_btc_only() -> serde_json::Value {
     serde_json::json!({
         "universe": [
@@ -350,6 +411,7 @@ pub fn fixture_perp_meta_btc_only() -> serde_json::Value {
 }
 
 #[allow(dead_code)]
+/// Spot metadata with USDC and no pairs.
 pub fn fixture_spot_meta_usdc_only() -> serde_json::Value {
     serde_json::json!({
         "universe": [],
@@ -367,6 +429,7 @@ pub fn fixture_spot_meta_usdc_only() -> serde_json::Value {
 }
 
 #[allow(dead_code)]
+/// Spot metadata whose second pair references a missing token.
 pub fn fixture_malformed_spot_meta() -> serde_json::Value {
     serde_json::json!({
         "universe": [
@@ -403,11 +466,13 @@ pub fn fixture_malformed_spot_meta() -> serde_json::Value {
 }
 
 #[allow(dead_code)]
+/// A resting order row for `coin`.
 pub fn fixture_basic_order(coin: &str, oid: u64) -> serde_json::Value {
     fixture_basic_order_with_cloid(coin, oid, None)
 }
 
 #[allow(dead_code)]
+/// A resting order row for `coin`, optionally with a client order id.
 pub fn fixture_basic_order_with_cloid(
     coin: &str,
     oid: u64,
@@ -429,6 +494,7 @@ pub fn fixture_basic_order_with_cloid(
 }
 
 #[allow(dead_code)]
+/// A user-fill row for `coin`.
 pub fn fixture_fill(coin: &str, oid: u64) -> serde_json::Value {
     serde_json::json!({
         "coin": coin,
@@ -451,6 +517,7 @@ pub fn fixture_fill(coin: &str, oid: u64) -> serde_json::Value {
 }
 
 #[allow(dead_code)]
+/// A clearinghouse state with one BTC position.
 pub fn fixture_clearinghouse_state(withdrawable: &str, leverage: u32) -> serde_json::Value {
     serde_json::json!({
         "marginSummary": {
@@ -490,6 +557,7 @@ pub fn fixture_clearinghouse_state(withdrawable: &str, leverage: u32) -> serde_j
 }
 
 #[allow(dead_code)]
+/// An order response whose single status is resting.
 pub fn fixture_order_success_response(oid: u64) -> serde_json::Value {
     serde_json::json!({
         "status": "ok",
@@ -510,6 +578,7 @@ pub fn fixture_order_success_response(oid: u64) -> serde_json::Value {
 }
 
 #[allow(dead_code)]
+/// An order response whose single status is an error.
 pub fn fixture_order_error_response(message: &str) -> serde_json::Value {
     serde_json::json!({
         "status": "ok",
@@ -527,6 +596,7 @@ pub fn fixture_order_error_response(message: &str) -> serde_json::Value {
 }
 
 #[allow(dead_code)]
+/// Mount an `allMids` reply on `server`.
 pub async fn mount_all_mids(server: &MockServer, btc: &str, eth: &str) {
     Mock::given(method("POST"))
         .and(path("/info"))
@@ -540,16 +610,19 @@ pub async fn mount_all_mids(server: &MockServer, btc: &str, eth: &str) {
 }
 
 #[allow(dead_code)]
+/// Mount the reply the API-override probe expects.
 pub async fn mount_override_healthcheck(server: &MockServer) {
     mount_all_mids(server, "50000", "3000").await;
 }
 
 #[allow(dead_code)]
+/// A mock server answering `allMids`.
 pub async fn mock_all_mids_server() -> MockServer {
     mock_all_mids_server_with_prices("50000.0", "3000.0").await
 }
 
 #[allow(dead_code)]
+/// A mock server answering `allMids` with `btc` and `eth`.
 pub async fn mock_all_mids_server_with_prices(btc: &str, eth: &str) -> MockServer {
     let server = MockServer::start().await;
     mount_all_mids(&server, btc, eth).await;
@@ -557,6 +630,7 @@ pub async fn mock_all_mids_server_with_prices(btc: &str, eth: &str) -> MockServe
 }
 
 #[allow(dead_code)]
+/// Mount a `meta` reply on `server`.
 pub async fn mount_market_meta(server: &MockServer, body: serde_json::Value) {
     Mock::given(method("POST"))
         .and(path("/info"))
@@ -567,6 +641,7 @@ pub async fn mount_market_meta(server: &MockServer, body: serde_json::Value) {
 }
 
 #[allow(dead_code)]
+/// Mount a `spotMeta` reply on `server`.
 pub async fn mount_spot_meta(server: &MockServer, body: serde_json::Value) {
     Mock::given(method("POST"))
         .and(path("/info"))
@@ -577,6 +652,7 @@ pub async fn mount_spot_meta(server: &MockServer, body: serde_json::Value) {
 }
 
 #[allow(dead_code)]
+/// Mount a `perpDexs` reply on `server`.
 pub async fn mount_perp_dexs(server: &MockServer, body: serde_json::Value) {
     Mock::given(method("POST"))
         .and(path("/info"))
@@ -587,6 +663,7 @@ pub async fn mount_perp_dexs(server: &MockServer, body: serde_json::Value) {
 }
 
 #[allow(dead_code)]
+/// Mount the public reads most read-only commands need.
 pub async fn mount_common_public_endpoints(server: &MockServer) {
     mount_override_healthcheck(server).await;
     mount_market_meta(server, fixture_perp_meta_btc_eth()).await;
@@ -595,6 +672,7 @@ pub async fn mount_common_public_endpoints(server: &MockServer) {
 }
 
 #[allow(dead_code)]
+/// A mock server with the common market metadata mounted.
 pub async fn mock_market_server() -> MockServer {
     let server = MockServer::start().await;
     mount_override_healthcheck(&server).await;
@@ -604,6 +682,7 @@ pub async fn mock_market_server() -> MockServer {
 }
 
 #[allow(dead_code)]
+/// Mount one account's orders, fills, balances, and positions on `server`.
 pub async fn mount_account_state(
     server: &MockServer,
     open_orders: Vec<serde_json::Value>,
@@ -679,6 +758,7 @@ pub async fn mount_account_state(
 }
 
 #[allow(dead_code)]
+/// Mount successful leverage, USD class transfer, and order actions.
 pub async fn mount_successful_exchange_actions(
     server: &MockServer,
     order_response: serde_json::Value,

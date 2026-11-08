@@ -10,6 +10,7 @@ use hypersdk::Address;
 use hypersdk::hypercore::PrivateKeySigner;
 use ows_lib::types::WalletInfo;
 
+use crate::bankr::{BankrClient, KeySource};
 use crate::errors::CliError;
 use crate::legacy_accounts::{LegacyAccount, LegacyAccounts};
 use crate::mode::Mode;
@@ -63,6 +64,8 @@ impl ResolvedSigner {
 /// The signer inputs of one run.
 #[derive(Debug, Clone, Default)]
 pub struct SignerSelection {
+    /// `--bankr`: sign with the wallet linked to the stored Bankr API key.
+    pub bankr: bool,
     pub ows: Option<String>,
     pub private_key: Option<String>,
     pub keystore: Option<PathBuf>,
@@ -83,13 +86,15 @@ impl SignerSelection {
         keystore_password: Option<String>,
         account: Option<String>,
         ows: Option<String>,
+        bankr: bool,
     ) -> Result<Self, CliError> {
-        let private_key = if account.is_some() || ows.is_some() {
+        let private_key = if bankr || account.is_some() || ows.is_some() {
             None
         } else {
             settings.private_key(cli_private_key)?
         };
         Ok(Self {
+            bankr,
             ows,
             private_key,
             keystore,
@@ -101,7 +106,8 @@ impl SignerSelection {
     /// Whether nothing names a signer, so the default wallet applies.
     #[must_use]
     pub fn picks_default(&self) -> bool {
-        self.ows.is_none()
+        !self.bankr
+            && self.ows.is_none()
             && self.private_key.is_none()
             && self.keystore.is_none()
             && self.account.is_none()
@@ -111,25 +117,31 @@ impl SignerSelection {
     /// as opposed to one named through `--account`.
     #[must_use]
     pub fn names_wallet_directly(&self) -> bool {
-        self.ows.is_some() || self.picks_default()
+        self.bankr || self.ows.is_some() || self.picks_default()
     }
 }
 
+/// Parse a 0x-prefixed 32-byte private key into a signer.
 pub fn parse_private_key(private_key: &str) -> Result<PrivateKeySigner, CliError> {
     private_key.parse::<PrivateKeySigner>().map_err(|_| {
         CliError::InvalidAuth("private key must be a 32-byte 0x-prefixed hex string".to_string())
     })
 }
 
+/// The 0x-prefixed hex form of `signer`'s key.
 pub fn signer_private_key_hex(signer: &PrivateKeySigner) -> String {
     format!("0x{}", hex::encode(signer.to_bytes()))
 }
 
+/// Resolve the run's signer inputs into one signer, first match wins.
 pub fn resolve_signer(
     selection: &SignerSelection,
     settings: &Settings,
     mode: &Mode,
 ) -> Result<ResolvedSigner, anyhow::Error> {
+    if selection.bankr {
+        return resolve_bankr(settings);
+    }
     if let Some(selector) = selection.ows.as_deref() {
         return Ok(resolve_ows_flag(selector, settings)?);
     }
@@ -168,6 +180,41 @@ pub fn resolve_signer(
     resolve_default(settings, mode)
 }
 
+/// `--bankr`: the wallet linked to the stored Bankr API key. The address comes
+/// from the config written by `wallet login`; a key that no login recorded (an
+/// environment variable, or the Bankr CLI's own config) is looked up once.
+fn resolve_bankr(settings: &Settings) -> Result<ResolvedSigner, anyhow::Error> {
+    let (client, source) = BankrClient::from_settings(settings)?;
+    // The cached address belongs to the key `wallet login` stored, against the
+    // endpoint it stored. A key from the environment or the Bankr CLI, or a run
+    // pointed at another endpoint, may belong to another wallet.
+    let cached = match (source, settings.bankr_address()?) {
+        (KeySource::Config, Some(address))
+            if bankr_login_endpoint(settings)? == client.api_url() =>
+        {
+            Some(address)
+        }
+        _ => None,
+    };
+    let address = match cached {
+        Some(address) => address,
+        None => client.blocking_wallet()?.address,
+    };
+    Ok(ResolvedSigner::new(SelectedSigner::bankr(client, address)))
+}
+
+/// The endpoint `wallet login` recorded, normalised, so a cached address is only
+/// reused for the API that produced it.
+fn bankr_login_endpoint(settings: &Settings) -> Result<String, CliError> {
+    let stored = settings
+        .config()?
+        .and_then(|config| config.bankr_api_url.clone())
+        .map(|url| url.trim().to_string())
+        .filter(|url| !url.is_empty());
+    crate::bankr::validate_api_url(stored.as_deref().unwrap_or(crate::bankr::DEFAULT_API_URL))
+}
+
+/// A resolved vault wallet behind the OWS signing config.
 fn ows_signer(
     selector: String,
     wallet: &WalletInfo,
@@ -224,6 +271,7 @@ fn find_vault_account(
     Ok(Some((wallet, account)))
 }
 
+/// A vault wallet or legacy account named by `--account`.
 fn resolve_account(
     selector: &str,
     settings: &Settings,
@@ -248,6 +296,7 @@ fn resolve_account(
     legacy_signer(&store, account)
 }
 
+/// The configured default wallet, else the only vault wallet.
 fn resolve_default(settings: &Settings, mode: &Mode) -> Result<ResolvedSigner, anyhow::Error> {
     let vault = Vault::from_settings(settings);
     match vault.default_wallet(settings.default_wallet_id()?) {
@@ -272,6 +321,7 @@ fn resolve_default(settings: &Settings, mode: &Mode) -> Result<ResolvedSigner, a
     legacy_signer(&store, account)
 }
 
+/// A signer from a pre-OWS stored account.
 fn legacy_signer(
     store: &LegacyAccounts,
     account: LegacyAccount,
@@ -544,12 +594,14 @@ mod tests {
             None,
             Some("main".to_string()),
             None,
+            false,
         )
         .unwrap();
         assert_eq!(named.private_key, None);
         assert!(!named.picks_default());
 
-        let ambient = SignerSelection::from_flags(&settings, None, None, None, None, None).unwrap();
+        let ambient =
+            SignerSelection::from_flags(&settings, None, None, None, None, None, false).unwrap();
         assert_eq!(ambient.private_key.as_deref(), Some(KEY));
         assert!(!ambient.names_wallet_directly());
 
@@ -560,6 +612,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(bare.picks_default());

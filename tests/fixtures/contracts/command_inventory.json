@@ -2776,6 +2776,46 @@
       "transport": [
         "cli_interactive"
       ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid wallet login",
+      "command_path": [
+        "wallet",
+        "login"
+      ],
+      "confirmation": "prompt",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "wallet",
+      "input_kinds": {},
+      "mutability": "interactive_local",
+      "output_contract": "interactive_local",
+      "raw_payload": "unsupported",
+      "risk": "local_secret",
+      "transport": [
+        "cli_interactive"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid wallet logout",
+      "command_path": [
+        "wallet",
+        "logout"
+      ],
+      "confirmation": "prompt",
+      "dangerous": false,
+      "dry_run": "optional",
+      "group": "wallet",
+      "input_kinds": {},
+      "mutability": "interactive_local",
+      "output_contract": "interactive_local",
+      "raw_payload": "unsupported",
+      "risk": "local_state",
+      "transport": [
+        "cli_interactive"
+      ]
     }
   ],
   "review_required_to_update": true

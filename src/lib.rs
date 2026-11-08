@@ -4,6 +4,7 @@
 
 pub mod assets;
 pub mod auth;
+pub mod bankr;
 pub mod command_registry;
 pub mod command_spec;
 pub mod commands;

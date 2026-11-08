@@ -464,6 +464,7 @@ mod settings_tests {
             default_builder_address: Some("0xbuilder".to_string()),
             default_builder_fee_rate: Some("0.001%".to_string()),
             default_referral_code: Some("CODE".to_string()),
+            ..Config::default()
         };
         let (_tmp, settings) = settings_with_file(&[], &config);
         assert_eq!(settings.config().unwrap(), Some(&config));

@@ -6,19 +6,12 @@ use support::IsolatedHome;
 #[test]
 fn incident_context_excludes_remote_data_and_preserves_explicit_context() {
     let home = IsolatedHome::new();
-    let dir = home.config.join("hyperliquid");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("last_error.json"),
-        json!({
-            "category": "api", "reason": "unavailable", "exit_code": 12, "retryable": true,
-            "message": "secret top-level message",
-            "data": {"command": "mids", "http_status": 503,
-                "remote_message": "secret remote message", "unknown": "secret unknown"}
-        })
-        .to_string(),
-    )
-    .unwrap();
+    home.write_last_error(&json!({
+        "category": "api", "reason": "unavailable", "exit_code": 12, "retryable": true,
+        "message": "secret top-level message",
+        "data": {"command": "mids", "http_status": 503,
+            "remote_message": "secret remote message", "unknown": "secret unknown"}
+    }));
     let output = home
         .command()
         .args(["--json", "report-incident"])
@@ -83,9 +76,6 @@ fn recorded_command_uses_parsed_path_with_global_option_values() {
         ])
         .assert()
         .failure();
-    let recorded: Value = serde_json::from_slice(
-        &std::fs::read(home.config.join("hyperliquid/last_error.json")).unwrap(),
-    )
-    .unwrap();
+    let recorded = home.read_last_error();
     assert_eq!(recorded["data"]["command"], "orders create");
 }
