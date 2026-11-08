@@ -244,3 +244,29 @@ fn wallet_login_refuses_plaintext_http_to_a_remote_host() {
         .stderr(predicate::str::contains("loopback"))
         .stderr(predicate::str::contains("Bankr API URL"));
 }
+
+#[tokio::test]
+async fn bankr_requests_do_not_follow_redirects() {
+    let destination = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
+        .expect(0)
+        .mount(&destination)
+        .await;
+
+    let origin = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wallet/me"))
+        .and(header("X-API-Key", BANKR_KEY))
+        .respond_with(
+            ResponseTemplate::new(302)
+                .insert_header("Location", format!("{}/wallet/me", destination.uri())),
+        )
+        .expect(1)
+        .mount(&origin)
+        .await;
+
+    let client = BankrClient::new(origin.uri(), BANKR_KEY);
+    assert!(client.wallet().await.is_err());
+    destination.verify().await;
+}

@@ -64,6 +64,8 @@ impl IsolatedHome {
             .env("XDG_CONFIG_HOME", &self.config)
             .env("XDG_DATA_HOME", &self.data)
             .env(FORMAT_ENV, "pretty")
+            .env_remove("BANKR_API_KEY")
+            .env_remove("BANKR_API_URL")
             .env_remove(PRIVATE_KEY_ENV)
             .env_remove(NETWORK_ENV)
             .env_remove(API_OVERRIDE_ENV)

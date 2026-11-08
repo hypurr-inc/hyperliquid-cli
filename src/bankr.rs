@@ -191,8 +191,14 @@ impl BankrClient {
             http: reqwest::Client::builder()
                 .user_agent(concat!("hyperliquid-cli/", env!("CARGO_PKG_VERSION")))
                 .timeout(REQUEST_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .unwrap_or_default(),
+                .unwrap_or_else(|_| {
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .expect("failed to build Bankr HTTP client")
+                }),
             api_url: api_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
         }
