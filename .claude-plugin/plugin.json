@@ -1,6 +1,22 @@
 {
+  "$schema": "https://json.schemastore.org/partial-claude-plugin.json",
   "name": "hyperliquid-cli",
-  "description": "Hyperliquid trading execution, market analysis, and portfolio management via hyperliquid CLI",
   "version": "1.1.0",
-  "skills": ["./SKILL.md"]
+  "description": "Hyperliquid DEX spot and perpetual trading, market discovery, dry-runs, and portfolio management via hyperliquid CLI",
+  "author": {
+    "name": "Hypurr Inc.",
+    "url": "https://github.com/hypurr-inc/hyperliquid-cli"
+  },
+  "homepage": "https://github.com/hypurr-inc/hyperliquid-cli",
+  "repository": "https://github.com/hypurr-inc/hyperliquid-cli",
+  "license": "MIT",
+  "keywords": [
+    "hyperliquid",
+    "trading",
+    "crypto",
+    "dex",
+    "perps",
+    "defi",
+    "cli"
+  ]
 }
