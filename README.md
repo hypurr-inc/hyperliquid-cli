@@ -40,6 +40,34 @@ cargo install --path . --bin hyperliquid
 
 Requires Rust 1.93+.
 
+### Install as an AI Agent Skill / Plugin
+
+`hyperliquid-cli` adheres to the [Agent Plugins v1](https://agent-plugins.org/) and [Agent Skills](https://agentskills.io/) standards.
+
+**Universal Agent Install (`skills.sh`, Claude Code, Cursor, Codex, Windsurf, Cline):**
+```bash
+npx skills add hypurr-inc/hyperliquid-cli
+```
+
+**Claude Code Plugin:**
+```bash
+# Load for a session:
+claude --plugin-dir /path/to/hyperliquid-cli
+
+# Or install to personal skills directory:
+npx skills add hypurr-inc/hyperliquid-cli
+```
+
+**Hermes Agent:**
+```bash
+hermes skills tap add hypurr-inc/hyperliquid-cli
+hermes skills install hypurr-inc/hyperliquid-cli
+```
+
+**OpenClaw / ClawHub:**
+```bash
+clawhub install hyperliquid-cli
+
 ## Quick start
 
 ```bash
