@@ -21,6 +21,9 @@ pub const GROUP: GroupSpec = GroupSpec::new(&["orders"], "Manage orders").aliase
 pub struct OpenOrdersArgs {
     #[command(flatten)]
     pub watch: SnapshotWatchArgs,
+    /// Perp dex name (HIP-3). Defaults to the first dex.
+    #[arg(long)]
+    pub dex: Option<String>,
 }
 
 pub struct OrdersOpen;
@@ -43,15 +46,16 @@ impl CliCommand for OrdersOpen {
             .kind(InputKind::Boolean)
             .describe("Watch live snapshots. Use max_ticks to bound automation calls."),
         arg("max_ticks").describe("Stop after this many watch snapshots."),
+        arg("dex").describe("Perp dex name (HIP-3). Defaults to the first dex."),
     ]);
 
     async fn run(inv: &Invocation, args: &OpenOrdersArgs) -> Result<(), anyhow::Error> {
         if args.watch.watch {
-            watch_open_orders(inv, args.watch.max_ticks).await
+            watch_open_orders(inv, args.dex.as_deref(), args.watch.max_ticks).await
         } else {
             let resolver = inv.asset_resolver().await?;
             let user = inv.resolve_signer()?.query_address();
-            open(inv, &resolver, user).await
+            open(inv, &resolver, user, args.dex.as_deref()).await
         }
     }
 }
@@ -1278,6 +1282,7 @@ hyperliquid --format json outcome-sell --coin #10 --size 1 --yes")
 
 async fn watch_open_orders(
     inv: &Invocation,
+    dex: Option<&str>,
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
@@ -1285,6 +1290,7 @@ async fn watch_open_orders(
     let resolver = std::sync::Arc::new(inv.asset_resolver().await?);
     let resolved = inv.resolve_signer()?;
     let user = resolved.query_address();
+    let dex = dex.map(str::to_string);
 
     crate::watch::run_snapshot_watch(
         inv.session(),
@@ -1294,7 +1300,8 @@ async fn watch_open_orders(
         max_ticks,
         move || {
             let resolver = std::sync::Arc::clone(&resolver);
-            async move { open_snapshot(client, &resolver, user).await }
+            let dex = dex.clone();
+            async move { open_snapshot(client, &resolver, user, dex.as_deref()).await }
         },
     )
     .await

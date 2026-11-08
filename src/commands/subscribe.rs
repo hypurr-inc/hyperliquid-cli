@@ -2,6 +2,8 @@
 
 use clap::Args;
 
+use hypersdk::hypercore::HttpClient;
+
 use crate::assets::AssetResolver;
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, Lifecycle, OwsSupport, Risk, StreamBound, arg,
@@ -64,7 +66,8 @@ impl CliCommand for SubscribeTrades {
 
     async fn run(inv: &Invocation, args: &SubscribeAssetArgs) -> Result<(), anyhow::Error> {
         let resolver = inv.asset_resolver().await?;
-        let coin = resolve_subscription_coin(&resolver, &args.asset)?;
+        let coin =
+            resolve_subscription_coin(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
         stream(inv, SubscribeTarget::trades(coin), &args.stream).await
     }
 }
@@ -90,7 +93,8 @@ impl CliCommand for SubscribeOrderbook {
 
     async fn run(inv: &Invocation, args: &SubscribeAssetArgs) -> Result<(), anyhow::Error> {
         let resolver = inv.asset_resolver().await?;
-        let coin = resolve_subscription_coin(&resolver, &args.asset)?;
+        let coin =
+            resolve_subscription_coin(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
         stream(inv, SubscribeTarget::orderbook(coin), &args.stream).await
     }
 }
@@ -118,7 +122,8 @@ impl CliCommand for SubscribeCandles {
     async fn run(inv: &Invocation, args: &SubscribeCandlesArgs) -> Result<(), anyhow::Error> {
         parse_candle_interval(&args.interval).map_err(CliError::Configuration)?;
         let resolver = inv.asset_resolver().await?;
-        let coin = resolve_subscription_coin(&resolver, &args.asset)?;
+        let coin =
+            resolve_subscription_coin(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
         stream(
             inv,
             SubscribeTarget::candles(coin, args.interval.clone()),
@@ -205,8 +210,13 @@ impl CliCommand for SubscribeFills {
     }
 }
 
-fn resolve_subscription_coin(resolver: &AssetResolver, asset: &str) -> Result<String, CliError> {
-    crate::commands::orderbook::resolve_subscription_info_coin(resolver, asset)
+/// Resolve a stream's asset, looking a HIP-3 `dex:TOKEN` up on its dex.
+async fn resolve_subscription_coin(
+    client: &HttpClient,
+    resolver: &AssetResolver,
+    asset: &str,
+) -> Result<String, CliError> {
+    crate::commands::orderbook::resolve_subscription_coin(client, resolver, asset).await
 }
 
 async fn stream(

@@ -306,6 +306,19 @@
           "positional_index": null,
           "required": false,
           "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "kind": null,
+          "long": "dex",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
         }
       ],
       "lifecycle": "read_only",
@@ -2191,6 +2204,19 @@
           "positional_index": 0,
           "required": true,
           "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "kind": null,
+          "long": "dex",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
         }
       ],
       "lifecycle": "read_only",
@@ -3747,6 +3773,19 @@
           "positional_index": null,
           "required": false,
           "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "kind": null,
+          "long": "dex",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
         }
       ],
       "lifecycle": "read_only",
@@ -3892,6 +3931,19 @@
           "id": "max_ticks",
           "kind": null,
           "long": "max-ticks",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "kind": null,
+          "long": "dex",
           "multiple": false,
           "positional_index": null,
           "required": false,

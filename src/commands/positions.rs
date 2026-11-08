@@ -353,8 +353,8 @@ impl TableData for PositionActionOutput {
 }
 
 /// List authenticated user's open positions.
-pub async fn list(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    inv.print(&list_snapshot(inv.remote()?.api().sdk(), user).await?);
+pub async fn list(inv: &Invocation, user: Address, dex: Option<&str>) -> Result<(), anyhow::Error> {
+    inv.print(&list_snapshot(inv.remote()?.api().sdk(), user, dex).await?);
     Ok(())
 }
 
@@ -362,9 +362,10 @@ pub async fn list(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> 
 pub async fn list_snapshot(
     client: &HttpClient,
     user: Address,
+    dex: Option<&str>,
 ) -> Result<PositionsOutput, anyhow::Error> {
     let rows = client
-        .clearinghouse_state(user, None)
+        .clearinghouse_state(user, dex.map(str::to_string))
         .await
         .map_err(from_sdk)?
         .asset_positions
@@ -498,6 +499,9 @@ pub const GROUP: GroupSpec =
 pub struct PositionsListArgs {
     #[command(flatten)]
     pub watch: SnapshotWatchArgs,
+    /// Perp dex name (HIP-3). Defaults to the first dex.
+    #[arg(long)]
+    pub dex: Option<String>,
 }
 
 pub struct PositionsList;
@@ -520,15 +524,16 @@ impl CliCommand for PositionsList {
             .kind(InputKind::Boolean)
             .describe("Watch live snapshots. Use max_ticks to bound automation calls."),
         arg("max_ticks").describe("Stop after this many watch snapshots."),
+        arg("dex").describe("Perp dex name (HIP-3). Defaults to the first dex."),
     ])
     .cli_aliases(&["ls"]);
 
     async fn run(inv: &Invocation, args: &PositionsListArgs) -> Result<(), anyhow::Error> {
         if args.watch.watch {
-            watch_positions(inv, args.watch.max_ticks).await
+            watch_positions(inv, args.dex.as_deref(), args.watch.max_ticks).await
         } else {
             let user = inv.resolve_signer()?.query_address();
-            list(inv, user).await
+            list(inv, user, args.dex.as_deref()).await
         }
     }
 }
@@ -633,11 +638,16 @@ impl CliCommand for PositionsUpdateMargin {
     }
 }
 
-async fn watch_positions(inv: &Invocation, max_ticks: Option<usize>) -> Result<(), anyhow::Error> {
+async fn watch_positions(
+    inv: &Invocation,
+    dex: Option<&str>,
+    max_ticks: Option<usize>,
+) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let client = remote.api().sdk();
     let resolved = inv.resolve_signer()?;
     let user = resolved.query_address();
+    let dex = dex.map(str::to_string);
 
     crate::watch::run_snapshot_watch(
         inv.session(),
@@ -645,7 +655,10 @@ async fn watch_positions(inv: &Invocation, max_ticks: Option<usize>) -> Result<(
         remote.chain(),
         vec![Subscription::WebData3 { user }],
         max_ticks,
-        move || async move { list_snapshot(client, user).await },
+        move || {
+            let dex = dex.clone();
+            async move { list_snapshot(client, user, dex.as_deref()).await }
+        },
     )
     .await
 }

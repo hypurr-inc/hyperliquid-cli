@@ -274,7 +274,7 @@ Canonical top-level aliases accepted by the CLI:
 | `outcomes get #<ENCODING>` / `outcomes get +<ENCODING>` | Show outcome side metadata and derived asset ID. |
 | `search <QUERY> [--type perp\|hip3\|spot\|outcome\|all]` | Search perps, HIP-3, spot, and outcomes in one list. Alias of `asset search`. |
 | `book <COIN> [-w] [--max-ticks <TICKS>]` | Show L2 order book snapshot or watch updates. |
-| `mids [-w] [--max-ticks <TICKS>]` | Show all mid prices. |
+| `mids [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | Show all mid prices. |
 | `candles <COIN> [--interval <INTERVAL>] [--limit <N>] [-w] [--max-ticks <TICKS>]` | Show candle history. |
 | `spread <COIN>` | Show bid, ask, and spread. |
 | `funding <COIN>` | Show current and predicted funding. |
@@ -301,7 +301,7 @@ Canonical top-level aliases accepted by the CLI:
 | `account ledger [ADDRESS_OR_WALLET] --start <TIME> [--end <TIME>]` | Query deposits, withdrawals, transfers, and other non-funding ledger updates. |
 | `account funding [ADDRESS_OR_WALLET] --start <TIME> [--end <TIME>]` | Query user funding payment history. |
 | `account orders [ADDRESS_OR_WALLET]` | Query public open orders. |
-| `account portfolio [ADDRESS_OR_WALLET]` | Query public portfolio summary. |
+| `account portfolio [ADDRESS_OR_WALLET] [--dex <NAME>]` | Query public portfolio summary. `--dex` reads a HIP-3 DEX's perp account. |
 | `account portfolio-history [ADDRESS_OR_WALLET]` | Query frontend portfolio graph/history data. |
 | `account rate-limit [ADDRESS_OR_WALLET]` | Query user rate-limit context. |
 | `account subaccounts [ADDRESS_OR_WALLET]` | Query public subaccounts. |
@@ -325,7 +325,7 @@ Signer and acting-account flags intentionally share the same selector grammar wh
 
 | Command | Description |
 | --- | --- |
-| `orders open [-w] [--max-ticks <TICKS>]` | List open orders. |
+| `orders open [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | List open orders. |
 | `orders history` | List order history. |
 | `orders status --user <ADDRESS> (--oid <OID>\|--cloid <CLOID>)` | Query public order status. |
 | `orders create --coin <COIN> --side buy\|sell [--type limit\|market\|stop-loss\|take-profit\|stop-limit\|take-limit] [--price <PX>] [--trigger-price <PX>] [--size <SIZE>\|--amount <USDC>] [--dex <DEX>] [--reduce-only] [--on-behalf-of <ACCOUNT_SELECTOR>] [--cloid <CLOID>] [-y]` | Create limit, market, stop-loss, take-profit, stop-limit, or take-limit orders. `--on-behalf-of` is an acting-account selector used as `vaultAddress`. |
@@ -346,7 +346,7 @@ Signer and acting-account flags intentionally share the same selector grammar wh
 | `orders twap-create --coin <COIN> --side buy\|sell --size <SIZE> --duration <SECONDS> [--dex <DEX>] [--margin-mode cross\|isolated] [--on-behalf-of <ACCOUNT_SELECTOR>] [-y]` | Create a TWAP order. |
 | `orders twap-cancel <TWAP_ID> --coin <COIN> [--dex <DEX>] [--on-behalf-of <ACCOUNT_SELECTOR>]` | Cancel a TWAP order. |
 | `orders schedule-cancel (--in <DURATION>\|--clear) [--on-behalf-of <ACCOUNT_SELECTOR>] [-y]` | Configure or clear a dead man's switch. Mainnet set and clear flows prompt unless `--yes` is supplied. |
-| `positions list [-w] [--max-ticks <TICKS>]` | List open positions. |
+| `positions list [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | List open positions. `--dex` reads a HIP-3 DEX's account. |
 | `positions update-leverage --coin <COIN> --leverage <N> [--isolated]` | Update leverage. |
 | `positions update-margin --coin <COIN> --amount <AMOUNT>` | Add or remove isolated margin. |
 | `transfer spot-to-perp --amount <USDC> [-y]` | Move USDC from spot to perp. |

@@ -268,16 +268,28 @@ pub async fn orders(inv: &Invocation, address: &str) -> Result<(), anyhow::Error
 }
 
 /// Fetch and render a portfolio summary for any public address.
-pub async fn portfolio(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
+pub async fn portfolio(
+    inv: &Invocation,
+    address: &str,
+    dex: Option<&str>,
+) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
     let client = api.sdk();
     let user = parse_address(address)?;
     let state = client
-        .clearinghouse_state(user, None)
+        .clearinghouse_state(user, dex.map(str::to_string))
         .await
         .map_err(from_sdk)?;
-    let spot_balances = user_balances_raw(api, user).await?;
-    let vault_equities = client.user_vault_equities(user).await.map_err(from_sdk)?;
+    // Spot balances and vault equities are account-wide, not per-dex: report
+    // them only for the default dex so a HIP-3 view is not double-counted.
+    let (spot_balances, vault_equities) = if dex.is_some() {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            user_balances_raw(api, user).await?,
+            client.user_vault_equities(user).await.map_err(from_sdk)?,
+        )
+    };
     inv.print(&PortfolioOutput::new(state, spot_balances, vault_equities));
     Ok(())
 }
@@ -1392,10 +1404,20 @@ impl CliCommand for AccountOrders {
     }
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct PortfolioArgs {
+    /// Ethereum address, wallet name, or wallet id.
+    /// Defaults to the selected/default signer when omitted.
+    pub address: Option<String>,
+    /// Perp dex name (HIP-3). Defaults to the first dex.
+    #[arg(long)]
+    pub dex: Option<String>,
+}
+
 pub struct AccountPortfolio;
 
 impl CliCommand for AccountPortfolio {
-    type Args = OptionalAddressArgs;
+    type Args = PortfolioArgs;
 
     const SPEC: CommandSpec = CommandSpec::read(
         &["account", "portfolio"],
@@ -1403,15 +1425,18 @@ impl CliCommand for AccountPortfolio {
         "Show the portfolio summary for an address or wallet",
         "Query public portfolio summary for an address or wallet.",
     )
-    .args(&[arg("address")
-        .kind(InputKind::PublicUserSelector)
-        .describe("Ethereum address, wallet name, or wallet id.")
-        .resource_id("account selector")
-        .schema_required()]);
+    .args(&[
+        arg("address")
+            .kind(InputKind::PublicUserSelector)
+            .describe("Ethereum address, wallet name, or wallet id.")
+            .resource_id("account selector")
+            .schema_required(),
+        arg("dex").describe("Perp dex name (HIP-3). Defaults to the first dex."),
+    ]);
 
-    async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
+    async fn run(inv: &Invocation, args: &PortfolioArgs) -> Result<(), anyhow::Error> {
         let address = inv.resolve_user(args.address.as_deref())?.to_string();
-        portfolio(inv, &address).await
+        portfolio(inv, &address, args.dex.as_deref()).await
     }
 }
 
