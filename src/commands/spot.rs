@@ -3,8 +3,8 @@ use hypersdk::Decimal;
 use serde::{Deserialize, Serialize};
 
 use crate::assets::{
-    AssetMetadata, AssetResolver, SpotListing, load_spot_markets, require_spot_token,
-    spot_price_tick,
+    AssetMetadata, AssetResolver, SpotAsset, load_spot_markets, load_spot_markets_with_contexts,
+    require_spot_token,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
@@ -37,18 +37,16 @@ pub struct SpotMarketRow {
     pub tick_size_at_price_1: Option<String>,
 }
 
-impl From<SpotListing> for SpotMarketRow {
-    fn from(market: SpotListing) -> Self {
+impl From<SpotAsset> for SpotMarketRow {
+    fn from(market: SpotAsset) -> Self {
         Self {
+            tick_size_at_price_1: market.tick_size_at_price_1(),
             symbol: market.symbol,
             index: market.index,
             base: market.base,
             quote: market.quote,
-            base_sz_decimals: market.base_sz_decimals,
-            quote_sz_decimals: market.quote_sz_decimals,
-            tick_size_at_price_1: spot_price_tick(market.base_sz_decimals)
-                .tick_for(Decimal::from(1))
-                .map(|tick| tick.to_string()),
+            base_sz_decimals: i64::from(market.base_sz_decimals),
+            quote_sz_decimals: i64::from(market.quote_sz_decimals),
         }
     }
 }
@@ -90,21 +88,17 @@ pub async fn list(inv: &Invocation) -> Result<(), anyhow::Error> {
 }
 
 pub async fn get(inv: &Invocation, pair: &str) -> Result<(), anyhow::Error> {
-    let api = inv.remote()?.api();
-    let listings = load_spot_markets(api).await?;
-    // The resolver is built from the list the row is read from, so a miss gets
-    // its suggestion or outcome-notation error without a second read.
-    let resolver = AssetResolver::new(AssetMetadata::from_listings(Vec::new(), listings.clone())?);
-    let spot = resolver.resolve_spot(pair).map_err(CliError::from)?;
-    let listing = listings
-        .into_iter()
-        .find(|listing| listing.index == spot.index)
-        .ok_or_else(|| CliError::AssetNotFoundNoSuggestion {
-            asset: pair.to_string(),
-        })?;
+    // `spotMetaAndAssetCtxs` lists the spot metadata first, so one read names
+    // the market, gets a miss its suggestion or outcome-notation error, and
+    // carries the market's context.
+    let (spots, contexts) =
+        load_spot_markets_with_contexts::<SpotAssetContext>(inv.remote()?.api()).await?;
+    let spot =
+        AssetResolver::new(AssetMetadata::from_assets(Vec::new(), spots)).resolve_spot(pair)?;
 
-    let ctx = spot_context(api, &spot.info_coin()).await?;
-    inv.print(&One::new(SpotMarketDetailRow::new(listing.into(), ctx)));
+    let info_coin = spot.info_coin();
+    let ctx = contexts.into_iter().find(|ctx| ctx.coin == info_coin);
+    inv.print(&One::new(SpotMarketDetailRow::new(spot.into(), ctx)));
     Ok(())
 }
 
@@ -186,20 +180,6 @@ struct SpotAssetContext {
     day_ntl_vlm: Option<Decimal>,
     #[serde(default, with = "rust_decimal::serde::str_option")]
     day_base_vlm: Option<Decimal>,
-}
-
-/// The context of `market`, keyed the way info endpoints name a spot coin.
-async fn spot_context(
-    api: &ApiClient,
-    info_coin: &str,
-) -> Result<Option<SpotAssetContext>, CliError> {
-    let (_meta, contexts): (serde::de::IgnoredAny, Vec<SpotAssetContext>) = api
-        .info(
-            &InfoRequest::new("spotMetaAndAssetCtxs"),
-            "loading spot asset contexts",
-        )
-        .await?;
-    Ok(contexts.into_iter().find(|ctx| ctx.coin == info_coin))
 }
 
 /// The token id `tokenDetails` takes: a `0x` id as given, or the id of the

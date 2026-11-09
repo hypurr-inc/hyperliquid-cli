@@ -7,11 +7,11 @@ use hypersdk::hypercore::types::api::{TopUpIsolatedOnlyMargin, UpdateIsolatedMar
 use hypersdk::hypercore::types::{Action, LeverageType};
 use serde::Serialize;
 
-use crate::assets::canonical_dex;
-use crate::assets::{AssetResolver, PerpAsset};
+use crate::assets::{DexArg, PerpAsset};
 use crate::command_spec::{
     ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg,
 };
+use crate::commands::common::market_input::resolve_perp;
 use crate::commands::common::position::{PositionRow, find_position};
 use crate::commands::common::rows::{ListRow, Row, Rows};
 use crate::commands::common::support::{
@@ -143,16 +143,6 @@ async fn list_snapshot(
     Ok(Rows::new(PositionRow::open(positions)))
 }
 
-/// The perp a `--coin` names. A HIP-3 market (`dex:COIN`) is looked up live
-/// when the metadata snapshot lacks it, as orders do.
-async fn resolve_perp_asset(
-    resolver: &AssetResolver,
-    client: &ApiClient,
-    coin: &str,
-) -> Result<PerpAsset, CliError> {
-    Ok(resolver.resolve_perp_or_fetch(client, coin).await?)
-}
-
 /// A signed margin change in USDC micro-units: positive adds isolated margin,
 /// negative removes it. Zero changes nothing and is refused.
 fn margin_micro_units(amount: Decimal) -> Result<i64, CliError> {
@@ -219,7 +209,7 @@ pub struct PositionsListArgs {
     pub watch: SnapshotWatchArgs,
     /// Perp dex name (HIP-3). Defaults to the first dex.
     #[arg(long)]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
 }
 
 pub struct PositionsList;
@@ -250,7 +240,10 @@ impl CliCommand for PositionsList {
         // Validate once, before either path: a watch must not start on a dex that
         // cannot be read, and both paths send the canonical spelling.
         let client = inv.remote()?.api();
-        let dex = canonical_dex(client, args.dex.as_deref()).await?;
+        let dex = inv
+            .dex(args.dex.as_ref())
+            .await?
+            .map(|dex| dex.name.clone());
         if args.watch.watch {
             watch_positions(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
@@ -285,8 +278,7 @@ impl CliCommand for PositionsUpdateLeverage {
     ]);
 
     async fn run(inv: &Invocation, args: &UpdateLeverageArgs) -> Result<(), anyhow::Error> {
-        let resolver = inv.asset_resolver().await?;
-        let perp = resolve_perp_asset(&resolver, inv.remote()?.api(), &args.coin).await?;
+        let perp = resolve_perp(inv, &args.coin).await?;
         let (coin, asset) = (perp.display_name(), perp.index);
         let mode = if args.isolated {
             MarginModeArg::Isolated
@@ -371,8 +363,7 @@ impl CliCommand for PositionsUpdateMargin {
 
     async fn run(inv: &Invocation, args: &UpdateMarginArgs) -> Result<(), anyhow::Error> {
         let ntli = margin_micro_units(args.amount)?;
-        let resolver = inv.asset_resolver().await?;
-        let perp = resolve_perp_asset(&resolver, inv.remote()?.api(), &args.coin).await?;
+        let perp = resolve_perp(inv, &args.coin).await?;
         let (coin, asset) = (perp.display_name(), perp.index);
         if ntli < 0 && perp.margin_rule.refuses_margin_removal() {
             return Err(CliError::Unsupported(format!(
@@ -454,8 +445,7 @@ impl CliCommand for PositionsTopUpMargin {
     async fn run(inv: &Invocation, args: &TopUpMarginArgs) -> Result<(), anyhow::Error> {
         quantity::require_positive(args.leverage, "leverage")?;
         let leverage = args.leverage.normalize();
-        let resolver = inv.asset_resolver().await?;
-        let perp = resolve_perp_asset(&resolver, inv.remote()?.api(), &args.coin).await?;
+        let perp = resolve_perp(inv, &args.coin).await?;
         let (coin, asset) = (perp.display_name(), perp.index);
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;

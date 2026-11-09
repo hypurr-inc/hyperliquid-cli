@@ -6,6 +6,7 @@ use hypersdk::{Address, Decimal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::assets::USDC_NAME;
 use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::position::PositionRow;
@@ -470,7 +471,7 @@ fn transfer_dry_run_value(
         "network": chain.to_string(),
         "vault": vault.to_string(),
         "amount": args.amount.to_string(),
-        "asset": "USDC",
+        "asset": USDC_NAME,
         "is_deposit": action_kind.is_deposit(),
         "usd": usd,
         "reversibility": TRANSFER_REVERSIBILITY,
@@ -542,7 +543,7 @@ async fn run_transfer(
         reversibility: TRANSFER_REVERSIBILITY.as_str().to_string(),
         vault_address: args.vault.clone(),
         amount: args.amount,
-        asset: "USDC".to_string(),
+        asset: USDC_NAME.to_string(),
     }));
     Ok(())
 }

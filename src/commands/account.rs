@@ -4,8 +4,9 @@ use hypersdk::hypercore::{AssetPosition, ClearinghouseState, UserVaultEquity};
 use serde::{Deserialize, Serialize};
 
 use crate::account_mode::{AccountMode, fetch_abstraction};
-use crate::assets::{AssetResolver, canonical_dex};
+use crate::assets::{AssetResolver, DexArg};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::common::market_input::resolve_perp;
 use crate::commands::common::order_list::open_orders_output;
 use crate::commands::common::paging::{self, Endpoint};
 use crate::commands::common::position::{self, pretty_pnl};
@@ -44,7 +45,7 @@ pub struct OrdersArgs {
     pub user: OptionalAddressArgs,
     /// Perp dex name (HIP-3). Defaults to the first dex.
     #[arg(long)]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -92,7 +93,7 @@ pub struct PortfolioArgs {
     pub user: OptionalAddressArgs,
     /// Perp dex name (HIP-3). Defaults to the first dex.
     #[arg(long)]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
 }
 
 fn fills_window(
@@ -442,7 +443,7 @@ impl From<AssetPosition> for PositionRow {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BalanceRow {
     pub coin: String,
-    pub token: Option<usize>,
+    pub token: Option<u32>,
     #[serde(with = "rust_decimal::serde::str")]
     pub hold: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
@@ -775,7 +776,10 @@ impl CliCommand for AccountOrders {
     async fn run(inv: &Invocation, args: &OrdersArgs) -> Result<(), anyhow::Error> {
         let user = args.user.resolve(inv).await?;
         let api = inv.remote()?.api();
-        let dex = canonical_dex(api, args.dex.as_deref()).await?;
+        let dex = inv
+            .dex(args.dex.as_ref())
+            .await?
+            .map(|dex| dex.name.clone());
         let resolver = inv.asset_resolver().await?;
         inv.print(&open_orders_output(api, &resolver, user, dex.as_deref()).await?);
         Ok(())
@@ -802,7 +806,10 @@ impl CliCommand for AccountPortfolio {
         let user = args.user.resolve(inv).await?;
         let api = inv.remote()?.api();
         let client = api.sdk();
-        let dex = canonical_dex(api, args.dex.as_deref()).await?;
+        let dex = inv
+            .dex(args.dex.as_ref())
+            .await?
+            .map(|dex| dex.name.clone());
         let account_mode = fetch_abstraction(api, user).await?.normalized_mode;
         let state = client
             .clearinghouse_state(user, dex.clone())
@@ -1025,11 +1032,7 @@ impl CliCommand for AccountAssetData {
 
     async fn run(inv: &Invocation, args: &AssetDataArgs) -> Result<(), anyhow::Error> {
         let user = args.user.resolve(inv).await?;
-        let resolver = inv.asset_resolver().await?;
-        let perp = resolver
-            .resolve_perp_or_fetch(inv.remote()?.api(), &args.coin)
-            .await
-            .map_err(CliError::from)?;
+        let perp = resolve_perp(inv, &args.coin).await?;
         print_info_value(
             inv,
             InfoRequest::user("activeAssetData", user).field("coin", perp.display_name()),

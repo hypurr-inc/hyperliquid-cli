@@ -12,11 +12,9 @@ use super::preview::OrderDryRunPlan;
 use super::rendering::ModifyConfirmation;
 use super::status::Status;
 use super::validation::MarketPrecision;
-use crate::assets::asset_id::{
-    outcome_coin, parse_spot_coin_key, spot_asset_index, spot_internal_coin_key,
-};
 use crate::assets::{
-    AssetQuery, AssetResolver, Market, canonical_dex, parse_asset_query, qualify_dex_asset,
+    AssetQuery, AssetResolver, ListedSpot, Market, outcome_coin, parse_asset_query,
+    qualify_dex_asset,
 };
 use crate::errors::{CliError, from_sdk};
 use crate::hints::{
@@ -60,19 +58,14 @@ async fn order_asset(
     resolver: &AssetResolver,
     order: &BasicOrder,
 ) -> Result<OrderAsset, CliError> {
-    if let Some(internal_id) = parse_spot_coin_key(&order.coin) {
-        return Ok(
-            match resolver.spot_by_protocol_asset_id(spot_asset_index(internal_id)) {
-                Some(spot) => OrderAsset {
-                    index: spot.index,
-                    precision: Some(MarketPrecision::of(&Market::Spot(spot))),
-                },
-                None => OrderAsset {
-                    index: internal_id,
-                    precision: None,
-                },
+    if let Some(spot) = resolver.listed_spot(&order.coin) {
+        return Ok(OrderAsset {
+            index: spot.asset_index(),
+            precision: match spot {
+                ListedSpot::Known(spot) => Some(MarketPrecision::of(&Market::Spot(spot))),
+                ListedSpot::Unknown { .. } => None,
             },
-        );
+        });
     }
 
     let market = resolver.resolve_or_fetch(client, &order.coin).await?;
@@ -157,21 +150,17 @@ pub(super) async fn resolve_cancel_all_coin_filter(
     let Some(coin) = args.coin.as_deref() else {
         return Ok(None);
     };
-    if let Some(internal_id) = parse_spot_coin_key(coin) {
+    if let Some(spot) = resolver.listed_spot(coin) {
         // `@N` is how a spot pair is listed, except PURR/USDC, which the
         // exchange lists by name.
-        let key = match resolver.spot_by_protocol_asset_id(spot_asset_index(internal_id)) {
-            Some(spot) => spot.info_coin(),
-            None => spot_internal_coin_key(internal_id),
-        };
-        return Ok(Some(CoinFilter::on_default_dex(key)));
+        return Ok(Some(CoinFilter::on_default_dex(spot.info_coin())));
     }
 
     let query = match parse_asset_query(coin) {
         AssetQuery::Outcome(_) => coin.to_string(),
         _ => {
-            let dex = canonical_dex(client, args.dex.as_deref()).await?;
-            qualify_dex_asset(dex.as_deref(), coin)
+            let dex = resolver.dexes().select(client, args.dex.as_ref()).await?;
+            qualify_dex_asset(dex.map(|dex| dex.name.as_str()), coin)
         }
     };
     Ok(Some(

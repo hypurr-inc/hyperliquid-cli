@@ -5,12 +5,10 @@ use serde::Serialize;
 use serde_json::Value;
 use strsim::levenshtein;
 
-use crate::assets::asset_id::{
-    self, AssetIdLayout, MAX_OUTCOME_SIDE, outcome_coin, outcome_token, split_outcome_encoding,
-};
 use crate::assets::{
-    AssetResolver, Names, OutcomeCatalog, OutcomeDescription, OutcomeSideRow, PerpAsset, SpotAsset,
-    normalize_asset_name,
+    AssetIdLayout, AssetMetadata, AssetResolver, MAX_OUTCOME_SIDE, Names, OutcomeCatalog,
+    OutcomeDescription, OutcomeSideRow, PerpAsset, SpotAsset, classify, normalize_asset_name,
+    outcome_coin, outcome_token, split_outcome_encoding,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::rows::or_missing;
@@ -339,7 +337,7 @@ pub async fn decode(inv: &Invocation, args: &AssetDecodeArgs) -> Result<(), anyh
     match decoded.kind {
         AssetIdKind::Outcome => enrich_outcome(api, &mut decoded).await,
         AssetIdKind::Perp | AssetIdKind::Spot | AssetIdKind::Hip3Perp => {
-            enrich_from_resolver(api, &mut decoded).await
+            enrich_from_resolver(inv, &mut decoded).await
         }
     }
 
@@ -350,6 +348,7 @@ pub async fn decode(inv: &Invocation, args: &AssetDecodeArgs) -> Result<(), anyh
 pub async fn search(inv: &Invocation, args: &AssetSearchArgs) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let rows = search_assets(
+        inv,
         remote.api(),
         &remote.network().to_string(),
         &args.query,
@@ -364,7 +363,7 @@ pub async fn search(inv: &Invocation, args: &AssetSearchArgs) -> Result<(), anyh
 
 #[must_use]
 pub fn decode_asset_id(asset_id: u64, network: &str) -> DecodedAssetId {
-    let layout = asset_id::classify(asset_id);
+    let layout = classify(asset_id);
     let kind = AssetIdKind::from(layout);
     let mut decoded = DecodedAssetId {
         asset_id,
@@ -429,6 +428,7 @@ async fn load_outcome_rows(api: &ApiClient) -> Option<Vec<OutcomeSideRow>> {
 }
 
 async fn search_assets(
+    inv: &Invocation,
     api: &ApiClient,
     network: &str,
     query: &str,
@@ -437,7 +437,7 @@ async fn search_assets(
 ) -> Vec<DecodedAssetId> {
     let mut candidates = Vec::new();
 
-    let resolver = load_resolver(api).await;
+    let resolver = load_resolver(inv).await;
     if let Some(resolver) = resolver.as_ref() {
         candidates.extend(search_resolver_assets(resolver, network));
     }
@@ -571,19 +571,27 @@ fn fuzzy_search_threshold(query: &str) -> usize {
     if query.len() <= 3 { 1 } else { 2 }
 }
 
-/// A dex that failed to load is named on stderr: its markets are missing from the answer.
-async fn load_resolver(api: &ApiClient) -> Option<AssetResolver> {
-    let resolver = or_warn("asset metadata", AssetResolver::load_with_hip3(api).await)?;
+/// A dex that failed to load is named on stderr, with the reason: its markets
+/// are missing from the answer.
+async fn load_resolver(inv: &Invocation) -> Option<AssetResolver> {
+    let loaded = async {
+        let metadata =
+            AssetMetadata::load_with_hip3(inv.remote()?.api(), inv.dex_list().await?).await?;
+        Ok(inv.resolver_over(metadata))
+    }
+    .await;
+    let resolver = or_warn("asset metadata", loaded)?;
     for dex in resolver.unavailable_dexes() {
         warn(&format!(
-            "HIP-3 dex {dex} metadata unavailable, results are limited"
+            "HIP-3 dex {} metadata unavailable, results are limited: {}",
+            dex.name, dex.reason
         ));
     }
     Some(resolver)
 }
 
-async fn enrich_from_resolver(api: &ApiClient, decoded: &mut DecodedAssetId) {
-    let Some(resolver) = load_resolver(api).await else {
+async fn enrich_from_resolver(inv: &Invocation, decoded: &mut DecodedAssetId) {
+    let Some(resolver) = load_resolver(inv).await else {
         return;
     };
     enrich_from_loaded_resolver(&resolver, decoded);

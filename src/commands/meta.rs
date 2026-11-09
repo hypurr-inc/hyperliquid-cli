@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::assets::{DeployerFeeScales, PerpDexList, SpotListing, load_spot_markets};
+use crate::assets::{DeployerFeeScales, SpotAsset, load_spot_markets};
 use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
 use crate::commands::common::rows::MISSING;
 use crate::errors::CliError;
@@ -22,14 +22,14 @@ pub struct MetaSpotRow {
     pub base_sz_decimals: i64,
 }
 
-impl From<SpotListing> for MetaSpotRow {
-    fn from(market: SpotListing) -> Self {
+impl From<SpotAsset> for MetaSpotRow {
+    fn from(market: SpotAsset) -> Self {
         Self {
             symbol: market.symbol,
             index: market.index,
             base: market.base,
             quote: market.quote,
-            base_sz_decimals: market.base_sz_decimals,
+            base_sz_decimals: i64::from(market.base_sz_decimals),
         }
     }
 }
@@ -194,7 +194,7 @@ pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
     let raw_meta_and_contexts = fetch_meta_and_asset_contexts(api).await?;
     let spot_universe = load_spot_universe(api).await?;
-    let dexes = fetch_dexes(api).await?;
+    let dexes = fetch_dexes(inv, api).await?;
     inv.print(&raw_meta_and_contexts.into_output(spot_universe, dexes)?);
     Ok(())
 }
@@ -207,8 +207,8 @@ async fn fetch_meta_and_asset_contexts(api: &ApiClient) -> Result<MetaAndAssetCo
     .await
 }
 
-async fn fetch_dexes(api: &ApiClient) -> Result<Vec<DexRow>, CliError> {
-    let dexes = PerpDexList::load(api).await?;
+async fn fetch_dexes(inv: &Invocation, api: &ApiClient) -> Result<Vec<DexRow>, CliError> {
+    let dexes = inv.dex_list().await?;
     Ok(dexes
         .metas(api)
         .await?

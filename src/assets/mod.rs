@@ -2,7 +2,7 @@
 //! through the re-exports here, so the submodules stay private and can be
 //! reorganised without touching a caller.
 
-pub mod asset_id;
+mod asset_id;
 mod dexes;
 mod market;
 mod metadata;
@@ -12,18 +12,22 @@ mod outcomes;
 mod query;
 mod resolver;
 
-pub(crate) use dexes::{CoinDecimal, DexMeta, PerpDexList, PerpListing};
-pub use dexes::{DeployerFeeScales, MarketFeeScale, canonical_dex, canonical_dexs};
+pub use asset_id::{
+    AssetIdLayout, MAX_OUTCOME_SIDE, classify, outcome_coin, outcome_token, parse_outcome_notation,
+    split_outcome_encoding,
+};
+pub(crate) use dexes::{CoinDecimal, DexCollateral, DexMeta, PerpDex, PerpDexList};
+pub use dexes::{DeployerFeeScales, DexArg, DexCatalogue, MarketFeeScale, USDC_NAME, USDC_TOKEN};
 #[cfg(test)]
 pub(crate) use market::test_support;
 pub use market::{
     MarginRule, Market, OutcomeAsset, PerpAsset, SpotAsset, perp_price_tick, spot_price_tick,
 };
+pub(crate) use metadata::load_perp_markets;
 pub use metadata::{
-    AssetMetadata, MetadataCache, SpotListing, SpotTokenListing, load_spot_markets,
-    load_spot_tokens, require_spot_token,
+    AssetMetadata, SpotTokenListing, UnavailableDex, load_spot_markets,
+    load_spot_markets_with_contexts, load_spot_tokens, require_spot_token,
 };
-pub(crate) use metadata::{load_hip3_market, load_perp_listings};
 pub use outcome_description::OutcomeDescription;
 pub use outcome_templates::{OutcomeTemplate, TemplateList, TemplateRole, load_outcome_templates};
 #[cfg(test)]
@@ -34,4 +38,4 @@ pub use outcomes::{
 };
 pub use query::{AssetQuery, normalize_dex, parse_asset_query, qualify_dex_asset};
 pub(crate) use query::{eq_asset_name, normalize_asset_name};
-pub use resolver::{AssetError, AssetResolver};
+pub use resolver::{AssetResolver, ListedSpot, MarketCache};

@@ -6,9 +6,14 @@
 //! its slot and the slot is kept on the entry, never recomputed by a caller. A
 //! dex whose `meta` names no `collateralToken` is collateralised in USDC.
 
+use std::convert::Infallible;
+use std::str::FromStr;
+use std::sync::Arc;
+
 use futures::future::join_all;
 use hypersdk::Decimal;
 use serde::{Deserialize, Serialize};
+use tokio::sync::OnceCell;
 
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
@@ -16,12 +21,14 @@ use crate::wire::InfoRequest;
 
 use super::asset_id;
 use super::market::{MarginRule, PerpAsset};
-use super::query::strip_dex_prefix;
+use super::query::{normalize_dex, strip_dex_prefix};
 
-/// Spot token index of USDC, the collateral of a dex that names none.
-pub(crate) const USDC_TOKEN: u32 = 0;
-/// Name shown for a collateral token the spot metadata does not list.
-pub(super) const USDC_NAME: &str = "USDC";
+/// Spot token index of USDC, the collateral of a dex that names none, on every
+/// network. A balance row that names no token is not USDC.
+pub const USDC_TOKEN: u32 = 0;
+/// USDC's name: shown for a collateral token the spot metadata does not list,
+/// and the unit of the funds the CLI moves.
+pub const USDC_NAME: &str = "USDC";
 
 /// `[coin, "decimal"]`, the pair shape of the dex cap and multiplier lists.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -146,77 +153,79 @@ impl PerpDexList {
             .map(|(dex, meta)| Ok((dex, meta?)))
             .collect()
     }
-}
 
-/// Validate a `--dex` value against the exchange and return its canonical name.
-///
-/// A blank value is the default dex. An unknown DEX is explicit invalid input:
-/// it fails here instead of reading an empty account or an empty mid map, and
-/// the canonical spelling is what every later request uses.
-pub async fn canonical_dex(api: &ApiClient, dex: Option<&str>) -> Result<Option<String>, CliError> {
-    Ok(canonical_dexs(api, &[dex]).await?.remove(0))
-}
-
-/// [`canonical_dex`] for several values, reading `perpDexs` once for all of
-/// them and not at all when every one is blank.
-pub async fn canonical_dexs(
-    api: &ApiClient,
-    requested: &[Option<&str>],
-) -> Result<Vec<Option<String>>, CliError> {
-    let requested: Vec<Option<&str>> = requested
-        .iter()
-        .map(|dex| super::query::normalize_dex(*dex))
-        .collect();
-    if requested.iter().all(Option::is_none) {
-        return Ok(vec![None; requested.len()]);
-    }
-    let list = PerpDexList::load(api).await?;
-    requested
-        .into_iter()
-        .map(|dex| {
-            dex.map(|dex| list.canonical(dex).map(|dex| dex.name.clone()))
-                .transpose()
+    /// The spot token each dex is collateralised in.
+    pub(crate) async fn collateral_tokens(
+        &self,
+        api: &ApiClient,
+    ) -> Result<DexCollateral, CliError> {
+        let default = DexMeta::load(api, None).await?;
+        Ok(DexCollateral {
+            default_token: default.collateral_token,
+            dexes: self
+                .metas(api)
+                .await?
+                .into_iter()
+                .map(|(dex, meta)| (dex.name.clone(), meta.collateral_token))
+                .collect(),
         })
-        .collect()
+    }
 }
 
+/// The spot token index of each perp dex's collateral, 0 being USDC.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DexMarket {
-    /// As the exchange names it: a HIP-3 market carries its `dex:` prefix.
-    pub name: String,
-    pub sz_decimals: u32,
-    /// Absent when `meta` states none; `perps list` refuses such a market.
-    pub max_leverage: Option<u64>,
-    /// The legacy `onlyIsolated` flag, as stated.
-    pub only_isolated: bool,
-    pub margin_rule: MarginRule,
-    pub delisted: bool,
-    pub deployer_fee_scale: Option<Decimal>,
+pub(crate) struct DexCollateral {
+    /// The default dex's.
+    pub default_token: u32,
+    /// Each listed dex's, by name, in slot order.
+    pub dexes: Vec<(String, u32)>,
 }
 
-/// A [`DexMarket`] with the asset id and collateral it trades under.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PerpListing {
-    pub market: DexMarket,
-    pub index: usize,
-    /// The HIP-3 dex the market belongs to; `None` for the default dex.
-    pub dex: Option<String>,
-    pub collateral: String,
+/// A `--dex` value as typed. Only [`DexCatalogue::select`] turns it into a
+/// dex, so no command can send a name the exchange has not confirmed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct DexArg(String);
+
+impl FromStr for DexArg {
+    type Err = Infallible;
+
+    fn from_str(text: &str) -> Result<Self, Infallible> {
+        Ok(Self(text.to_string()))
+    }
 }
 
-impl PerpListing {
-    /// The market as an asset, without the `dex:` prefix HIP-3 names carry.
-    pub(crate) fn into_asset(self) -> PerpAsset {
-        PerpAsset {
-            name: match &self.dex {
-                Some(dex) => strip_dex_prefix(&self.market.name, dex).to_string(),
-                None => self.market.name,
-            },
-            index: self.index,
-            dex: self.dex,
-            sz_decimals: self.market.sz_decimals,
-            collateral: self.collateral,
-            margin_rule: self.market.margin_rule,
+impl DexArg {
+    /// What the user named; `None` for a blank value, which is the default
+    /// dex: the exchange treats the empty name as the first perp dex.
+    fn requested(requested: Option<&Self>) -> Option<&str> {
+        normalize_dex(requested.map(|dex| dex.0.as_str()))
+    }
+}
+
+/// The perp dexes of one run: `perpDexs` is read the first time anything needs
+/// it and never again. Clones share that one read.
+#[derive(Debug, Clone, Default)]
+pub struct DexCatalogue(Arc<OnceCell<PerpDexList>>);
+
+impl DexCatalogue {
+    pub(crate) async fn list(&self, api: &ApiClient) -> Result<&PerpDexList, CliError> {
+        self.0.get_or_try_init(|| PerpDexList::load(api)).await
+    }
+
+    /// Validate a `--dex` value against the exchange: the dex it names in its
+    /// canonical spelling (which every later request uses), or `None` for the
+    /// default dex, which reads nothing. An unknown dex is explicit invalid
+    /// input: it fails here instead of reading an empty account or an empty mid
+    /// map.
+    pub(crate) async fn select(
+        &self,
+        api: &ApiClient,
+        requested: Option<&DexArg>,
+    ) -> Result<Option<&PerpDex>, CliError> {
+        match DexArg::requested(requested) {
+            Some(name) => self.list(api).await?.canonical(name).map(Some),
+            None => Ok(None),
         }
     }
 }
@@ -247,11 +256,11 @@ struct RawMarket {
 }
 
 /// What `meta` (the default dex) or `meta{dex}` lists.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) struct DexMeta {
     /// Spot token index of the dex's collateral.
     pub collateral_token: u32,
-    pub markets: Vec<DexMarket>,
+    markets: Vec<RawMarket>,
 }
 
 impl DexMeta {
@@ -270,49 +279,42 @@ impl DexMeta {
     fn from_raw(raw: RawMeta) -> Self {
         Self {
             collateral_token: raw.collateral_token.unwrap_or(USDC_TOKEN),
-            markets: raw
-                .universe
-                .into_iter()
-                .map(|market| DexMarket {
-                    margin_rule: MarginRule::from_wire(
-                        market.only_isolated,
-                        market.margin_mode.as_deref(),
-                    ),
-                    name: market.name,
-                    sz_decimals: market.sz_decimals,
-                    max_leverage: market.max_leverage,
-                    only_isolated: market.only_isolated,
-                    delisted: market.delisted,
-                    deployer_fee_scale: market.deployer_fee_scale,
-                })
-                .collect(),
+            markets: raw.universe,
         }
     }
 
-    /// The markets with their asset ids. `dex` is the HIP-3 dex they belong
-    /// to, `None` for the default dex.
-    pub(crate) fn into_listings(self, dex: Option<&PerpDex>, collateral: &str) -> Vec<PerpListing> {
+    pub(crate) fn market_count(&self) -> usize {
+        self.markets.len()
+    }
+
+    /// The markets as assets, each with its asset id and the name of the token
+    /// that collateralises it. `dex` is the HIP-3 dex they belong to, `None`
+    /// for the default dex; a HIP-3 name loses its `dex:` prefix.
+    pub(super) fn into_assets(self, dex: Option<&PerpDex>, collateral: &str) -> Vec<PerpAsset> {
         self.markets
             .into_iter()
             .enumerate()
-            .map(|(index, market)| PerpListing {
+            .map(|(position, market)| PerpAsset {
+                margin_rule: MarginRule::from_wire(
+                    market.only_isolated,
+                    market.margin_mode.as_deref(),
+                ),
                 index: match dex {
-                    Some(dex) => asset_id::hip3_asset_index(dex.slot, index),
-                    None => index,
+                    Some(dex) => asset_id::hip3_asset_index(dex.slot, position),
+                    None => position,
+                },
+                name: match dex {
+                    Some(dex) => strip_dex_prefix(&market.name, &dex.name).to_string(),
+                    None => market.name,
                 },
                 dex: dex.map(|dex| dex.name.clone()),
+                sz_decimals: market.sz_decimals,
                 collateral: collateral.to_string(),
-                market,
+                max_leverage: market.max_leverage,
+                only_isolated: market.only_isolated,
+                delisted: market.delisted,
+                deployer_fee_scale: market.deployer_fee_scale,
             })
-            .collect()
-    }
-
-    /// The markets as assets. `dex` is the HIP-3 dex they belong to, `None`
-    /// for the default dex.
-    pub(super) fn into_assets(self, dex: Option<&PerpDex>, collateral: &str) -> Vec<PerpAsset> {
-        self.into_listings(dex, collateral)
-            .into_iter()
-            .map(PerpListing::into_asset)
             .collect()
     }
 
@@ -387,52 +389,45 @@ mod tests {
     }
 
     #[test]
-    fn a_listing_keeps_what_perps_list_shows_and_the_asset_id_of_its_slot() {
+    fn an_asset_keeps_what_perps_list_shows_and_the_asset_id_of_its_slot() {
         let dex = PerpDex::named("xyz".to_string(), 2);
-        let listings = meta(serde_json::json!({"universe": [
+        let assets = meta(serde_json::json!({"universe": [
             {"name": "xyz:A", "szDecimals": 2, "maxLeverage": 10, "isDelisted": true,
              "onlyIsolated": true, "marginMode": "strictIsolated", "deployerFeeScale": "0.5"},
             {"name": "xyz:B", "szDecimals": 3, "maxLeverage": 20, "growthMode": "enabled"}
         ]}))
-        .into_listings(Some(&dex), "USDH");
+        .into_assets(Some(&dex), "USDH");
 
         assert_eq!(
-            listings
-                .iter()
-                .map(|listing| listing.index)
-                .collect::<Vec<_>>(),
+            assets.iter().map(|asset| asset.index).collect::<Vec<_>>(),
             [120_000, 120_001],
             "100000 + slot * 10000 + position"
         );
-        let first = &listings[0];
-        assert_eq!(first.market.name, "xyz:A");
-        assert_eq!(first.market.max_leverage, Some(10));
-        assert!(first.market.delisted && first.market.only_isolated);
-        assert_eq!(first.market.margin_rule, MarginRule::StrictIsolated);
-        assert_eq!(first.market.deployer_fee_scale, Some(Decimal::new(5, 1)));
-        assert_eq!(first.collateral, "USDH");
-        assert!(!listings[1].market.delisted);
-
-        let asset = first.clone().into_asset();
+        let first = &assets[0];
         assert_eq!(
-            (asset.name.as_str(), asset.dex.as_deref()),
-            ("A", Some("xyz"))
+            (first.name.as_str(), first.dex.as_deref()),
+            ("A", Some("xyz")),
+            "the dex: prefix is the dex's, not the name's"
         );
-        assert_eq!(asset.index, 120_000);
+        assert_eq!(first.max_leverage, Some(10));
+        assert!(first.delisted && first.only_isolated);
+        assert_eq!(first.margin_rule, MarginRule::StrictIsolated);
+        assert_eq!(first.deployer_fee_scale, Some(Decimal::new(5, 1)));
+        assert_eq!(first.collateral, "USDH");
+        assert!(!assets[1].delisted);
     }
 
     #[test]
-    fn default_dex_listings_are_indexed_by_position() {
-        let listings = meta(serde_json::json!({"universe": [
+    fn default_dex_assets_are_indexed_by_position() {
+        let assets = meta(serde_json::json!({"universe": [
             {"name": "BTC", "szDecimals": 5, "maxLeverage": 40},
             {"name": "ETH", "szDecimals": 4, "maxLeverage": 25}
         ]}))
-        .into_listings(None, "USDC");
+        .into_assets(None, "USDC");
 
         assert_eq!(
-            listings
+            assets
                 .into_iter()
-                .map(PerpListing::into_asset)
                 .map(|asset| (asset.name, asset.index))
                 .collect::<Vec<_>>(),
             [("BTC".to_string(), 0), ("ETH".to_string(), 1)]
@@ -487,5 +482,19 @@ mod tests {
         assert_eq!(list.canonical("XYZ").unwrap().slot, 1);
         let err = list.canonical("nope").unwrap_err();
         assert!(err.to_string().contains("Unknown DEX: nope"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::*;
+
+    #[test]
+    fn a_blank_dex_flag_is_the_default_dex_and_a_named_one_is_trimmed() {
+        let arg = |text: &str| text.parse::<DexArg>().unwrap();
+
+        assert_eq!(DexArg::requested(Some(&arg("  "))), None);
+        assert_eq!(DexArg::requested(None), None);
+        assert_eq!(DexArg::requested(Some(&arg(" xyz "))), Some("xyz"));
     }
 }

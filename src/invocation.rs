@@ -2,7 +2,7 @@
 //! reference to every handler.
 //!
 //! The output session, the prompting mode, the selected command, the dry-run
-//! and payload inputs and the asset metadata cache are known at startup. The
+//! and payload inputs and the market cache are known at startup. The
 //! network, API endpoint, HTTP client and signer depend on the environment and
 //! config file, so they resolve on first use ([`Invocation::remote`]) and
 //! local-only commands such as `wallet list` never read them.
@@ -13,7 +13,7 @@ use std::time::Duration;
 use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::UserRole;
 
-use crate::assets::{AssetResolver, MetadataCache};
+use crate::assets::{AssetMetadata, AssetResolver, DexArg, MarketCache, PerpDex, PerpDexList};
 use crate::auth::{SignerFlags, SignerSelection};
 use crate::command_spec::CommandSpec;
 use crate::errors::CliError;
@@ -110,7 +110,7 @@ pub struct Invocation {
     flags: InvocationFlags,
     command: &'static CommandSpec,
     payload: OnceLock<Option<serde_json::Value>>,
-    metadata: MetadataCache,
+    markets: MarketCache,
     remote: OnceLock<Remote>,
 }
 
@@ -130,7 +130,7 @@ impl Invocation {
             flags,
             command,
             payload: OnceLock::new(),
-            metadata: MetadataCache::new(),
+            markets: MarketCache::new(),
             remote: OnceLock::new(),
         }
     }
@@ -422,10 +422,34 @@ impl Invocation {
         crate::auth::lookup_account_address(selector, &self.settings, &self.mode)
     }
 
-    /// Asset metadata through the per-run cache.
+    /// The run's asset metadata, read once.
     pub async fn asset_resolver(&self) -> Result<AssetResolver, CliError> {
-        let metadata = self.metadata.get_or_load(self.remote()?.api()).await?;
-        Ok(AssetResolver::new(metadata))
+        self.markets.resolver(self.remote()?.api()).await
+    }
+
+    /// A resolver over metadata a command already holds; see
+    /// [`MarketCache::resolver_over`].
+    #[must_use]
+    pub fn resolver_over(&self, metadata: AssetMetadata) -> AssetResolver {
+        self.markets.resolver_over(metadata)
+    }
+
+    /// The perp dex a `--dex` value names, validated against the exchange:
+    /// the one way a command turns the flag into a dex name or slot. `None`
+    /// is the default dex.
+    pub(crate) async fn dex(
+        &self,
+        requested: Option<&DexArg>,
+    ) -> Result<Option<&PerpDex>, CliError> {
+        self.markets
+            .dexes()
+            .select(self.remote()?.api(), requested)
+            .await
+    }
+
+    /// Every perp dex the exchange lists, read once per run.
+    pub(crate) async fn dex_list(&self) -> Result<&PerpDexList, CliError> {
+        self.markets.dexes().list(self.remote()?.api()).await
     }
 }
 

@@ -6,9 +6,9 @@
 
 use hypersdk::hypercore::CandleInterval;
 
-use crate::assets::{AssetResolver, Market};
+use crate::assets::{Market, PerpAsset};
 use crate::errors::CliError;
-use crate::http_api::ApiClient;
+use crate::invocation::Invocation;
 
 const VALID_INTERVALS: &str = "1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M";
 
@@ -26,38 +26,39 @@ fn market_info_coin(market: Market, input: &str) -> Result<String, CliError> {
     }
 }
 
-pub(crate) async fn resolve_perp_coin_or_fetch(
-    client: &ApiClient,
-    resolver: &AssetResolver,
-    coin: &str,
-) -> Result<String, CliError> {
-    Ok(resolver
-        .resolve_perp_or_fetch(client, coin)
+/// The perp `input` names. A HIP-3 market (`dex:COIN`) is looked up live when
+/// the metadata snapshot lacks it, as orders do.
+pub(crate) async fn resolve_perp(inv: &Invocation, input: &str) -> Result<PerpAsset, CliError> {
+    inv.asset_resolver()
+        .await?
+        .resolve_perp_or_fetch(inv.remote()?.api(), input)
         .await
-        .map_err(CliError::from)?
-        .display_name())
 }
 
-pub(crate) async fn resolve_market_coin(
-    client: &ApiClient,
-    resolver: &AssetResolver,
-    coin: &str,
-) -> Result<String, CliError> {
-    let market = resolver
-        .resolve_or_fetch(client, coin)
-        .await
-        .map_err(CliError::from)?;
-    market_info_coin(market, coin)
+/// The name the exchange lists a perp under: dex-qualified for HIP-3.
+pub(crate) async fn perp_coin(inv: &Invocation, input: &str) -> Result<String, CliError> {
+    Ok(resolve_perp(inv, input).await?.display_name())
+}
+
+/// The name info and websocket endpoints know the perp or spot `input` names
+/// by.
+pub(crate) async fn market_coin(inv: &Invocation, input: &str) -> Result<String, CliError> {
+    let market = inv
+        .asset_resolver()
+        .await?
+        .resolve_or_fetch(inv.remote()?.api(), input)
+        .await?;
+    market_info_coin(market, input)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assets::AssetMetadata;
     use crate::assets::test_support::{perp, spot};
+    use crate::assets::{AssetMetadata, AssetResolver};
 
     fn resolve_book_coin(resolver: &AssetResolver, coin: &str) -> Result<String, CliError> {
-        market_info_coin(resolver.resolve(coin).map_err(CliError::from)?, coin)
+        market_info_coin(resolver.resolve(coin)?, coin)
     }
 
     fn fixture_resolver() -> AssetResolver {

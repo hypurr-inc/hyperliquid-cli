@@ -3,8 +3,8 @@ use std::time::Duration;
 use hypersdk::hypercore::types::TimeInForce;
 
 use super::*;
-use crate::assets::test_support::hip3_perp;
-use crate::assets::{AssetMetadata, MarginRule, SpotAsset};
+use crate::assets::test_support::{hip3_perp, perp, spot as spot_asset};
+use crate::assets::{AssetMetadata, SpotAsset};
 use crate::commands::orders::args::{
     CreateTpslGroupingArg, DEFAULT_MARKET_ORDER_SLIPPAGE_BPS, PositionTpslGroupingArg, TpslArgs,
 };
@@ -17,21 +17,14 @@ fn resolver() -> AssetResolver {
     AssetResolver::new(AssetMetadata::from_assets(
         vec![
             PerpAsset {
-                name: "BTC".to_string(),
-                index: 0,
-                dex: None,
                 sz_decimals: 5,
-                collateral: "USDC".to_string(),
-                margin_rule: MarginRule::CrossOrIsolated,
+                ..perp("BTC", 0)
             },
             hip3_perp("testdex", "HYPE", 11_100),
         ],
         vec![SpotAsset {
-            symbol: "HYPE/USDC".to_string(),
-            index: 11_035,
-            base: "HYPE".to_string(),
-            quote: "USDC".to_string(),
             base_sz_decimals: 2,
+            ..spot_asset("HYPE/USDC", 11_035, "HYPE", "USDC")
         }],
     ))
 }
@@ -694,12 +687,8 @@ fn market_precision_truncates_prices_to_the_tick_grid() {
 fn market_precision_clamps_the_decimal_budget_for_oversized_lots() {
     // szDecimals above the budget leaves no decimals: whole-number prices only.
     let token = PerpAsset {
-        name: "TOKEN".to_string(),
-        index: 1,
-        dex: None,
         sz_decimals: 8,
-        collateral: "USDC".to_string(),
-        margin_rule: MarginRule::CrossOrIsolated,
+        ..perp("TOKEN", 1)
     };
     assert_eq!(
         MarketPrecision::of_perp(&token)
@@ -757,11 +746,8 @@ fn a_spot_pair_is_looked_up_in_all_mids_by_its_info_coin() {
     // `allMids` lists PURR/USDC by name and every other pair as `@<index>`.
     let spot = |symbol: &str, index: usize, base: &str| {
         Market::Spot(SpotAsset {
-            symbol: symbol.to_string(),
-            index,
-            base: base.to_string(),
-            quote: "USDC".to_string(),
             base_sz_decimals: 2,
+            ..spot_asset(symbol, index, base, "USDC")
         })
     };
     let key = |market: &Market| mid_key(market, "x", None).unwrap().0;

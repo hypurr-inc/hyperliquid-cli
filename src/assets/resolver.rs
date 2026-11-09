@@ -1,48 +1,79 @@
 use strsim::levenshtein;
+use tokio::sync::OnceCell;
 
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 
 use super::asset_id;
-use super::dexes::{PerpDexList, PerpListing};
+use super::dexes::DexCatalogue;
 use super::market::{Market, OutcomeAsset, PerpAsset, SpotAsset};
-use super::metadata::{AssetMetadata, load_hip3_market};
+use super::metadata::{AssetMetadata, UnavailableDex, load_hip3_market};
 use super::query::{AssetQuery, eq_asset_name, normalize_asset_name, parse_asset_query};
 
-/// Why an asset name did not resolve.
-///
-/// Deliberately not a `std::error::Error`: `?` into an `anyhow::Error` must not
-/// skip the [`CliError`] conversion that gives each case its exit code and text.
-#[derive(Debug)]
-pub enum AssetError {
-    NotFound {
-        asset: String,
-        suggestion: Option<String>,
-    },
-    /// Outcome notation given where only perp or spot markets apply.
-    UnsupportedOutcome { input: String },
-    /// The live HIP-3 lookup failed.
-    Load(CliError),
+/// What one run has read of the exchange's market data: the default dex and
+/// spot metadata and the dex catalogue, each read at most once, however many
+/// commands steps ask for it.
+#[derive(Debug, Default)]
+pub struct MarketCache {
+    dexes: DexCatalogue,
+    metadata: OnceCell<AssetMetadata>,
 }
 
-impl From<AssetError> for CliError {
-    fn from(err: AssetError) -> Self {
-        match err {
-            AssetError::NotFound {
-                asset,
-                suggestion: Some(suggestion),
-            } => CliError::AssetNotFound {
-                asset,
-                suggestions: suggestion,
-            },
-            AssetError::NotFound {
-                asset,
-                suggestion: None,
-            } => CliError::AssetNotFoundNoSuggestion { asset },
-            AssetError::UnsupportedOutcome { input } => {
-                CliError::unsupported_outcome_notation(&input)
-            }
-            AssetError::Load(err) => err,
+impl MarketCache {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn dexes(&self) -> &DexCatalogue {
+        &self.dexes
+    }
+
+    /// A resolver over the run's asset metadata.
+    pub async fn resolver(&self, api: &ApiClient) -> Result<AssetResolver, CliError> {
+        let metadata = self
+            .metadata
+            .get_or_try_init(|| AssetMetadata::load(api))
+            .await?;
+        Ok(self.resolver_over(metadata.clone()))
+    }
+
+    /// A resolver over `metadata` a command already holds, so it resolves a
+    /// name against them without reading them again. A HIP-3 market it lacks is
+    /// still looked up live, through the run's dex catalogue.
+    #[must_use]
+    pub fn resolver_over(&self, metadata: AssetMetadata) -> AssetResolver {
+        AssetResolver::new(metadata).with_dexes(self.dexes.clone())
+    }
+}
+
+/// A spot pair named by the protocol key `@N` that open orders list it under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListedSpot {
+    Known(SpotAsset),
+    /// The key names no pair the metadata lists.
+    Unknown {
+        internal_id: usize,
+    },
+}
+
+impl ListedSpot {
+    /// The asset id an order on the pair names; an unlisted pair's is its key
+    /// number.
+    #[must_use]
+    pub fn asset_index(&self) -> usize {
+        match self {
+            Self::Known(spot) => spot.index,
+            Self::Unknown { internal_id } => *internal_id,
+        }
+    }
+
+    /// The key info endpoints list the pair under.
+    #[must_use]
+    pub fn info_coin(&self) -> String {
+        match self {
+            Self::Known(spot) => spot.info_coin(),
+            Self::Unknown { internal_id } => asset_id::spot_internal_coin_key(*internal_id),
         }
     }
 }
@@ -50,21 +81,30 @@ impl From<AssetError> for CliError {
 #[derive(Debug, Clone)]
 pub struct AssetResolver {
     metadata: AssetMetadata,
+    dexes: DexCatalogue,
 }
 
 impl AssetResolver {
     #[must_use]
     pub fn new(metadata: AssetMetadata) -> Self {
-        Self { metadata }
+        Self {
+            metadata,
+            dexes: DexCatalogue::default(),
+        }
     }
 
-    pub async fn load_with_hip3(api: &ApiClient) -> Result<Self, CliError> {
-        AssetMetadata::load_with_hip3(api).await.map(Self::new)
+    #[must_use]
+    fn with_dexes(self, dexes: DexCatalogue) -> Self {
+        Self { dexes, ..self }
+    }
+
+    pub(crate) fn dexes(&self) -> &DexCatalogue {
+        &self.dexes
     }
 
     /// Outcome notation resolves to [`Market::Outcome`] without being decoded;
     /// commands that cannot trade outcomes reject it themselves.
-    pub fn resolve(&self, input: &str) -> Result<Market, AssetError> {
+    pub fn resolve(&self, input: &str) -> Result<Market, CliError> {
         match parse_asset_query(input) {
             AssetQuery::Perp(_) | AssetQuery::Hip3 { .. } => {
                 self.resolve_perp(input).map(Market::Perp)
@@ -74,19 +114,19 @@ impl AssetResolver {
         }
     }
 
-    pub fn resolve_perp(&self, input: &str) -> Result<PerpAsset, AssetError> {
+    pub fn resolve_perp(&self, input: &str) -> Result<PerpAsset, CliError> {
         match parse_asset_query(input) {
             AssetQuery::Hip3 { dex, token } => self.resolve_hip3(input, &dex, &token),
             AssetQuery::Perp(symbol) => self.resolve_default_perp(input, &symbol),
-            AssetQuery::Outcome(_) => Err(unsupported_outcome(input)),
+            AssetQuery::Outcome(_) => Err(CliError::unsupported_outcome_notation(input)),
             AssetQuery::Spot(_) => Err(self.not_found(input, self.perp_candidate_names())),
         }
     }
 
-    pub fn resolve_spot(&self, input: &str) -> Result<SpotAsset, AssetError> {
+    pub fn resolve_spot(&self, input: &str) -> Result<SpotAsset, CliError> {
         let pair = match parse_asset_query(input) {
             AssetQuery::Spot(pair) => pair,
-            AssetQuery::Outcome(_) => return Err(unsupported_outcome(input)),
+            AssetQuery::Outcome(_) => return Err(CliError::unsupported_outcome_notation(input)),
             _ => return Err(self.not_found(input, self.spot_candidate_names())),
         };
 
@@ -103,19 +143,15 @@ impl AssetResolver {
         &self,
         api: &ApiClient,
         input: &str,
-    ) -> Result<PerpAsset, AssetError> {
+    ) -> Result<PerpAsset, CliError> {
         match self.resolve_perp(input) {
             Ok(perp) => Ok(perp),
-            Err(err) => fetch_hip3_perp(api, input, err).await,
+            Err(missed) => self.fetch_hip3_perp(api, input, missed).await,
         }
     }
 
     /// [`Self::resolve`], looking a missing HIP-3 market up live.
-    pub async fn resolve_or_fetch(
-        &self,
-        api: &ApiClient,
-        input: &str,
-    ) -> Result<Market, AssetError> {
+    pub async fn resolve_or_fetch(&self, api: &ApiClient, input: &str) -> Result<Market, CliError> {
         match parse_asset_query(input) {
             AssetQuery::Hip3 { .. } => self
                 .resolve_perp_or_fetch(api, input)
@@ -123,6 +159,36 @@ impl AssetResolver {
                 .map(Market::Perp),
             _ => self.resolve(input),
         }
+    }
+
+    /// [`Self::resolve_or_fetch`] for a market to trade, whose spot miss
+    /// suggests perp names: an order's coin is a perp unless it is spelled as a
+    /// pair.
+    pub async fn resolve_tradable_or_fetch(
+        &self,
+        api: &ApiClient,
+        input: &str,
+    ) -> Result<Market, CliError> {
+        match parse_asset_query(input) {
+            AssetQuery::Spot(_) => self
+                .resolve_spot(input)
+                .map(Market::Spot)
+                .map_err(|_| self.not_found(input, self.perp_candidate_names())),
+            _ => self.resolve_or_fetch(api, input).await,
+        }
+    }
+
+    /// The pair a protocol spot key `@N` names, or `None` when `coin` is not
+    /// one.
+    #[must_use]
+    pub fn listed_spot(&self, coin: &str) -> Option<ListedSpot> {
+        let internal_id = asset_id::parse_spot_coin_key(coin)?;
+        Some(
+            match self.spot_by_protocol_asset_id(asset_id::spot_asset_index(internal_id)) {
+                Some(spot) => ListedSpot::Known(spot),
+                None => ListedSpot::Unknown { internal_id },
+            },
+        )
     }
 
     #[must_use]
@@ -163,7 +229,7 @@ impl AssetResolver {
     /// HIP-3 DEXes whose metadata failed to load; see
     /// [`AssetMetadata::unavailable_dexes`].
     #[must_use]
-    pub fn unavailable_dexes(&self) -> &[String] {
+    pub fn unavailable_dexes(&self) -> &[UnavailableDex] {
         self.metadata.unavailable_dexes()
     }
 
@@ -174,7 +240,7 @@ impl AssetResolver {
             .find(|spot| asset_id::spot_internal_id(spot.index) == internal_id)
     }
 
-    fn resolve_default_perp(&self, input: &str, symbol: &str) -> Result<PerpAsset, AssetError> {
+    fn resolve_default_perp(&self, input: &str, symbol: &str) -> Result<PerpAsset, CliError> {
         self.metadata
             .perps
             .iter()
@@ -183,7 +249,7 @@ impl AssetResolver {
             .ok_or_else(|| self.not_found(input, self.perp_candidate_names()))
     }
 
-    fn resolve_hip3(&self, input: &str, dex: &str, token: &str) -> Result<PerpAsset, AssetError> {
+    fn resolve_hip3(&self, input: &str, dex: &str, token: &str) -> Result<PerpAsset, CliError> {
         self.metadata
             .perps
             .iter()
@@ -200,15 +266,30 @@ impl AssetResolver {
                     .metadata
                     .unavailable_dexes()
                     .iter()
-                    .any(|unavailable| eq_asset_name(unavailable, dex))
+                    .any(|unavailable| eq_asset_name(&unavailable.name, dex))
                 {
-                    AssetError::Load(CliError::Unavailable(format!(
+                    CliError::Unavailable(format!(
                         "Metadata for the HIP-3 dex {dex} could not be loaded, so {input} cannot be resolved. Try again."
-                    )))
+                    ))
                 } else {
                     self.not_found(input, self.perp_candidate_names())
                 }
             })
+    }
+
+    /// After `missed` (a failed snapshot lookup of `input`), look a HIP-3
+    /// market up live. A DEX without that market reports the original miss.
+    async fn fetch_hip3_perp(
+        &self,
+        api: &ApiClient,
+        input: &str,
+        missed: CliError,
+    ) -> Result<PerpAsset, CliError> {
+        let AssetQuery::Hip3 { dex, token } = parse_asset_query(input) else {
+            return Err(missed);
+        };
+        let dex = self.dexes.list(api).await?.canonical(&dex)?;
+        load_hip3_market(api, dex, &token).await?.ok_or(missed)
     }
 
     fn perp_candidate_names(&self) -> Vec<String> {
@@ -227,44 +308,12 @@ impl AssetResolver {
             .collect()
     }
 
-    fn not_found(&self, input: &str, candidates: Vec<String>) -> AssetError {
-        AssetError::NotFound {
-            asset: input.to_string(),
-            suggestion: suggestion(input, candidates),
+    fn not_found(&self, input: &str, candidates: Vec<String>) -> CliError {
+        let asset = input.to_string();
+        match suggestion(input, candidates) {
+            Some(suggestions) => CliError::AssetNotFound { asset, suggestions },
+            None => CliError::AssetNotFoundNoSuggestion { asset },
         }
-    }
-}
-
-fn unsupported_outcome(input: &str) -> AssetError {
-    AssetError::UnsupportedOutcome {
-        input: input.to_string(),
-    }
-}
-
-/// After `missed` (a failed snapshot lookup of `input`), look a HIP-3 market up
-/// live. A DEX without that market reports the original miss.
-async fn fetch_hip3_perp(
-    api: &ApiClient,
-    input: &str,
-    missed: AssetError,
-) -> Result<PerpAsset, AssetError> {
-    let AssetQuery::Hip3 { dex, token } = parse_asset_query(input) else {
-        return Err(missed);
-    };
-    let loaded = async {
-        let dexes = PerpDexList::load(api).await?;
-        let dex = dexes.canonical(&dex)?;
-        Ok::<_, CliError>(
-            load_hip3_market(api, dex, &token)
-                .await?
-                .map(PerpListing::into_asset),
-        )
-    }
-    .await;
-    match loaded {
-        Ok(Some(perp)) => Ok(perp),
-        Ok(None) => Err(missed),
-        Err(err) => Err(AssetError::Load(err)),
     }
 }
 
@@ -389,16 +438,19 @@ mod tests {
     #[test]
     fn a_market_on_a_dex_that_failed_to_load_reports_the_load_failure() {
         let mut metadata = AssetMetadata::from_assets(vec![perp("BTC", 0)], Vec::new());
-        metadata.unavailable_dexes = vec!["Broken".to_string()];
+        metadata.unavailable_dexes = vec![UnavailableDex {
+            name: "Broken".to_string(),
+            reason: "HTTP 500".to_string(),
+        }];
         let resolver = AssetResolver::new(metadata);
 
         let err = resolver.resolve_perp("broken:GOLD").unwrap_err();
-        assert!(matches!(err, AssetError::Load(_)), "{err:?}");
-        assert_eq!(CliError::from(err).exit_code(), 12);
+        assert!(matches!(err, CliError::Unavailable(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 12);
 
         assert!(matches!(
             resolver.resolve_perp("other:GOLD"),
-            Err(AssetError::NotFound { .. })
+            Err(CliError::AssetNotFoundNoSuggestion { .. })
         ));
     }
 
@@ -408,14 +460,14 @@ mod tests {
 
         assert!(matches!(
             err,
-            AssetError::NotFound { asset, suggestion }
-                if asset == "BTCC" && suggestion.as_deref() == Some("BTC")
+            CliError::AssetNotFound { asset, suggestions }
+                if asset == "BTCC" && suggestions == "BTC"
         ));
 
         let err = resolver().resolve_spot("PUR/USDC").unwrap_err();
         assert!(matches!(
             err,
-            AssetError::NotFound { suggestion, .. } if suggestion.as_deref() == Some("PURR/USDC")
+            CliError::AssetNotFound { suggestions, .. } if suggestions == "PURR/USDC"
         ));
     }
 
@@ -444,7 +496,10 @@ mod tests {
             resolver.resolve_perp(" #10").unwrap_err(),
             resolver.resolve_spot(" #10").unwrap_err(),
         ] {
-            assert!(matches!(err, AssetError::UnsupportedOutcome { input } if input == " #10"));
+            assert!(
+                matches!(&err, CliError::Unsupported(text) if text.contains("notation ' #10'")),
+                "{err:?}"
+            );
         }
     }
 
@@ -454,11 +509,11 @@ mod tests {
 
         assert!(matches!(
             resolver.resolve_perp("PURR/USDC"),
-            Err(AssetError::NotFound { .. })
+            Err(CliError::AssetNotFoundNoSuggestion { .. })
         ));
         assert!(matches!(
             resolver.resolve_spot("BTC"),
-            Err(AssetError::NotFound { .. })
+            Err(CliError::AssetNotFoundNoSuggestion { .. })
         ));
     }
 
@@ -476,11 +531,8 @@ mod tests {
     }
 
     #[test]
-    fn asset_errors_convert_to_their_cli_errors() {
-        let not_found = CliError::from(AssetError::NotFound {
-            asset: "BTCC".to_string(),
-            suggestion: Some("BTC".to_string()),
-        });
+    fn a_miss_is_exit_13_with_at_most_one_suggestion_in_its_text() {
+        let not_found = resolver().resolve_perp("BTCC").unwrap_err();
         assert_eq!(not_found.exit_code(), 13);
         assert_eq!(
             not_found.to_string(),
@@ -488,20 +540,62 @@ mod tests {
         );
         assert_eq!(not_found.suggestion(), Some("BTC"));
 
-        let bare = CliError::from(AssetError::NotFound {
-            asset: "ZZZ".to_string(),
-            suggestion: None,
-        });
+        let bare = resolver().resolve_perp("ZZZ").unwrap_err();
         assert!(matches!(bare, CliError::AssetNotFoundNoSuggestion { .. }));
 
-        let outcome = CliError::from(AssetError::UnsupportedOutcome {
-            input: "#10".to_string(),
-        });
+        let outcome = resolver().resolve_perp("#10").unwrap_err();
         assert_eq!(outcome.exit_code(), 13);
         assert!(outcome.to_string().contains("outcome-aware command path"));
         assert!(outcome.to_string().contains("outcomes get #10"));
+    }
 
-        let load = CliError::from(AssetError::Load(CliError::AuthRequired));
-        assert!(matches!(load, CliError::AuthRequired));
+    #[test]
+    fn protocol_spot_keys_name_a_listed_pair_or_stay_unknown() {
+        let resolver = resolver();
+
+        assert!(matches!(
+            resolver.listed_spot("@0"),
+            Some(ListedSpot::Known(spot)) if spot.index == 10_000
+        ));
+        let unknown = resolver.listed_spot("@9").unwrap();
+        assert_eq!(unknown, ListedSpot::Unknown { internal_id: 9 });
+        assert_eq!(
+            (unknown.asset_index(), unknown.info_coin()),
+            (9, "@9".to_string())
+        );
+        assert_eq!(resolver.listed_spot("BTC"), None);
+        assert_eq!(resolver.listed_spot("PURR/USDC"), None);
+    }
+}
+
+#[cfg(test)]
+mod tradable_tests {
+    use super::super::market::test_support::{perp, spot};
+    use super::*;
+    use crate::network::Network;
+
+    #[tokio::test]
+    async fn a_spot_miss_to_trade_suggests_perp_names_while_a_lookup_suggests_pairs() {
+        let resolver = AssetResolver::new(AssetMetadata::from_assets(
+            vec![perp("PURR", 0)],
+            vec![spot("PURR/USDC", 10_000, "PURR", "USDC")],
+        ));
+        let api = ApiClient::new(Network::Testnet, None);
+
+        let looked_up = resolver
+            .resolve_or_fetch(&api, "PUR/USDC")
+            .await
+            .unwrap_err();
+        let tradable = resolver
+            .resolve_tradable_or_fetch(&api, "PUR/USDC")
+            .await
+            .unwrap_err();
+
+        assert_eq!(looked_up.suggestion(), Some("PURR/USDC"));
+        assert_eq!(tradable.suggestion(), None, "{tradable}");
+        assert!(matches!(
+            resolver.resolve_tradable_or_fetch(&api, "PURR/USDC").await,
+            Ok(Market::Spot(_))
+        ));
     }
 }

@@ -4,6 +4,7 @@ use hypersdk::hypercore::Chain;
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, Hip3Dex};
+use support::reads::read_json;
 use support::signing::{recover_signer, test_signer};
 use support::{IsolatedHome, run_json, wire};
 
@@ -128,6 +129,22 @@ async fn perps_get_dex_accepts_unprefixed_token_from_prefixed_market() {
         .success()
         .stdout(predicate::str::contains("TOKEN"))
         .stdout(predicate::str::contains("110000"));
+    // A USDC dex is named without reading the spot metadata, and the dex list
+    // is read once for the validated dex and the lookup on it.
+    assert!(server.info_requests("spotMeta").await.is_empty());
+    assert_eq!(server.info_requests("perpDexs").await.len(), 1);
+}
+
+#[tokio::test]
+async fn perps_get_names_a_collateral_other_than_usdc_from_the_spot_metadata() {
+    let server = advanced_exchange().await;
+
+    let market = read_json(&server, &["perps", "get", "TSLA", "--dex", "builderdex"]);
+
+    assert_eq!(market["name"], "builderdex:TSLA");
+    assert_eq!(market["collateral"], "USDH");
+    assert_eq!(server.info_requests("spotMeta").await.len(), 1);
+    assert_eq!(server.info_requests("perpDexs").await.len(), 1);
 }
 
 #[tokio::test]

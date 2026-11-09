@@ -3,7 +3,7 @@ use clap::Args;
 use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::types::{Action, SpotSend, UsdSend};
 
-use crate::assets::{SpotTokenListing, require_spot_token};
+use crate::assets::{SpotTokenListing, USDC_NAME, require_spot_token};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, YES_FOR_AUTOMATION, arg};
 use crate::commands::common::rows::{ListRow, Row, Rows};
 use crate::commands::common::support::print_dry_run;
@@ -297,7 +297,7 @@ async fn send(
         acting_context: signer.query_address(),
         recipient: destination,
         destination_class: "hyperliquid_user_address",
-        asset: "USDC".to_string(),
+        asset: USDC_NAME.to_string(),
         amount: args.amount,
         fee_or_cap: EXCHANGE_DEFAULT_FEE,
         reversibility: TransferActionKind::Send.reversibility(),
@@ -321,7 +321,7 @@ async fn send(
     );
     actions::send_default_l1_action_with_nonce(api, signer, action, nonce).await?;
 
-    TransferConfirmation::new("send", args.amount, "USDC")
+    TransferConfirmation::new("send", args.amount, USDC_NAME)
         .to(&args.to)
         .print(inv);
     Ok(())
@@ -409,7 +409,7 @@ async fn withdraw(
         acting_context: signer.query_address(),
         recipient: destination,
         destination_class: "arbitrum_address",
-        asset: "USDC".to_string(),
+        asset: USDC_NAME.to_string(),
         amount: args.amount,
         fee_or_cap: "not_estimated_bridge_or_exchange_fee",
         reversibility: TransferActionKind::Withdraw.reversibility(),
@@ -434,7 +434,7 @@ async fn withdraw(
     })
     .await?;
 
-    TransferConfirmation::new("withdraw", args.amount, "USDC")
+    TransferConfirmation::new("withdraw", args.amount, USDC_NAME)
         .to(&args.to)
         .print(inv);
     Ok(())
@@ -497,7 +497,7 @@ async fn class_transfer(
     };
     TransferConfirmation {
         subaccount: subaccount.map(|subaccount| subaccount.to_string()),
-        ..TransferConfirmation::new(label, amount.normalize(), "USDC")
+        ..TransferConfirmation::new(label, amount.normalize(), USDC_NAME)
     }
     .print(inv);
     Ok(())
