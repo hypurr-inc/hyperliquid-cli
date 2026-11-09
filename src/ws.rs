@@ -4,14 +4,15 @@ use std::time::Duration;
 use clap::Args;
 use futures::StreamExt;
 use hypersdk::Address;
-use hypersdk::hypercore::{self, Chain, Incoming, Subscription, WebSocket, ws::Event};
+use hypersdk::hypercore::{Incoming, Subscription, ws::Event};
 
 use crate::errors::CliError;
+use crate::http_api::ApiClient;
 
 /// Documented per-IP WebSocket limit: subscriptions across all connections.
-pub const MAX_SUBSCRIPTIONS: usize = 1000;
+const MAX_SUBSCRIPTIONS: usize = 1000;
 /// Documented per-IP WebSocket limit: unique users across user-specific subscriptions.
-pub const MAX_SUBSCRIBED_USERS: usize = 10;
+const MAX_SUBSCRIBED_USERS: usize = 10;
 
 /// Refuse more subscriptions than the exchange allows per IP.
 pub fn ensure_subscription_count(count: usize) -> Result<(), CliError> {
@@ -125,15 +126,6 @@ impl BookAggregationArgs {
     }
 }
 
-/// A WebSocket for `chain`'s public endpoint. The API endpoint override does
-/// not apply to WebSockets.
-pub fn websocket_for_chain(chain: Chain) -> WebSocket {
-    match chain {
-        Chain::Mainnet => hypercore::mainnet_ws(),
-        Chain::Testnet => hypercore::testnet_ws(),
-    }
-}
-
 /// What a one-shot WebSocket read is waiting for, as phrased in its errors.
 pub struct Awaited {
     /// Completes "WebSocket closed before receiving ...".
@@ -156,13 +148,13 @@ fn timed_out(awaited: &Awaited) -> CliError {
 
 /// Subscribe on a fresh socket and return the first message `pick` accepts.
 pub async fn first_matching_message<T>(
-    chain: Chain,
+    api: &ApiClient,
     subscription: Subscription,
     timeout: Duration,
     awaited: &Awaited,
     mut pick: impl FnMut(Incoming) -> Option<T>,
 ) -> Result<T, CliError> {
-    let mut ws = websocket_for_chain(chain);
+    let mut ws = api.websocket();
     ws.subscribe(subscription);
 
     tokio::time::timeout(timeout, async {

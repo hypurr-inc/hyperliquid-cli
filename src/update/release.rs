@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 use crate::env::{self, EnvSource};
 use crate::errors::{CliError, network_error};
+use crate::paths;
 
 /// The GitHub repository, as `owner/name`: the one spelling every release,
 /// download and issue URL derives from. Must match the repository and archive
@@ -172,7 +173,7 @@ pub(super) enum InstallMethod {
 
 impl InstallMethod {
     pub fn detect(exe: &Path, source: &EnvSource) -> Self {
-        let home = dirs::home_dir();
+        let home = paths::home_dir(source);
         let cargo_home = source.get_os(env::CARGO_HOME).map(PathBuf::from);
         let resolved = std::fs::canonicalize(exe).ok();
         [Some(exe), resolved.as_deref()]
@@ -350,6 +351,16 @@ mod tests {
         assert_eq!(
             classify("/usr/local/bin/hyperliquid", None),
             InstallMethod::Standalone
+        );
+    }
+
+    #[test]
+    fn install_method_reads_the_home_the_environment_names() {
+        let source = EnvSource::fixed([(env::HOME_DIR, "/pinned-home")]);
+
+        assert_eq!(
+            InstallMethod::detect(Path::new("/pinned-home/.cargo/bin/hyperliquid"), &source),
+            InstallMethod::Cargo
         );
     }
 }

@@ -10,7 +10,6 @@ use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::network::Network;
 use crate::signing::SelectedSigner;
 
 #[derive(Clone, Copy)]
@@ -73,7 +72,7 @@ impl<'a> OrderSubmissionContext<'a> {
         }
         let target = ConsentTarget::new(
             self.inv.mode(),
-            Network::from(self.api.chain()),
+            self.api.network(),
             self.signer,
             self.vault_address,
             builder,

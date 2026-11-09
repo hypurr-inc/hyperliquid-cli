@@ -776,10 +776,7 @@ impl CliCommand for AccountOrders {
     async fn run(inv: &Invocation, args: &OrdersArgs) -> Result<(), anyhow::Error> {
         let user = args.user.resolve(inv).await?;
         let api = inv.remote()?.api();
-        let dex = inv
-            .dex(args.dex.as_ref())
-            .await?
-            .map(|dex| dex.name.clone());
+        let dex = inv.dex_name(args.dex.as_ref()).await?;
         let resolver = inv.asset_resolver().await?;
         inv.print(&open_orders_output(api, &resolver, user, dex.as_deref()).await?);
         Ok(())
@@ -806,10 +803,7 @@ impl CliCommand for AccountPortfolio {
         let user = args.user.resolve(inv).await?;
         let api = inv.remote()?.api();
         let client = api.sdk();
-        let dex = inv
-            .dex(args.dex.as_ref())
-            .await?
-            .map(|dex| dex.name.clone());
+        let dex = inv.dex_name(args.dex.as_ref()).await?;
         let account_mode = fetch_abstraction(api, user).await?.normalized_mode;
         let state = client.clearinghouse_state(user, dex.clone()).await?;
         // Spot balances and vault equities are account-wide, not per-dex.

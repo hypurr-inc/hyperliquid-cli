@@ -22,10 +22,7 @@ use crate::output::sink;
 pub(crate) const DEFAULT_DEADLINE: Duration = clock::SECOND.of(30);
 
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 struct JsonRpcRequest {
-    #[serde(default)]
-    jsonrpc: String,
     id: Option<Value>,
     method: String,
     #[serde(default)]

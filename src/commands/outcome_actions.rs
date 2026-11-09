@@ -20,7 +20,7 @@ use crate::assets::{Names, OutcomeCatalog};
 use crate::cli_command::CliCommand;
 use crate::command_spec::{ArgSpec, CommandSpec, InputKind, YES, arg};
 use crate::commands::common::rows::{ListRow, Row, Rows, or_missing};
-use crate::commands::common::support::print_dry_run;
+use crate::commands::common::support::{load_outcome_catalog, print_dry_run};
 use crate::consent::{self, ConsentBlock};
 use crate::errors::CliError;
 use crate::exchange::actions;
@@ -258,34 +258,18 @@ impl Conversion {
     /// A listed outcome or question is the only one the exchange can convert: settled
     /// outcomes pay out on their own.
     fn preflight(&self, catalog: &OutcomeCatalog) -> Result<BTreeSet<String>, CliError> {
-        let listed = |outcome: u32| {
-            catalog
-                .sides
-                .iter()
-                .any(|row| row.outcome == u64::from(outcome))
-        };
-        let quotes_of = |outcomes: &mut dyn Iterator<Item = u64>| -> BTreeSet<String> {
-            let wanted: BTreeSet<u64> = outcomes.collect();
-            catalog
-                .sides
-                .iter()
-                .filter(|row| wanted.contains(&row.outcome))
-                .filter_map(|row| row.quote_token.clone())
-                .collect()
-        };
-        if let Some(outcome) = self.outcome().filter(|outcome| !listed(*outcome)) {
+        if let Some(outcome) = self
+            .outcome()
+            .filter(|outcome| !catalog.has_outcome(u64::from(*outcome)))
+        {
             return Err(CliError::Unsupported(format!(
                 "outcome {outcome} is not listed by outcomeMeta: it never existed, could not be read, or has settled (settled outcomes pay out automatically; see `outcomes settled {outcome}`)"
             )));
         }
         let Some(question) = self.question() else {
-            return Ok(quotes_of(&mut self.outcome().map(u64::from).into_iter()));
+            return Ok(catalog.quote_tokens(self.outcome().map(u64::from).as_slice()));
         };
-        let Some(listing) = catalog
-            .questions
-            .iter()
-            .find(|candidate| candidate.question == u64::from(question))
-        else {
+        let Some(listing) = catalog.question(u64::from(question)) else {
             return Err(CliError::Unsupported(format!(
                 "question {question} is not listed by outcomeMeta; see `outcomes questions`"
             )));
@@ -306,7 +290,7 @@ impl Conversion {
                 listing.named_outcomes, listing.fallback_outcome
             )));
         }
-        Ok(quotes_of(&mut members.into_iter()))
+        Ok(catalog.quote_tokens(&members))
     }
 }
 
@@ -355,7 +339,7 @@ impl ListRow for OutcomeActionConfirmation {
 
 async fn convert(inv: &Invocation, conversion: Conversion, yes: bool) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let catalog = OutcomeCatalog::load(remote.api(), Names::Raw).await?;
+    let catalog = load_outcome_catalog(remote.api(), Names::Raw).await?;
     let quotes = conversion.preflight(&catalog)?;
     let quote = quotes.iter().cloned().collect::<Vec<_>>().join("/");
     let quote_token = (!quote.is_empty()).then(|| quote.clone());

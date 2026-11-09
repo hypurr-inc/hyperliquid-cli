@@ -440,6 +440,15 @@ impl Invocation {
             .await
     }
 
+    /// The name of the perp dex a `--dex` value names ([`Self::dex`]), for
+    /// the commands that only send or filter by it.
+    pub(crate) async fn dex_name(
+        &self,
+        requested: Option<&DexArg>,
+    ) -> Result<Option<String>, CliError> {
+        Ok(self.dex(requested).await?.map(|dex| dex.name.clone()))
+    }
+
     /// Every perp dex the exchange lists, read once per run.
     pub(crate) async fn dex_list(&self) -> Result<&PerpDexList, CliError> {
         self.markets.dexes().list(self.remote()?.api()).await

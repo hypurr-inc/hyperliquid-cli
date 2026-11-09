@@ -7,7 +7,7 @@ use crate::http_api::ApiClient;
 use super::asset_id;
 use super::dexes::DexCatalogue;
 use super::market::{Market, OutcomeAsset, PerpAsset, SpotAsset};
-use super::metadata::{AssetMetadata, UnavailableDex, load_hip3_market};
+use super::metadata::{AssetMetadata, load_hip3_market};
 use super::query::{AssetQuery, eq_asset_name, normalize_asset_name, parse_asset_query};
 
 /// What one run has read of the exchange's market data: the default dex and
@@ -96,10 +96,6 @@ impl AssetResolver {
     #[must_use]
     fn with_dexes(self, dexes: DexCatalogue) -> Self {
         Self { dexes, ..self }
-    }
-
-    pub(crate) fn dexes(&self) -> &DexCatalogue {
-        &self.dexes
     }
 
     /// Outcome notation resolves to [`Market::Outcome`] without being decoded;
@@ -224,13 +220,6 @@ impl AssetResolver {
     #[must_use]
     pub fn spots(&self) -> &[SpotAsset] {
         self.metadata.spots()
-    }
-
-    /// HIP-3 DEXes whose metadata failed to load; see
-    /// [`AssetMetadata::unavailable_dexes`].
-    #[must_use]
-    pub fn unavailable_dexes(&self) -> &[UnavailableDex] {
-        self.metadata.unavailable_dexes()
     }
 
     fn spot_for_internal_id(&self, internal_id: usize) -> Option<&SpotAsset> {
@@ -380,6 +369,7 @@ fn is_rankable_suggestion(
 #[cfg(test)]
 mod tests {
     use super::super::market::test_support::{hip3_perp, perp, spot};
+    use super::super::metadata::UnavailableDex;
     use super::*;
 
     fn resolver() -> AssetResolver {

@@ -3,8 +3,7 @@ use std::time::Duration;
 
 use hypersdk::Decimal;
 use hypersdk::hypercore::{
-    AssetContext, BookLevel, Candle, CandleInterval, Chain, FundingRate, Incoming, L2Book,
-    Subscription,
+    AssetContext, BookLevel, Candle, CandleInterval, FundingRate, Incoming, L2Book, Subscription,
 };
 use serde::Serialize;
 
@@ -330,16 +329,16 @@ async fn book(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let coin = market_coin(inv, coin).await?;
-    inv.print(&book_snapshot_for(remote.chain(), &coin, aggregation).await?);
+    inv.print(&book_snapshot_for(remote.api(), &coin, aggregation).await?);
     Ok(())
 }
 
 async fn book_snapshot_for(
-    chain: Chain,
+    api: &ApiClient,
     coin: &str,
     aggregation: BookAggregationArgs,
 ) -> Result<BookSnapshot, anyhow::Error> {
-    let book = fetch_l2_book(chain, coin, aggregation).await?;
+    let book = fetch_l2_book(api, coin, aggregation).await?;
     Ok(BookSnapshot::from(book))
 }
 
@@ -386,7 +385,7 @@ async fn candles_snapshot_for(
 async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let coin = market_coin(inv, coin).await?;
-    let book = fetch_l2_book(remote.chain(), &coin, BookAggregationArgs::default()).await?;
+    let book = fetch_l2_book(remote.api(), &coin, BookAggregationArgs::default()).await?;
     inv.print(&One::new(spread_row_from_book(&coin, &book)?));
     Ok(())
 }
@@ -405,7 +404,7 @@ async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
         .into_iter()
         .max_by_key(|rate| rate.time);
 
-    let active_ctx = fetch_active_asset_ctx(remote.chain(), &coin).await?;
+    let active_ctx = fetch_active_asset_ctx(remote.api(), &coin).await?;
     inv.print(&One::new(FundingRow::from_history_and_context(
         &coin,
         latest_history,
@@ -417,7 +416,7 @@ async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
 async fn mids(inv: &Invocation, dex: Option<&DexArg>) -> Result<(), anyhow::Error> {
     let selected = inv.session().json_options().selected_fields();
     let client = inv.remote()?.api();
-    let dex = inv.dex(dex).await?.map(|dex| dex.name.clone());
+    let dex = inv.dex_name(dex).await?;
     inv.print(&mids_snapshot(client, dex.as_deref(), selected).await?);
     Ok(())
 }
@@ -482,12 +481,12 @@ fn spread_row_from_book(coin: &str, book: &L2Book) -> Result<SpreadRow, CliError
 }
 
 async fn fetch_l2_book(
-    chain: Chain,
+    api: &ApiClient,
     coin: &str,
     aggregation: BookAggregationArgs,
 ) -> Result<L2Book, CliError> {
     first_matching_message(
-        chain,
+        api,
         aggregation.subscription(coin),
         WEBSOCKET_TIMEOUT,
         &Awaited {
@@ -502,9 +501,9 @@ async fn fetch_l2_book(
     .await
 }
 
-async fn fetch_active_asset_ctx(chain: Chain, coin: &str) -> Result<AssetContext, CliError> {
+async fn fetch_active_asset_ctx(api: &ApiClient, coin: &str) -> Result<AssetContext, CliError> {
     first_matching_message(
-        chain,
+        api,
         Subscription::ActiveAssetCtx {
             coin: coin.to_string(),
         },
@@ -730,18 +729,17 @@ async fn watch_book(
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let chain = remote.chain();
+    let api = remote.api();
     let subscription_coin = market_coin(inv, coin).await?;
 
     crate::watch::run_snapshot_watch(
         inv,
         &format!("Live order book: {subscription_coin}"),
-        chain,
         vec![aggregation.subscription(subscription_coin.clone())],
         max_ticks,
         move || {
             let coin = subscription_coin.clone();
-            async move { book_snapshot_for(chain, &coin, aggregation).await }
+            async move { book_snapshot_for(api, &coin, aggregation).await }
         },
     )
     .await
@@ -755,12 +753,11 @@ async fn watch_mids(
     let remote = inv.remote()?;
     let client = remote.api();
     let selected = inv.session().json_options().selected_fields();
-    let dex = inv.dex(dex).await?.map(|dex| dex.name.clone());
+    let dex = inv.dex_name(dex).await?;
 
     crate::watch::run_snapshot_watch(
         inv,
         "Live mid prices",
-        remote.chain(),
         vec![Subscription::AllMids { dex: dex.clone() }],
         max_ticks,
         move || {
@@ -785,7 +782,6 @@ async fn watch_candles(
     crate::watch::run_snapshot_watch(
         inv,
         &format!("Live candles: {subscription_coin} {interval}"),
-        remote.chain(),
         vec![Subscription::Candle {
             coin: subscription_coin.clone(),
             interval: interval.to_string(),

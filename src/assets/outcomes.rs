@@ -1,7 +1,7 @@
 //! Outcome markets as `outcomeMeta` lists them: one row per tradable side, one
 //! row per question, and the `settledOutcome` read.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -14,8 +14,7 @@ use crate::wire::InfoRequest;
 use super::asset_id::{outcome_asset_id, outcome_coin, outcome_encoding, outcome_token};
 use super::outcome_description::OutcomeDescription;
 use super::outcome_templates::{
-    TEMPLATE_PREFIX, TemplateList, interpolate, load_outcome_templates, report_skipped,
-    resolve_side_name,
+    TEMPLATE_PREFIX, TemplateList, interpolate, load_outcome_templates, resolve_side_name,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -122,9 +121,10 @@ pub enum Names {
 }
 
 impl OutcomeCatalog {
-    /// `outcomeMeta` as rows. An entry that cannot become rows is reported on
-    /// stderr, not dropped silently and not fatal: one odd outcome must not
-    /// hide the rest.
+    /// `outcomeMeta` as rows. An entry that cannot become rows is named in
+    /// `skipped` (the `outcomeTemplates` entries that could not be read come
+    /// first), not dropped silently and not fatal: one odd outcome must not
+    /// hide the rest. The caller reports them.
     pub async fn load(api: &ApiClient, names: Names) -> Result<Self, CliError> {
         let response = api
             .info::<OutcomeMetaResponse>(
@@ -138,9 +138,38 @@ impl OutcomeCatalog {
                 .await
                 .map_err(|err| err.to_string());
             catalog.resolve_templates(&templates);
+            if let Ok(list) = templates {
+                catalog.skipped.splice(0..0, list.skipped);
+            }
         }
-        report_skipped(&catalog.skipped);
         Ok(catalog)
+    }
+
+    /// The tradable side that asset encoding `encoding` names.
+    #[must_use]
+    pub fn side(&self, encoding: u64) -> Option<&OutcomeSideRow> {
+        self.sides.iter().find(|row| row.encoding == encoding)
+    }
+
+    /// Whether `outcomeMeta` lists any side of `outcome`.
+    #[must_use]
+    pub fn has_outcome(&self, outcome: u64) -> bool {
+        self.sides.iter().any(|row| row.outcome == outcome)
+    }
+
+    #[must_use]
+    pub fn question(&self, question: u64) -> Option<&OutcomeQuestionRow> {
+        self.questions.iter().find(|row| row.question == question)
+    }
+
+    /// The tokens `outcomes` are quoted in.
+    #[must_use]
+    pub fn quote_tokens(&self, outcomes: &[u64]) -> BTreeSet<String> {
+        self.sides
+            .iter()
+            .filter(|row| outcomes.contains(&row.outcome))
+            .filter_map(|row| row.quote_token.clone())
+            .collect()
     }
 
     fn from_meta(response: OutcomeMetaResponse) -> Self {
@@ -505,12 +534,20 @@ struct RawSettledQuestion {
     description: String,
 }
 
+/// A settled outcome and the `outcomeTemplates` entries that could not be
+/// read while naming it, for the caller to report.
+#[derive(Debug)]
+pub struct SettledOutcome {
+    pub row: SettledOutcomeRow,
+    pub skipped: Vec<String>,
+}
+
 /// How `outcome` settled; `None` when it has not (the exchange answers `null`
 /// for an outcome that is still trading and for an unknown id alike).
 pub async fn load_settled_outcome(
     api: &ApiClient,
     outcome: u64,
-) -> Result<Option<SettledOutcomeRow>, CliError> {
+) -> Result<Option<SettledOutcome>, CliError> {
     let raw = api
         .info::<Option<RawSettled>>(
             &InfoRequest::new("settledOutcome").field("outcome", outcome),
@@ -532,7 +569,14 @@ pub async fn load_settled_outcome(
     } else {
         Ok(TemplateList::default())
     };
-    Ok(Some(settled_row(raw, &templates)))
+    let skipped = templates
+        .as_ref()
+        .map(|list| list.skipped.clone())
+        .unwrap_or_default();
+    Ok(Some(SettledOutcome {
+        row: settled_row(raw, &templates),
+        skipped,
+    }))
 }
 
 fn settled_row(raw: RawSettled, templates: &Result<TemplateList, String>) -> SettledOutcomeRow {

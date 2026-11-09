@@ -12,7 +12,14 @@ use std::time::{Duration, Instant};
 const DIR_MODE: u32 = 0o700;
 const FILE_MODE: u32 = 0o600;
 const LOCK_POLL: Duration = Duration::from_millis(25);
-const TEMP_NAME_ATTEMPTS: u32 = 16;
+pub(crate) const TEMP_NAME_ATTEMPTS: u32 = 16;
+
+/// A suffix no other process or call shares, for a temporary file or
+/// directory created beside its target. A name that is taken anyway is retried
+/// up to [`TEMP_NAME_ATTEMPTS`] times.
+pub(crate) fn unique_suffix() -> String {
+    format!("{}-{:032x}", std::process::id(), rand::random::<u128>())
+}
 
 /// `OpenOptions` that create files with `mode` on Unix.
 #[must_use]
@@ -68,11 +75,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 
     let mut attempt = 0_u32;
     let (tmp_path, mut tmp) = loop {
-        let nanos = crate::clock::now_utc().timestamp_subsec_nanos();
-        let tmp_path = parent.join(format!(
-            ".{file_name}.{}.{nanos}.{attempt}.tmp",
-            std::process::id()
-        ));
+        let tmp_path = parent.join(format!(".{file_name}.{}.tmp", unique_suffix()));
         match open_options_with_mode(FILE_MODE)
             .write(true)
             .create_new(true)

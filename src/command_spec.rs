@@ -611,7 +611,7 @@ impl CommandSpec {
     /// A command that reads public data only: nothing about the account, the
     /// exchange state or local secrets. The MCP server exposes these by default.
     #[must_use]
-    pub const fn is_public_read(&self) -> bool {
+    const fn is_public_read(&self) -> bool {
         matches!(self.lifecycle, Lifecycle::ReadOnly) && matches!(self.risk, Risk::None)
     }
 

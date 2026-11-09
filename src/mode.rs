@@ -248,12 +248,6 @@ impl Mode {
             (true, _) => self.live_display_blocker(),
         }
     }
-
-    /// The run may take over the whole terminal (the watch TUI).
-    #[must_use]
-    pub fn full_screen(&self) -> bool {
-        self.full_screen_blocker().is_none()
-    }
 }
 
 fn env_output_format(source: &EnvSource) -> Option<Result<OutputFormat, CliError>> {
@@ -658,15 +652,16 @@ mod tests {
 
     #[test]
     fn full_screen_is_a_live_display_that_can_also_read_keys() {
-        assert!(terminal().full_screen());
-        assert!(!tty(false, true, true).full_screen());
-        assert!(!tty(true, false, true).full_screen());
+        assert!(terminal().full_screen_blocker().is_none());
+        assert!(tty(false, true, true).full_screen_blocker().is_some());
+        assert!(tty(true, false, true).full_screen_blocker().is_some());
         assert!(
             !Mode {
                 agent: true,
                 ..terminal()
             }
-            .full_screen()
+            .full_screen_blocker()
+            .is_none()
         );
     }
 

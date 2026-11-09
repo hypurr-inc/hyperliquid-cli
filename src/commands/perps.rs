@@ -504,10 +504,7 @@ async fn funding_history(inv: &Invocation, args: &FundingHistoryArgs) -> Result<
 
 async fn at_oi_cap(inv: &Invocation, args: &AtOiCapArgs) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
-    let dex = inv
-        .dex(args.dex.as_ref())
-        .await?
-        .map(|dex| dex.name.clone());
+    let dex = inv.dex_name(args.dex.as_ref()).await?;
     let coins: Vec<String> = api
         .info(
             &InfoRequest::new("perpsAtOpenInterestCap").field_if("dex", dex),
@@ -552,7 +549,7 @@ async fn dexs(inv: &Invocation) -> Result<(), anyhow::Error> {
 
 async fn dex_limits(inv: &Invocation, args: &DexLimitsArgs) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
-    let Some(dex) = inv.dex(Some(&args.dex)).await?.map(|dex| dex.name.clone()) else {
+    let Some(dex) = inv.dex_name(Some(&args.dex)).await? else {
         return Err(CliError::Configuration("dex must not be empty".to_string()).into());
     };
     let limits: Option<RawDexLimits> = api

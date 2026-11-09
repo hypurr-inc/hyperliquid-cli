@@ -29,7 +29,7 @@ pub enum StreamBound {
 
 /// What `0` means in a bound's environment variable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnvZero {
+pub(crate) enum EnvZero {
     /// Not a bound: the variable is ignored, as if unset.
     Unbounded,
     /// A real bound of zero items: the stream stops right after it starts.
@@ -37,7 +37,7 @@ pub enum EnvZero {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StreamEnv {
+pub(crate) struct StreamEnv {
     pub name: &'static str,
     pub zero: EnvZero,
 }
@@ -61,7 +61,7 @@ impl StreamBound {
     }
 
     #[must_use]
-    pub const fn env(self) -> Option<StreamEnv> {
+    pub(crate) const fn env(self) -> Option<StreamEnv> {
         match self {
             Self::SnapshotWatch => Some(StreamEnv {
                 name: env::WATCH_MAX_TICKS,
@@ -80,7 +80,7 @@ impl StreamBound {
     /// names the run for a stream that is a command of its own (`Polled`),
     /// whose message also carries a runnable example.
     #[must_use]
-    pub fn unbounded_message(self, command: &str) -> String {
+    fn unbounded_message(self, command: &str) -> String {
         let mut ways: Vec<String> = self
             .cli_args()
             .iter()

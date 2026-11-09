@@ -2,7 +2,7 @@
 //!
 //! `/exchange` answers `{"status":"ok","response":{"type":..,"data":..}}` or
 //! `{"status":"err","response":"<text>"}`; the words other services use for the
-//! same error (`error`, `failed`, `failure`) are one set, [`is_error_status`].
+//! same error (`error`, `failed`, `failure`) are one set, `is_error_status`.
 //! [`Reply`] reads the envelope, [`typed`] reads the `type`/`data` of an ok
 //! payload, [`ok_response`] decodes it into the SDK's type, and
 //! [`info_request_unavailable`] says when `/info` does not know a request type
@@ -16,7 +16,7 @@ use serde_json::Value;
 const ERROR_STATUSES: &[&str] = &["err", "error", "failed", "failure"];
 
 #[must_use]
-pub fn is_error_status(status: &str) -> bool {
+fn is_error_status(status: &str) -> bool {
     ERROR_STATUSES
         .iter()
         .any(|word| status.eq_ignore_ascii_case(word))

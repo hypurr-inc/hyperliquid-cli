@@ -1,9 +1,12 @@
 use hypersdk::Address;
 use hypersdk::hypercore::types::Action;
 
+use crate::assets::{Names, OutcomeCatalog};
 use crate::dry_run::{DryRunEnvelope, DryRunSigning};
 use crate::errors::CliError;
+use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::output::warn;
 use crate::signing::SelectedSigner;
 
 /// The `status` of a receipt for an action the exchange accepted.
@@ -91,4 +94,22 @@ pub(crate) fn action_json(action: &Action) -> Result<serde_json::Value, CliError
     serde_json::to_value(action).map_err(|err| {
         CliError::Internal(anyhow::anyhow!("failed to encode exchange action: {err}"))
     })
+}
+
+/// One stderr warning per `outcomeMeta`/`outcomeTemplates` entry a loader
+/// could not turn into rows.
+pub(crate) fn warn_skipped(skipped: &[String]) {
+    for line in skipped {
+        warn(line);
+    }
+}
+
+/// [`OutcomeCatalog::load`], with the entries it skipped reported on stderr.
+pub(crate) async fn load_outcome_catalog(
+    api: &ApiClient,
+    names: Names,
+) -> Result<OutcomeCatalog, CliError> {
+    let catalog = OutcomeCatalog::load(api, names).await?;
+    warn_skipped(&catalog.skipped);
+    Ok(catalog)
 }

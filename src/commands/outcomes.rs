@@ -1,12 +1,13 @@
 use clap::Args;
 
 use crate::assets::{
-    Names, OutcomeCatalog, OutcomeQuestionRow, OutcomeSideRow, OutcomeTemplate, QuestionState,
-    SettledOutcomeRow, load_outcome_templates, load_settled_outcome, parse_outcome_notation,
+    Names, OutcomeQuestionRow, OutcomeSideRow, OutcomeTemplate, QuestionState, SettledOutcomeRow,
+    load_outcome_templates, load_settled_outcome, parse_outcome_notation,
 };
 use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, GroupSpec, InputKind, NoArgs, arg};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
+use crate::commands::common::support::{load_outcome_catalog, warn_skipped};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::quantity::parse_positive_usize;
@@ -184,7 +185,7 @@ impl ListRow for OutcomeTemplate {
 }
 
 pub async fn list(inv: &Invocation, args: &OutcomeListArgs) -> Result<(), anyhow::Error> {
-    let mut rows = OutcomeCatalog::load(inv.remote()?.api(), Names::Resolved)
+    let mut rows = load_outcome_catalog(inv.remote()?.api(), Names::Resolved)
         .await?
         .sides;
     if !args.oldest_first {
@@ -197,11 +198,10 @@ pub async fn list(inv: &Invocation, args: &OutcomeListArgs) -> Result<(), anyhow
 
 pub async fn get(inv: &Invocation, args: &OutcomeGetArgs) -> Result<(), anyhow::Error> {
     let parsed = parse_outcome_notation(&args.notation)?;
-    let row = OutcomeCatalog::load(inv.remote()?.api(), Names::Resolved)
+    let row = load_outcome_catalog(inv.remote()?.api(), Names::Resolved)
         .await?
-        .sides
-        .into_iter()
-        .find(|row| row.encoding == parsed.encoding)
+        .side(parsed.encoding)
+        .cloned()
         .ok_or_else(|| {
             CliError::Unsupported(format!(
                 "outcome notation '{}' was not found in outcomeMeta",
@@ -281,7 +281,7 @@ impl CliCommand for OutcomesQuestions {
     ]);
 
     async fn run(inv: &Invocation, args: &OutcomeQuestionsArgs) -> Result<(), anyhow::Error> {
-        let mut rows = OutcomeCatalog::load(inv.remote()?.api(), Names::Resolved)
+        let mut rows = load_outcome_catalog(inv.remote()?.api(), Names::Resolved)
             .await?
             .questions;
         if !args.oldest_first {
@@ -309,7 +309,7 @@ impl CliCommand for OutcomesSettled {
         .describe("Outcome id.")]);
 
     async fn run(inv: &Invocation, args: &OutcomeSettledArgs) -> Result<(), anyhow::Error> {
-        let row = load_settled_outcome(inv.remote()?.api(), args.outcome)
+        let settled = load_settled_outcome(inv.remote()?.api(), args.outcome)
             .await?
             .ok_or_else(|| {
                 CliError::Unsupported(format!(
@@ -317,7 +317,8 @@ impl CliCommand for OutcomesSettled {
                     args.outcome
                 ))
             })?;
-        inv.print(&One::new(row));
+        warn_skipped(&settled.skipped);
+        inv.print(&One::new(settled.row));
         Ok(())
     }
 }
@@ -336,6 +337,7 @@ impl CliCommand for OutcomesTemplates {
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         let list = load_outcome_templates(inv.remote()?.api()).await?;
+        warn_skipped(&list.skipped);
         inv.print(&Rows::new(list.templates));
         Ok(())
     }

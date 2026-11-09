@@ -21,6 +21,7 @@ use crate::hints::{
     CANCEL_ORDER_COMMAND, CANCEL_TWAP_COMMAND, CREATE_TWAP_COMMAND, TRAILING_STOP_COMMAND,
 };
 use crate::http_api::ApiClient;
+use crate::invocation::Invocation;
 use crate::quantity::require_positive_if_set;
 
 async fn lookup_order(
@@ -143,6 +144,7 @@ impl CoinFilter {
 /// market must exist: an unknown coin or dex fails here instead of listing an
 /// empty set of orders to cancel.
 pub(super) async fn resolve_cancel_all_coin_filter(
+    inv: &Invocation,
     client: &ApiClient,
     resolver: &AssetResolver,
     args: &CancelAllArgs,
@@ -159,8 +161,8 @@ pub(super) async fn resolve_cancel_all_coin_filter(
     let query = match parse_asset_query(coin) {
         AssetQuery::Outcome(_) => coin.to_string(),
         _ => {
-            let dex = resolver.dexes().select(client, args.dex.as_ref()).await?;
-            qualify_dex_asset(dex.map(|dex| dex.name.as_str()), coin)
+            let dex = inv.dex_name(args.dex.as_ref()).await?;
+            qualify_dex_asset(dex.as_deref(), coin)
         }
     };
     Ok(Some(
@@ -209,12 +211,13 @@ impl CancelAllOrdersPlan {
 }
 
 pub(super) async fn prepare_cancel_all_orders_plan(
+    inv: &Invocation,
     client: &ApiClient,
     resolver: &AssetResolver,
     user: Address,
     args: &CancelAllArgs,
 ) -> Result<CancelAllOrdersPlan, CliError> {
-    let coin_filter = resolve_cancel_all_coin_filter(client, resolver, args).await?;
+    let coin_filter = resolve_cancel_all_coin_filter(inv, client, resolver, args).await?;
     let open_orders = client
         .sdk()
         .open_orders(
@@ -242,11 +245,12 @@ pub(super) async fn prepare_cancel_all_orders_plan(
 }
 
 pub(super) async fn cancel_all_dry_run_plan(
+    inv: &Invocation,
     client: &ApiClient,
     resolver: &AssetResolver,
     args: &CancelAllArgs,
 ) -> Result<OrderDryRunPlan, CliError> {
-    let coin_filter = resolve_cancel_all_coin_filter(client, resolver, args).await?;
+    let coin_filter = resolve_cancel_all_coin_filter(inv, client, resolver, args).await?;
     Ok(OrderDryRunPlan::new(
         "cancel_open_orders",
         serde_json::json!({

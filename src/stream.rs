@@ -11,9 +11,7 @@ use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 use hypersdk::Address;
-use hypersdk::hypercore::{
-    Chain, Incoming, Subscription, UserEvent, WebSocket, ws::Event as WsEvent,
-};
+use hypersdk::hypercore::{Incoming, Subscription, UserEvent, WebSocket, ws::Event as WsEvent};
 use serde::Serialize;
 use tokio::time::Sleep;
 
@@ -51,7 +49,7 @@ where
     sink::write_line(output, &line)
 }
 
-pub struct ShutdownSignals {
+struct ShutdownSignals {
     /// Each handled signal with the exit status it ends the process with.
     #[cfg(unix)]
     signals: Vec<(tokio::signal::unix::Signal, i32)>,
@@ -59,7 +57,7 @@ pub struct ShutdownSignals {
 
 impl ShutdownSignals {
     #[cfg(unix)]
-    pub fn install() -> Result<Self, anyhow::Error> {
+    fn install() -> Result<Self, anyhow::Error> {
         use tokio::signal::unix::{SignalKind, signal};
 
         let signals = [
@@ -79,12 +77,12 @@ impl ShutdownSignals {
     }
 
     #[cfg(not(unix))]
-    pub fn install() -> Result<Self, anyhow::Error> {
+    fn install() -> Result<Self, anyhow::Error> {
         Ok(Self {})
     }
 
     #[cfg(unix)]
-    pub async fn recv(&mut self) -> i32 {
+    async fn recv(&mut self) -> i32 {
         let waits = self.signals.iter_mut().map(|(signal, code)| {
             Box::pin(async move {
                 match signal.recv().await {
@@ -97,7 +95,7 @@ impl ShutdownSignals {
     }
 
     #[cfg(not(unix))]
-    pub async fn recv(&mut self) -> i32 {
+    async fn recv(&mut self) -> i32 {
         match tokio::signal::ctrl_c().await {
             Ok(()) => EXIT_SIGINT,
             Err(_) => std::future::pending().await,
@@ -419,10 +417,10 @@ impl SubscribeTarget {
 /// asked for explicitly, so it earns a notice that the stream is JSON lines.
 pub async fn stream_subscription(
     inv: &Invocation,
-    chain: Chain,
     target: SubscribeTarget,
     args: &StreamBoundArgs,
 ) -> Result<(), anyhow::Error> {
+    let api = inv.remote()?.api();
     ws::ensure_within_limits(target.subscriptions())?;
     let mode = inv.mode();
     let projection = inv.session().json_options();
@@ -442,7 +440,7 @@ pub async fn stream_subscription(
         }
         stream_target(
             &target,
-            ws::websocket_for_chain(chain),
+            api.websocket(),
             bounds,
             &mut stdout,
             projection,

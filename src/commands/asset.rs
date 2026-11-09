@@ -13,6 +13,7 @@ use crate::assets::{
 use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::rows::or_missing;
+use crate::commands::common::support;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
@@ -419,12 +420,10 @@ fn or_warn<T>(what: &str, loaded: Result<T, CliError>) -> Option<T> {
 
 /// Names are the ones the exchange sends: `asset search` and `asset decode` show
 /// template outcomes as `template:<id>`.
-async fn load_outcome_rows(api: &ApiClient) -> Option<Vec<OutcomeSideRow>> {
+async fn load_outcome_catalog(api: &ApiClient) -> Option<OutcomeCatalog> {
     or_warn(
         "outcome metadata",
-        OutcomeCatalog::load(api, Names::Raw)
-            .await
-            .map(|catalog| catalog.sides),
+        support::load_outcome_catalog(api, Names::Raw).await,
     )
 }
 
@@ -443,9 +442,9 @@ async fn search_assets(
         candidates.extend(search_resolver_assets(resolver, network));
     }
 
-    let outcome_rows = load_outcome_rows(api).await;
-    if let Some(rows) = outcome_rows.as_ref() {
-        candidates.extend(rows.iter().cloned().filter_map(|row| {
+    let outcome_catalog = load_outcome_catalog(api).await;
+    if let Some(catalog) = outcome_catalog.as_ref() {
+        candidates.extend(catalog.sides.iter().cloned().filter_map(|row| {
             let asset_id = row.asset_id;
             let mut decoded = decode_asset_id(asset_id, network);
             apply_outcome_row(&mut decoded, row);
@@ -457,12 +456,9 @@ async fn search_assets(
         let mut decoded = decode_asset_id(asset_id, network);
         match decoded.kind {
             AssetIdKind::Outcome => {
-                if let Some(row) = outcome_rows
-                    .as_ref()
-                    .and_then(|rows| {
-                        rows.iter()
-                            .find(|row| Some(row.encoding) == decoded.encoding)
-                    })
+                if let Some(row) = decoded
+                    .encoding
+                    .and_then(|encoding| outcome_catalog.as_ref()?.side(encoding))
                     .cloned()
                 {
                     apply_outcome_row(&mut decoded, row);
@@ -575,20 +571,17 @@ fn fuzzy_search_threshold(query: &str) -> usize {
 /// A dex that failed to load is named on stderr, with the reason: its markets
 /// are missing from the answer.
 async fn load_resolver(inv: &Invocation) -> Option<AssetResolver> {
-    let loaded = async {
-        let metadata =
-            AssetMetadata::load_with_hip3(inv.remote()?.api(), inv.dex_list().await?).await?;
-        Ok(inv.resolver_over(metadata))
-    }
-    .await;
-    let resolver = or_warn("asset metadata", loaded)?;
-    for dex in resolver.unavailable_dexes() {
+    let loaded =
+        async { AssetMetadata::load_with_hip3(inv.remote()?.api(), inv.dex_list().await?).await }
+            .await;
+    let metadata = or_warn("asset metadata", loaded)?;
+    for dex in metadata.unavailable_dexes() {
         warn(&format!(
             "HIP-3 dex {} metadata unavailable, results are limited: {}",
             dex.name, dex.reason
         ));
     }
-    Some(resolver)
+    Some(inv.resolver_over(metadata))
 }
 
 async fn enrich_from_resolver(inv: &Invocation, decoded: &mut DecodedAssetId) {
@@ -641,10 +634,10 @@ async fn enrich_outcome(api: &ApiClient, decoded: &mut DecodedAssetId) {
     let Some(encoding) = decoded.encoding else {
         return;
     };
-    let Some(rows) = load_outcome_rows(api).await else {
+    let Some(catalog) = load_outcome_catalog(api).await else {
         return;
     };
-    let Some(row) = rows.into_iter().find(|row| row.encoding == encoding) else {
+    let Some(row) = catalog.side(encoding).cloned() else {
         return;
     };
 
@@ -662,130 +655,15 @@ fn apply_outcome_row(decoded: &mut DecodedAssetId, row: OutcomeSideRow) {
     decoded.side_name = Some(side_name.clone());
     decoded.outcome_name = Some(row.outcome_name.clone());
     let parsed = OutcomeDescription::parse(&row.description);
-    decoded.market_title = outcome_market_title(&parsed, &side_name, &row.outcome_name);
-    decoded.slug = outcome_slug(&parsed, &side_name);
-    decoded.condition = outcome_condition_summary(&parsed);
+    decoded.market_title = parsed.market_title(&side_name, &row.outcome_name);
+    decoded.slug = parsed.slug(&side_name);
+    decoded.condition = parsed.condition_summary();
     decoded.condition_class = parsed.class().map(str::to_string);
     decoded.underlying = parsed.underlying().map(str::to_string);
     decoded.expiry = parsed.expiry().map(str::to_string);
     decoded.target_price = parsed.target_price().map(str::to_string);
     decoded.period = parsed.period().map(str::to_string);
     decoded.description = Some(row.description);
-}
-
-fn outcome_condition_summary(description: &OutcomeDescription) -> Option<String> {
-    if let Some((underlying, target_price, expiry)) = description.price_binary() {
-        let expiry = format_expiry_display(expiry).unwrap_or_else(|| expiry.to_string());
-        return Some(format!("{underlying} above {target_price} at {expiry}"));
-    }
-
-    let mut fields = Vec::new();
-    if let Some(condition_class) = description.class() {
-        fields.push(condition_class.to_string());
-    }
-    if let Some(underlying) = description.underlying() {
-        fields.push(format!("underlying={underlying}"));
-    }
-    if let Some(target_price) = description.target_price() {
-        fields.push(format!("target_price={target_price}"));
-    }
-    if let Some(expiry) = description.expiry() {
-        fields.push(format!("expiry={expiry}"));
-    }
-    if let Some(period) = description.period() {
-        fields.push(format!("period={period}"));
-    }
-
-    (!fields.is_empty()).then(|| fields.join("; "))
-}
-
-fn outcome_market_title(
-    description: &OutcomeDescription,
-    side_name: &str,
-    fallback_name: &str,
-) -> Option<String> {
-    if let Some((underlying, target_price, expiry)) = description.price_binary() {
-        let expiry = format_expiry_display(expiry).unwrap_or_else(|| expiry.to_string());
-        return Some(format!(
-            "{underlying} above {target_price} {side_name} {expiry}"
-        ));
-    }
-
-    (!fallback_name.trim().is_empty()).then(|| fallback_name.to_string())
-}
-
-fn outcome_slug(description: &OutcomeDescription, side_name: &str) -> Option<String> {
-    let (underlying, target_price, expiry) = description.price_binary()?;
-    let expiry_slug = format_expiry_slug(expiry)?;
-    Some(format!(
-        "{}-above-{}-{}-{expiry_slug}",
-        slug_token(underlying),
-        slug_token(target_price),
-        slug_token(side_name)
-    ))
-}
-
-fn format_expiry_display(raw: &str) -> Option<String> {
-    let (_, month, day, hour, minute) = parse_expiry_parts(raw)?;
-    let month = month_name(month)?;
-    Some(format!("{month} {day} {hour}:{minute}"))
-}
-
-fn format_expiry_slug(raw: &str) -> Option<String> {
-    let (_, month, day, hour, minute) = parse_expiry_parts(raw)?;
-    let month = month_name(month)?.to_ascii_lowercase();
-    Some(format!("{month}-{day}-{hour}{minute}"))
-}
-
-fn parse_expiry_parts(raw: &str) -> Option<(&str, &str, &str, &str, &str)> {
-    let raw = raw.trim();
-    if raw.len() != 13 || raw.as_bytes().get(8) != Some(&b'-') {
-        return None;
-    }
-    let year = raw.get(0..4)?;
-    let month = raw.get(4..6)?;
-    let day = raw.get(6..8)?;
-    let hour = raw.get(9..11)?;
-    let minute = raw.get(11..13)?;
-    [year, month, day, hour, minute]
-        .into_iter()
-        .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
-        .then_some((year, month, day, hour, minute))
-}
-
-fn month_name(month: &str) -> Option<&'static str> {
-    match month {
-        "01" => Some("Jan"),
-        "02" => Some("Feb"),
-        "03" => Some("Mar"),
-        "04" => Some("Apr"),
-        "05" => Some("May"),
-        "06" => Some("Jun"),
-        "07" => Some("Jul"),
-        "08" => Some("Aug"),
-        "09" => Some("Sep"),
-        "10" => Some("Oct"),
-        "11" => Some("Nov"),
-        "12" => Some("Dec"),
-        _ => None,
-    }
-}
-
-fn slug_token(raw: &str) -> String {
-    raw.trim()
-        .chars()
-        .filter_map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                Some(ch.to_ascii_lowercase())
-            } else if ch.is_whitespace() || matches!(ch, '_' | ':') {
-                Some('-')
-            } else {
-                None
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
 }
 
 pub fn parse_asset_id(raw: &str) -> Result<u64, String> {

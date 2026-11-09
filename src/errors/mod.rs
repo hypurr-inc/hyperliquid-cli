@@ -18,7 +18,7 @@ use crate::response_sanitization::Untrusted;
 
 pub(crate) use classify::from_sdk;
 pub use classify::{
-    Decisive, Rejection, address_rate_limit_in_body, classify_rejection, from_anyhow,
+    Rejection, address_rate_limit_in_body, classify_rejection, from_anyhow,
     from_exchange_rejection, http_response_indicates_rate_limit, http_status_in_text,
     is_server_status,
 };
@@ -214,12 +214,14 @@ impl CliError {
         self.spec().exit_code
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn category(&self) -> &'static str {
         self.spec().category
     }
 
     /// Stable snake_case reason code for JSON error envelopes.
+    #[cfg(test)]
     #[must_use]
     pub fn reason(&self) -> &'static str {
         self.spec().reason
