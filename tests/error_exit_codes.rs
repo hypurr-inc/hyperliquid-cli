@@ -2,7 +2,7 @@ mod support;
 
 use predicates::prelude::*;
 use serde_json::Value;
-use support::{IsolatedHome, hyperliquid_command};
+use support::{IsolatedHome, hermetic_command};
 
 const OWS_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const OWS_FAIL_CLOSED: &str = "does not have a resolved wallet for live signing";
@@ -13,7 +13,7 @@ fn stdout_json(output: &[u8]) -> Value {
 
 #[test]
 fn no_arguments_prints_usage_and_exits_zero() {
-    hyperliquid_command()
+    hermetic_command()
         .assert()
         .success()
         .code(0)
@@ -22,7 +22,7 @@ fn no_arguments_prints_usage_and_exits_zero() {
 
 #[test]
 fn version_flag_prints_the_crate_version() {
-    hyperliquid_command()
+    hermetic_command()
         .arg("--version")
         .assert()
         .code(0)
@@ -31,7 +31,7 @@ fn version_flag_prints_the_crate_version() {
 
 #[test]
 fn help_flag_exits_zero_with_usage() {
-    hyperliquid_command()
+    hermetic_command()
         .arg("--help")
         .assert()
         .code(0)
@@ -40,7 +40,7 @@ fn help_flag_exits_zero_with_usage() {
 
 #[test]
 fn an_unknown_format_value_is_a_usage_error_with_a_json_envelope() {
-    let output = hyperliquid_command()
+    let output = hermetic_command()
         .args(["--format", "yaml"])
         .assert()
         .code(2)
@@ -54,15 +54,12 @@ fn an_unknown_format_value_is_a_usage_error_with_a_json_envelope() {
 
 #[test]
 fn a_missing_required_argument_exits_with_usage_code() {
-    hyperliquid_command()
-        .args(["perps", "get"])
-        .assert()
-        .code(2);
+    hermetic_command().args(["perps", "get"]).assert().code(2);
 }
 
 #[test]
 fn non_tty_usage_errors_are_structured_json_by_default() {
-    let output = hyperliquid_command()
+    let output = hermetic_command()
         .args(["wallet", "show", "--bogus"])
         .assert()
         .code(2)
@@ -77,7 +74,7 @@ fn non_tty_usage_errors_are_structured_json_by_default() {
 
 #[test]
 fn explicit_pretty_usage_errors_stay_human_readable() {
-    hyperliquid_command()
+    hermetic_command()
         .args(["--format", "pretty", "wallet", "show", "--bogus"])
         .assert()
         .code(2)
@@ -87,7 +84,7 @@ fn explicit_pretty_usage_errors_stay_human_readable() {
 
 #[test]
 fn agent_mode_usage_errors_are_structured_json() {
-    let output = hyperliquid_command()
+    let output = hermetic_command()
         .env("HYPERLIQUID_AGENT", "1")
         .args(["wallet", "show", "--bogus"])
         .assert()
@@ -162,7 +159,7 @@ fn an_ows_signer_dry_run_does_not_require_signing() {
 
 #[test]
 fn a_private_key_flag_with_a_keystore_is_a_usage_error() {
-    hyperliquid_command()
+    hermetic_command()
         .args([
             "--private-key",
             "0x0000000000000000000000000000000000000000000000000000000000000009",
