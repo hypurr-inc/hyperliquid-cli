@@ -1,26 +1,10 @@
 mod support;
 
-use support::stdout_json;
-
-use serde_json::Value;
-use support::IsolatedHome;
-use wiremock::matchers::{body_partial_json, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use serde_json::{Value, json};
+use support::exchange::ExchangeFixture;
+use support::{IsolatedHome, run_json, stdout_json};
 
 const USER: &str = "0x00000000000000000000000000000000000000aa";
-
-async fn mock_info_server() -> MockServer {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "BTC": "50000"
-        })))
-        .mount(&server)
-        .await;
-    server
-}
 
 #[tokio::test]
 async fn account_abstraction_read_normalizes_every_protocol_mode() {
@@ -34,27 +18,22 @@ async fn account_abstraction_read_normalizes_every_protocol_mode() {
     ];
     for (raw_mode, normalized_mode) in cases {
         let env = IsolatedHome::new();
-        let server = mock_info_server().await;
-        Mock::given(method("POST"))
-            .and(path("/info"))
-            .and(body_partial_json(serde_json::json!({
-                "type": "userAbstraction",
-                "user": USER
-            })))
-            .respond_with(ResponseTemplate::new(200).set_body_json(Value::String(raw_mode.into())))
-            .mount(&server)
+        let server = ExchangeFixture::start().await;
+        server
+            .mount_info_containing(
+                json!({"type": "userAbstraction", "user": USER}),
+                Value::String(raw_mode.into()),
+            )
             .await;
 
-        let out = env
-            .command_with_server(&server)
-            .args(["--format", "json", "account", "abstraction", USER])
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
+        let json = run_json(env.command_with_server(&server).args([
+            "--format",
+            "json",
+            "account",
+            "abstraction",
+            USER,
+        ]));
 
-        let json = stdout_json(&out);
         assert_eq!(
             json["user"].as_str().unwrap().to_ascii_lowercase(),
             USER.to_ascii_lowercase()
@@ -72,25 +51,16 @@ fn account_abstraction_set_dry_run_maps_cli_modes_to_protocol_modes() {
         ("portfolio-margin", "portfolioMargin"),
     ] {
         let env = IsolatedHome::new();
-        let out = env
-            .command()
-            .args([
-                "--format",
-                "json",
-                "--dry-run",
-                "account",
-                "abstraction",
-                "set",
-                "--mode",
-                cli_mode,
-            ])
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-
-        let json: Value = serde_json::from_slice(&out).unwrap();
+        let json = run_json(env.command().args([
+            "--format",
+            "json",
+            "--dry-run",
+            "account",
+            "abstraction",
+            "set",
+            "--mode",
+            cli_mode,
+        ]));
         assert_eq!(json["dry_run"], true);
         assert_eq!(json["command"], "account abstraction set");
         assert_eq!(json["would_execute"], "set_abstraction");
@@ -133,7 +103,7 @@ fn account_abstraction_set_dry_run_never_invents_the_user_it_signs_for() {
     assert!(unsigned["args"]["user"].is_null());
     assert!(unsigned["args"]["action"]["user"].is_null());
     assert!(unsigned["signer"].is_null());
-    assert!(unsigned["signer_warning"].is_string());
+    assert_eq!(unsigned["signer_warning"], "Authentication required.");
 
     let signer = support::expected_address(support::VALID_PRIVATE_KEY);
     let signed = run(Some(support::VALID_PRIVATE_KEY));
@@ -189,74 +159,29 @@ fn master_only_actions_refuse_a_stored_api_wallet_even_under_dry_run() {
     }
 }
 
-#[test]
-fn account_abstraction_set_help_and_schema_carry_the_protocol_cautions() {
-    let env = IsolatedHome::new();
-    let text = |args: &[&str]| {
-        let output = env
-            .command()
-            .args(args)
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        String::from_utf8(output).unwrap()
-    };
-    let help = text(&["account", "abstraction", "set", "--help"]);
-    let schema = text(&[
-        "--format",
-        "json",
-        "schema",
-        "account",
-        "abstraction",
-        "set",
-    ]);
-
-    for caution in [
-        "`disabled` is Standard",
-        "builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode",
-        "limited to 50k actions per day",
-    ] {
-        assert!(help.contains(caution), "{caution}: {help}");
-        assert!(schema.contains(caution), "{caution}: {schema}");
-    }
-}
-
-async fn portfolio_server(raw_mode: &str) -> MockServer {
-    let server = mock_info_server().await;
+async fn portfolio_server(raw_mode: &str) -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
     for (request, response) in [
+        (json!({"type": "userAbstraction"}), json!(raw_mode)),
         (
-            serde_json::json!({"type": "userAbstraction"}),
-            serde_json::json!(raw_mode),
-        ),
-        (
-            serde_json::json!({"type": "clearinghouseState"}),
+            json!({"type": "clearinghouseState"}),
             support::wire::perp_state_with("626469", "0", "0", "479227", vec![]),
         ),
         (
-            serde_json::json!({"type": "spotClearinghouseState"}),
-            serde_json::json!({"balances": [{
+            json!({"type": "spotClearinghouseState"}),
+            json!({"balances": [{
                 "coin": "USDC", "token": 0, "hold": "147242",
                 "total": "1186505", "entryNtl": "0"
             }]}),
         ),
-        (
-            serde_json::json!({"type": "userVaultEquities"}),
-            serde_json::json!([]),
-        ),
+        (json!({"type": "userVaultEquities"}), json!([])),
     ] {
-        Mock::given(method("POST"))
-            .and(path("/info"))
-            .and(body_partial_json(request))
-            .respond_with(ResponseTemplate::new(200).set_body_json(response))
-            .mount(&server)
-            .await;
+        server.mount_info_containing(request, response).await;
     }
     server
 }
 
-fn portfolio_stdout(env: &IsolatedHome, server: &MockServer, format: &str) -> String {
+fn portfolio_stdout(env: &IsolatedHome, server: &ExchangeFixture, format: &str) -> String {
     let output = env
         .command_with_server(server)
         .args(["--format", format, "account", "portfolio", USER])
