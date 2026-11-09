@@ -1,23 +1,17 @@
 //! One definition per command.
 //!
-//! A command is a type that implements [`CliCommand`]: its clap `Args`, its
-//! [`CommandSpec`] (the policy the schema, help notes and the run pipeline read)
-//! and its `run`. [`Entry::of`] erases the type; the list of entries in
-//! `commands::entries` is the only place a command is registered. The clap tree,
-//! the schema registry and dispatch are all derived from that list.
+//! A command's [`CommandSpec`]: the policy the schema, help notes and the run
+//! pipeline read, as data. A command type pairs it with its `run` in
+//! [`crate::cli_command::CliCommand`].
 
-use std::pin::Pin;
-
-use clap::{ArgMatches, Command, FromArgMatches};
+use clap::ArgMatches;
 use serde::Serialize;
 
 use crate::assets::{AssetQuery, parse_asset_query};
-use crate::bankr;
 use crate::errors::CliError;
 use crate::input_hardening::validate_resource_id;
-use crate::invocation::Invocation;
 use crate::network::Network;
-use crate::signing::Signs;
+use crate::signable::{Signs, UserSigned};
 use crate::stream_bounds::StreamBound;
 
 /// The flag that answers a confirmation prompt. Every command with this arg and
@@ -348,6 +342,20 @@ impl CommandSpec {
         }
     }
 
+    /// A read that runs on this machine alone: no network, signer or API
+    /// endpoint.
+    #[must_use]
+    pub const fn local_read(
+        path: &'static [&'static str],
+        category: &'static str,
+        about: &'static str,
+        description: &'static str,
+    ) -> Self {
+        let mut spec = Self::read(path, category, about, description);
+        spec.network = NetworkUse::None;
+        spec
+    }
+
     /// An interactive command that runs on this machine alone: no network,
     /// signer or API endpoint, and no risk until [`Self::risk`] says otherwise.
     #[must_use]
@@ -357,9 +365,8 @@ impl CommandSpec {
         about: &'static str,
         description: &'static str,
     ) -> Self {
-        let mut spec = Self::read(path, category, about, description);
+        let mut spec = Self::local_read(path, category, about, description);
         spec.lifecycle = Lifecycle::InteractiveLocal;
-        spec.network = NetworkUse::None;
         spec
     }
 
@@ -389,7 +396,7 @@ impl CommandSpec {
     #[must_use]
     pub fn bankr_signer(&self) -> SignerSupport {
         match self.signs {
-            Some(signs) if bankr::covers(signs) => SignerSupport::Supported,
+            Some(signs) if signs.bankr_covers() => SignerSupport::Supported,
             Some(_) => SignerSupport::Unsupported,
             None if self.auth_required => SignerSupport::Supported,
             None => SignerSupport::NotRequired,
@@ -400,6 +407,22 @@ impl CommandSpec {
     pub const fn signs(mut self, signs: Signs<'static>) -> Self {
         self.signs = Some(signs);
         self
+    }
+
+    /// Signs the user-signed action `T`, which only the master account may
+    /// sign: a stored API wallet is refused, naming `T`'s tag.
+    #[must_use]
+    pub const fn user_signed<T: UserSigned>(self) -> Self {
+        self.signs(Signs::user_signed::<T>())
+            .master_only(T::ACTION_TYPE)
+    }
+
+    /// Signs the user-signed `action` by digest, hypersdk not exposing its
+    /// document, and only the master account may: a stored API wallet is
+    /// refused, naming `action`.
+    #[must_use]
+    pub const fn digest_signed(self, action: &'static str) -> Self {
+        self.signs(Signs::Digest).master_only(action)
     }
 
     /// Refuse a stored API wallet for `action`, which only the master account
@@ -468,12 +491,6 @@ impl CommandSpec {
     pub const fn confirms_with_arg(mut self, id: &'static str) -> Self {
         self.confirms_with_arg = Some(id);
         self
-    }
-
-    /// Shorthand for [`NetworkUse::None`]: the command runs on this machine alone.
-    #[must_use]
-    pub const fn local(self) -> Self {
-        self.network(NetworkUse::None)
     }
 
     #[must_use]
@@ -672,65 +689,6 @@ impl GroupSpec {
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct NoArgs;
 
-pub type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + 'a>>;
-
-pub trait CliCommand: 'static {
-    type Args: clap::Args + FromArgMatches + 'static;
-
-    const SPEC: CommandSpec;
-
-    /// Rejections that need more than a per-arg [`Check`]. Runs right after them.
-    fn validate(_args: &Self::Args) -> Result<(), CliError> {
-        Ok(())
-    }
-
-    fn run<'a>(
-        inv: &'a Invocation,
-        args: &'a Self::Args,
-    ) -> impl Future<Output = Result<(), anyhow::Error>> + 'a;
-}
-
-pub trait Bound {
-    fn validate(&self) -> Result<(), CliError>;
-    fn run<'a>(&'a self, inv: &'a Invocation) -> RunFuture<'a>;
-}
-
-struct Parsed<C: CliCommand>(C::Args);
-
-impl<C: CliCommand> Bound for Parsed<C> {
-    fn validate(&self) -> Result<(), CliError> {
-        C::validate(&self.0)
-    }
-
-    fn run<'a>(&'a self, inv: &'a Invocation) -> RunFuture<'a> {
-        Box::pin(C::run(inv, &self.0))
-    }
-}
-
-/// A registered command with its type erased.
-pub struct Entry {
-    pub spec: &'static CommandSpec,
-    augment: fn(Command) -> Command,
-    bind: fn(&ArgMatches) -> Result<Box<dyn Bound>, clap::Error>,
-}
-
-impl Entry {
-    #[must_use]
-    pub fn of<C: CliCommand>() -> Self {
-        Self {
-            spec: &C::SPEC,
-            augment: <C::Args as clap::Args>::augment_args,
-            bind: |matches| {
-                Ok(Box::new(Parsed::<C>(C::Args::from_arg_matches(matches)?)) as Box<dyn Bound>)
-            },
-        }
-    }
-
-    pub fn bind(&self, matches: &ArgMatches) -> Result<Box<dyn Bound>, clap::Error> {
-        (self.bind)(matches)
-    }
-}
-
 pub fn check_args(spec: &CommandSpec, matches: &ArgMatches) -> Result<(), CliError> {
     for arg in spec.args {
         let Some(check) = arg.check else { continue };
@@ -756,95 +714,4 @@ pub fn supplied_secrets<'a>(
     spec.args.iter().filter(move |arg| {
         arg.secret && matches.value_source(arg.id) == Some(clap::parser::ValueSource::CommandLine)
     })
-}
-
-struct Node<'a> {
-    name: &'static str,
-    entry: Option<&'a Entry>,
-    group: Option<&'a GroupSpec>,
-    children: Vec<Node<'a>>,
-}
-
-impl<'a> Node<'a> {
-    fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            entry: None,
-            group: None,
-            children: Vec::new(),
-        }
-    }
-
-    fn at(&mut self, path: &[&'static str]) -> &mut Node<'a> {
-        let Some((first, rest)) = path.split_first() else {
-            return self;
-        };
-        let index = match self.children.iter().position(|child| child.name == *first) {
-            Some(index) => index,
-            None => {
-                self.children.push(Node::new(first));
-                self.children.len() - 1
-            }
-        };
-        self.children[index].at(rest)
-    }
-
-    fn command(&self) -> Command {
-        let mut command = Command::new(self.name);
-        if let Some(entry) = self.entry {
-            let spec = entry.spec;
-            command = (entry.augment)(command).about(spec.about);
-            if let Some(long_about) = spec.long_about {
-                command = command.long_about(long_about);
-            }
-            for alias in spec.cli_aliases {
-                command = command.alias(*alias);
-            }
-        } else if let Some(group) = self.group {
-            command = command.about(group.about);
-            if let Some(long_about) = group.long_about {
-                command = command.long_about(long_about);
-            }
-            for alias in group.aliases {
-                command = command.alias(*alias);
-            }
-            command = command
-                .subcommand_required(true)
-                .arg_required_else_help(true);
-        }
-        for (order, child) in self.children.iter().enumerate() {
-            command = command.subcommand(child.command().display_order(order));
-        }
-        command
-    }
-}
-
-/// The clap subcommand tree of `entries`, in registration order, under a bare
-/// `hyperliquid` command. Groups come from `groups`.
-#[must_use]
-pub fn command_tree(entries: &[Entry], groups: &[GroupSpec]) -> Command {
-    let mut root = Node::new("hyperliquid");
-    for entry in entries {
-        let node = root.at(entry.spec.path);
-        assert!(
-            node.entry.is_none(),
-            "command {} is registered twice",
-            entry.spec.key()
-        );
-        node.entry = Some(entry);
-    }
-    for group in groups {
-        let node = root.at(group.path);
-        assert!(
-            node.entry.is_none() && !node.children.is_empty(),
-            "group {} has no commands or is itself a command",
-            group.path.join(" ")
-        );
-        node.group = Some(group);
-    }
-    let mut command = Command::new("hyperliquid");
-    for (order, child) in root.children.iter().enumerate() {
-        command = command.subcommand(child.command().display_order(order));
-    }
-    command
 }

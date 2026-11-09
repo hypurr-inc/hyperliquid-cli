@@ -17,8 +17,9 @@ use crate::account_mode::{
     AccountMode, DexCollateral, UnifiedRisk, fetch_abstraction, load_dex_collateral,
     unified_account_ratio,
 };
+use crate::cli_command::CliCommand;
 use crate::clock::{self, DurationError};
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::borrow_lend_state::fetch_user_state;
 use crate::commands::common::position::mark_price;
 use crate::commands::common::rows::{One, Row};

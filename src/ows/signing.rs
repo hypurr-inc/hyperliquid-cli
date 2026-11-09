@@ -14,8 +14,8 @@ use ows_lib::types::WalletInfo;
 use super::vault::Vault;
 use super::{HYPERLIQUID_CHAIN_ALIAS, WalletSource};
 use crate::errors::CliError;
-use crate::signing::payload::Payload;
-use crate::signing::signature::Provider;
+use crate::signable::Payload;
+use crate::signature::Provider;
 
 #[derive(Debug, Clone)]
 struct SigningWallet {

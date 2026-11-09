@@ -11,7 +11,7 @@ use hyperliquid_cli::command_spec::{
 use hyperliquid_cli::errors::CliError;
 use hyperliquid_cli::input_hardening::{validate_input_path, validate_resource_id};
 use hyperliquid_cli::invocation::{Invocation, InvocationFlags};
-use hyperliquid_cli::signing::ensure_supports_expires_after;
+use hyperliquid_cli::signable::ensure_supports_expires_after;
 use hyperliquid_cli::stream_bounds::require_bound;
 
 use crate::cli_shell::{Redactions, Selected};

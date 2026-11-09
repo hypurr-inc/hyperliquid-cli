@@ -4,10 +4,9 @@ use std::time::Duration;
 use clap::Args;
 use futures::StreamExt;
 use hypersdk::Address;
-use hypersdk::hypercore::{Chain, Incoming, Subscription, WebSocket, ws::Event};
+use hypersdk::hypercore::{self, Chain, Incoming, Subscription, WebSocket, ws::Event};
 
 use crate::errors::CliError;
-use crate::network::Network;
 
 /// Documented per-IP WebSocket limit: subscriptions across all connections.
 pub const MAX_SUBSCRIPTIONS: usize = 1000;
@@ -126,10 +125,13 @@ impl BookAggregationArgs {
     }
 }
 
-/// A WebSocket for `chain`'s public endpoint, for callers that hold a [`Chain`]
-/// rather than a [`Network`]. The API endpoint override does not apply.
+/// A WebSocket for `chain`'s public endpoint. The API endpoint override does
+/// not apply to WebSockets.
 pub fn websocket_for_chain(chain: Chain) -> WebSocket {
-    Network::from(chain).websocket()
+    match chain {
+        Chain::Mainnet => hypercore::mainnet_ws(),
+        Chain::Testnet => hypercore::testnet_ws(),
+    }
 }
 
 /// What a one-shot WebSocket read is waiting for, as phrased in its errors.

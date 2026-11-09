@@ -6,8 +6,9 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::builder_fee::{self, MaxFeeRate};
+use crate::cli_command::CliCommand;
 use crate::command_spec::{
-    CliCommand, CommandSpec, InputKind, Lifecycle, NetworkUse, OwsSupport, Risk, YES, YES_FLAG, arg,
+    CommandSpec, InputKind, Lifecycle, NetworkUse, OwsSupport, Risk, YES, YES_FLAG, arg,
 };
 use crate::env;
 use crate::errors::CliError;

@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::account_mode::{AccountMode, fetch_abstraction};
 use crate::assets::{AssetResolver, canonical_dex};
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::order_list::open_orders_output;
 use crate::commands::common::paging::{self, Endpoint};
 use crate::commands::common::position::{self, pretty_pnl};

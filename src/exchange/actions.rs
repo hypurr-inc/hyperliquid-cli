@@ -13,7 +13,8 @@ use crate::exchange_reply::{self, Reply};
 use crate::hints;
 use crate::http_api::ApiClient;
 use crate::response_sanitization::Untrusted;
-use crate::signing::{SelectedSigner, Signs, USER_SIGNED_PREFIX, ensure_supports_expires_after};
+use crate::signable::{Signs, USER_SIGNED_PREFIX, ensure_supports_expires_after};
+use crate::signing::SelectedSigner;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -57,7 +58,7 @@ fn expires_after_now(api: &ApiClient) -> Option<u64> {
 /// Sign and send an L1 action supported by hypersdk, returning the ok response
 /// payload as the exchange sent it. The sender takes the nonce (the current
 /// time in milliseconds, raised above every nonce this machine already signed
-/// with, see [`crate::signing::nonce`]) and the expiry at the moment it signs, so a caller that
+/// with, see [`crate::nonce`]) and the expiry at the moment it signs, so a caller that
 /// returns early, as a dry run does, spends neither.
 pub(crate) async fn send_l1_action(
     api: &ApiClient,

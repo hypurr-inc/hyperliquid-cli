@@ -6,8 +6,9 @@ use hypersdk::{Address, Decimal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::cli_command::CliCommand;
 use crate::clock;
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::direction::TransferDirection;
 use crate::commands::common::position::PositionRow;
 use crate::commands::common::rows::{One, Row, or_missing};

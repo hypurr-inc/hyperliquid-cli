@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::assets::DexMeta;
-use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, NoArgs};
 use crate::hints;
 use crate::invocation::Invocation;
 use crate::output::format::{duration, plural};

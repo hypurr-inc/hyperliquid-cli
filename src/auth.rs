@@ -384,7 +384,7 @@ mod tests {
     use crate::config::Config;
     use crate::env::EnvSource;
     use crate::ows::vault::test_support::import_test_wallet;
-    use crate::signing::Signs;
+    use crate::signable::Signs;
     use tempfile::TempDir;
 
     fn resolve(
