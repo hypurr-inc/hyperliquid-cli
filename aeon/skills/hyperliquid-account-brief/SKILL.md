@@ -30,7 +30,7 @@ Hyperliquid is a perp and spot DEX where the account is the address: balances, p
    ```bash
    node skills/hyperliquid-account-brief/x.mjs
    ```
-   It reads `SKILL_VAR` itself and prints to stdout. The first line is `HL_BRIEF_OK`, then the brief, then a log line starting `HL_BRIEF `.
+   `${var}` is already exported in the environment as `SKILL_VAR`; the helper reads it itself. Run that exact line: do not prefix it with a variable assignment or `env`, and do not add a pipe or redirect. It prints to stdout. The first line is `HL_BRIEF_OK`, then the brief, then a log line starting `HL_BRIEF `.
    - Exit `2` (`HL_BRIEF_BAD_ADDRESS`): the variable is empty or not `0x` + 40 hex characters. Send one short notification (`./notify --severity warn`) saying the address in `var` is missing or malformed, then stop. Do not retry.
    - Exit `3` (`HL_BRIEF_READ_FAILED`): the API could not be read. Stop without notifying; the next run retries.
 

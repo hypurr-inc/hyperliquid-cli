@@ -35,7 +35,7 @@ Hyperliquid publishes one document per venue with everything this check needs pe
    ```bash
    node skills/hyperliquid-market-monitor/x.mjs
    ```
-   It reads `SKILL_VAR` itself and prints to stdout. The first line is the verdict, the last line is the log line.
+   `${var}` is already exported in the environment as `SKILL_VAR`; the helper reads it itself. Run that exact line: do not prefix it with a variable assignment or `env`, and do not add a pipe or redirect. It prints to stdout. The first line is the verdict, the last line is the log line.
    - Exit `2` (`HL_WATCH_BAD_INPUT`): the variable could not be read. Send one notification naming the bad token (`./notify --severity warn`), then stop.
    - Exit `3` (`HL_READ_FAILED`): the API could not be read. Stop without notifying; the next run retries.
 
