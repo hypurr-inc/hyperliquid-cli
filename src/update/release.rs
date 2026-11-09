@@ -8,7 +8,6 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::errors::CliError;
-use crate::http_api;
 use crate::settings::env;
 
 /// Must match the repository and archive names the release workflow publishes.
@@ -56,7 +55,7 @@ impl ReleaseClient {
             return Ok(response);
         }
         let body = response.text().await.unwrap_or_default();
-        Err(http_api::failed_reply(status, &body))
+        Err(CliError::failed_reply(status, &body))
     }
 
     /// The tag of the latest published release.

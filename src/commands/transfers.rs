@@ -9,9 +9,7 @@ use crate::assets::find_spot_token;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::actions;
 use crate::commands::spot_balances::user_spot_balances_raw;
-use crate::commands::support::{
-    default_dry_run_signing_context, print_transfer_dry_run, print_transfer_dry_run_as,
-};
+use crate::commands::support::print_dry_run;
 use crate::commands::user_signed::{self, UserSigned};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
@@ -206,17 +204,6 @@ impl TransferActionKind {
             Self::Send | Self::SpotSend | Self::SendAsset | Self::Withdraw => {
                 ActionReversibility::Irreversible
             }
-        }
-    }
-
-    fn command(self) -> &'static str {
-        match self {
-            Self::SpotToPerp => "transfer spot-to-perp",
-            Self::PerpToSpot => "transfer perp-to-spot",
-            Self::Send => "transfer send",
-            Self::SpotSend => "transfer spot-send",
-            Self::SendAsset => "transfer send-asset",
-            Self::Withdraw => "transfer withdraw",
         }
     }
 
@@ -566,10 +553,8 @@ async fn run_class_transfer(
 ) -> Result<(), anyhow::Error> {
     quantity::require_positive(args.amount, "amount")?;
     if inv.dry_run() {
-        return print_transfer_dry_run(
+        return print_dry_run(
             inv,
-            kind.command(),
-            kind,
             kind.would_execute(),
             serde_json::json!({"amount": args.amount.to_string()}),
         );
@@ -812,10 +797,8 @@ impl CliCommand for TransferSend {
         let destination = validate_send_args(args)?;
         if inv.dry_run() {
             let kind = TransferActionKind::Send;
-            return print_transfer_dry_run(
+            return print_dry_run(
                 inv,
-                kind.command(),
-                kind,
                 kind.would_execute(),
                 serde_json::json!({"to": args.to, "amount": args.amount.to_string()}),
             );
@@ -860,10 +843,8 @@ impl CliCommand for TransferSpotSend {
         let token = resolve_spot_token(inv.remote()?.api().sdk(), &args.token).await?;
         if inv.dry_run() {
             let kind = TransferActionKind::SpotSend;
-            return print_transfer_dry_run_as(
+            return print_dry_run(
                 inv,
-                kind.command(),
-                kind,
                 kind.would_execute(),
                 serde_json::json!({
                     "to": destination.to_string(),
@@ -871,7 +852,6 @@ impl CliCommand for TransferSpotSend {
                     "token_index": token.index,
                     "amount": args.amount.normalize().to_string(),
                 }),
-                Some(default_dry_run_signing_context(inv)),
             );
         }
         let resolved = inv.resolve_signer()?;
@@ -923,10 +903,8 @@ impl CliCommand for TransferSendAsset {
         let token = resolve_spot_token(remote.api().sdk(), &args.token).await?;
         if inv.dry_run() {
             let kind = TransferActionKind::SendAsset;
-            return print_transfer_dry_run_as(
+            return print_dry_run(
                 inv,
-                kind.command(),
-                kind,
                 kind.would_execute(),
                 serde_json::json!({
                     "to": route.destination.to_string(),
@@ -939,7 +917,6 @@ impl CliCommand for TransferSendAsset {
                     "amount": args.amount.normalize().to_string(),
                     "from_subaccount": args.from_subaccount.clone(),
                 }),
-                Some(default_dry_run_signing_context(inv)),
             );
         }
         let resolved = inv.resolve_signer()?;
@@ -985,10 +962,8 @@ impl CliCommand for TransferWithdraw {
         let destination = validate_withdraw_args(args)?;
         if inv.dry_run() {
             let kind = TransferActionKind::Withdraw;
-            return print_transfer_dry_run(
+            return print_dry_run(
                 inv,
-                kind.command(),
-                kind,
                 kind.would_execute(),
                 serde_json::json!({"to": args.to, "amount": args.amount.to_string()}),
             );

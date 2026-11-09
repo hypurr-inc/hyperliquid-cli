@@ -17,8 +17,8 @@ mod cli_runtime;
 mod cli_shell;
 
 use cli_shell::{
-    PANIC_COMMAND, ParsedCli, exit_for_clap_error, install_panic_hook, print_help_to_stdout,
-    startup, try_parse_cli_from,
+    ParsedCli, exit_for_clap_error, install_panic_hook, print_help_to_stdout, startup,
+    try_parse_cli_from,
 };
 
 const GLOBAL_OPTIONS: &str = "Global Options";
@@ -169,15 +169,7 @@ async fn main() {
     };
     output::colors::init(cli.no_color, settings.env());
     if let Some(selected) = &selected {
-        let path: Vec<String> = selected
-            .entry
-            .spec
-            .path
-            .iter()
-            .map(|part| (*part).to_string())
-            .collect();
-        let _ = PANIC_COMMAND.set(path.join(" "));
-        errors::set_command_path(&path);
+        errors::set_command_path(selected.entry.spec.path);
     }
     let (env, format) = match startup(requested_format, settings.env()) {
         Ok(started) => started,

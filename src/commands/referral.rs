@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, NoArgs, OwsSupport, Risk, arg};
 use crate::commands::actions;
-use crate::commands::support::print_signed_dry_run;
+use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
@@ -72,13 +72,6 @@ impl ReferralActionKind {
         match self {
             Self::Set => "setReferrer",
             Self::Register => "registerReferrer",
-        }
-    }
-
-    fn command(self) -> &'static str {
-        match self {
-            Self::Set => "referral set",
-            Self::Register => "referral register",
         }
     }
 
@@ -204,11 +197,9 @@ async fn run_code_action(
     kind.validate(code)?;
     if inv.dry_run() {
         let signer_context = inv.resolve_signer().ok();
-        return print_signed_dry_run(
+        return print_dry_run(
             inv,
-            kind.command(),
             kind.would_execute(),
-            REVERSIBILITY,
             referral_dry_run_value(
                 inv.remote()?.chain(),
                 signer_context.as_ref().map(|resolved| resolved.address()),
@@ -427,7 +418,7 @@ impl CliCommand for ReferralStatus {
     )
     .risk(Risk::AccountState)
     .ows(OwsSupport::ExperimentalFeatureGated)
-    .auth(true);
+    .auth();
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         let user = inv.resolve_signer()?.query_address();

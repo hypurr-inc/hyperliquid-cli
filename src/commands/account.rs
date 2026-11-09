@@ -11,15 +11,14 @@ use chrono::DateTime;
 use clap::{Args, ValueEnum};
 use hypersdk::Address;
 use hypersdk::Decimal;
-use hypersdk::hypercore::{BasicOrder, ClearinghouseState, Fill, SubAccount, UserVaultEquity};
+use hypersdk::hypercore::{ClearinghouseState, Fill, SubAccount, UserVaultEquity};
 use serde::Serialize;
 
 use crate::command_spec::{ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
+use crate::commands::orders::OrderListOutput;
 use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
-use crate::commands::support::{
-    canonical_dex, dry_run_signed_details, dry_run_signer_address, print_dry_run,
-};
+use crate::commands::support::{canonical_dex, print_dry_run, require_master_signer};
 use crate::commands::user_signed::{self, UserSigned};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -279,19 +278,20 @@ pub async fn fetch_abstraction(
 
 fn abstraction_set_dry_run_value(
     chain: hypersdk::hypercore::Chain,
-    signer: Address,
+    signer: Option<Address>,
     mode: AbstractionModeArg,
 ) -> serde_json::Value {
+    let user = signer.map(|address| address.to_string());
     serde_json::json!({
         "mode": mode.cli_value(),
         "protocol_mode": mode.protocol_value(),
         "network": chain.to_string(),
-        "user": signer.to_string(),
+        "user": user,
         "action": {
             "type": UserSetAbstraction::ACTION_TYPE,
             "hyperliquidChain": chain.to_string(),
             "signatureChainId": chain.arbitrum_id().to_string(),
-            "user": signer.to_string(),
+            "user": user,
             "abstraction": mode.protocol_value(),
         }
     })
@@ -506,99 +506,6 @@ impl TableData for FillsOutput {
 
     fn to_json_value(&self) -> serde_json::Value {
         serde_json::to_value(&self.fills).unwrap_or_else(|_| serde_json::json!([]))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct OrderRow {
-    pub coin: String,
-    pub side: String,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub limit_price: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub size: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub original_size: Decimal,
-    pub oid: u64,
-    pub order_type: String,
-    pub tif: Option<String>,
-    pub reduce_only: bool,
-    pub timestamp: u64,
-    pub cloid: Option<String>,
-}
-
-impl From<BasicOrder> for OrderRow {
-    fn from(order: BasicOrder) -> Self {
-        Self {
-            coin: order.coin,
-            side: order.side.to_string(),
-            limit_price: order.limit_px,
-            size: order.sz,
-            original_size: order.orig_sz,
-            oid: order.oid,
-            order_type: format!("{:?}", order.order_type),
-            tif: order.tif.map(|tif| format!("{tif:?}")),
-            reduce_only: order.reduce_only,
-            timestamp: order.timestamp,
-            cloid: order.cloid.map(|cloid| cloid.to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrdersOutput {
-    orders: Vec<OrderRow>,
-}
-
-impl OrdersOutput {
-    #[must_use]
-    pub fn new(orders: Vec<OrderRow>) -> Self {
-        Self { orders }
-    }
-}
-
-impl TableData for OrdersOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec![
-            "Coin",
-            "Side",
-            "Limit Price",
-            "Size",
-            "Original Size",
-            "OID",
-            "Type",
-            "TIF",
-            "Reduce Only",
-            "Timestamp",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.orders
-            .iter()
-            .map(|order| {
-                vec![
-                    order.coin.clone(),
-                    order.side.clone(),
-                    order.limit_price.to_string(),
-                    order.size.to_string(),
-                    order.original_size.to_string(),
-                    order.oid.to_string(),
-                    order.order_type.clone(),
-                    order.tif.clone().unwrap_or_else(|| "n/a".to_string()),
-                    order.reduce_only.to_string(),
-                    order.timestamp.to_string(),
-                ]
-            })
-            .collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No orders.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.orders).unwrap_or_else(|_| serde_json::json!([]))
     }
 }
 
@@ -1072,11 +979,8 @@ impl CliCommand for AccountOrders {
             .sdk()
             .open_orders(user, None)
             .await
-            .map_err(from_sdk)?
-            .into_iter()
-            .map(OrderRow::from)
-            .collect();
-        inv.print(&OrdersOutput::new(orders));
+            .map_err(from_sdk)?;
+        inv.print(&OrderListOutput::new(orders, "No orders."));
         Ok(())
     }
 }
@@ -1357,32 +1261,22 @@ impl CliCommand for AccountAbstractionSet {
     ]);
 
     async fn run(inv: &Invocation, args: &SetAbstractionArgs) -> Result<(), anyhow::Error> {
+        let resolved = inv.resolve_signer();
+        if let Ok(signer) = &resolved {
+            require_master_signer(signer, "userSetAbstraction")?;
+        }
         if inv.dry_run() {
-            let signer_address = inv.resolve_signer().ok().map(|r| r.address());
-            let fallback_address: Address = "0x0000000000000000000000000000000000000001"
-                .parse()
-                .expect("valid placeholder address");
-            let preview_args = abstraction_set_dry_run_value(
-                inv.remote()?.chain(),
-                signer_address.unwrap_or(fallback_address),
-                args.mode,
-            );
-            let signer = dry_run_signer_address(inv);
             return print_dry_run(
                 inv,
-                "account abstraction set",
-                dry_run_signed_details(inv, "set_abstraction", preview_args, signer, None, None),
+                "set_abstraction",
+                abstraction_set_dry_run_value(
+                    inv.remote()?.chain(),
+                    resolved.ok().map(|signer| signer.address()),
+                    args.mode,
+                ),
             );
         }
-        let resolved = inv.resolve_signer()?;
-        if resolved.is_stored_agent() {
-            return Err(CliError::Unsupported(
-                "userSetAbstraction must be signed by the master account; select the master wallet, not a stored API wallet"
-                    .to_string(),
-            )
-            .into());
-        }
-        set_abstraction(inv, &resolved, args).await
+        set_abstraction(inv, &resolved?, args).await
     }
 }
 
@@ -1404,15 +1298,6 @@ mod tests {
 
         assert!(output.rows().is_empty());
         assert_eq!(output.empty_message(), Some("No fills."));
-        assert!(output.to_json_value().as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn empty_orders_show_no_data_message_but_json_is_empty_array() {
-        let output = OrdersOutput::new(vec![]);
-
-        assert!(output.rows().is_empty());
-        assert_eq!(output.empty_message(), Some("No orders."));
         assert!(output.to_json_value().as_array().unwrap().is_empty());
     }
 

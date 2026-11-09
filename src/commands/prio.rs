@@ -8,7 +8,7 @@ use serde::Serialize;
 use crate::assets::find_spot_token;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
 use crate::commands::actions::{nonce_now, send_l1_action_raw};
-use crate::commands::support::{dry_run_details, print_dry_run};
+use crate::commands::support::print_dry_run;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
@@ -295,12 +295,8 @@ impl CliCommand for PrioBid {
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "prio bid",
-                dry_run_details(
-                    inv,
-                    "place_priority_auction_bid",
-                    serde_json::json!({"ip": args.ip, "max": args.max.to_string(), "slot": args.slot}),
-                ),
+                "place_priority_auction_bid",
+                serde_json::json!({"ip": args.ip, "max": args.max.to_string(), "slot": args.slot}),
             );
         }
         let resolved = inv.resolve_signer()?;

@@ -274,7 +274,7 @@ where
     loop {
         let snapshot = refresh().await?;
         if format == OutputFormat::Json {
-            output.emit_json(&session.render_json_line(&snapshot)?)?;
+            output.emit_json(&session.render_json_line(&snapshot))?;
         } else {
             output.render_tui(session, title, &snapshot, format, connection_lost)?;
         }

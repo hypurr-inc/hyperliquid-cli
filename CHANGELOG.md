@@ -10,7 +10,7 @@
 - `orders twap-create` rejects durations above the exchange's 7-day maximum.
 - A non-interactive run that stops at the confirmation check no longer repeats a secret argument in its suggested `--dry-run`/`--yes` commands or in the saved last-error report: `wallet import <PRIVATE_KEY>`, `wallet import-mnemonic <MNEMONIC>`, `account add` and `wallet login --api-key` values are dropped, as `--private-key` and `--keystore-password` already were.
 - `HYPERLIQUID_NETWORK=testnet` now skips the mainnet-only confirmation check in the run pipeline exactly like `--testnet`; before, a non-interactive run without `--yes` was rejected there although the command itself would not have prompted.
-- `watch risk` declares its stream bound like `subscribe`: in JSON or agent contexts it needs `--max-events` or `--idle-timeout-ms` (checked before the run, exit `2`), and `hyperliquid schema watch risk` reports `stream_bounds` and `bounded_ndjson_stream`. An explicit `--format pretty` on a pipe no longer forces the bound; an explicit `--format json` on a terminal now does.
+- `watch risk` declares its stream bound like `subscribe`: in JSON or agent contexts it needs `--max-events` or `--idle-timeout-ms` (checked before the run, exit `13` like `subscribe` and `mids --watch`), and `hyperliquid schema watch risk` reports `stream_bounds` and `bounded_ndjson_stream`. An explicit `--format pretty` on a pipe no longer forces the bound; an explicit `--format json` on a terminal now does.
 - `feedback`, `mcp` and `report-incident` no longer carry a `Notes:` block saying they change live exchange state; they change no state.
 - The watch view refreshes only on its timer, a socket message, or `r`; other keys no longer trigger a refresh.
 - Bankr now refuses every user-signed action it does not cover (withdrawals, spot/asset sends, staking, builder approvals, `setAbstraction`) with exit `13` before a request is sent, on the typed-data path as well as the L1 path; only trading actions and spot-to-perp USDC moves reach Bankr, as documented.
@@ -22,6 +22,19 @@
 - `Config keys written` in wallet and setup receipts lists the keys the command changed, read from the config diff, and the root help lists every environment variable the CLI reads.
 - A live run refuses a signer that cannot sign the command before any prompt or network lookup, with the same exit `13` error as before: Bankr and address-only `--ows-signer` for user-signed commands (`transfer send|spot-send|send-asset|withdraw`, `staking`, `builder approve`, `account abstraction set`, `api-wallet create|approve|revoke`), and an address-only `--ows-signer` for every signing command, not only orders and `prio bid`. `--dry-run` still previews with any signer.
 - `hyperliquid schema` and the registry report `bankr_signer` (`supported`, `unsupported`, `not_required`) in each command's `x-hyperliquid` policy, so Bankr support is readable without running the command.
+- Every signing command's `--dry-run` preview carries `signer`, `acting_as` and `vault_address`; `transfer spot-to-perp|perp-to-spot|send|withdraw` and `prio bid` previews gained `acting_as` and `vault_address`, and `account abstraction set` reports `acting_as` as the signer's account instead of `null`. A `null` signer always comes with `signer_warning`.
+- `account abstraction set --dry-run` with no resolvable signer previews `user` as `null` instead of the placeholder address `0x…0001`.
+- `--dry-run` of `account abstraction set`, `builder approve` and `api-wallet create|approve|revoke` refuses a stored API wallet with exit `13`, as the live run does.
+- The dry-run `command` of `buy`, `sell`, `outcome-buy` and `outcome-sell` names the command typed instead of `orders create`.
+- `asset decode` and `asset search` print a warning on stderr when asset or outcome metadata can't be loaded (the JSON answer is unchanged: formula-only rows), and `asset decode` shows an unknown `Cli Input` as an empty table cell instead of `null`.
+- `report-incident` URL-encodes the issue labels like `feedback` does (`labels=bug%2Cagent-incident`); GitHub reads both spellings alike.
+- The exit-15 result of `orders batch-create`, `scale`, `cancel-all` and `orders bracket` now carries the standard partial-result keys: `category` is `partial_results` (was `partial_failure`, which is now the `reason`) and the commands to run are in `next` (`[{"command": "..."}]`), replacing `next_command` and `next_commands`.
+- An order, cancel, modify, TWAP, TP/SL, trailing-stop, chase or bracket status that carries a rate-limit text now exits `11`, and one that carries a credential refusal exits `10`; every other rejection keeps exit `13` and its wording.
+- `orders chase`, `orders bracket` and `orders cancel-all --coin ... --dex ...` read a HIP-3 market's own dex: a resting chase quote or bracket entry is no longer treated as filled because the default dex's open orders do not list it, and `cancel-all` finds the dex's orders.
+- `orders chase` resolves its market once, accepts perpetual markets only, and no longer reads the default builder configuration (it never sent a builder fee). `--dry-run` now fails like the live command when the market or its mid price is unavailable (exit `13`/`12`) instead of previewing a null `first_price`.
+- `orders bracket --entry limit` refuses `--amount` with a bracket-specific message (exit `2`).
+- `account orders` shows a missing TIF as a dimmed `n/a` in pretty output, like `orders open`.
+- `orders history` retries the raw order list only when the response shape does not match, not when the body is malformed JSON.
 
 ## 0.17.0 - 2026-11-09
 

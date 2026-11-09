@@ -1,84 +1,136 @@
 use std::time::{Duration, Instant};
 
-use hypersdk::Address;
-use hypersdk::Decimal;
-use hypersdk::hypercore::Cloid;
+use hypersdk::hypercore::{Cloid, HttpClient};
+use hypersdk::{Address, Decimal};
 use serde_json::json;
 
-use crate::assets::PerpAsset;
-use crate::commands::actions;
-use crate::errors::CliError;
-use crate::invocation::Invocation;
+use crate::assets::{AssetResolver, Market, PerpAsset};
+use crate::errors::{CliError, NextCommand, partial_results_fields};
 use crate::output::TableData;
-use crate::response_sanitization::labelled_untrusted_text;
+use crate::settings::Settings;
 
-use super::exchange::Placement;
-use super::live_order::LiveOrder;
+use super::exchange::{Placement, rejection_error};
+use super::live_order::{
+    DEFAULT_TRACKING_TIMEOUT, LiveOrder, elapsed_ms, generated_cloid, send_tracked_action,
+};
 use super::planning::{
-    CreateOrderSubmission, create_dry_run_preview, prepare_create_order_plan, resolve_perp,
-    resolve_trigger_prices, tpsl_dry_run_plan, validate_tpsl_price_ordering,
+    CreateOrderSubmission, create_dry_run_preview, market_dex, prepare_order_in,
+    resolve_perp_market, resolve_trigger_prices, tpsl_dry_run_plan, validate_tpsl_price_ordering,
 };
-use super::validation::validate_tpsl_args;
+use super::rendering::{CHECK_LIVE_COMMAND, on_behalf_of_flag, partial_results_error};
+use super::validation::{BuilderRequest, MarketSizing, OrderSpec, TpslSpec};
 use super::{
-    BracketArgs, CreateArgs, CreateOrderType, OrderExecutionContext, TifArg, TpslArgs,
-    place_prepared_single, protect_position,
+    BracketArgs, CreateArgs, CreateOrderType, OrderExecutionContext, TifArg, place_prepared_single,
+    protect_position,
 };
 
-use super::live_order::DEFAULT_TRACKING_TIMEOUT;
+/// How often a resting entry order is checked for a fill.
+const ENTRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-pub fn validate_bracket_args(args: &BracketArgs) -> Result<(), CliError> {
-    match args.entry {
-        CreateOrderType::Market => {
-            if args.price.is_some() {
-                return Err(CliError::Configuration(
-                    "orders bracket --entry market does not accept --price".to_string(),
-                ));
+/// The entry order of a bracket, with exactly what its type needs.
+enum BracketEntry {
+    Limit { price: Decimal, size: Decimal },
+    Market(MarketSizing),
+}
+
+impl BracketEntry {
+    fn from_args(args: &BracketArgs) -> Result<Self, CliError> {
+        match args.entry {
+            CreateOrderType::Market => {
+                if args.price.is_some() {
+                    return Err(CliError::Configuration(
+                        "orders bracket --entry market does not accept --price".to_string(),
+                    ));
+                }
+                match (args.size, args.amount) {
+                    (Some(size), None) => Ok(Self::Market(MarketSizing::Size(size))),
+                    (None, Some(amount)) => Ok(Self::Market(MarketSizing::Amount(amount))),
+                    (None, None) => Err(CliError::Configuration(
+                        "orders bracket requires --size or --amount for market entry.\n  \
+                         hyperliquid --format json --dry-run orders bracket --coin ETH --side buy --size 0.1 --take-profit +10% --stop-loss -5%"
+                            .to_string(),
+                    )),
+                    (Some(_), Some(_)) => Err(CliError::Configuration(
+                        "orders bracket accepts --size or --amount, not both".to_string(),
+                    )),
+                }
             }
-            if args.size.is_none() && args.amount.is_none() {
-                return Err(CliError::Configuration(
-                    "orders bracket requires --size or --amount for market entry.\n  \
-                     hyperliquid --format json --dry-run orders bracket --coin ETH --side buy --size 0.1 --take-profit +10% --stop-loss -5%"
-                        .to_string(),
-                ));
+            CreateOrderType::Limit => {
+                if args.amount.is_some() {
+                    return Err(CliError::Configuration(
+                        "orders bracket --entry limit does not accept --amount".to_string(),
+                    ));
+                }
+                match (args.price, args.size) {
+                    (Some(price), Some(size)) => Ok(Self::Limit { price, size }),
+                    _ => Err(CliError::Configuration(
+                        "orders bracket --entry limit requires --price and --size.\n  \
+                         hyperliquid --format json --dry-run orders bracket --coin ETH --side buy --entry limit --price 3000 --size 0.1 --take-profit +10% --stop-loss -5%"
+                            .to_string(),
+                    )),
+                }
             }
-            if args.size.is_some() && args.amount.is_some() {
-                return Err(CliError::Configuration(
-                    "orders bracket accepts --size or --amount, not both".to_string(),
-                ));
-            }
-        }
-        CreateOrderType::Limit => {
-            if args.price.is_none() || args.size.is_none() {
-                return Err(CliError::Configuration(
-                    "orders bracket --entry limit requires --price and --size.\n  \
-                     hyperliquid --format json --dry-run orders bracket --coin ETH --side buy --entry limit --price 3000 --size 0.1 --take-profit +10% --stop-loss -5%"
-                        .to_string(),
-                ));
-            }
-        }
-        other => {
-            return Err(CliError::Configuration(format!(
+            other => Err(CliError::Configuration(format!(
                 "orders bracket --entry supports market or limit, not {other}"
-            )));
+            ))),
         }
     }
-    Ok(())
+
+    /// The order to plan. The entry carries the default builder fee, if one is
+    /// configured, like any other order placed one at a time.
+    fn spec(&self, args: &BracketArgs, cloid: Option<Cloid>) -> Result<OrderSpec, CliError> {
+        let spec = match *self {
+            Self::Limit { price, size } => OrderSpec::limit_leg(
+                &args.coin,
+                args.dex.as_deref(),
+                args.side,
+                price,
+                size,
+                TifArg::Gtc,
+            )?,
+            Self::Market(sizing) => OrderSpec::market(
+                &args.coin,
+                args.dex.as_deref(),
+                args.side,
+                sizing,
+                args.max_slippage_bps,
+            )?,
+        };
+        Ok(spec.with_builder(BuilderRequest::Default).with_cloid(cloid))
+    }
+}
+
+/// Check the flags before anything is read from the network.
+pub fn validate_bracket_args(args: &BracketArgs) -> Result<(), CliError> {
+    BracketEntry::from_args(args).map(drop)
 }
 
 pub async fn bracket_dry_run_plan(
-    client: &hypersdk::hypercore::HttpClient,
-    resolver: &crate::assets::AssetResolver,
-    settings: &crate::settings::Settings,
+    client: &HttpClient,
+    resolver: &AssetResolver,
+    settings: &Settings,
     args: &BracketArgs,
 ) -> Result<serde_json::Value, CliError> {
-    validate_bracket_args(args)?;
-    let entry_args = entry_create_args(args, None);
+    let spec = BracketEntry::from_args(args)?.spec(args, None)?;
+    let perp = resolve_perp_market(
+        client,
+        resolver,
+        "orders bracket",
+        args.dex.as_deref(),
+        &args.coin,
+    )
+    .await?;
+    let entry = prepare_order_in(client, &Market::Perp(perp.clone()), settings, &spec).await?;
     let entry = create_dry_run_preview(
-        &prepare_create_order_plan(client, resolver, settings, &entry_args).await?,
-        &entry_args,
+        &CreateOrderSubmission::Single(entry),
+        &entry_preview_args(args),
     )?;
-    let perp = resolve_perp(client, resolver, args.dex.as_deref(), &args.coin).await?;
-    let protection = tpsl_dry_run_plan(&perp, &protection_tpsl_args(args, args.size))?.into_args();
+    let protection = tpsl_dry_run_plan(
+        &perp,
+        &TpslSpec::protecting(args, args.size),
+        &args.on_behalf_of,
+    )?
+    .into_args();
     Ok(json!({
         "coin": args.coin,
         "dex": args.dex,
@@ -93,333 +145,9 @@ pub async fn bracket_dry_run_plan(
     }))
 }
 
-/// The entry order of a bracket as the user can name it in a command.
-#[derive(Clone, Copy)]
-struct EntryRef {
-    oid: Option<u64>,
-    cloid: Cloid,
-}
-
-impl EntryRef {
-    fn label(&self) -> String {
-        self.oid
-            .map_or_else(|| format!("{:#x}", self.cloid), |oid| oid.to_string())
-    }
-
-    fn cancel_command(&self, args: &BracketArgs) -> String {
-        let target = self.oid.map_or_else(
-            || format!("--cloid {:#x}", self.cloid),
-            |oid| oid.to_string(),
-        );
-        format!(
-            "hyperliquid orders cancel {target}{}",
-            on_behalf_of_flag(args)
-        )
-    }
-}
-
-fn entry_ref(order: &LiveOrder) -> EntryRef {
-    EntryRef {
-        oid: order.oid,
-        cloid: order.cloid,
-    }
-}
-
-fn on_behalf_of_flag(args: &BracketArgs) -> String {
-    args.on_behalf_of
-        .as_deref()
-        .map(|selector| format!(" --on-behalf-of {selector}"))
-        .unwrap_or_default()
-}
-
-pub async fn bracket(
-    context: OrderExecutionContext<'_>,
-    args: &BracketArgs,
-    vault_address: Option<Address>,
-) -> Result<(), anyhow::Error> {
-    validate_bracket_args(args)?;
-    if context.submission.require_mainnet_confirmation && !args.yes {
-        return Err(CliError::Configuration(
-            "Can't place a bracket on mainnet without --yes. Rerun with --yes once you approve it:\n    \
-             hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take-profit +10% --stop-loss -5% --yes"
-                .to_string(),
-        )
-        .into());
-    }
-
-    let started = Instant::now();
-    let cloid = super::generated_cloid(1)?;
-    let entry_args = entry_create_args(args, Some(cloid));
-    let plan = prepare_create_order_plan(
-        context.submission.api.sdk(),
-        context.resolver,
-        context.submission.inv.settings(),
-        &entry_args,
-    )
-    .await?;
-    let prepared = match plan {
-        CreateOrderSubmission::Single(prepared) => prepared,
-        CreateOrderSubmission::NormalTpsl(_) => {
-            return Err(CliError::Internal(anyhow::anyhow!(
-                "bracket entries cannot attach TP/SL children"
-            ))
-            .into());
-        }
-    };
-    let asset = u32::try_from(prepared.request.asset).map_err(|_| {
-        CliError::Internal(anyhow::anyhow!(
-            "bracket entry asset index {} does not fit cancel-by-cloid",
-            prepared.request.asset
-        ))
-    })?;
-    let requested_size = prepared.size;
-    let perp = prepared.perp().cloned().ok_or_else(|| {
-        CliError::Unsupported(format!(
-            "orders bracket supports perpetual markets only; {} is not a perpetual market",
-            args.coin
-        ))
-    })?;
-
-    // Fail fast before the entry executes: the protection legs must be
-    // constructible and correctly ordered for the position side.
-    validate_tpsl_args(&protection_tpsl_args(args, Some(requested_size)))?;
-    let (est_tp, est_sl) = resolve_trigger_prices(
-        Some(&args.take_profit),
-        Some(&args.stop_loss),
-        Some(prepared.price),
-        args.side,
-    )?;
-    validate_tpsl_price_ordering(args.side.opposite(), est_tp, est_sl, "orders bracket")?;
-
-    let statuses = place_prepared_single(context, &prepared, vault_address).await?;
-    let entry_status = statuses.into_iter().next().ok_or_else(|| {
-        CliError::Internal(anyhow::anyhow!("bracket entry returned no order status"))
-    })?;
-
-    let mut tracking = match Placement::classify(entry_status) {
-        Placement::Filled { total_sz, oid, .. } => {
-            let entry = EntryRef {
-                oid: Some(oid),
-                cloid,
-            };
-            return arm_protection(
-                context,
-                &perp,
-                args,
-                vault_address,
-                started,
-                &entry,
-                total_sz,
-                "armed",
-            )
-            .await;
-        }
-        // Accepted without an oid is tracked by cloid and polled like a resting entry.
-        Placement::Open { oid, .. } => LiveOrder {
-            oid,
-            cloid,
-            asset,
-            open_size: requested_size,
-        },
-        Placement::Rejected(err) => {
-            return Err(CliError::Unsupported(format!(
-                "Couldn't place the bracket entry. Exchange said: {}",
-                labelled_untrusted_text(&err)
-            ))
-            .into());
-        }
-    };
-
-    // Poll the entry order itself (not position presence) so pre-existing
-    // exposure cannot falsely complete the bracket.
-    let timeout = if args.entry_timeout.is_zero() {
-        DEFAULT_TRACKING_TIMEOUT
-    } else {
-        args.entry_timeout
-    };
-    let user = vault_address.unwrap_or_else(|| context.submission.signer.query_address());
-    while started.elapsed() < timeout {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        let open = match context.submission.api.sdk().open_orders(user, None).await {
-            Ok(open) => open,
-            Err(err) => {
-                return Err(report_unprotected(
-                    args,
-                    &entry_ref(&tracking),
-                    "resting",
-                    "Couldn't check it",
-                    &crate::errors::from_sdk(err),
-                    context.submission.inv,
-                    started,
-                ));
-            }
-        };
-        let open_size = tracking.open_size_in(&open);
-        if open_size <= Decimal::ZERO {
-            let filled = requested_size - tracking.open_size;
-            return arm_protection(
-                context,
-                &perp,
-                args,
-                vault_address,
-                started,
-                &entry_ref(&tracking),
-                filled,
-                "armed",
-            )
-            .await;
-        }
-        tracking.open_size = open_size;
-    }
-
-    // Entry timed out: cancel the remainder so it cannot fill unprotected,
-    // then protect whatever already filled.
-    if let Err(err) = cancel_entry(context, &tracking, vault_address).await {
-        return Err(report_unprotected(
-            args,
-            &entry_ref(&tracking),
-            "resting",
-            "Couldn't cancel it after the entry timeout",
-            &err,
-            context.submission.inv,
-            started,
-        ));
-    }
-    let filled = requested_size - tracking.open_size;
-    if filled > Decimal::ZERO {
-        arm_protection(
-            context,
-            &perp,
-            args,
-            vault_address,
-            started,
-            &entry_ref(&tracking),
-            filled,
-            "entry_cancelled_protected",
-        )
-        .await
-    } else {
-        let headline = format!(
-            "Entry order {} timed out unfilled and was cancelled. No position was opened.",
-            entry_ref(&tracking).label()
-        );
-        let mut result = BracketOutput::result("entry_cancelled", args, "0".to_string(), started);
-        result.problem = Some(BracketProblem {
-            entry_order_id: tracking.oid,
-            headline: headline.clone(),
-            next_commands: Vec::new(),
-        });
-        context.submission.inv.print(&result);
-        Err(CliError::PartialResults(headline).into())
-    }
-}
-
-/// Print the bracket result for an entry that is still live or filled without
-/// protection, and return the error (exit 15) that tells the user how to
-/// recover. In JSON the printed result is the only document.
-fn report_unprotected(
-    args: &BracketArgs,
-    entry: &EntryRef,
-    state: &str,
-    failed_step: &str,
-    cause: &CliError,
-    inv: &Invocation,
-    started: Instant,
-) -> anyhow::Error {
-    let headline = format!(
-        "Entry order {} is {state} and not protected. {failed_step}: {cause}",
-        entry.label()
-    );
-    let mut next_commands = vec![super::rendering::CHECK_LIVE_COMMAND.to_string()];
-    let lead = if state == "resting" {
-        next_commands.push(entry.cancel_command(args));
-        "Check what is live, then cancel the entry if you don't want it:"
-    } else {
-        next_commands.push(format!(
-            "hyperliquid orders tpsl --coin {} --take-profit {} --stop-loss {}{}",
-            args.coin,
-            args.take_profit.display(),
-            args.stop_loss.display(),
-            on_behalf_of_flag(args)
-        ));
-        "Check what is live, then protect the position:"
-    };
-    let status = if state == "resting" {
-        "entry_open_unprotected"
-    } else {
-        "entry_filled_unprotected"
-    };
-    let mut result = BracketOutput::result(status, args, "0".to_string(), started);
-    result.problem = Some(BracketProblem {
-        entry_order_id: entry.oid,
-        headline: headline.clone(),
-        next_commands: next_commands.clone(),
-    });
-    inv.print(&result);
-    let commands = next_commands
-        .iter()
-        .map(|command| format!("    {command}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    CliError::PartialResults(format!("{headline}\n\n{lead}\n{commands}")).into()
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn arm_protection(
-    context: OrderExecutionContext<'_>,
-    perp: &PerpAsset,
-    args: &BracketArgs,
-    vault_address: Option<Address>,
-    started: Instant,
-    entry: &EntryRef,
-    filled: Decimal,
-    status: &str,
-) -> Result<(), anyhow::Error> {
-    if filled <= Decimal::ZERO {
-        let headline = format!(
-            "Entry order {} is no longer open and nothing filled. No position was opened.",
-            entry.label()
-        );
-        let mut result = BracketOutput::result("entry_unfilled", args, "0".to_string(), started);
-        result.problem = Some(BracketProblem {
-            entry_order_id: entry.oid,
-            headline: headline.clone(),
-            next_commands: vec![super::rendering::CHECK_LIVE_COMMAND.to_string()],
-        });
-        context.submission.inv.print(&result);
-        return Err(CliError::PartialResults(format!(
-            "{headline}\n\nCheck what is live:\n    hyperliquid orders open"
-        ))
-        .into());
-    }
-    if let Err(err) = protect_position(
-        context.submission,
-        perp,
-        &protection_tpsl_args(args, Some(filled)),
-        vault_address,
-    )
-    .await
-    {
-        return Err(report_unprotected(
-            args,
-            entry,
-            "filled",
-            "Couldn't place the take-profit and stop-loss",
-            &crate::errors::from_anyhow(err),
-            context.submission.inv,
-            started,
-        ));
-    }
-    context.submission.inv.print(&BracketOutput::result(
-        status,
-        args,
-        filled.to_string(),
-        started,
-    ));
-    Ok(())
-}
-
-fn entry_create_args(args: &BracketArgs, cloid: Option<Cloid>) -> CreateArgs {
+/// What a `--dry-run` preview of the entry echoes of the flags that made it.
+/// Only the preview reads this; the live entry is planned from an [`OrderSpec`].
+fn entry_preview_args(args: &BracketArgs) -> CreateArgs {
     CreateArgs {
         coin: args.coin.clone(),
         dex: args.dex.clone(),
@@ -439,51 +167,357 @@ fn entry_create_args(args: &BracketArgs, cloid: Option<Cloid>) -> CreateArgs {
         margin_mode: None,
         builder: None,
         builder_fee_rate: None,
-        cloid: cloid.map(|cloid| format!("{cloid:#x}")),
-        yes: true,
-    }
-}
-
-/// TP/SL args for the filled size. `size` is `None` only in dry-run previews,
-/// where the live position size is used instead.
-fn protection_tpsl_args(args: &BracketArgs, size: Option<Decimal>) -> TpslArgs {
-    TpslArgs {
-        coin: args.coin.clone(),
-        dex: args.dex.clone(),
-        take_profit: Some(args.take_profit.clone()),
-        stop_loss: Some(args.stop_loss.clone()),
-        grouping: super::PositionTpslGroupingArg::PositionTpsl,
-        side: size.map(|_| args.side.opposite()),
-        size,
-        on_behalf_of: args.on_behalf_of.clone(),
-        margin_mode: None,
-        yes: true,
         cloid: None,
+        yes: false,
     }
 }
 
-/// Cancel the remaining entry order so a timed-out bracket cannot fill
-/// unprotected later.
-async fn cancel_entry(
-    context: OrderExecutionContext<'_>,
-    tracking: &LiveOrder,
+/// The entry order of a bracket as the user can name it in a command.
+#[derive(Clone, Copy)]
+struct EntryRef {
+    oid: Option<u64>,
+    cloid: Cloid,
+}
+
+impl EntryRef {
+    fn of(order: &LiveOrder) -> Self {
+        Self {
+            oid: order.oid,
+            cloid: order.cloid,
+        }
+    }
+
+    fn label(&self) -> String {
+        self.oid
+            .map_or_else(|| format!("{:#x}", self.cloid), |oid| oid.to_string())
+    }
+
+    fn cancel_command(&self, args: &BracketArgs) -> String {
+        let target = self.oid.map_or_else(
+            || format!("--cloid {:#x}", self.cloid),
+            |oid| oid.to_string(),
+        );
+        format!(
+            "hyperliquid orders cancel {target}{}",
+            on_behalf_of_flag(args.on_behalf_of.as_deref())
+        )
+    }
+}
+
+/// What the entry order is doing while no TP/SL protects it.
+#[derive(Clone, Copy)]
+enum Exposure {
+    /// Still resting on the book: it can fill later.
+    Resting,
+    /// Filled: a position exists.
+    Filled,
+}
+
+/// Commands that say what to do after a bracket ended with work left on the
+/// exchange, led by the sentence that introduces them.
+struct Followup {
+    lead: &'static str,
+    commands: Vec<String>,
+}
+
+/// A bracket in flight: what each step needs to arm protection or to report
+/// how it ended.
+struct Bracket<'a> {
+    context: OrderExecutionContext<'a>,
+    args: &'a BracketArgs,
+    perp: PerpAsset,
     vault_address: Option<Address>,
-) -> Result<(), CliError> {
-    let action = tracking.cancel_prefer_oid();
-    actions::send_l1_action_raw(
-        context.submission.api,
-        context.submission.signer,
-        action,
-        actions::nonce_now(),
-        vault_address,
-        "bracket entry cancel failed",
+    started: Instant,
+}
+
+pub async fn bracket(
+    context: OrderExecutionContext<'_>,
+    args: &BracketArgs,
+    vault_address: Option<Address>,
+) -> Result<(), anyhow::Error> {
+    let entry = BracketEntry::from_args(args)?;
+    if context.submission.require_mainnet_confirmation {
+        return Err(CliError::Configuration(
+            "Can't place a bracket on mainnet without --yes. Rerun with --yes once you approve it:\n    \
+             hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take-profit +10% --stop-loss -5% --yes"
+                .to_string(),
+        )
+        .into());
+    }
+
+    let started = Instant::now();
+    let client = context.submission.api.sdk();
+    let cloid = generated_cloid(1)?;
+    let spec = entry.spec(args, Some(cloid))?;
+    let perp = resolve_perp_market(
+        client,
+        context.resolver,
+        "orders bracket",
+        args.dex.as_deref(),
+        &args.coin,
     )
     .await?;
-    Ok(())
+    let market = Market::Perp(perp.clone());
+    let prepared =
+        prepare_order_in(client, &market, context.submission.inv.settings(), &spec).await?;
+    let asset = u32::try_from(prepared.request.asset).map_err(|_| {
+        CliError::Internal(anyhow::anyhow!(
+            "bracket entry asset index {} does not fit cancel-by-cloid",
+            prepared.request.asset
+        ))
+    })?;
+    let requested_size = prepared.size();
+
+    // Fail fast before the entry executes: the protection legs must be
+    // constructible and correctly ordered for the position side.
+    TpslSpec::protecting(args, Some(requested_size)).validate()?;
+    let (est_tp, est_sl) = resolve_trigger_prices(
+        Some(&args.take_profit),
+        Some(&args.stop_loss),
+        Some(prepared.price()),
+        args.side,
+    )?;
+    validate_tpsl_price_ordering(args.side.opposite(), est_tp, est_sl, "orders bracket")?;
+
+    let run = Bracket {
+        context,
+        args,
+        perp,
+        vault_address,
+        started,
+    };
+    let statuses = place_prepared_single(context, &prepared, vault_address).await?;
+    let entry_status = statuses.into_iter().next().ok_or_else(|| {
+        CliError::Internal(anyhow::anyhow!("bracket entry returned no order status"))
+    })?;
+
+    let mut tracking = match Placement::classify(entry_status) {
+        Placement::Filled { total_sz, oid, .. } => {
+            let entry = EntryRef {
+                oid: Some(oid),
+                cloid,
+            };
+            return run.arm_protection(&entry, total_sz, "armed").await;
+        }
+        // Accepted without an oid is tracked by cloid and polled like a resting entry.
+        Placement::Open { oid, .. } => LiveOrder {
+            oid,
+            cloid,
+            asset,
+            open_size: requested_size,
+        },
+        Placement::Rejected(rejected) => {
+            return Err(rejection_error(
+                "Couldn't place the bracket entry. Exchange said: ",
+                &rejected,
+            )
+            .into());
+        }
+    };
+
+    // Poll the entry order itself (not position presence) so pre-existing
+    // exposure cannot falsely complete the bracket.
+    let timeout = if args.entry_timeout.is_zero() {
+        DEFAULT_TRACKING_TIMEOUT
+    } else {
+        args.entry_timeout
+    };
+    let user = context.submission.account(vault_address);
+    let dex = market_dex(&market);
+    while started.elapsed() < timeout {
+        tokio::time::sleep(ENTRY_POLL_INTERVAL).await;
+        let open_size = match tracking.open_size_now(client, user, dex.clone()).await {
+            Ok(open_size) => open_size,
+            Err(err) => {
+                return Err(run.report_unprotected(
+                    &EntryRef::of(&tracking),
+                    Exposure::Resting,
+                    "Couldn't check it",
+                    &err,
+                ));
+            }
+        };
+        if open_size <= Decimal::ZERO {
+            let filled = requested_size - tracking.open_size;
+            return run
+                .arm_protection(&EntryRef::of(&tracking), filled, "armed")
+                .await;
+        }
+        tracking.open_size = open_size;
+    }
+
+    // Entry timed out: cancel the remainder so it cannot fill unprotected,
+    // then protect whatever already filled.
+    if let Err(err) = run.cancel_entry(&tracking).await {
+        return Err(run.report_unprotected(
+            &EntryRef::of(&tracking),
+            Exposure::Resting,
+            "Couldn't cancel it after the entry timeout",
+            &err,
+        ));
+    }
+    let filled = requested_size - tracking.open_size;
+    let entry = EntryRef::of(&tracking);
+    if filled > Decimal::ZERO {
+        run.arm_protection(&entry, filled, "entry_cancelled_protected")
+            .await
+    } else {
+        Err(run.report(
+            "entry_cancelled",
+            entry.oid,
+            format!(
+                "Entry order {} timed out unfilled and was cancelled. No position was opened.",
+                entry.label()
+            ),
+            None,
+        ))
+    }
 }
 
-fn elapsed_ms(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+impl Bracket<'_> {
+    /// Place the TP/SL for the `filled` size of the entry, or report that
+    /// nothing filled.
+    async fn arm_protection(
+        &self,
+        entry: &EntryRef,
+        filled: Decimal,
+        status: &str,
+    ) -> Result<(), anyhow::Error> {
+        if filled <= Decimal::ZERO {
+            return Err(self.report(
+                "entry_unfilled",
+                entry.oid,
+                format!(
+                    "Entry order {} is no longer open and nothing filled. No position was opened.",
+                    entry.label()
+                ),
+                Some(Followup {
+                    lead: "Check what is live:",
+                    commands: vec![CHECK_LIVE_COMMAND.to_string()],
+                }),
+            ));
+        }
+        if let Err(err) = protect_position(
+            self.context.submission,
+            &self.perp,
+            &TpslSpec::protecting(self.args, Some(filled)),
+            self.vault_address,
+        )
+        .await
+        {
+            return Err(self.report_unprotected(
+                entry,
+                Exposure::Filled,
+                "Couldn't place the take-profit and stop-loss",
+                &crate::errors::from_anyhow(err),
+            ));
+        }
+        self.context
+            .submission
+            .inv
+            .print(&self.result(status, filled.to_string()));
+        Ok(())
+    }
+
+    /// Cancel the remaining entry order so a timed-out bracket cannot fill
+    /// unprotected later.
+    async fn cancel_entry(&self, tracking: &LiveOrder) -> Result<(), CliError> {
+        send_tracked_action(
+            self.context.submission,
+            tracking.cancel_prefer_oid(),
+            self.vault_address,
+            "bracket entry cancel failed",
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Report an entry that is live or filled without protection.
+    fn report_unprotected(
+        &self,
+        entry: &EntryRef,
+        exposure: Exposure,
+        failed_step: &str,
+        cause: &CliError,
+    ) -> anyhow::Error {
+        let (state, status, followup) = match exposure {
+            Exposure::Resting => (
+                "resting",
+                "entry_open_unprotected",
+                Followup {
+                    lead: "Check what is live, then cancel the entry if you don't want it:",
+                    commands: vec![
+                        CHECK_LIVE_COMMAND.to_string(),
+                        entry.cancel_command(self.args),
+                    ],
+                },
+            ),
+            Exposure::Filled => (
+                "filled",
+                "entry_filled_unprotected",
+                Followup {
+                    lead: "Check what is live, then protect the position:",
+                    commands: vec![
+                        CHECK_LIVE_COMMAND.to_string(),
+                        format!(
+                            "hyperliquid orders tpsl --coin {} --take-profit {} --stop-loss {}{}",
+                            self.args.coin,
+                            self.args.take_profit.display(),
+                            self.args.stop_loss.display(),
+                            on_behalf_of_flag(self.args.on_behalf_of.as_deref())
+                        ),
+                    ],
+                },
+            ),
+        };
+        self.report(
+            status,
+            entry.oid,
+            format!(
+                "Entry order {} is {state} and not protected. {failed_step}: {cause}",
+                entry.label()
+            ),
+            Some(followup),
+        )
+    }
+
+    /// Print the bracket result for an entry that ended without protection or
+    /// without a position, and return the error (exit 15) that tells the user
+    /// how to recover. In JSON the printed result is the only document.
+    fn report(
+        &self,
+        status: &str,
+        entry_order_id: Option<u64>,
+        headline: String,
+        followup: Option<Followup>,
+    ) -> anyhow::Error {
+        let mut result = self.result(status, "0".to_string());
+        result.problem = Some(BracketProblem {
+            entry_order_id,
+            headline: headline.clone(),
+            next: followup
+                .as_ref()
+                .map(|followup| followup.commands.clone())
+                .unwrap_or_default(),
+        });
+        self.context.submission.inv.print(&result);
+        match followup {
+            Some(followup) => {
+                partial_results_error(&headline, followup.lead, &followup.commands).into()
+            }
+            None => CliError::PartialResults(headline).into(),
+        }
+    }
+
+    fn result(&self, status: &str, protected_size: String) -> BracketOutput {
+        BracketOutput {
+            status: status.to_string(),
+            coin: self.args.coin.clone(),
+            protected_size,
+            elapsed_ms: elapsed_ms(self.started),
+            problem: None,
+        }
+    }
 }
 
 struct BracketOutput {
@@ -499,19 +533,7 @@ struct BracketOutput {
 struct BracketProblem {
     entry_order_id: Option<u64>,
     headline: String,
-    next_commands: Vec<String>,
-}
-
-impl BracketOutput {
-    fn result(status: &str, args: &BracketArgs, protected_size: String, started: Instant) -> Self {
-        Self {
-            status: status.to_string(),
-            coin: args.coin.clone(),
-            protected_size,
-            elapsed_ms: elapsed_ms(started),
-            problem: None,
-        }
-    }
+    next: Vec<String>,
 }
 
 impl TableData for BracketOutput {
@@ -528,24 +550,24 @@ impl TableData for BracketOutput {
         ]]
     }
 
-    /// One document. A problem adds the standard error keys, so this result is
-    /// also the error envelope and no second document is printed.
+    /// One document. A problem adds the standard error keys
+    /// ([`partial_results_fields`]), so this result is also the error envelope
+    /// and no second document is printed.
     fn to_json_value(&self) -> serde_json::Value {
-        let mut value = json!({
-            "kind": "result",
-            "status": self.status,
-            "coin": self.coin,
-            "protected_size": self.protected_size,
-            "elapsed_ms": self.elapsed_ms,
-        });
-        if let (Some(problem), Some(object)) = (&self.problem, value.as_object_mut()) {
-            object.insert("error".to_string(), json!(problem.headline));
-            object.insert("category".to_string(), json!("partial_failure"));
-            object.insert("exit_code".to_string(), json!(15));
-            object.insert("entry_order_id".to_string(), json!(problem.entry_order_id));
-            object.insert("next_commands".to_string(), json!(problem.next_commands));
+        let mut document = serde_json::Map::new();
+        document.insert("kind".into(), "result".into());
+        document.insert("status".into(), self.status.clone().into());
+        document.insert("coin".into(), self.coin.clone().into());
+        document.insert("protected_size".into(), self.protected_size.clone().into());
+        document.insert("elapsed_ms".into(), self.elapsed_ms.into());
+        if let Some(problem) = &self.problem {
+            document.extend(partial_results_fields(
+                problem.headline.clone(),
+                problem.next.iter().map(NextCommand::new).collect(),
+            ));
+            document.insert("entry_order_id".into(), json!(problem.entry_order_id));
         }
-        value
+        serde_json::Value::Object(document)
     }
 }
 
@@ -554,6 +576,7 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
+    use crate::commands::orders::validation::ClosingSize;
     use crate::commands::orders::{OrderSide, TriggerPriceSpec};
 
     fn sample_args() -> BracketArgs {
@@ -591,16 +614,42 @@ mod tests {
     }
 
     #[test]
+    fn limit_entry_refuses_a_quote_amount() {
+        let mut args = sample_args();
+        args.entry = CreateOrderType::Limit;
+        args.price = Some(Decimal::from(100));
+        args.amount = Some(Decimal::from(50));
+        let err = validate_bracket_args(&args).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string()
+                .contains("--entry limit does not accept --amount")
+        );
+    }
+
+    #[test]
     fn amount_entry_protection_uses_filled_size() {
         // --amount entries have no --size; protection must be built from the
         // confirmed filled size, not the (absent) size flag.
         let mut args = sample_args();
         args.size = None;
         args.amount = Some(Decimal::from(100));
-        let tpsl = protection_tpsl_args(&args, Some(Decimal::new(25, 3)));
-        assert_eq!(tpsl.size, Some(Decimal::new(25, 3)));
-        assert_eq!(tpsl.side, Some(OrderSide::Sell));
-        assert!(validate_tpsl_args(&tpsl).is_ok());
+        let protection = TpslSpec::protecting(&args, Some(Decimal::new(25, 3)));
+        assert!(matches!(
+            protection.close,
+            ClosingSize::Fixed { side: OrderSide::Sell, size } if size == Decimal::new(25, 3)
+        ));
+        assert!(protection.validate().is_ok());
+    }
+
+    #[test]
+    fn identical_protection_triggers_are_refused_before_the_entry() {
+        let mut args = sample_args();
+        args.stop_loss = args.take_profit.clone();
+        let err = TpslSpec::protecting(&args, Some(Decimal::ONE))
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot be equal"));
     }
 
     #[test]
@@ -638,5 +687,34 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&value.to_string()).is_ok(),
             "bracket result must parse as one JSON value"
         );
+    }
+
+    #[test]
+    fn unprotected_bracket_carries_the_partial_results_keys() {
+        let output = BracketOutput {
+            status: "entry_open_unprotected".to_string(),
+            coin: "ETH".to_string(),
+            protected_size: "0".to_string(),
+            elapsed_ms: 8,
+            problem: Some(BracketProblem {
+                entry_order_id: Some(77),
+                headline: "Entry order 77 is resting and not protected.".to_string(),
+                next: vec![
+                    CHECK_LIVE_COMMAND.to_string(),
+                    "hyperliquid orders cancel 77".to_string(),
+                ],
+            }),
+        };
+        let value = output.to_json_value();
+        assert_eq!(value["category"], "partial_results");
+        assert_eq!(value["exit_code"], 15);
+        assert_eq!(
+            value["error"],
+            "Entry order 77 is resting and not protected."
+        );
+        assert_eq!(value["entry_order_id"], 77);
+        assert_eq!(value["next"][0]["command"], CHECK_LIVE_COMMAND);
+        assert_eq!(value["next"][1]["command"], "hyperliquid orders cancel 77");
+        assert!(value.get("next_commands").is_none());
     }
 }

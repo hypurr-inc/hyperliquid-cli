@@ -90,6 +90,107 @@ fn account_abstraction_set_dry_run_includes_user_set_action() {
     assert_eq!(json["args"]["action"]["abstraction"], "disabled");
 }
 
+#[test]
+fn account_abstraction_set_dry_run_never_invents_the_user_it_signs_for() {
+    let env = IsolatedHome::new();
+    let args = [
+        "--format",
+        "json",
+        "--dry-run",
+        "account",
+        "abstraction",
+        "set",
+        "--mode",
+        "disabled",
+    ];
+    let run = |key: Option<&str>| {
+        let mut command = env.command();
+        if let Some(key) = key {
+            command.env(support::PRIVATE_KEY_ENV, key);
+        }
+        let out = command
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        json_stdout(out)
+    };
+
+    let unsigned = run(None);
+    assert!(unsigned["args"]["user"].is_null());
+    assert!(unsigned["args"]["action"]["user"].is_null());
+    assert!(unsigned["signer"].is_null());
+    assert!(unsigned["signer_warning"].is_string());
+
+    let signer = support::expected_address(support::VALID_PRIVATE_KEY);
+    let signed = run(Some(support::VALID_PRIVATE_KEY));
+    assert_eq!(signed["args"]["user"], signer);
+    assert_eq!(signed["args"]["action"]["user"], signer);
+    assert_eq!(signed["signer"], signer);
+    assert_eq!(signed["acting_as"], signer);
+}
+
+#[test]
+fn master_only_actions_refuse_a_stored_api_wallet_even_under_dry_run() {
+    let env = IsolatedHome::new();
+    let agent = support::expected_address(support::VALID_PRIVATE_KEY);
+    for db in env.accounts_db_candidates() {
+        let key_file = db.parent().unwrap().join("accounts.key");
+        support::legacy_accounts_fixture::create_accounts_db_with_key_file(
+            &db,
+            &key_file,
+            &[support::legacy_accounts_fixture::Row::new(
+                "bot",
+                &agent,
+                support::VALID_PRIVATE_KEY,
+            )
+            .agent_of(USER)
+            .default_account()],
+        );
+    }
+
+    let master_only: [&[&str]; 3] = [
+        &["account", "abstraction", "set", "--mode", "disabled"],
+        &[
+            "builder",
+            "approve",
+            "--builder",
+            "0x00000000000000000000000000000000000000bb",
+            "--max-fee-rate",
+            "0.001%",
+        ],
+        &["api-wallet", "revoke", "--name", "bot"],
+    ];
+    for command in master_only {
+        for dry_run in [true, false] {
+            let mut args = vec!["--format", "json"];
+            if dry_run {
+                args.push("--dry-run");
+            }
+            args.extend_from_slice(command);
+            if !dry_run && command[0] != "api-wallet" {
+                args.push("--yes");
+            }
+            let output = env
+                .account_command_without_passphrase()
+                .args(&args)
+                .assert()
+                .failure()
+                .code(13)
+                .get_output()
+                .stdout
+                .clone();
+            let text = String::from_utf8(output).unwrap();
+            assert!(
+                text.contains("must be signed by the master account"),
+                "{command:?} dry_run={dry_run}: {text}"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn account_abstraction_read_uses_api_override() {
     let env = IsolatedHome::new();

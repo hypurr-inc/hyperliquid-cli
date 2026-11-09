@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::auth;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
 use crate::commands::actions;
-use crate::commands::support::parse_address;
+use crate::commands::support::{parse_address, require_master_signer};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::input_hardening::validate_resource_id;
@@ -667,8 +667,7 @@ impl CliCommand for ApiWalletList {
         "List API wallets approved by a master account. Stored agent accounts query under their master address.",
     )
     .risk(Risk::AccountState)
-    .ows(OwsSupport::ExperimentalFeatureGated)
-    .auth(true)
+    .ows(OwsSupport::ExperimentalFeatureGated).auth()
     .cli_aliases(&["ls"])
     .schema_command("hyperliquid api-wallet list")
     .args(&[
@@ -713,17 +712,14 @@ impl CliCommand for ApiWalletRevoke {
 /// The signer that approves an agent: the master account itself, one that can
 /// sign `approveAgent`. `None` for a dry run, which signs nothing.
 fn api_wallet_approval_signer(inv: &Invocation) -> Result<Option<SelectedSigner>, anyhow::Error> {
+    let resolved = inv.resolve_signer();
+    if let Ok(signer) = &resolved {
+        require_master_signer(signer, "approveAgent")?;
+    }
     if inv.dry_run() {
         return Ok(None);
     }
-    let signer = inv.resolve_signer()?;
-    if signer.is_stored_agent() {
-        return Err(CliError::Unsupported(
-            "approveAgent must be signed by the master account; select the master wallet, not a stored API wallet"
-                .to_string(),
-        )
-        .into());
-    }
+    let signer = resolved?;
     Ok(Some(signer))
 }
 

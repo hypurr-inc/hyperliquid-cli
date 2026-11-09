@@ -9,7 +9,7 @@ use hypersdk::hypercore::types::{
     Action, BasicOrder, BatchOrder, OrderGrouping, OrderRequest, OrderResponseStatus, OrderType,
     OrderTypePlacement, ScheduleCancel, TimeInForce, TpSl,
 };
-use hypersdk::hypercore::{Chain, Cloid, HttpClient, OidOrCloid};
+use hypersdk::hypercore::{Cloid, HttpClient, OidOrCloid};
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
@@ -24,10 +24,8 @@ use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::mode::Mode;
 use crate::output::{self, TableData};
 use crate::prompt;
-use crate::response_sanitization::labelled_untrusted_text;
 use crate::signing::SelectedSigner;
 
 const DEFAULT_MARKET_ORDER_SLIPPAGE_BPS: u16 = 500;
@@ -40,6 +38,7 @@ mod args;
 mod bracket;
 mod chase;
 pub mod cli;
+mod consent;
 mod exchange;
 mod hip3;
 mod live_order;
@@ -50,9 +49,15 @@ mod trailing_stop;
 mod validation;
 
 use args::*;
+use consent::{
+    ConsentTarget, ask_confirmation, confirm_cancel_all, confirm_mainnet_order,
+    confirm_mainnet_order_batch, confirm_mainnet_schedule_cancel, confirm_mainnet_tpsl_batch,
+    confirm_mainnet_twap,
+};
 use exchange::{
-    Placement, ensure_action_statuses_ok, modification_result_oid, order_statuses_from_response,
-    parse_order_statuses,
+    Rejected, ScheduleCancelRawAction, ensure_action_statuses_ok, modification_result_oid,
+    order_statuses_from_response, parse_twap_cancel_response, parse_twap_create_response,
+    place_builder_order_batch_raw, place_order_batch_raw, rejected_all,
 };
 use hip3::{Hip3MarginPlan, execute_hip3_margin_transfer, plan_hip3_margin_transfer};
 use planning::{
@@ -60,6 +65,7 @@ use planning::{
     prepare_cancel_all_orders_plan, prepare_cancel_order_plan, prepare_modify_order_plan,
     prepare_position_tpsl_batch,
 };
+pub use rendering::OrderListOutput;
 use rendering::{
     CancelAllSummary, CancelAllSummaryOutput, CancelConfirmation, CancelConfirmationOutput,
     CancelLeg, CancelLegsOutput, ModifyConfirmationOutput, OrderConfirmation,
@@ -67,7 +73,7 @@ use rendering::{
     TpslOrderConfirmation, TpslOrderConfirmationOutput, TwapCancelConfirmation, TwapCancelOutput,
     TwapCreateConfirmation, TwapCreateOutput,
 };
-use validation::MarketPrecision;
+use validation::{MarketPrecision, TpslSpec};
 
 #[derive(Debug, Clone)]
 struct PreparedOrder {
@@ -78,9 +84,7 @@ struct PreparedOrder {
     side: OrderSide,
     order_type: CreateOrderType,
     tif: Option<TifArg>,
-    price: Decimal,
     trigger_price: Option<Decimal>,
-    size: Decimal,
     amount: Option<Decimal>,
     amount_unit: String,
     warning: Option<String>,
@@ -102,8 +106,17 @@ impl PreparedOrder {
         self.perp().and_then(|perp| perp.dex.as_deref())
     }
 
+    /// The price the order is sent at.
+    fn price(&self) -> Decimal {
+        self.request.limit_px
+    }
+
+    fn size(&self) -> Decimal {
+        self.request.sz
+    }
+
     fn notional(&self) -> Decimal {
-        self.size * self.price
+        self.size() * self.price()
     }
 }
 
@@ -476,12 +489,12 @@ async fn place_order_batch(
 async fn place_position_tpsl(
     context: OrderSubmissionContext<'_>,
     perp: &PerpAsset,
-    args: &TpslArgs,
+    spec: &TpslSpec,
     vault_address: Option<Address>,
 ) -> Result<TpslOrderConfirmationOutput, anyhow::Error> {
-    verify_margin_mode(context, vault_address, Some(perp), args.margin_mode).await?;
+    verify_margin_mode(context, vault_address, Some(perp), spec.margin_mode).await?;
     let user = context.account(vault_address);
-    let prepared = prepare_position_tpsl_batch(context.api.sdk(), perp, user, args).await?;
+    let prepared = prepare_position_tpsl_batch(context.api.sdk(), perp, user, spec).await?;
     context.consent(vault_address, None, "TP/SL", "order placement", |target| {
         confirm_mainnet_tpsl_batch(&prepared, target)
     })?;
@@ -501,10 +514,10 @@ async fn place_position_tpsl(
 async fn tpsl(
     context: OrderSubmissionContext<'_>,
     perp: &PerpAsset,
-    args: &TpslArgs,
+    spec: &TpslSpec,
     vault_address: Option<Address>,
 ) -> Result<(), anyhow::Error> {
-    let legs = place_position_tpsl(context, perp, args, vault_address).await?;
+    let legs = place_position_tpsl(context, perp, spec, vault_address).await?;
     report_tpsl_batch(legs, context.inv)
 }
 
@@ -513,10 +526,10 @@ async fn tpsl(
 async fn protect_position(
     context: OrderSubmissionContext<'_>,
     perp: &PerpAsset,
-    args: &TpslArgs,
+    spec: &TpslSpec,
     vault_address: Option<Address>,
 ) -> Result<(), anyhow::Error> {
-    let legs = place_position_tpsl(context, perp, args, vault_address).await?;
+    let legs = place_position_tpsl(context, perp, spec, vault_address).await?;
     let failures = legs.rejection_errors();
     if failures.is_empty() {
         Ok(())
@@ -553,15 +566,8 @@ async fn verify_margin_mode(
             return Ok(());
         }
         return Err(CliError::Configuration(format!(
-            "orders with --margin-mode {} require an open {} perp position so the mode can be verified; establish it first with `positions update-leverage --coin {} --leverage <N>{}`",
-            margin_mode,
-            coin,
-            coin,
-            if matches!(margin_mode, MarginModeArg::Isolated) {
-                " --isolated"
-            } else {
-                ""
-            }
+            "orders with --margin-mode {margin_mode} require an open {coin} perp position so the mode can be verified; establish it first with `{}`",
+            update_leverage_command(coin, margin_mode)
         ))
         .into());
     };
@@ -572,16 +578,8 @@ async fn verify_margin_mode(
     };
     if actual_margin_mode != margin_mode {
         return Err(CliError::Configuration(format!(
-            "orders requested --margin-mode {} but the current {} perp position is {}; use `positions update-leverage --coin {} --leverage <N>{}` first",
-            margin_mode,
-            coin,
-            actual_margin_mode,
-            coin,
-            if matches!(margin_mode, MarginModeArg::Isolated) {
-                " --isolated"
-            } else {
-                ""
-            }
+            "orders requested --margin-mode {margin_mode} but the current {coin} perp position is {actual_margin_mode}; use `{}` first",
+            update_leverage_command(coin, margin_mode)
         ))
         .into());
     }
@@ -589,26 +587,14 @@ async fn verify_margin_mode(
     Ok(())
 }
 
-/// Sanitized exchange errors of the rejected legs, in leg order.
-fn rejection_errors<'a>(errors: impl IntoIterator<Item = Option<&'a str>>) -> Vec<String> {
-    errors.into_iter().flatten().map(str::to_string).collect()
-}
-
-/// Error for a batch where the exchange rejected every leg. `failures` are
-/// already sanitized and labelled.
-fn rejected_all(action: &str, failures: &[String]) -> CliError {
-    match failures {
-        [one] => CliError::Unsupported(format!("Couldn't {action}. Exchange said: {one}")),
-        many => {
-            let lines = many
-                .iter()
-                .enumerate()
-                .map(|(index, failure)| format!("  {}. {failure}", index + 1))
-                .collect::<Vec<_>>()
-                .join("\n");
-            CliError::Unsupported(format!("Couldn't {action}. Exchange said:\n{lines}"))
-        }
-    }
+/// The `positions update-leverage` command that puts a position in `margin_mode`.
+fn update_leverage_command(coin: &str, margin_mode: MarginModeArg) -> String {
+    let isolated = if margin_mode == MarginModeArg::Isolated {
+        " --isolated"
+    } else {
+        ""
+    };
+    format!("positions update-leverage --coin {coin} --leverage <N>{isolated}")
 }
 
 /// Report a batch where some legs failed. Prints the per-leg result, then
@@ -618,7 +604,7 @@ fn finish_with_failures(
     legs: impl TableData + 'static,
     verb: &str,
     action: &str,
-    failures: Vec<String>,
+    failures: Vec<Rejected>,
     inv: &Invocation,
 ) -> Result<(), anyhow::Error> {
     let total = legs.rows().len();
@@ -736,7 +722,7 @@ async fn cancel_all(
             .zip(&statuses)
             .map(|(order_id, status)| CancelLeg::from_status(*order_id, status))
             .collect();
-        let failures = rejection_errors(rows.iter().map(|row| row.error.as_deref()));
+        let failures: Vec<Rejected> = rows.iter().filter_map(|row| row.error.clone()).collect();
         if !failures.is_empty() {
             return finish_with_failures(
                 CancelLegsOutput { rows },
@@ -927,133 +913,6 @@ fn status_count_mismatch(statuses: usize, orders: usize) -> CliError {
     ))
 }
 
-async fn place_order_batch_raw(
-    api: &ApiClient,
-    signer: &SelectedSigner,
-    batch: BatchOrder,
-    vault_address: Option<Address>,
-) -> Result<Vec<OrderResponseStatus>, CliError> {
-    let response = actions::send_l1_action_raw(
-        api,
-        signer,
-        Action::Order(batch),
-        actions::nonce_now(),
-        vault_address,
-        "order placement failed",
-    )
-    .await?;
-    parse_order_statuses(response)
-}
-
-#[derive(Debug, Serialize)]
-struct BuilderOrderAction {
-    #[serde(rename = "type")]
-    action_type: &'static str,
-    orders: Vec<OrderRequest>,
-    grouping: OrderGrouping,
-    builder: OrderBuilderFee,
-}
-
-async fn place_builder_order_batch_raw(
-    api: &ApiClient,
-    signer: &SelectedSigner,
-    batch: BatchOrder,
-    builder: OrderBuilderFee,
-    vault_address: Option<Address>,
-) -> Result<Vec<OrderResponseStatus>, CliError> {
-    // Builder fee order shape is documented by Hyperliquid's exchange endpoint:
-    // action `{ type: "order", orders, grouping, builder: { b, f } }`, where
-    // `f` is measured in tenths of a basis point.
-    let action = BuilderOrderAction {
-        action_type: "order",
-        orders: batch.orders,
-        grouping: batch.grouping,
-        builder,
-    };
-    let response = actions::send_raw_l1_json_action(
-        api,
-        signer,
-        &action,
-        actions::RawL1ActionMetadata::new(actions::nonce_now()).with_vault_address(vault_address),
-        "order placement failed",
-    )
-    .await?;
-    parse_order_statuses(response)
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-enum TwapExchangeAction {
-    TwapOrder { twap: TwapOrderAction },
-    TwapCancel { a: usize, t: u64 },
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScheduleCancelRawAction {
-    #[serde(rename = "type")]
-    action_type: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    time: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct TwapOrderAction {
-    a: usize,
-    b: bool,
-    s: String,
-    r: bool,
-    m: u64,
-    t: bool,
-}
-
-fn parse_twap_create_response(response: serde_json::Value) -> Result<u64, CliError> {
-    if let Some(error) = response
-        .pointer("/data/status/error")
-        .and_then(serde_json::Value::as_str)
-    {
-        return Err(rendering::status_error("create TWAP", error));
-    }
-
-    response
-        .pointer("/data/status/running/twapId")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| {
-            CliError::Internal(anyhow::anyhow!(
-                "twap-create returned unexpected response: {}",
-                response
-            ))
-        })
-}
-
-/// Unique client order ID for internally generated orders (chase quotes,
-/// bracket entries): nonce-derived high bits plus a per-run sequence.
-fn generated_cloid(seq: u64) -> Result<Cloid, CliError> {
-    let raw = format!("0x{:016x}{:016x}", actions::nonce_now(), seq);
-    parse_cloid(&raw)
-}
-
-fn parse_twap_cancel_response(response: serde_json::Value) -> Result<(), CliError> {
-    let status = response.pointer("/data/status").ok_or_else(|| {
-        CliError::Internal(anyhow::anyhow!(
-            "twap-cancel returned unexpected response: {}",
-            response
-        ))
-    })?;
-
-    if status.as_str() == Some("success") {
-        return Ok(());
-    }
-
-    if let Some(error) = status.get("error").and_then(serde_json::Value::as_str) {
-        return Err(rendering::status_error("cancel TWAP", error));
-    }
-
-    Err(CliError::Internal(anyhow::anyhow!(
-        "twap-cancel returned unexpected status: {status}"
-    )))
-}
-
 fn parse_cloid(input: &str) -> Result<Cloid, CliError> {
     let Some(stripped) = input.strip_prefix("0x") else {
         return Err(CliError::Configuration(
@@ -1119,16 +978,31 @@ fn filter_orders_by_coin(orders: Vec<BasicOrder>, coin: Option<&str>) -> Vec<Bas
         .collect()
 }
 
+/// What `cancel-all --coin` cancels: orders on `coin`, as the exchange lists
+/// them, which sit in the open orders of `dex` (the default dex when `None`).
+pub(super) struct CoinFilter {
+    pub(super) coin: String,
+    pub(super) dex: Option<String>,
+}
+
+impl CoinFilter {
+    fn on_default_dex(coin: String) -> Self {
+        Self { coin, dex: None }
+    }
+}
+
 fn resolve_cancel_all_coin_filter(
     resolver: &AssetResolver,
     coin: Option<&str>,
     dex: Option<&str>,
-) -> Result<Option<String>, CliError> {
+) -> Result<Option<CoinFilter>, CliError> {
     let Some(coin) = coin else {
         return Ok(None);
     };
     if let Some(internal_id) = parse_spot_coin_key(coin) {
-        return Ok(Some(spot_internal_coin_key(internal_id)));
+        return Ok(Some(CoinFilter::on_default_dex(spot_internal_coin_key(
+            internal_id,
+        ))));
     }
 
     let query = match parse_asset_query(coin) {
@@ -1136,11 +1010,19 @@ fn resolve_cancel_all_coin_filter(
         _ => qualify_dex_asset(dex, coin),
     };
     match resolver.resolve(&query) {
-        Ok(Market::Perp(perp)) => Ok(Some(perp.display_name())),
-        Ok(Market::Spot(spot)) => Ok(Some(spot_coin_key(spot.index))),
-        Ok(Market::Outcome(outcome)) => Ok(Some(outcome_coin(outcome.parse()?.encoding))),
+        Ok(Market::Perp(perp)) => Ok(Some(CoinFilter {
+            coin: perp.display_name(),
+            dex: perp.dex.clone(),
+        })),
+        Ok(Market::Spot(spot)) => Ok(Some(CoinFilter::on_default_dex(spot_coin_key(spot.index)))),
+        Ok(Market::Outcome(outcome)) => Ok(Some(CoinFilter::on_default_dex(outcome_coin(
+            outcome.parse()?.encoding,
+        )))),
         Err(err) => match parse_asset_query(&query) {
-            AssetQuery::Hip3 { dex, token } => Ok(Some(format!("{dex}:{token}"))),
+            AssetQuery::Hip3 { dex, token } => Ok(Some(CoinFilter {
+                coin: format!("{dex}:{token}"),
+                dex: Some(dex),
+            })),
             _ => Err(err.into()),
         },
     }
@@ -1216,226 +1098,17 @@ fn require_modify_trigger_price(
     })
 }
 
-fn confirm_cancel_all(
-    coin: Option<&str>,
-    count: usize,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
-    let scope = coin.map(|coin| format!("{coin} ")).unwrap_or_default();
-    let question = format!(
-        "Cancel {count} open {scope}{} on {}?",
-        output::format::noun(count, "order", "orders"),
-        target.network()
-    );
-    ask_confirmation(target, &[], &question)
-}
-
-fn confirm_mainnet_schedule_cancel(
-    plan: &ScheduleCancelPlan,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
-    let question = if let Some(scheduled) = plan.scheduled(Utc::now()) {
-        format!(
-            "Schedule cancel-all for {} on {}?",
-            scheduled.at.to_rfc3339(),
-            target.network()
-        )
-    } else {
-        format!("Clear scheduled cancel-all on {}?", target.network())
-    };
-    ask_confirmation(target, &[], &question)
-}
-
-fn confirm_mainnet_order(
-    prepared: &PreparedOrder,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
-    let amount = prepared
-        .amount
-        .map(|amount| format!(", amount {amount} {}", prepared.amount_unit))
-        .unwrap_or_default();
-    let trigger = prepared
-        .trigger_price
-        .map(|trigger_price| format!(", trigger price {trigger_price}"))
-        .unwrap_or_default();
-    let reduce_only = if prepared.request.reduce_only {
-        "reduce-only"
-    } else {
-        "not reduce-only"
-    };
-    let mut details = vec![format!(
-        "Order: {} {} order for {} {} at price {}{}{}, {}",
-        prepared.side,
-        prepared.order_type,
-        prepared.size,
-        prepared.coin,
-        prepared.price,
-        trigger,
-        amount,
-        reduce_only
-    )];
-    if let Some(slippage_warning) = &prepared.warning {
-        details.push(prompt::warning(slippage_warning));
-    }
-    ask_confirmation(
-        target,
-        &details,
-        &format!("Place this order on {}?", target.network()),
-    )
-}
-
-fn confirm_mainnet_order_batch(
-    label: &str,
-    prepared: &PreparedOrderBatch,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
-    let count = prepared.legs.len();
-    let orders = output::format::noun(count, "order", "orders");
-    ask_confirmation(
-        target,
-        &[format!("Orders: {count} {label} {orders}")],
-        &format!("Submit {count} {label} {orders} on {}?", target.network()),
-    )
-}
-
-fn confirm_mainnet_tpsl_batch(
-    prepared: &PreparedTpslBatch,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
-    let parent = prepared
-        .legs
-        .iter()
-        .find(|leg| leg.leg == TpslLegKind::Parent);
-    let summary = if let Some(parent) = parent {
-        let children = prepared.legs.len().saturating_sub(1);
-        format!(
-            "Orders: {} parent order for {} {} at price {} with {children} grouped child {} using {}",
-            parent.side,
-            parent.size,
-            parent.coin,
-            parent.price,
-            output::format::noun(children, "order", "orders"),
-            prepared.grouping
-        )
-    } else {
-        let first = prepared.legs.first().ok_or_else(|| {
-            CliError::Configuration("TP/SL batch requires at least one leg".to_string())
-        })?;
-        format!(
-            "Orders: {} grouped TP/SL {} for {} using {}",
-            prepared.legs.len(),
-            output::format::noun(prepared.legs.len(), "order", "orders"),
-            first.coin,
-            prepared.grouping
-        )
-    };
-    let mut details = vec![summary];
-    for leg in &prepared.legs {
-        if let Some(warning) = &leg.warning {
-            details.push(prompt::warning(warning));
-        }
-    }
-    ask_confirmation(
-        target,
-        &details,
-        &format!("Place this TP/SL batch on {}?", target.network()),
-    )
-}
-
-fn confirm_mainnet_twap(
-    plan: &TwapCreatePlan,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
-    let details = [format!(
-        "TWAP: {} {} {} over {} seconds",
-        plan.side, plan.size, plan.coin, plan.duration_seconds
-    )];
-    ask_confirmation(
-        target,
-        &details,
-        &format!("Create this TWAP on {}?", target.network()),
-    )
-}
-
-/// Target facts every consent preview shows before the question.
-struct ConsentTarget<'a> {
-    mode: &'a Mode,
-    chain: Chain,
-    signer: &'a SelectedSigner,
-    vault_address: Option<Address>,
-    builder: Option<&'a OrderBuilderFee>,
-}
-
-impl<'a> ConsentTarget<'a> {
-    fn new(
-        submission: OrderSubmissionContext<'a>,
-        vault_address: Option<Address>,
-        builder: Option<&'a OrderBuilderFee>,
-    ) -> Self {
-        Self {
-            mode: submission.inv.mode(),
-            chain: submission.api.chain(),
-            signer: submission.signer,
-            vault_address,
-            builder,
-        }
-    }
-
-    fn network(&self) -> &'static str {
-        match self.chain {
-            Chain::Mainnet => "mainnet",
-            Chain::Testnet => "testnet",
-        }
-    }
-
-    fn preview_lines(&self) -> Vec<String> {
-        let mut lines = vec![
-            format!("Network: {}", self.network()),
-            format!("Signer: {}", self.signer.address()),
-        ];
-        if let Some(vault) = self.vault_address {
-            lines.push(format!("Acting as: {vault} (vault or subaccount)"));
-        }
-        if let Some(builder) = self.builder {
-            lines.push(format!(
-                "Builder: {} (max fee {}%)",
-                builder.b,
-                Decimal::new(i64::try_from(builder.f).unwrap_or(i64::MAX), 3).normalize()
-            ));
-        }
-        lines
-    }
-}
-
-/// Print the consent preview block on stderr, then ask `question`.
-///
-/// Runs that can't prompt fail with `--yes` as the way to answer before the
-/// block is printed.
-fn ask_confirmation(
-    target: &ConsentTarget<'_>,
-    details: &[String],
-    question: &str,
-) -> Result<bool, CliError> {
-    prompt::ensure_can_prompt(target.mode, "--yes")?;
-    let mut stderr = io::stderr();
-    for line in target.preview_lines().iter().chain(details) {
-        writeln!(stderr, "{line}").map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
-    }
-    prompt::confirm_warning(target.mode, question, "--yes")
-}
-
 #[cfg(test)]
 mod tests {
     use super::planning::{
         position_tpsl_batch, prepare_normal_tpsl_batch, prepare_order, scale_sizes,
     };
-    use super::validation::{
-        OrderSpec, validate_order_for_market, validate_scale_args, validate_tpsl_args,
-    };
+    use super::validation::{OrderSpec, validate_order_for_market, validate_scale_args};
     use super::*;
     use crate::assets::test_support::hip3_perp;
     use crate::assets::{AssetMetadata, PerpAsset, SpotAsset};
     use crate::settings::{EnvSource, Settings};
+    use hypersdk::hypercore::Chain;
     use std::time::Duration;
 
     fn resolver() -> AssetResolver {
@@ -1674,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_tpsl_args_rejects_invalid_cloid() {
+    fn tpsl_flags_reject_invalid_cloid() {
         let mut args = TpslArgs {
             coin: "BTC".to_string(),
             dex: None,
@@ -1688,14 +1361,14 @@ mod tests {
             yes: false,
             cloid: Some("not-a-hex-value".to_string()),
         };
-        let err = validate_tpsl_args(&args).unwrap_err();
+        let err = TpslSpec::from_flags(&args).unwrap_err();
         assert!(
             err.to_string().contains("CLOID must be a 0x-prefixed"),
             "expected cloid validation error, got: {err}"
         );
 
         args.cloid = Some("0xDEADBEEF".to_string());
-        let err = validate_tpsl_args(&args).unwrap_err();
+        let err = TpslSpec::from_flags(&args).unwrap_err();
         assert!(
             err.to_string().contains("CLOID must be exactly 16 bytes"),
             "expected cloid length error, got: {err}"
@@ -1727,7 +1400,7 @@ mod tests {
             yes: false,
             cloid: None,
         };
-        let err = validate_tpsl_args(&tpsl_args).unwrap_err();
+        let err = TpslSpec::from_flags(&tpsl_args).unwrap_err();
         assert!(
             err.to_string()
                 .contains("requires --take-profit or --stop-loss")
@@ -2026,7 +1699,7 @@ mod tests {
             "data": { "statuses": ["waitingForTrigger", "waitingForFill"] }
         });
 
-        let statuses = parse_order_statuses(response).unwrap();
+        let statuses = exchange::parse_order_statuses(response).unwrap();
 
         assert!(matches!(
             statuses.as_slice(),
@@ -2116,7 +1789,7 @@ mod tests {
         let prepared = planning::prepare_scale_batch(&client, &resolver(), &args)
             .await
             .unwrap();
-        let sizes: Vec<_> = prepared.legs.iter().map(|leg| leg.order.size).collect();
+        let sizes: Vec<_> = prepared.legs.iter().map(|leg| leg.order.size()).collect();
         assert_eq!(sizes, vec![Decimal::new(1, 1); 3]);
     }
 
@@ -2226,10 +1899,10 @@ mod tests {
 
     #[test]
     fn tpsl_fixed_size_truncates_to_the_market_lot_in_the_dry_run_plan() {
-        let plan =
-            planning::tpsl_dry_run_plan(&btc(), &fixed_tpsl_args(Decimal::new(123_456_789, 9)))
-                .unwrap()
-                .into_args();
+        let spec = TpslSpec::from_flags(&fixed_tpsl_args(Decimal::new(123_456_789, 9))).unwrap();
+        let plan = planning::tpsl_dry_run_plan(&btc(), &spec, &None)
+            .unwrap()
+            .into_args();
         assert_eq!(plan["legs"][0]["size"], "0.12345");
         assert_eq!(plan["batch_order"]["orders"][1]["s"], "0.12345");
     }

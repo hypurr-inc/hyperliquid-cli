@@ -90,6 +90,13 @@ impl Mode {
         self.stderr_tty && self.can_prompt()
     }
 
+    /// The "Completed in" footer may print on stderr: a human format, stderr is
+    /// a terminal, and no agent or CI reads the run.
+    #[must_use]
+    pub fn timing_footer(&self) -> bool {
+        !self.machine_format && !self.agent && !self.ci && self.stderr_tty
+    }
+
     /// An unprompted notice may interrupt the person at this terminal, for
     /// example the passive update notice: human formats, no agent or CI, and
     /// both output streams are terminals.
@@ -279,6 +286,52 @@ mod tests {
             ),
         ] {
             assert!(!mode.person_on_stderr(), "{name}");
+        }
+    }
+
+    #[test]
+    fn timing_footer_is_for_human_formats_on_a_stderr_terminal() {
+        assert!(terminal().timing_footer());
+        assert!(
+            Mode {
+                non_interactive_flag: true,
+                stdout_tty: false,
+                ..terminal()
+            }
+            .timing_footer(),
+            "only a stderr terminal and a human format matter"
+        );
+        for (name, mode) in [
+            (
+                "stderr piped",
+                Mode {
+                    stderr_tty: false,
+                    ..terminal()
+                },
+            ),
+            (
+                "json",
+                Mode {
+                    machine_format: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "agent",
+                Mode {
+                    agent: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "ci",
+                Mode {
+                    ci: true,
+                    ..terminal()
+                },
+            ),
+        ] {
+            assert!(!mode.timing_footer(), "{name}");
         }
     }
 

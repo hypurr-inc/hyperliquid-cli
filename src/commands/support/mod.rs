@@ -1,13 +1,12 @@
-//! Helpers every command's `run` shares: dry-run envelopes, address parsing,
+//! Helpers every command's `run` shares: the dry-run preview, address parsing,
 //! GitHub issue link helpers, and acting-account lookup.
 
 use hypersdk::Address;
 
-use crate::dry_run::{
-    ActionPlan, ActionReversibility, DryRunEnvelope, DryRunSigningContext, LiveSubmissionPolicy,
-};
+use crate::dry_run::{DryRunEnvelope, DryRunSigning};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
+use crate::signing::SelectedSigner;
 
 pub const REPORT_REPO: &str = "hypurr-inc/hyperliquid-cli";
 
@@ -90,171 +89,68 @@ pub fn open_in_browser(url: &str) -> bool {
     }
 }
 
+/// Print the `--dry-run` preview of a command: its name from the invocation,
+/// what it `would_execute`, and its `args`.
+///
+/// A signing command's preview also names the signer, once resolved here and
+/// without prompting; a signer that cannot be resolved prints as `null` with a
+/// `signer_warning`. A local command's preview names no network.
 pub(crate) fn print_dry_run(
     inv: &Invocation,
-    command: impl Into<String>,
-    details: serde_json::Value,
+    would_execute: &str,
+    args: serde_json::Value,
 ) -> Result<(), anyhow::Error> {
-    print_dry_run_envelope(inv, DryRunEnvelope::from_details(command, details))
+    print_dry_run_acting_for(inv, would_execute, args, None)
 }
 
-pub(crate) fn print_dry_run_envelope(
+/// [`print_dry_run`] for an action sent for `vault_address`, the account an
+/// order's `--on-behalf-of` names.
+pub(crate) fn print_dry_run_acting_for(
     inv: &Invocation,
-    envelope: DryRunEnvelope,
+    would_execute: &str,
+    args: serde_json::Value,
+    vault_address: Option<String>,
 ) -> Result<(), anyhow::Error> {
-    inv.print_dry_run(envelope);
+    let mut envelope = DryRunEnvelope::new(inv.command_key(), would_execute, args).with_payload(
+        inv.payload()
+            .map(|payload| crate::input_hardening::redact_sensitive_json(payload.clone())),
+    );
+    if inv.command().dry_run_names_signer() {
+        envelope = envelope.with_signing(dry_run_signing(inv, vault_address));
+    }
+    if !inv.command().local {
+        envelope = envelope.with_network(inv.remote().ok().map(|remote| remote.network()));
+    }
+    inv.print_untimed(&envelope);
     Ok(())
 }
 
-pub(crate) fn dry_run_details(
-    inv: &Invocation,
-    would_execute: &str,
-    args: serde_json::Value,
-) -> serde_json::Value {
-    let mut details = serde_json::Map::new();
-    details.insert(
-        "would_execute".to_string(),
-        serde_json::json!(would_execute),
-    );
-    details.insert("args".to_string(), args);
-    if let Some(payload) = inv.payload() {
-        details.insert("payload".to_string(), redact_payload(payload.clone()));
-    }
-    serde_json::Value::Object(details)
-}
-
-pub(crate) fn dry_run_signed_details(
-    inv: &Invocation,
-    would_execute: &str,
-    args: serde_json::Value,
-    signer: Option<String>,
-    acting_as: Option<String>,
-    vault_address: Option<String>,
-) -> serde_json::Value {
-    let mut details = match dry_run_details(inv, would_execute, args) {
-        serde_json::Value::Object(details) => details,
-        _ => serde_json::Map::new(),
-    };
-    details.insert("signer".to_string(), serde_json::json!(signer));
-    details.insert("acting_as".to_string(), serde_json::json!(acting_as));
-    details.insert(
-        "vault_address".to_string(),
-        serde_json::json!(vault_address),
-    );
-    serde_json::Value::Object(details)
-}
-
-pub(crate) fn transfer_dry_run_envelope(
-    inv: &Invocation,
-    command: &str,
-    action: crate::commands::transfers::TransferActionKind,
-    would_execute: &str,
-    args: serde_json::Value,
-) -> DryRunEnvelope {
-    let plan = ActionPlan::signed_exchange_action(
-        would_execute,
-        action.reversibility(),
-        LiveSubmissionPolicy::ValidateConfirmSignSubmit,
-    );
-    DryRunEnvelope::from_action_plan(command, &plan, args)
-        .with_payload(inv.payload().map(|payload| redact_payload(payload.clone())))
-}
-
-pub(crate) fn signed_action_dry_run_envelope(
-    inv: &Invocation,
-    command: &str,
-    would_execute: &str,
-    reversibility: ActionReversibility,
-    args: serde_json::Value,
-    signing_context: DryRunSigningContext,
-) -> DryRunEnvelope {
-    let plan = ActionPlan::signed_exchange_action(
-        would_execute,
-        reversibility,
-        LiveSubmissionPolicy::ValidateConfirmSignSubmit,
-    );
-    DryRunEnvelope::from_action_plan(command, &plan, args)
-        .with_payload(inv.payload().map(|payload| redact_payload(payload.clone())))
-        .with_signing_context(signing_context)
-}
-
-pub(crate) fn print_signed_dry_run(
-    inv: &Invocation,
-    command: &str,
-    would_execute: &str,
-    reversibility: ActionReversibility,
-    args: serde_json::Value,
-) -> Result<(), anyhow::Error> {
-    print_dry_run_envelope(
-        inv,
-        signed_action_dry_run_envelope(
-            inv,
-            command,
-            would_execute,
-            reversibility,
-            args,
-            default_dry_run_signing_context(inv),
+fn dry_run_signing(inv: &Invocation, vault_address: Option<String>) -> DryRunSigning {
+    match inv.resolve_signer() {
+        Ok(resolved) => DryRunSigning::new(
+            Ok(resolved.address().to_string()),
+            vault_address
+                .clone()
+                .or_else(|| Some(resolved.query_address().to_string())),
+            vault_address,
         ),
-    )
-}
-
-pub(crate) fn print_transfer_dry_run(
-    inv: &Invocation,
-    command: &str,
-    action: crate::commands::transfers::TransferActionKind,
-    would_execute: &str,
-    args: serde_json::Value,
-) -> Result<(), anyhow::Error> {
-    print_transfer_dry_run_as(inv, command, action, would_execute, args, None)
-}
-
-pub(crate) fn print_transfer_dry_run_as(
-    inv: &Invocation,
-    command: &str,
-    action: crate::commands::transfers::TransferActionKind,
-    would_execute: &str,
-    args: serde_json::Value,
-    signing: Option<DryRunSigningContext>,
-) -> Result<(), anyhow::Error> {
-    let mut envelope = transfer_dry_run_envelope(inv, command, action, would_execute, args);
-    if let Some(signing) = signing {
-        envelope = envelope.with_signing_context(signing);
+        Err(err) => DryRunSigning::new(Err(err.to_string()), vault_address.clone(), vault_address),
     }
-    print_dry_run_envelope(inv, envelope)
 }
 
-pub(crate) fn dry_run_signer_address(inv: &Invocation) -> Option<String> {
-    dry_run_signing_addresses(inv).0
-}
-
-pub(crate) fn dry_run_signing_addresses(inv: &Invocation) -> (Option<String>, Option<String>) {
-    inv.resolve_signer()
-        .ok()
-        .map(|resolved| {
-            (
-                Some(resolved.address().to_string()),
-                Some(resolved.query_address().to_string()),
-            )
-        })
-        .unwrap_or((None, None))
-}
-
-pub(crate) fn dry_run_vault_signing_addresses(
-    inv: &Invocation,
-    vault_address: Option<String>,
-) -> (Option<String>, Option<String>, Option<String>) {
-    let (signer, query_address) = dry_run_signing_addresses(inv);
-    let acting_as = vault_address.clone().or(query_address);
-    (signer, acting_as, vault_address)
-}
-
-pub(crate) fn default_dry_run_signing_context(inv: &Invocation) -> DryRunSigningContext {
-    let (signer, acting_as) = dry_run_signing_addresses(inv);
-    DryRunSigningContext::new(signer, acting_as, None)
-}
-
-pub(crate) fn redact_payload(value: serde_json::Value) -> serde_json::Value {
-    crate::input_hardening::redact_sensitive_json(value)
+/// Refuse a stored API wallet for `action_type`, which only the master account
+/// may sign. Runs on dry runs too, so a preview never succeeds where the live
+/// run is rejected.
+pub(crate) fn require_master_signer(
+    signer: &SelectedSigner,
+    action_type: &str,
+) -> Result<(), CliError> {
+    if signer.is_stored_agent() {
+        return Err(CliError::Unsupported(format!(
+            "{action_type} must be signed by the master account; select the master wallet, not a stored API wallet"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn resolve_optional_acting_account_target(

@@ -12,11 +12,21 @@ use serde::Deserialize;
 
 use super::{CliError, ErrorEnvelope};
 
-static COMMAND_PATH: OnceLock<Vec<String>> = OnceLock::new();
+static COMMAND_PATH: OnceLock<String> = OnceLock::new();
 
-/// Record the command path resolved by clap for error diagnostics.
-pub fn set_command_path(path: &[String]) {
-    let _ = COMMAND_PATH.set(path.to_vec());
+/// Record the registered command the line selected, as its space-joined path
+/// (`orders create`). Failure diagnostics and the panic message quote it.
+pub fn set_command_path(path: &[&str]) {
+    let _ = COMMAND_PATH.set(path.join(" "));
+}
+
+/// The command recorded by [`set_command_path`]; `None` before one is selected.
+#[must_use]
+pub fn command_path() -> Option<&'static str> {
+    COMMAND_PATH
+        .get()
+        .map(String::as_str)
+        .filter(|path| !path.is_empty())
 }
 
 /// The parts of the recorded envelope that an incident report quotes.
@@ -87,10 +97,7 @@ pub(super) fn record(err: &CliError) {
     let Some(path) = crate::paths::last_error_file() else {
         return;
     };
-    let command = COMMAND_PATH
-        .get()
-        .and_then(|path| crate::command_registry::CommandRegistry::get().find_matching_path(path));
-    let _ = write(&path, err, command);
+    let _ = write(&path, err, command_path().map(str::to_owned));
 }
 
 fn write(path: &Path, err: &CliError, command: Option<String>) -> std::io::Result<()> {
@@ -105,6 +112,13 @@ fn write(path: &Path, err: &CliError, command: Option<String>) -> std::io::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_selected_command_is_one_space_joined_path() {
+        assert_eq!(command_path(), None);
+        set_command_path(&["orders", "create"]);
+        assert_eq!(command_path(), Some("orders create"));
+    }
 
     #[test]
     fn recorded_failure_round_trips_through_the_reader() {

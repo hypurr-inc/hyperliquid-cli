@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
 use crate::commands::account::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::actions;
-use crate::commands::support::print_signed_dry_run;
+use crate::commands::support::print_dry_run;
 use crate::commands::user_signed::{self, UserSigned};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
@@ -140,18 +140,6 @@ impl StakingActionKind {
             Self::Withdraw => "queue_hype_staking_withdrawal",
             Self::ClaimRewards => "claim_staking_rewards",
             Self::LinkInitiate | Self::LinkFinalize => "link_staking_user",
-        }
-    }
-
-    fn command(self) -> &'static str {
-        match self {
-            Self::Delegate => "staking delegate",
-            Self::Undelegate => "staking undelegate",
-            Self::Deposit => "staking deposit",
-            Self::Withdraw => "staking withdraw",
-            Self::ClaimRewards => "staking claim-rewards",
-            Self::LinkInitiate => "staking link initiate",
-            Self::LinkFinalize => "staking link finalize",
         }
     }
 }
@@ -967,11 +955,9 @@ async fn run_delegation(
     let validator = protocol_address(&args.validator, "validator")?;
     validate_amount_to_wei(args.amount)?;
     if inv.dry_run() {
-        return print_signed_dry_run(
+        return print_dry_run(
             inv,
-            action_kind.command(),
             action_kind.would_execute(),
-            action_kind.reversibility(),
             delegate_dry_run_value(inv.remote()?.chain(), args, action_kind),
         );
     }
@@ -994,11 +980,9 @@ async fn run_amount(
 ) -> Result<(), anyhow::Error> {
     validate_amount_to_wei(args.amount)?;
     if inv.dry_run() {
-        return print_signed_dry_run(
+        return print_dry_run(
             inv,
-            action_kind.command(),
             action_kind.would_execute(),
-            action_kind.reversibility(),
             amount_dry_run_value(inv.remote()?.chain(), args, action_kind),
         );
     }
@@ -1120,11 +1104,9 @@ impl CliCommand for StakingClaimRewards {
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         if inv.dry_run() {
             let action_kind = StakingActionKind::ClaimRewards;
-            return print_signed_dry_run(
+            return print_dry_run(
                 inv,
-                action_kind.command(),
                 action_kind.would_execute(),
-                action_kind.reversibility(),
                 claim_rewards_dry_run_value(inv.remote()?.chain()),
             );
         }
@@ -1187,11 +1169,9 @@ async fn staking_link(
     let user = protocol_address(&args.user, "staking-link user")?;
     if inv.dry_run() {
         let action_kind = action_kind_for_link(is_finalize);
-        return print_signed_dry_run(
+        return print_dry_run(
             inv,
-            action_kind.command(),
             action_kind.would_execute(),
-            action_kind.reversibility(),
             link_dry_run_value(inv.remote()?.chain(), user, is_finalize),
         );
     }
