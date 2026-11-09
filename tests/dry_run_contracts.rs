@@ -9,8 +9,7 @@ use serde_json::{Value, json};
 use contract_support::assert_json_fixture;
 use support::exchange::ExchangeFixture;
 use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address,
-    run_json,
+    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address, run_json,
 };
 
 /// The preview of `args`, signed by the test key when `signer` is set, against
@@ -529,7 +528,9 @@ async fn shortcut_orders_preview_under_their_own_command_name() {
         let output = dry_run(
             Some(&server),
             false,
-            &[command, "--coin", "BTC", "--price", "50000", "--size", "0.001"],
+            &[
+                command, "--coin", "BTC", "--price", "50000", "--size", "0.001",
+            ],
         );
         assert_eq!(output["command"], command);
         assert_eq!(output["would_execute"], "submit_order");

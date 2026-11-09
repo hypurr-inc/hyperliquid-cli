@@ -94,11 +94,17 @@ fn environment_variable_names_are_spelled_only_in_the_env_table() {
     );
 }
 
+/// The scan is not vacuous: run over the one file that does spell every name
+/// (the table in `env.rs`), it finds each of them in a string literal.
 #[test]
-fn the_scanner_finds_names_in_literals_and_ignores_comments_and_words() {
-    let source = "// \"HYPERLIQUID_FORMAT\"\nlet a = \"set HYPERLIQUID_FORMAT=json\";\nlet b = '\"';\nlet c = \"HYPERLIQUID_FORMATTED\";";
-    let literals = string_literals(source);
-    assert_eq!(literals.len(), 2, "{literals:?}");
-    assert!(mentions(&literals[0], env::FORMAT));
-    assert!(!mentions(&literals[1], env::FORMAT));
+fn the_scan_finds_every_name_where_the_table_spells_it() {
+    let table = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/env.rs");
+    let literals = string_literals(&fs::read_to_string(table).unwrap());
+
+    for name in env::ALL {
+        assert!(
+            literals.iter().any(|literal| mentions(literal, name)),
+            "{name} is not found in a literal of src/env.rs"
+        );
+    }
 }

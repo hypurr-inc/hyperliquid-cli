@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use hyperliquid_cli::command_registry::CommandRegistry;
-use hyperliquid_cli::output::TableData;
 use hyperliquid_cli::commands::schema::schema_query;
+use hyperliquid_cli::output::TableData;
 use serde_json::{Value, json};
 
 /// Set to `1` to rewrite the snapshot fixtures instead of checking them. The

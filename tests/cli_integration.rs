@@ -12,7 +12,12 @@ use support::{
 /// The `--dry-run` preview of `args`, for a command that reads nothing. The
 /// pipeline reads the config file, so the command gets a home.
 fn preview(args: &[&str]) -> Value {
-    run_json(IsolatedHome::new().json_command().arg("--dry-run").args(args))
+    run_json(
+        IsolatedHome::new()
+            .json_command()
+            .arg("--dry-run")
+            .args(args),
+    )
 }
 
 /// The `--dry-run` preview of `args`, for a command that resolves a market
@@ -170,12 +175,7 @@ async fn output_format_follows_flag_then_environment_then_the_pipe() {
 
 #[test]
 fn an_invalid_format_variable_is_a_json_configuration_error() {
-    let error = run_json_failure(
-        hermetic_command()
-            .env(FORMAT_ENV, "xml")
-            .arg("schema"),
-        2,
-    );
+    let error = run_json_failure(hermetic_command().env(FORMAT_ENV, "xml").arg("schema"), 2);
 
     assert!(
         error["error"].as_str().unwrap().contains(FORMAT_ENV),
@@ -336,10 +336,7 @@ async fn orders_twap_dry_runs_show_the_validated_intent() {
     assert_eq!(create["args"]["resolved_asset"], "ETH");
     assert_eq!(create["args"]["margin_mode"], "cross");
 
-    let cancel = preview_on(
-        &server,
-        &["orders", "twap-cancel", "42", "--coin", "ETH"],
-    );
+    let cancel = preview_on(&server, &["orders", "twap-cancel", "42", "--coin", "ETH"]);
     assert_eq!(cancel["command"], "orders twap-cancel");
     assert_eq!(cancel["would_execute"], "cancel_twap_order");
     assert_eq!(cancel["args"]["twap_id"], 42);
