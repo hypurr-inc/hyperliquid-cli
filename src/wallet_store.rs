@@ -1,8 +1,9 @@
 //! The wallet management workflow shared by `wallet`, `account` and `setup`:
 //! vault writes paired with config updates, rollback, naming and default markers.
 //!
-//! Vault failures reach the user as plain messages. Config, lock and
-//! wallet-not-found failures keep their typed errors and exit codes.
+//! Wallet selection and the vault's own operations stay on [`Vault`]; errors keep
+//! their types (`wallet_not_found`, ambiguity, config and lock failures), so each
+//! reaches the user with its own exit code.
 
 use ows_lib::types::WalletInfo;
 
@@ -10,10 +11,6 @@ use crate::config::Config;
 use crate::errors::CliError;
 use crate::ows::vault::{HyperliquidAccount, Vault};
 use crate::settings::{ConfigTransaction, Settings};
-
-fn vault_failure(err: CliError) -> anyhow::Error {
-    anyhow::anyhow!("{err}")
-}
 
 pub enum NewWallet<'a> {
     Create,
@@ -25,6 +22,17 @@ pub enum WalletName<'a> {
     Exact(&'a str),
     /// The first free name among `base`, `base-2`, `base-3`, ...
     Next(&'a str),
+}
+
+impl<'a> WalletName<'a> {
+    /// The alias the user gave, trimmed; none or a blank one is `Next(base)`.
+    #[must_use]
+    pub fn from_alias(alias: Option<&'a str>, base: &'a str) -> Self {
+        match crate::config::nonblank(alias) {
+            Some(alias) => Self::Exact(alias),
+            None => Self::Next(base),
+        }
+    }
 }
 
 /// Edits the config once the wallet exists, under the config lock. The config
@@ -56,12 +64,8 @@ impl<'a> WalletStore<'a> {
         &self.vault
     }
 
-    pub fn list(&self) -> Result<Vec<WalletInfo>, anyhow::Error> {
-        self.vault.list().map_err(vault_failure)
-    }
-
-    pub fn next_name(&self, base: &str) -> Result<String, anyhow::Error> {
-        let wallets = self.list()?;
+    pub fn next_name(&self, base: &str) -> Result<String, CliError> {
+        let wallets = self.vault.list()?;
         let taken = |name: &str| wallets.iter().any(|wallet| wallet.name == name);
         if !taken(base) {
             return Ok(base.to_string());
@@ -70,13 +74,6 @@ impl<'a> WalletStore<'a> {
             .map(|index| format!("{base}-{index}"))
             .find(|candidate| !taken(candidate))
             .expect("an unbounded range always yields a free name"))
-    }
-
-    pub fn find(wallets: Vec<WalletInfo>, selector: &str) -> Result<WalletInfo, CliError> {
-        wallets
-            .into_iter()
-            .find(|wallet| wallet.name == selector || wallet.id == selector)
-            .ok_or_else(|| CliError::Unsupported(format!("wallet '{selector}' not found")))
     }
 
     pub fn is_configured_default(&self, wallet: &WalletInfo) -> Result<bool, CliError> {
@@ -122,21 +119,18 @@ impl<'a> WalletStore<'a> {
             NewWallet::Create => self.vault.create(&name),
             NewWallet::ImportPrivateKey(key) => self.vault.import_private_key(&name, key),
             NewWallet::ImportMnemonic(mnemonic) => self.vault.import_mnemonic(&name, mnemonic),
-        }
-        .map_err(vault_failure)?;
+        }?;
 
         let account = match Vault::hyperliquid_account(&info) {
             Ok(account) => account,
-            Err(err) => return Err(self.roll_back(&info, vault_failure(err))),
+            Err(err) => return Err(self.roll_back(&info, err.into())),
         };
 
         let mut config_keys_written = Vec::new();
         if let Some((transaction, edit)) = editing {
             config_keys_written = transaction
                 .commit(|config| edit(config, &info, &account))
-                .map_err(|err| {
-                    self.roll_back(&info, anyhow::anyhow!("failed to save config: {err}"))
-                })?;
+                .map_err(|err| self.roll_back(&info, err))?;
         }
 
         Ok(StoredWallet {
@@ -159,16 +153,20 @@ impl<'a> WalletStore<'a> {
         }
     }
 
-    pub fn set_default(&self, wallet: &WalletInfo) -> Result<(), anyhow::Error> {
+    /// Make `wallet` the default signer. A wallet that can't sign for Hyperliquid
+    /// is refused before the config is touched; the account it would sign as is
+    /// returned.
+    pub fn set_default(&self, wallet: &WalletInfo) -> Result<HyperliquidAccount, anyhow::Error> {
+        let account = Vault::hyperliquid_account(wallet)?;
         self.settings
             .update_config(|config| config.default_wallet_id = Some(wallet.id.clone()))?;
-        Ok(())
+        Ok(account)
     }
 
     /// Delete `wallet` from the vault. When it was the configured default, clear
     /// that reference too.
     pub fn remove(&self, wallet: &WalletInfo, was_default: bool) -> Result<(), anyhow::Error> {
-        self.vault.delete(&wallet.id).map_err(vault_failure)?;
+        self.vault.delete(&wallet.id)?;
         if was_default {
             self.settings
                 .update_config(|config| config.default_wallet_id = None)?;
@@ -176,19 +174,9 @@ impl<'a> WalletStore<'a> {
         Ok(())
     }
 
-    pub fn rename(&self, selector: &str, new_name: &str) -> Result<WalletInfo, anyhow::Error> {
-        self.vault
-            .rename(selector, new_name)
-            .map_err(vault_failure)?;
-        self.vault.get(new_name).map_err(vault_failure)
-    }
-
-    pub fn export(&self, selector: &str) -> Result<String, anyhow::Error> {
-        self.vault.export(selector).map_err(vault_failure)
-    }
-
-    pub fn account_of(wallet: &WalletInfo) -> Result<HyperliquidAccount, anyhow::Error> {
-        Vault::hyperliquid_account(wallet).map_err(vault_failure)
+    pub fn rename(&self, selector: &str, new_name: &str) -> Result<WalletInfo, CliError> {
+        self.vault.rename(selector, new_name)?;
+        self.vault.get(new_name)
     }
 }
 
@@ -257,7 +245,7 @@ mod tests {
             saved_config(&tmp).default_wallet_id.as_deref(),
             Some(stored.info.id.as_str())
         );
-        assert_eq!(store.list().unwrap().len(), 1);
+        assert_eq!(store.vault().list().unwrap().len(), 1);
     }
 
     #[test]
@@ -326,7 +314,7 @@ mod tests {
             .unwrap();
 
         assert!(err.to_string().contains("invalid config file"));
-        assert!(store.list().unwrap().is_empty());
+        assert!(store.vault().list().unwrap().is_empty());
     }
 
     #[test]
@@ -353,27 +341,70 @@ mod tests {
             .err()
             .unwrap();
 
-        assert!(err.to_string().contains("failed to save config"));
-        assert!(store.list().unwrap().is_empty());
+        assert!(err.to_string().contains("Failed to write config file"));
+        assert_eq!(crate::errors::from_anyhow(err).exit_code(), 2);
+        assert!(store.vault().list().unwrap().is_empty());
     }
 
     #[test]
-    fn find_matches_exact_name_or_id_only() {
-        let tmp = TempDir::new().unwrap();
-        let wallet = import_test_wallet(tmp.path(), "main");
-        let wallets = vec![wallet.clone()];
+    fn blank_aliases_take_the_next_free_name() {
+        for alias in [None, Some(""), Some("   ")] {
+            assert!(matches!(
+                WalletName::from_alias(alias, "imported"),
+                WalletName::Next("imported")
+            ));
+        }
+        assert!(matches!(
+            WalletName::from_alias(Some("  main "), "imported"),
+            WalletName::Exact("main")
+        ));
+    }
 
+    #[test]
+    fn vault_failures_keep_their_exit_codes() {
+        let tmp = TempDir::new().unwrap();
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
+        import_test_wallet(&tmp.path().join("vault"), "main");
+
+        let err = store.rename("missing", "other").unwrap_err();
+        assert!(matches!(err, CliError::OwsWalletNotFound { .. }), "{err}");
+        assert_eq!(err.exit_code(), 10);
+
+        let err = store
+            .add(
+                &NewWallet::ImportPrivateKey(KEY),
+                &WalletName::Exact("main"),
+                None,
+            )
+            .err()
+            .unwrap();
+        assert_eq!(crate::errors::from_anyhow(err).exit_code(), 13);
+    }
+
+    #[test]
+    fn set_default_refuses_a_wallet_without_a_hyperliquid_account_before_writing() {
+        let tmp = TempDir::new().unwrap();
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
+        let mut wallet = import_test_wallet(&tmp.path().join("vault"), "main");
+
+        let account = store.set_default(&wallet).unwrap();
+        assert_eq!(account.chain_id, "eip155:1");
         assert_eq!(
-            WalletStore::find(wallets.clone(), "main").unwrap().id,
-            wallet.id
+            saved_config(&tmp).default_wallet_id.as_deref(),
+            Some(wallet.id.as_str())
         );
-        assert_eq!(
-            WalletStore::find(wallets.clone(), &wallet.id).unwrap().name,
-            "main"
+
+        std::fs::remove_file(tmp.path().join("config").join("config.json")).unwrap();
+        wallet.accounts.clear();
+        let err = store.set_default(&wallet).unwrap_err();
+        let err = crate::errors::from_anyhow(err);
+        assert!(matches!(err, CliError::OwsNoChainAccount { .. }), "{err}");
+        assert!(
+            !tmp.path().join("config").join("config.json").exists(),
+            "the config must not be written for a wallet that can't sign"
         );
-        let err = WalletStore::find(wallets, "Main").unwrap_err();
-        assert_eq!(err.exit_code(), 13);
-        assert!(err.to_string().contains("wallet 'Main' not found"));
     }
 
     #[test]
@@ -410,7 +441,7 @@ mod tests {
 
         store.remove(&stored.info, true).unwrap();
 
-        assert!(store.list().unwrap().is_empty());
+        assert!(store.vault().list().unwrap().is_empty());
         assert_eq!(saved_config(&tmp).default_wallet_id, None);
     }
 }

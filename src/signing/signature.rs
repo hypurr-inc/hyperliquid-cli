@@ -33,6 +33,11 @@ impl Provider {
         CliError::InvalidAuth(format!("{}_malformed_response: {detail}", self.code))
     }
 
+    /// The refusal for a signature made by an address other than the selected one.
+    pub(crate) fn signer_mismatch(self, detail: impl std::fmt::Display) -> CliError {
+        CliError::InvalidAuth(format!("{}_signer_mismatch: {detail}", self.code))
+    }
+
     /// Parse a provider's signature into the canonical `r || s || v` form with
     /// `v` as 27 or 28. `recovery_id` supplies `v` for a bare 128-hex-char
     /// `r || s`; a 130-hex-char signature carries its own.
@@ -97,9 +102,8 @@ impl Provider {
         if recovered == expected {
             return Ok(());
         }
-        Err(CliError::InvalidAuth(format!(
-            "{}_signer_mismatch: {label} signature recovered {recovered}, expected {expected}",
-            self.code
+        Err(self.signer_mismatch(format!(
+            "{label} signature recovered {recovered}, expected {expected}"
         )))
     }
 }

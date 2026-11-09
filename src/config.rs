@@ -83,11 +83,7 @@ impl BankrLogin {
 
     /// Hand-edited files may hold padding or blanks; blank means absent.
     fn normalized(self) -> Self {
-        let clean = |value: Option<String>| {
-            value
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-        };
+        let clean = |value: Option<String>| nonblank(value.as_deref()).map(str::to_string);
         Self {
             api_key: clean(self.api_key),
             api_url: clean(self.api_url),
@@ -98,17 +94,17 @@ impl BankrLogin {
     /// The stored API key, trimmed; `None` when absent or blank.
     #[must_use]
     pub fn api_key(&self) -> Option<&str> {
-        trimmed(self.api_key.as_deref())
+        nonblank(self.api_key.as_deref())
     }
 
     /// The stored API host, trimmed; `None` for the public endpoint.
     #[must_use]
     pub fn api_url(&self) -> Option<&str> {
-        trimmed(self.api_url.as_deref())
+        nonblank(self.api_url.as_deref())
     }
 
     pub fn address(&self) -> Result<Option<Address>, CliError> {
-        let Some(text) = trimmed(self.address.as_deref()) else {
+        let Some(text) = nonblank(self.address.as_deref()) else {
             return Ok(None);
         };
         text.parse::<Address>().map(Some).map_err(|_| {
@@ -119,7 +115,9 @@ impl BankrLogin {
     }
 }
 
-fn trimmed(value: Option<&str>) -> Option<&str> {
+/// The value trimmed, or `None` when it is absent or blank: what every
+/// setting layer means by "not set".
+pub(crate) fn nonblank(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
@@ -136,21 +134,13 @@ impl std::fmt::Debug for BankrLogin {
 impl Config {
     #[must_use]
     pub fn has_builder_default(&self) -> bool {
-        let set = |value: &Option<String>| {
-            value
-                .as_deref()
-                .map(str::trim)
-                .is_some_and(|value| !value.is_empty())
-        };
-        set(&self.default_builder_address) || set(&self.default_builder_fee_rate)
+        nonblank(self.default_builder_address.as_deref()).is_some()
+            || nonblank(self.default_builder_fee_rate.as_deref()).is_some()
     }
 
     #[must_use]
     pub fn has_referral_default(&self) -> bool {
-        self.default_referral_code
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
+        nonblank(self.default_referral_code.as_deref()).is_some()
     }
 
     pub(crate) fn plaintext_key(&self) -> Option<&str> {
@@ -198,24 +188,29 @@ impl ConfigFile {
         &self.path
     }
 
-    #[must_use]
-    pub fn exists(&self) -> bool {
-        self.path.exists()
+    /// Whether the file exists. Only a genuinely absent file is `false`; a file
+    /// that can't be inspected (permissions, I/O) is an error, never "absent".
+    pub fn exists(&self) -> Result<bool, CliError> {
+        match std::fs::metadata(&self.path) {
+            Ok(_) => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(CliError::Configuration(format!(
+                "failed to inspect config file {}: {err}",
+                self.path.display()
+            ))),
+        }
     }
 
     /// The raw file text. `Ok(None)` when the file doesn't exist.
     pub fn read_text(&self) -> Result<Option<String>, CliError> {
-        if !self.path.exists() {
-            return Ok(None);
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(CliError::Configuration(format!(
+                "failed to read config file {}: {err}",
+                self.path.display()
+            ))),
         }
-        std::fs::read_to_string(&self.path)
-            .map(Some)
-            .map_err(|err| {
-                CliError::Configuration(format!(
-                    "failed to read config file {}: {err}",
-                    self.path.display()
-                ))
-            })
     }
 
     /// Parse file text as `T`, naming this file in the error.
@@ -279,11 +274,14 @@ impl ConfigFile {
     }
 
     /// Replace the file atomically with mode 0600, creating the directory (0700).
-    pub fn save(&self, config: &Config, _lock: &FileLock) -> Result<(), anyhow::Error> {
+    pub fn save(&self, config: &Config, _lock: &FileLock) -> Result<(), CliError> {
         let json = serde_json::to_string_pretty(config)
-            .map_err(|err| anyhow::anyhow!("Failed to serialize config: {err}"))?;
+            .map_err(|err| CliError::Configuration(format!("Failed to serialize config: {err}")))?;
         private_fs::write_atomic(&self.path, json.as_bytes()).map_err(|err| {
-            anyhow::anyhow!("Failed to write config file {}: {err}", self.path.display())
+            CliError::Configuration(format!(
+                "Failed to write config file {}: {err}",
+                self.path.display()
+            ))
         })
     }
 

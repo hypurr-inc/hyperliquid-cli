@@ -10,7 +10,7 @@ use crate::command_spec::{ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind
 use crate::commands::orders::OrderListOutput;
 use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
-use crate::commands::support::{canonical_dex, print_dry_run, require_master_signer};
+use crate::commands::support::{canonical_dex, print_dry_run};
 use crate::commands::user_signed::{self, UserSigned};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -1242,6 +1242,7 @@ impl CliCommand for AccountAbstractionSet {
         "Set account abstraction for the signer (userSetAbstraction). Use --dry-run to preview; confirm or pass -y for live submit.",
     )
     .signs(Signs::user_signed::<UserSetAbstraction>())
+    .master_only("userSetAbstraction")
     .risk(Risk::AccountState)
     .prompt()
     .args(&[
@@ -1251,9 +1252,6 @@ impl CliCommand for AccountAbstractionSet {
 
     async fn run(inv: &Invocation, args: &SetAbstractionArgs) -> Result<(), anyhow::Error> {
         let resolved = inv.resolve_signer();
-        if let Ok(signer) = &resolved {
-            require_master_signer(signer, "userSetAbstraction")?;
-        }
         if inv.dry_run() {
             return print_dry_run(
                 inv,

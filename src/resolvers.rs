@@ -3,31 +3,51 @@
 
 use hypersdk::Address;
 
+use crate::errors::CliError;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HexAddressError {
     Format,
     Zero,
 }
 
+impl HexAddressError {
+    /// The refusal as an error of the caller's `class` (`CliError::Unsupported`,
+    /// `CliError::Configuration`, ...). `noun` names what was parsed ("builder
+    /// address", "address") and `raw` is what the user typed.
+    #[must_use]
+    pub fn refusal(self, class: fn(String) -> CliError, noun: &str, raw: &str) -> CliError {
+        class(match self {
+            Self::Format => format!("Invalid {noun}: {raw}"),
+            Self::Zero => format!("{noun} must not be the zero address"),
+        })
+    }
+}
+
 /// Parse `value` as a 40-hex-digit address whose `0x` prefix is optional, the
 /// way `Address::from_str` does. Does not trim.
 pub fn parse_hex_address(value: &str, reject_zero: bool) -> Result<Address, HexAddressError> {
-    let digits = value.strip_prefix("0x").unwrap_or(value);
-    parse_exact_hex_address(&format!("0x{digits}"), reject_zero)
+    parse_digits(value.strip_prefix("0x").unwrap_or(value), reject_zero)
 }
 
 /// Parse `value` as a 0x-prefixed 40-hex-digit address. Does not trim.
 pub fn parse_exact_hex_address(value: &str, reject_zero: bool) -> Result<Address, HexAddressError> {
-    let stripped = value.strip_prefix("0x").ok_or(HexAddressError::Format)?;
-    if stripped.len() != 40 || !stripped.chars().all(|ch| ch.is_ascii_hexdigit()) {
+    parse_digits(
+        value.strip_prefix("0x").ok_or(HexAddressError::Format)?,
+        reject_zero,
+    )
+}
+
+fn parse_digits(digits: &str, reject_zero: bool) -> Result<Address, HexAddressError> {
+    if digits.len() != 40 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(HexAddressError::Format);
     }
-    if reject_zero && stripped.chars().all(|ch| ch == '0') {
+    if reject_zero && digits.bytes().all(|byte| byte == b'0') {
         return Err(HexAddressError::Zero);
     }
-    value
-        .parse::<Address>()
-        .map_err(|_| HexAddressError::Format)
+    let mut bytes = [0_u8; 20];
+    hex::decode_to_slice(digits, &mut bytes).map_err(|_| HexAddressError::Format)?;
+    Ok(Address::from(bytes))
 }
 
 #[cfg(test)]
@@ -86,5 +106,17 @@ mod tests {
             parse_hex_address("0x0000000000000000000000000000000000000000", true),
             Err(HexAddressError::Zero)
         );
+    }
+
+    #[test]
+    fn a_refusal_takes_the_callers_error_class_and_noun() {
+        let format = HexAddressError::Format.refusal(CliError::Unsupported, "address", "nope");
+        assert!(matches!(&format, CliError::Unsupported(text) if text == "Invalid address: nope"));
+        let zero =
+            HexAddressError::Zero.refusal(CliError::Configuration, "validator address", "0x0");
+        assert!(matches!(
+            &zero,
+            CliError::Configuration(text) if text == "validator address must not be the zero address"
+        ));
     }
 }
