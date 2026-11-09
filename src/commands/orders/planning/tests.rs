@@ -641,6 +641,92 @@ fn twap_size_truncates_to_the_market_lot() {
     assert!(err.to_string().contains("truncates to zero"), "{err}");
 }
 
+/// `twap-create` and `twap-cancel` send the SDK's `Action::TwapOrder` and
+/// `TwapCancel`. The exchange verifies the signature over their msgpack, so
+/// the bytes must be those of the structs this CLI hand-built before the SDK
+/// typed them (`s` a normalized decimal string, `m` a `u64`): `s` is a
+/// `Decimal` in the SDK and `m` a `u32`, which must not change a byte.
+#[test]
+fn the_sdk_twap_actions_serialize_to_the_bytes_the_hand_built_ones_did() {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    #[serde(tag = "type", rename_all = "camelCase")]
+    enum HandBuilt {
+        TwapOrder { twap: HandBuiltTwap },
+        TwapCancel { a: usize, t: u64 },
+    }
+    #[derive(Serialize)]
+    struct HandBuiltTwap {
+        a: usize,
+        b: bool,
+        s: String,
+        r: bool,
+        m: u64,
+        t: bool,
+    }
+
+    // Sizes with trailing zeros, whole numbers, and the largest and smallest
+    // durations: the cases where a decimal or an integer width could differ.
+    for (size, duration, side, randomize) in [
+        (Decimal::new(5, 1), 300, OrderSide::Buy, false),
+        (Decimal::new(500, 3), 600, OrderSide::Sell, true),
+        (Decimal::new(12_345, 5), 3_600, OrderSide::Buy, true),
+        (Decimal::from(100), 604_800, OrderSide::Sell, false),
+        (Decimal::new(100_000, 5), 300, OrderSide::Buy, false),
+    ] {
+        let args = TwapCreateArgs {
+            side,
+            duration,
+            randomize,
+            ..twap_args(size)
+        };
+        let plan = prepare_twap_create_plan(&btc(), &args).unwrap();
+        let hand_built = HandBuilt::TwapOrder {
+            twap: HandBuiltTwap {
+                a: 0,
+                b: side.is_buy(),
+                s: plan.size.normalize().to_string(),
+                r: false,
+                m: duration / 60,
+                t: randomize,
+            },
+        };
+        assert_eq!(
+            rmp_serde::to_vec_named(&plan.action).unwrap(),
+            rmp_serde::to_vec_named(&hand_built).unwrap(),
+            "msgpack of {size} over {duration}s"
+        );
+        assert_eq!(
+            serde_json::to_string(&plan.action).unwrap(),
+            serde_json::to_string(&hand_built).unwrap(),
+            "json of {size} over {duration}s"
+        );
+    }
+
+    let cancel = prepare_twap_cancel_plan(
+        &btc(),
+        &TwapCancelArgs {
+            coin: "BTC".to_string(),
+            dex: None,
+            twap_id: 77_738_308,
+            on_behalf_of: None,
+        },
+    );
+    let hand_built = HandBuilt::TwapCancel {
+        a: 0,
+        t: 77_738_308,
+    };
+    assert_eq!(
+        rmp_serde::to_vec_named(&cancel.action).unwrap(),
+        rmp_serde::to_vec_named(&hand_built).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&cancel.action).unwrap(),
+        serde_json::to_string(&hand_built).unwrap()
+    );
+}
+
 fn fixed_tpsl_args(size: Decimal) -> TpslArgs {
     TpslArgs {
         coin: "BTC".to_string(),

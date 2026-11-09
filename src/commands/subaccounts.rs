@@ -436,7 +436,7 @@ fn consent_preview(chain: Chain, signer: &SelectedSigner, subaccount: Address) -
 }
 
 fn print_action(inv: &Invocation, row: SubaccountActionConfirmation) {
-    inv.print(&Rows::new(vec![row]));
+    inv.print(&Rows::one(row));
 }
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["subaccount"], "Manage subaccounts")

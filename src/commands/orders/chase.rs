@@ -16,8 +16,8 @@ use crate::settings::Settings;
 use super::args::{BPS_DENOMINATOR, ChaseArgs, DEFAULT_TRACKING_TIMEOUT, OrderSide, TifArg};
 use super::cloid::generated_cloid;
 use super::context::OrderSubmissionContext;
-use super::exchange::{Placement, rejection_error};
-use super::live_order::{CloidAsset, LiveOrder, elapsed_ms, send_tracked_action};
+use super::exchange::{Placement, Wording, rejection_error};
+use super::live_order::{CloidAsset, LiveOrder, elapsed_ms};
 use super::planning::{market_dex, market_mid_price, prepare_order_in, resolve_perp_market};
 use super::preview::OrderDryRunPlan;
 use super::rendering::single_status;
@@ -265,7 +265,9 @@ async fn cancel_working_quote(
     context: OrderSubmissionContext<'_>,
     quote: &LiveOrder,
 ) -> Result<(), CliError> {
-    send_tracked_action(context, quote.cancel_by_cloid(), "chase cancel failed").await?;
+    context
+        .send(quote.cancel_by_cloid(), Wording::CHASE_CANCEL)
+        .await?;
     Ok(())
 }
 
@@ -283,7 +285,7 @@ async fn place_chase_quote(
         context,
         &Ungated::Chase.cleared(),
         prepared.batch(),
-        "chase quote failed",
+        Wording::CHASE_QUOTE,
     )
     .await?;
     Ok(single_status(statuses)?)

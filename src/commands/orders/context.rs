@@ -1,8 +1,12 @@
 use hypersdk::Address;
+use hypersdk::hypercore::types::Action;
+use serde::Serialize;
 
-use super::consent::{ConsentKind, ConsentTarget};
+use super::consent::{Consent, ConsentTarget};
+use super::exchange::{Answer, Wording};
 use crate::builder_fee::BuilderFee;
 use crate::errors::CliError;
+use crate::exchange::actions;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::network::Network;
@@ -26,12 +30,43 @@ impl<'a> OrderSubmissionContext<'a> {
             .unwrap_or_else(|| self.signer.query_address())
     }
 
-    /// A no-op when no approval is required. A decline fails with `kind`'s error.
+    /// Sign and send `action` for the account this context acts for; the
+    /// exchange's answer, worded by `wording` where it is refused or cannot be
+    /// read.
+    pub(super) async fn send(self, action: Action, wording: Wording) -> Result<Answer, CliError> {
+        let payload = actions::send_l1_action(
+            self.api,
+            self.signer,
+            action,
+            self.vault_address,
+            wording.rejected,
+        )
+        .await?;
+        Ok(Answer::new(payload, wording))
+    }
+
+    /// [`send`](Self::send) for an action the SDK has no type for.
+    pub(super) async fn send_raw(
+        self,
+        action: &impl Serialize,
+        wording: Wording,
+    ) -> Result<Answer, CliError> {
+        let payload = actions::send_raw_l1_json_action(
+            self.api,
+            self.signer,
+            action,
+            self.vault_address,
+            wording.rejected,
+        )
+        .await?;
+        Ok(Answer::new(payload, wording))
+    }
+
+    /// A no-op when no approval is required. A decline fails with `consent`'s error.
     pub(super) fn consent(
         self,
-        kind: ConsentKind,
+        consent: &Consent<'_>,
         builder: Option<&BuilderFee>,
-        ask: impl FnOnce(&ConsentTarget<'_>) -> Result<bool, CliError>,
     ) -> Result<(), CliError> {
         if !self.requires_approval {
             return Ok(());
@@ -43,10 +78,10 @@ impl<'a> OrderSubmissionContext<'a> {
             self.vault_address,
             builder,
         );
-        if ask(&target)? {
+        if consent.ask(&target)? {
             return Ok(());
         }
-        Err(kind.declined())
+        Err(consent.declined())
     }
 
     /// Refuse a command that cannot ask (it runs unattended for minutes) when

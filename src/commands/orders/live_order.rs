@@ -11,9 +11,7 @@ use hypersdk::hypercore::types::{
 };
 use hypersdk::{Address, Decimal};
 
-use super::context::OrderSubmissionContext;
 use crate::errors::CliError;
-use crate::exchange::actions;
 use crate::http_api::ApiClient;
 
 /// A protocol asset index as a cancel-by-cloid request carries it: 32 bits,
@@ -45,21 +43,6 @@ pub(super) struct LiveOrder {
 
 pub(super) fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
-pub(super) async fn send_tracked_action(
-    context: OrderSubmissionContext<'_>,
-    action: Action,
-    error_label: &'static str,
-) -> Result<serde_json::Value, CliError> {
-    actions::send_l1_action(
-        context.api,
-        context.signer,
-        action,
-        context.vault_address,
-        error_label,
-    )
-    .await
 }
 
 impl LiveOrder {

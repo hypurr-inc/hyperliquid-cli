@@ -169,7 +169,7 @@ impl TransferConfirmation {
     }
 
     fn print(self, inv: &Invocation) {
-        inv.print(&Rows::new(vec![self]));
+        inv.print(&Rows::one(self));
     }
 }
 

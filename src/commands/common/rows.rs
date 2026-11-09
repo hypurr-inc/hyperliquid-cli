@@ -76,6 +76,12 @@ impl<T> Rows<T> {
     pub fn new(rows: Vec<T>) -> Self {
         Self { rows }
     }
+
+    /// A list of exactly `row`: a JSON array of one object, unlike [`One`].
+    #[must_use]
+    pub fn one(row: T) -> Self {
+        Self { rows: vec![row] }
+    }
 }
 
 impl<T: ListRow> TableData for Rows<T> {
