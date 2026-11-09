@@ -49,7 +49,7 @@ impl CliError {
             Self::UnknownOutcome(_) => Some(Recovery {
                 instruction: "Check open orders and recent fills:".into(),
                 commands: vec![
-                    NextCommand::new("hyperliquid orders open"),
+                    NextCommand::new(crate::hints::CHECK_LIVE_COMMAND),
                     NextCommand::new("hyperliquid account fills"),
                 ],
                 note: None,

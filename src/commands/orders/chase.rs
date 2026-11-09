@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use hypersdk::Decimal;
-use hypersdk::hypercore::types::{Action, BatchOrder, OrderGrouping, OrderResponseStatus};
+use hypersdk::hypercore::types::OrderResponseStatus;
 use hypersdk::hypercore::{Cloid, HttpClient};
 use serde_json::json;
 
@@ -11,14 +11,17 @@ use crate::invocation::Invocation;
 use crate::output::TableData;
 use crate::settings::Settings;
 
-use super::args::{ChaseArgs, DEFAULT_TRACKING_TIMEOUT, OrderSide, TifArg};
+use super::args::{BPS_DENOMINATOR, ChaseArgs, DEFAULT_TRACKING_TIMEOUT, OrderSide, TifArg};
 use super::cloid::generated_cloid;
 use super::context::OrderSubmissionContext;
-use super::exchange::{Placement, decode_statuses, rejection_error};
+use super::exchange::{Placement, rejection_error};
 use super::live_order::{CloidAsset, LiveOrder, elapsed_ms, send_tracked_action};
 use super::planning::{market_dex, market_mid_price, prepare_order_in, resolve_perp_market};
+use super::preview::OrderDryRunPlan;
 use super::rendering::single_status;
-use super::validation::{BPS_DENOMINATOR, OrderSpec};
+use super::status::Status;
+use super::submit::{Ungated, submit_orders};
+use super::validation::OrderSpec;
 
 /// Chase stops when the unfilled remainder is worth less than the exchange's
 /// minimum order value.
@@ -51,13 +54,13 @@ fn quote_spec(
     .with_cloid(cloid))
 }
 
-pub async fn chase_dry_run_plan(
+pub(super) async fn chase_dry_run_plan(
     client: &HttpClient,
     resolver: &AssetResolver,
     settings: &Settings,
     args: &ChaseArgs,
     timeout: Duration,
-) -> Result<serde_json::Value, CliError> {
+) -> Result<OrderDryRunPlan, CliError> {
     let perp = resolve_perp_market(
         client,
         resolver,
@@ -80,7 +83,10 @@ pub async fn chase_dry_run_plan(
         )?,
     )
     .await?;
-    Ok(dry_run_document(args, timeout, first_quote.price()))
+    Ok(OrderDryRunPlan::unattributed(
+        "chase",
+        dry_run_document(args, timeout, first_quote.price()),
+    ))
 }
 
 fn dry_run_document(
@@ -104,7 +110,7 @@ fn dry_run_document(
     })
 }
 
-pub async fn chase(
+pub(super) async fn chase(
     context: OrderSubmissionContext<'_>,
     resolver: &AssetResolver,
     args: &ChaseArgs,
@@ -129,7 +135,7 @@ pub async fn chase(
     let mid = || market_mid_price(client, &market, &args.coin, args.dex.as_deref());
     let start_mid = mid().await?;
     let mut remaining = args.size;
-    let mut status = "timeout";
+    let mut status = Status::Timeout;
     let mut working: Option<LiveOrder> = None;
     let mut seq: u64 = 0;
     let user = context.account();
@@ -143,12 +149,12 @@ pub async fn chase(
                 let traveled_bps =
                     ((mid - start_mid).abs() / start_mid) * Decimal::from(BPS_DENOMINATOR);
                 if traveled_bps > Decimal::from(args.max_chase) {
-                    status = "max_chase";
+                    status = Status::MaxChase;
                     break;
                 }
             }
             if remaining * mid < Decimal::from(MIN_NOTIONAL_USDC) {
-                status = "min_notional";
+                status = Status::MinNotional;
                 break;
             }
 
@@ -208,12 +214,12 @@ pub async fn chase(
     outcome?;
 
     if remaining <= Decimal::ZERO {
-        status = "filled";
+        status = Status::Filled;
         remaining = Decimal::ZERO;
     }
 
     context.inv.print(&ChaseOutput {
-        status: status.to_string(),
+        status,
         remaining: remaining.to_string(),
         elapsed_ms: elapsed_ms(started),
     });
@@ -281,24 +287,18 @@ async fn place_chase_quote(
     let spec = quote_spec(args, price, size, Some(cloid))?;
     let prepared =
         prepare_order_in(context.api.sdk(), market, context.inv.settings(), &spec).await?;
-    let response = send_tracked_action(
+    let statuses = submit_orders(
         context,
-        Action::Order(BatchOrder {
-            orders: vec![prepared.request],
-            grouping: OrderGrouping::Na,
-            builder: None,
-        }),
+        &Ungated::Chase.cleared(),
+        prepared.batch(),
         "chase quote failed",
     )
     .await?;
-    Ok(single_status(decode_statuses(
-        response,
-        "order placement",
-    )?)?)
+    Ok(single_status(statuses)?)
 }
 
 struct ChaseOutput {
-    status: String,
+    status: Status,
     remaining: String,
     elapsed_ms: u64,
 }
@@ -310,7 +310,7 @@ impl TableData for ChaseOutput {
 
     fn rows(&self) -> Vec<Vec<String>> {
         vec![vec![
-            self.status.clone(),
+            self.status.to_string(),
             self.remaining.clone(),
             self.elapsed_ms.to_string(),
         ]]

@@ -4,35 +4,27 @@ use chrono::Utc;
 use clap::Args;
 use hypersdk::hypercore::Subscription;
 
-use hypersdk::Address;
-
 use super::args::{
     BatchCreateArgs, BatchModifyArgs, BracketArgs, BuySellArgs, CancelAllArgs, CancelArgs,
-    ChaseArgs, CreateArgs, MarginModeArg, ModifyArgs, OrderSide, OutcomeOrderArgs, ScaleArgs,
-    ScheduleCancelArgs, StatusArgs, TpslArgs, TwapCancelArgs, TwapCreateArgs,
+    ChaseArgs, CreateArgs, ModifyArgs, OrderSide, OutcomeOrderArgs, ScaleArgs, ScheduleCancelArgs,
+    StatusArgs, TpslArgs, TrailingStopArgs, TwapCancelArgs, TwapCreateArgs,
 };
 use super::bracket::{bracket, bracket_dry_run_plan, validate_bracket_args};
-use super::builder_check;
 use super::chase::{chase, chase_dry_run_plan, chase_timeout};
-use super::context::OrderSubmissionContext;
-use super::exchange::OrderBuilderFee;
 use super::existing::{
     batch_modify_dry_run_plan, cancel_all_dry_run_plan, cancel_dry_run_plan, modify_dry_run_plan,
     validate_modify_args,
 };
-use super::hip3::{Hip3MarginPlan, plan_hip3_margin_transfers};
 use super::planning::{
-    OrderDryRunPlan, batch_create_dry_run_plan, create_dry_run_plan, fetch_current_margin_mode,
-    prepare_batch_create_orders, prepare_create_order, prepare_scale_batch,
-    prepare_schedule_cancel_plan, prepare_twap_cancel_plan, prepare_twap_create_plan, resolve_perp,
+    OrderEcho, batch_create_dry_run_plan, create_dry_run_plan, prepare_batch_create_orders,
+    prepare_create_order, prepare_scale_batch, prepare_schedule_cancel_plan,
+    prepare_trailing_stop_plan, prepare_twap_cancel_plan, prepare_twap_create_plan, resolve_perp,
     scale_dry_run_plan, schedule_cancel_dry_run_plan, tpsl_dry_run_plan, twap_cancel_dry_run_plan,
-    twap_create_dry_run_plan,
+    twap_create_dry_run_plan, validate_trailing_stop_args,
 };
-use super::prepared::PreparedOrder;
 use super::queries::{history, open, open_orders_output, status};
-use super::trailing_stop::{
-    TrailingStopArgs, prepare_trailing_stop_plan, trailing_stop, validate_trailing_stop_args,
-};
+use super::run::OrderRun;
+use super::trailing_stop::trailing_stop;
 use super::validation::{
     OrderSpec, ScaleLadder, TpslSpec, read_validated_batch_create_orders,
     read_validated_batch_modify_orders, validate_batch_create_args,
@@ -41,17 +33,132 @@ use super::{
     batch_create, batch_modify, cancel, cancel_all, create, modify, scale, schedule_cancel, tpsl,
     twap_cancel, twap_create,
 };
-use crate::assets::{PerpAsset, canonical_dex};
+use crate::assets::canonical_dex;
 use crate::command_spec::{
-    CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk, StreamBound, arg,
+    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk, StreamBound,
+    arg,
 };
-use crate::commands::support::*;
 use crate::errors::CliError;
-use crate::input_hardening::{FilePolicy, validate_file_path, validate_resource_id};
+use crate::input_hardening::{FilePolicy, validate_file_path};
 use crate::invocation::Invocation;
+use crate::margin::MarginPlan;
 use crate::stream::SnapshotWatchArgs;
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["orders"], "Manage orders").aliases(&["order"]);
+
+// What each order command says about the flags they share. A flag is described
+// here once, so every command that takes it gets the same input hardening.
+
+/// `--on-behalf-of`, hardened; a command adds [`ON_BEHALF_OF_DESCRIBED`] when
+/// the schema should say more than the clap help.
+const ON_BEHALF_OF: ArgSpec = arg("on_behalf_of")
+    .kind(InputKind::ActingAccountSelector)
+    .resource_id("on-behalf-of selector");
+const ON_BEHALF_OF_DESCRIBED: ArgSpec = ON_BEHALF_OF.describe(
+    "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
+);
+const YES: ArgSpec = arg("yes").kind(InputKind::Boolean).describe(
+    "Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt.",
+);
+const DEX: ArgSpec = arg("dex")
+    .kind(InputKind::VenueSelector)
+    .describe("HIP-3 DEX name.")
+    .resource_id("dex");
+const CLOID: ArgSpec = arg("cloid")
+    .kind(InputKind::Identifier)
+    .describe("0x-prefixed 16-byte client order id.")
+    .resource_id("cloid");
+const BUILDER: ArgSpec = arg("builder")
+    .kind(InputKind::ProtocolObjectAddress)
+    .describe("Builder address to receive the additional order fee. Requires --builder-fee-rate.")
+    .resource_id("builder address");
+const BUILDER_FEE_RATE: ArgSpec = arg("builder_fee_rate")
+    .describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder.")
+    .resource_id("builder fee rate");
+const SUB_BUILDER: ArgSpec = arg("sub_builder")
+    .kind(InputKind::ProtocolObjectAddress)
+    .describe("Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Up to 5; shares sum to at most 100%. Requires --builder.")
+    .resource_id("sub-builder");
+const PRIORITY_RATE: ArgSpec = arg("priority_rate");
+const MAX_SLIPPAGE_BPS: ArgSpec = arg("max_slippage_bps").describe(
+    "Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000.",
+);
+
+/// `--margin-mode`'s description, for the kind of order that takes it.
+macro_rules! margin_mode_help {
+    ($orders:literal) => {
+        concat!(
+            "Margin mode intent for perpetual ",
+            $orders,
+            ". Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."
+        )
+    };
+}
+const MARGIN_MODE: ArgSpec = arg("margin_mode").describe(margin_mode_help!("orders"));
+
+/// `--priority-rate`'s description up to what each command requires of it.
+macro_rules! priority_rate_help {
+    ($rest:literal) => {
+        concat!(
+            "Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps",
+            $rest
+        )
+    };
+}
+
+/// The args `buy` and `sell` take: `orders create` without the trigger, TP/SL
+/// and grouping flags, with `--side` preset by the command.
+const BUY_SELL_ARGS: &[ArgSpec] = &[
+    arg("coin")
+        .kind(InputKind::MarketSymbol)
+        .describe("Perpetual coin, spot pair, or outcome notation.")
+        .asset_input("coin"),
+    DEX,
+    arg("price").kind(InputKind::Price),
+    arg("size")
+        .kind(InputKind::Amount)
+        .describe("Base-asset size. Accepted for market and required for limit."),
+    arg("amount").kind(InputKind::Amount),
+    arg("order_type")
+        .describe("Order type. Defaults to limit when --price is set, otherwise market."),
+    arg("tif").describe("Time in force: gtc, ioc, or alo."),
+    arg("reduce_only")
+        .kind(InputKind::Boolean)
+        .describe("Only reduce an existing perpetual position; spot markets are not supported."),
+    MAX_SLIPPAGE_BPS,
+    ON_BEHALF_OF_DESCRIBED,
+    MARGIN_MODE,
+    BUILDER,
+    BUILDER_FEE_RATE,
+    SUB_BUILDER,
+    PRIORITY_RATE.describe(priority_rate_help!(
+        "). Requires a limit order with --tif ioc, or --tif alo without --reduce-only."
+    )),
+    CLOID,
+    YES,
+];
+
+/// The args `outcome-buy` and `outcome-sell` take: those of `buy` and `sell`
+/// for outcome tokens, which take no order write priority.
+const OUTCOME_ARGS: &[ArgSpec] = &[
+    arg("coin").kind(InputKind::MarketSymbol).describe("Outcome notation such as #10 or +10.").asset_input("coin"),
+    arg("price").kind(InputKind::Price).describe("Limit price. When omitted, attempts a market order."),
+    arg("size").kind(InputKind::Amount).describe("Outcome token size."),
+    DEX,
+    arg("amount").kind(InputKind::Amount),
+    arg("order_type").describe("Order type. Defaults to limit when --price is set, otherwise market."),
+    arg("tif").describe("Time in force: gtc, ioc, or alo."),
+    arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
+    MAX_SLIPPAGE_BPS,
+    ON_BEHALF_OF_DESCRIBED,
+    MARGIN_MODE,
+    BUILDER,
+    BUILDER_FEE_RATE,
+    SUB_BUILDER.describe("Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Requires --builder."),
+    PRIORITY_RATE.describe("Order write priority is not accepted on outcome markets; the flag is refused."),
+    CLOID,
+    YES,
+];
 
 #[derive(Args, Debug, Clone)]
 pub struct OpenOrdersArgs {
@@ -94,7 +201,7 @@ impl CliCommand for OrdersOpen {
             watch_open_orders(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
             let resolver = inv.asset_resolver().await?;
-            let user = inv.resolve_signer()?.query_address();
+            let user = inv.resolve_signer_account().await?;
             open(inv, &resolver, user, dex.as_deref()).await
         }
     }
@@ -149,7 +256,7 @@ impl CliCommand for OrdersHistory {
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         let resolver = inv.asset_resolver().await?;
-        let user = inv.resolve_signer()?.query_address();
+        let user = inv.resolve_signer_account().await?;
         history(inv, &resolver, user).await
     }
 }
@@ -174,7 +281,7 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
     .testnet_unprompted()
     .args(&[
         arg("coin").kind(InputKind::MarketSymbol).describe("Perpetual coin such as BTC, supported spot pair, or outcome notation (#<encoding> or +<encoding>) for verified outcome limit orders.").asset_input("coin"),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name.").resource_id("dex"),
+        DEX,
         arg("side"),
         arg("price").kind(InputKind::Price).describe("Limit price. For stop-loss and take-profit market trigger orders, also accepted as a legacy trigger price."),
         arg("trigger_price").kind(InputKind::Price),
@@ -183,55 +290,43 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
         arg("order_type").describe("Order type: limit, market, market-trigger, or trigger-limit."),
         arg("tif").describe("Time in force: gtc, ioc, or alo."),
         arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
-        arg("max_slippage_bps").describe("Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000."),
+        MAX_SLIPPAGE_BPS,
         arg("take_profit").kind(InputKind::Price).describe("Take-profit trigger price for a normal-tpsl child order."),
         arg("stop_loss").kind(InputKind::Price).describe("Stop-loss trigger price for a normal-tpsl child order."),
         arg("grouping").describe("Parent-attached TP/SL grouping. orders create requires normal-tpsl when TP/SL children are present."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.").resource_id("on-behalf-of selector"),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
-        arg("builder").kind(InputKind::ProtocolObjectAddress).describe("Builder address to receive the additional order fee. Requires --builder-fee-rate.").resource_id("builder address"),
-        arg("builder_fee_rate").describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder.").resource_id("builder fee rate"),
-        arg("sub_builder").kind(InputKind::ProtocolObjectAddress).describe("Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Up to 5; shares sum to at most 100%. Requires --builder.").resource_id("sub-builder"),
-        arg("priority_rate").describe("Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps; max 100000000). Requires a limit order with --tif ioc, or --tif alo without --reduce-only; cannot combine with --grouping, --take-profit or --stop-loss."),
-        arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id.").resource_id("cloid"),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
+        ON_BEHALF_OF_DESCRIBED,
+        MARGIN_MODE,
+        BUILDER,
+        BUILDER_FEE_RATE,
+        SUB_BUILDER,
+        PRIORITY_RATE.describe(priority_rate_help!("; max 100000000). Requires a limit order with --tif ioc, or --tif alo without --reduce-only; cannot combine with --grouping, --take-profit or --stop-loss.")),
+        CLOID,
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error> {
         let spec = OrderSpec::from_create(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         let submission = prepare_create_order(client, &resolver, inv.settings(), &spec).await?;
         if inv.dry_run() {
-            let plan = preview_with_account_margin_mode(
-                inv,
-                vault_address,
-                submission.parent().perp(),
-                args.margin_mode,
-                create_dry_run_plan(&submission, args)?,
-            )
-            .await;
-            let would_execute = plan.would_execute();
-            let mut details = plan.into_args();
-            add_hip3_side_effects(inv, vault_address, &[submission.parent()], &mut details).await?;
-            add_builder_approval(
-                inv,
-                vault_address,
-                submission.parent().builder.as_ref(),
-                &mut details,
-            )
-            .await;
-            return print_dry_run_acting_for(inv, would_execute, details, vault_address_string);
+            let parent = submission.parent();
+            let margin = run
+                .previewed_margin_of(parent.perp(), parent.margin)
+                .await?;
+            let mut plan =
+                create_dry_run_plan(&submission, &OrderEcho::from(args), margin.as_ref())?;
+            if let Some(effects) = run.hip3_side_effects(&[parent]).await? {
+                plan = plan.with_extra("side_effects", effects);
+            }
+            if let Some(approval) = run.builder_approval(parent.builder.as_ref()).await? {
+                plan = plan.with_extra("builder_approval", approval);
+            }
+            return run.preview(plan);
         }
         let signer = inv.resolve_signer()?;
-        create(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            submission,
-        )
-        .await
+        create(run.context(&signer)?, submission).await
     }
 }
 
@@ -250,7 +345,7 @@ impl CliCommand for OrdersScale {
     .testnet_unprompted()
     .args(&[
         arg("coin").kind(InputKind::MarketSymbol).describe("Perpetual coin, for example BTC.").asset_input("coin"),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name.").resource_id("dex"),
+        DEX,
         arg("side").describe("Order side for every generated leg."),
         arg("start_price"),
         arg("end_price"),
@@ -258,43 +353,28 @@ impl CliCommand for OrdersScale {
         arg("orders").describe("Number of limit orders to generate."),
         arg("tif").describe("Time in force for generated limit orders: gtc, ioc, or alo."),
         arg("reduce_only").kind(InputKind::Boolean),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.").resource_id("on-behalf-of selector"),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
-        arg("priority_rate").describe("Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps). Requires --tif ioc, or --tif alo without --reduce-only."),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
+        ON_BEHALF_OF_DESCRIBED,
+        MARGIN_MODE,
+        PRIORITY_RATE.describe(priority_rate_help!("). Requires --tif ioc, or --tif alo without --reduce-only.")),
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &ScaleArgs) -> Result<(), anyhow::Error> {
         let ladder = ScaleLadder::from_args(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         let prepared =
             prepare_scale_batch(client, &resolver, inv.settings(), args, &ladder).await?;
         if inv.dry_run() {
-            let plan = preview_with_account_margin_mode(
-                inv,
-                vault_address,
-                prepared.legs.first().and_then(PreparedOrder::perp),
-                args.margin_mode,
-                scale_dry_run_plan(&prepared, args),
-            )
-            .await;
-            return print_dry_run_acting_for(
-                inv,
-                plan.would_execute(),
-                plan.into_args(),
-                vault_address_string,
-            );
+            let (perp, margin) = prepared
+                .margin_check()
+                .map_or((None, None), |(perp, margin)| (Some(perp), Some(*margin)));
+            let margin = run.previewed_margin_of(perp, margin).await?;
+            return run.preview(scale_dry_run_plan(&prepared, margin.as_ref()));
         }
         let signer = inv.resolve_signer()?;
-        scale(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            prepared,
-        )
-        .await
+        scale(run.context(&signer)?, prepared).await
     }
 }
 
@@ -313,9 +393,9 @@ impl CliCommand for OrdersBatchCreate {
     .testnet_unprompted()
     .args(&[
         arg("orders_file").kind(InputKind::FilePath).describe("JSON file containing an array of order legs or an object with an orders array."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("priority_rate").describe("Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps). Every leg must be IOC, or every leg ALO and not reduce-only."),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
+        ON_BEHALF_OF_DESCRIBED,
+        PRIORITY_RATE.describe(priority_rate_help!("). Every leg must be IOC, or every leg ALO and not reduce-only.")),
+        YES,
     ]);
 
     fn validate(args: &BatchCreateArgs) -> Result<(), CliError> {
@@ -323,9 +403,6 @@ impl CliCommand for OrdersBatchCreate {
             &args.orders_file.to_string_lossy(),
             FilePolicy::json_artifact("orders file"),
         )?;
-        if let Some(on_behalf_of) = args.on_behalf_of.as_deref() {
-            validate_resource_id("on-behalf-of selector", on_behalf_of)?;
-        }
         Ok(())
     }
 
@@ -334,9 +411,7 @@ impl CliCommand for OrdersBatchCreate {
         let orders = read_validated_batch_create_orders(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         let prepared = prepare_batch_create_orders(
             client,
             &resolver,
@@ -346,20 +421,10 @@ impl CliCommand for OrdersBatchCreate {
         )
         .await?;
         if inv.dry_run() {
-            let plan = batch_create_dry_run_plan(&prepared, args);
-            return print_dry_run_acting_for(
-                inv,
-                plan.would_execute(),
-                plan.into_args(),
-                vault_address_string,
-            );
+            return run.preview(batch_create_dry_run_plan(&prepared, args));
         }
         let signer = inv.resolve_signer()?;
-        batch_create(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            prepared,
-        )
-        .await
+        batch_create(run.context(&signer)?, prepared).await
     }
 }
 
@@ -388,16 +453,16 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
     .testnet_unprompted()
     .args(&[
         arg("coin").kind(InputKind::MarketSymbol).describe("Perpetual coin, for example BTC.").asset_input("coin"),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name.").resource_id("dex"),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).resource_id("on-behalf-of selector"),
+        DEX,
+        ON_BEHALF_OF,
         arg("take_profit").kind(InputKind::Price).describe("Take-profit trigger: absolute price, percent offset such as +10%, or entry."),
         arg("stop_loss").kind(InputKind::Price).describe("Stop-loss trigger: absolute price, percent offset such as -5%, or entry."),
         arg("grouping"),
         arg("side").describe("Fixed close side. Omit live to infer from the current position."),
         arg("size").kind(InputKind::Amount).describe("Fixed base-asset size. Omit live to use the current position size."),
-        arg("margin_mode").describe("Margin mode intent for perpetual TP/SL orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
-        arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id.").resource_id("cloid"),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
+        MARGIN_MODE.describe(margin_mode_help!("TP/SL orders")),
+        CLOID,
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &TpslArgs) -> Result<(), anyhow::Error> {
@@ -405,32 +470,14 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
         let perp = resolve_perp(client, &resolver, spec.dex.as_deref(), &spec.coin).await?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
-            let plan = preview_with_account_margin_mode(
-                inv,
-                vault_address,
-                Some(&perp),
-                spec.margin_mode,
-                tpsl_dry_run_plan(&perp, &spec, &args.on_behalf_of)?,
-            )
-            .await;
-            return print_dry_run_acting_for(
-                inv,
-                plan.would_execute(),
-                plan.into_args(),
-                vault_address_string,
-            );
+            let margin = MarginPlan::for_market(&perp, spec.margin_mode)?;
+            let margin = run.previewed_margin(&perp, margin).await?;
+            return run.preview(tpsl_dry_run_plan(&perp, &spec, &margin)?);
         }
         let signer = inv.resolve_signer()?;
-        tpsl(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            &perp,
-            &spec,
-        )
-        .await
+        tpsl(run.context(&signer)?, &perp, &spec).await
     }
 }
 
@@ -459,15 +506,15 @@ hyperliquid --format json orders trailing-stop --coin ETH --side sell --size 0.5
     .one_of_required(&[&["retracement_pct"], &["retracement_px"]])
     .args(&[
         arg("coin").kind(InputKind::MarketSymbol).describe("Perpetual coin, for example BTC. Spot and outcome markets are not supported.").asset_input("coin"),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name.").resource_id("dex"),
+        DEX,
         arg("side"),
         arg("size").kind(InputKind::Amount),
         arg("retracement_pct").describe("Retracement from the best mark price as a percent, above 0 and below 100. Use this or --retracement-px."),
         arg("retracement_px").kind(InputKind::Price),
         arg("activation_price").kind(InputKind::Price),
         arg("reduce_only").kind(InputKind::Boolean),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).resource_id("on-behalf-of selector"),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
+        ON_BEHALF_OF,
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &TrailingStopArgs) -> Result<(), anyhow::Error> {
@@ -476,25 +523,12 @@ hyperliquid --format json orders trailing-stop --coin ETH --side sell --size 0.5
         let resolver = inv.trading_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
         let plan = prepare_trailing_stop_plan(&perp, args)?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
-            let dry_run_plan = plan.dry_run_plan(args);
-            return print_dry_run_acting_for(
-                inv,
-                dry_run_plan.would_execute(),
-                dry_run_plan.into_args(),
-                vault_address_string,
-            );
+            return run.preview(plan.dry_run_plan(args));
         }
         let signer = inv.resolve_signer()?;
-        trailing_stop(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            &plan,
-            args.on_behalf_of.as_deref(),
-        )
-        .await
+        trailing_stop(run.context(&signer)?, &plan, run.on_behalf_of()).await
     }
 }
 
@@ -518,32 +552,17 @@ impl CliCommand for OrdersCancel {
             .kind(InputKind::Identifier)
             .describe("Client order id.")
             .resource_id("cloid"),
-        arg("on_behalf_of")
-            .kind(InputKind::ActingAccountSelector)
-            .resource_id("on-behalf-of selector"),
+        ON_BEHALF_OF,
     ]);
 
     async fn run(inv: &Invocation, args: &CancelArgs) -> Result<(), anyhow::Error> {
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::unprompted(inv, &Self::SPEC, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
-            let plan = cancel_dry_run_plan(args)?;
-            return print_dry_run_acting_for(
-                inv,
-                plan.would_execute(),
-                plan.into_args(),
-                vault_address_string,
-            );
+            return run.preview(cancel_dry_run_plan(args)?);
         }
         let resolver = inv.trading_resolver().await?;
         let signer = inv.resolve_signer()?;
-        cancel(
-            order_submission_context(inv, &signer, &Self::SPEC, false, vault_address)?,
-            &resolver,
-            args,
-        )
-        .await
+        cancel(run.context(&signer)?, &resolver, args).await
     }
 }
 
@@ -564,40 +583,20 @@ impl CliCommand for OrdersCancelAll {
             .kind(InputKind::MarketSymbol)
             .describe("Optional coin filter.")
             .asset_input("coin"),
-        arg("dex")
-            .kind(InputKind::VenueSelector)
-            .describe("HIP-3 DEX name for the coin filter.")
-            .resource_id("dex"),
-        arg("on_behalf_of")
-            .kind(InputKind::ActingAccountSelector)
-            .resource_id("on-behalf-of selector"),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip confirmation prompt for deliberate automation."),
+        DEX.describe("HIP-3 DEX name for the coin filter."),
+        ON_BEHALF_OF,
+        YES.describe("Skip confirmation prompt for deliberate automation."),
     ]);
 
     async fn run(inv: &Invocation, args: &CancelAllArgs) -> Result<(), anyhow::Error> {
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         let resolver = inv.trading_resolver().await?;
         if inv.dry_run() {
             let client = inv.remote()?.api().sdk();
-            let plan = cancel_all_dry_run_plan(client, &resolver, args).await?;
-            return print_dry_run_acting_for(
-                inv,
-                plan.would_execute(),
-                plan.into_args(),
-                vault_address_string,
-            );
+            return run.preview(cancel_all_dry_run_plan(client, &resolver, args).await?);
         }
         let signer = inv.resolve_signer()?;
-        cancel_all(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            &resolver,
-            args,
-        )
-        .await
+        cancel_all(run.context(&signer)?, &resolver, args).await
     }
 }
 
@@ -617,10 +616,7 @@ impl CliCommand for OrdersModify {
         arg("order_id")
             .kind(InputKind::Identifier)
             .describe("Exchange-assigned order id."),
-        arg("cloid")
-            .kind(InputKind::Identifier)
-            .describe("0x-prefixed 16-byte client order id.")
-            .resource_id("cloid"),
+        CLOID,
         arg("price")
             .kind(InputKind::Price)
             .describe("Replacement price."),
@@ -631,34 +627,18 @@ impl CliCommand for OrdersModify {
             .kind(InputKind::Amount)
             .describe("Replacement size."),
         arg("always_place").kind(InputKind::Boolean),
-        arg("on_behalf_of")
-            .kind(InputKind::ActingAccountSelector)
-            .resource_id("on-behalf-of selector"),
+        ON_BEHALF_OF,
     ]);
 
     async fn run(inv: &Invocation, args: &ModifyArgs) -> Result<(), anyhow::Error> {
         let identifier = validate_modify_args(args)?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::unprompted(inv, &Self::SPEC, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
-            let plan = modify_dry_run_plan(args);
-            return print_dry_run_acting_for(
-                inv,
-                plan.would_execute(),
-                plan.into_args(),
-                vault_address_string,
-            );
+            return run.preview(modify_dry_run_plan(args));
         }
         let resolver = inv.trading_resolver().await?;
         let signer = inv.resolve_signer()?;
-        modify(
-            order_submission_context(inv, &signer, &Self::SPEC, false, vault_address)?,
-            &resolver,
-            &identifier,
-            args,
-        )
-        .await
+        modify(run.context(&signer)?, &resolver, &identifier, args).await
     }
 }
 
@@ -685,8 +665,8 @@ hyperliquid --format json orders batch-modify --orders-file modifications.json -
     .args(&[
         arg("orders_file").kind(InputKind::FilePath).describe("JSON file containing an array of modifications or an object with an orders array."),
         arg("always_place").kind(InputKind::Boolean).describe("Place each replacement even if its cancel fails. Required to modify trigger orders or place an IOC replacement."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.").resource_id("on-behalf-of selector"),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet modifications never prompt."),
+        ON_BEHALF_OF_DESCRIBED,
+        YES.describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet modifications never prompt."),
     ]);
 
     fn validate(args: &BatchModifyArgs) -> Result<(), CliError> {
@@ -694,35 +674,18 @@ hyperliquid --format json orders batch-modify --orders-file modifications.json -
             &args.orders_file.to_string_lossy(),
             FilePolicy::json_artifact("orders file"),
         )?;
-        if let Some(on_behalf_of) = args.on_behalf_of.as_deref() {
-            validate_resource_id("on-behalf-of selector", on_behalf_of)?;
-        }
         Ok(())
     }
 
     async fn run(inv: &Invocation, args: &BatchModifyArgs) -> Result<(), anyhow::Error> {
         let orders = read_validated_batch_modify_orders(args)?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
-            let plan = batch_modify_dry_run_plan(&orders, args);
-            return print_dry_run_acting_for(
-                inv,
-                plan.would_execute(),
-                plan.into_args(),
-                vault_address_string,
-            );
+            return run.preview(batch_modify_dry_run_plan(&orders, args));
         }
         let resolver = inv.trading_resolver().await?;
         let signer = inv.resolve_signer()?;
-        batch_modify(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            &resolver,
-            &orders,
-            args.always_place,
-        )
-        .await
+        batch_modify(run.context(&signer)?, &resolver, &orders, args.always_place).await
     }
 }
 
@@ -741,14 +704,14 @@ impl CliCommand for OrdersTwapCreate {
     .testnet_unprompted()
     .args(&[
         arg("coin").kind(InputKind::MarketSymbol).describe("Perpetual coin, for example BTC.").asset_input("coin"),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name.").resource_id("dex"),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).resource_id("on-behalf-of selector"),
+        DEX,
+        ON_BEHALF_OF,
         arg("side"),
         arg("size").kind(InputKind::Amount).describe("Total base-asset size."),
         arg("duration").kind(InputKind::Duration).describe("Whole-minute duration in seconds. Minimum 300."),
-        arg("margin_mode").describe("Margin mode intent for perpetual TWAP orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
+        MARGIN_MODE.describe(margin_mode_help!("TWAP orders")),
         arg("randomize").kind(InputKind::Boolean).describe("Randomize execution timing and suborder sizes up to ±20%."),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &TwapCreateArgs) -> Result<(), anyhow::Error> {
@@ -756,31 +719,13 @@ impl CliCommand for OrdersTwapCreate {
         let resolver = inv.trading_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
         let plan = prepare_twap_create_plan(&perp, args)?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
-            let dry_run_plan = preview_with_account_margin_mode(
-                inv,
-                vault_address,
-                Some(&plan.perp),
-                args.margin_mode,
-                twap_create_dry_run_plan(&plan, args),
-            )
-            .await;
-            return print_dry_run_acting_for(
-                inv,
-                dry_run_plan.would_execute(),
-                dry_run_plan.into_args(),
-                vault_address_string,
-            );
+            let margin = run.previewed_margin(&plan.perp, plan.margin).await?;
+            return run.preview(twap_create_dry_run_plan(&plan, args, &margin));
         }
         let signer = inv.resolve_signer()?;
-        twap_create(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            plan,
-        )
-        .await
+        twap_create(run.context(&signer)?, plan).await
     }
 }
 
@@ -803,13 +748,8 @@ impl CliCommand for OrdersTwapCancel {
             .kind(InputKind::MarketSymbol)
             .describe("Perpetual coin.")
             .asset_input("coin"),
-        arg("dex")
-            .kind(InputKind::VenueSelector)
-            .describe("HIP-3 DEX name.")
-            .resource_id("dex"),
-        arg("on_behalf_of")
-            .kind(InputKind::ActingAccountSelector)
-            .resource_id("on-behalf-of selector"),
+        DEX,
+        ON_BEHALF_OF,
     ]);
 
     async fn run(inv: &Invocation, args: &TwapCancelArgs) -> Result<(), anyhow::Error> {
@@ -817,24 +757,12 @@ impl CliCommand for OrdersTwapCancel {
         let resolver = inv.trading_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
         let plan = prepare_twap_cancel_plan(&perp, args);
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::unprompted(inv, &Self::SPEC, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
-            let dry_run_plan = twap_cancel_dry_run_plan(&plan, args);
-            return print_dry_run_acting_for(
-                inv,
-                dry_run_plan.would_execute(),
-                dry_run_plan.into_args(),
-                vault_address_string,
-            );
+            return run.preview(twap_cancel_dry_run_plan(&plan, args));
         }
         let signer = inv.resolve_signer()?;
-        twap_cancel(
-            order_submission_context(inv, &signer, &Self::SPEC, false, vault_address)?,
-            plan,
-        )
-        .await
+        twap_cancel(run.context(&signer)?, plan).await
     }
 }
 
@@ -854,30 +782,18 @@ impl CliCommand for OrdersScheduleCancel {
     .args(&[
         arg("in_duration").kind(InputKind::Duration).describe("Relative duration, for example 30s or 5m."),
         arg("clear").kind(InputKind::Boolean).schema_string(),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).resource_id("on-behalf-of selector"),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
+        ON_BEHALF_OF,
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &ScheduleCancelArgs) -> Result<(), anyhow::Error> {
         let plan = prepare_schedule_cancel_plan(args)?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
-            let dry_run_plan = schedule_cancel_dry_run_plan(&plan, args, Utc::now());
-            return print_dry_run_acting_for(
-                inv,
-                dry_run_plan.would_execute(),
-                dry_run_plan.into_args(),
-                vault_address_string,
-            );
+            return run.preview(schedule_cancel_dry_run_plan(&plan, Utc::now()));
         }
         let signer = inv.resolve_signer()?;
-        schedule_cancel(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            plan,
-        )
-        .await
+        schedule_cancel(run.context(&signer)?, plan).await
     }
 }
 
@@ -903,7 +819,7 @@ hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeou
     .testnet_unprompted()
     .args(&[
         arg("coin").kind(InputKind::MarketSymbol).describe("Perpetual coin, for example ETH.").asset_input("coin"),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name."),
+        DEX,
         arg("side"),
         arg("size").kind(InputKind::Amount),
         arg("offset").describe("Offset from mid in basis points."),
@@ -911,29 +827,21 @@ hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeou
         arg("interval").kind(InputKind::Duration),
         arg("max_chase").describe("Cancel and stop if mid travels this many basis points from the first mid."),
         arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
+        ON_BEHALF_OF_DESCRIBED,
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &ChaseArgs) -> Result<(), anyhow::Error> {
         let timeout = chase_timeout(inv, args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             let plan = chase_dry_run_plan(client, &resolver, inv.settings(), args, timeout).await?;
-            return print_dry_run_acting_for(inv, "chase", plan, vault_address_string);
+            return run.preview(plan);
         }
         let signer = inv.resolve_signer()?;
-        chase(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            &resolver,
-            args,
-            timeout,
-        )
-        .await
+        chase(run.context(&signer)?, &resolver, args, timeout).await
     }
 }
 
@@ -968,30 +876,23 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
         arg("take_profit").kind(InputKind::Price).describe("Take-profit trigger: absolute price, +10%, or entry."),
         arg("stop_loss").kind(InputKind::Price).describe("Stop-loss trigger: absolute price, -5%, or entry."),
         arg("entry_timeout").kind(InputKind::Duration).describe("How long to wait for a limit entry fill before the remaining entry is cancelled and any filled portion is protected."),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name."),
-        arg("max_slippage_bps").describe("Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
+        DEX,
+        MAX_SLIPPAGE_BPS,
+        ON_BEHALF_OF_DESCRIBED,
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &BracketArgs) -> Result<(), anyhow::Error> {
         validate_bracket_args(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let vault_address =
-            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
-        let vault_address_string = vault_address.map(|address| address.to_string());
+        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             let plan = bracket_dry_run_plan(client, &resolver, inv.settings(), args).await?;
-            return print_dry_run_acting_for(inv, "bracket", plan, vault_address_string);
+            return run.preview(plan);
         }
         let signer = inv.resolve_signer()?;
-        bracket(
-            order_submission_context(inv, &signer, &Self::SPEC, args.yes, vault_address)?,
-            &resolver,
-            args,
-        )
-        .await
+        bracket(run.context(&signer)?, &resolver, args).await
     }
 }
 
@@ -1017,25 +918,7 @@ hyperliquid --format json --dry-run buy --coin ETH --price 3000 --size 0.1\n  \
 hyperliquid --format json buy --coin BTC --size 0.001 --yes")
     .prompt()
     .testnet_unprompted()
-    .args(&[
-        arg("coin").kind(InputKind::MarketSymbol).describe("Perpetual coin, spot pair, or outcome notation.").asset_input("coin"),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name.").resource_id("dex"),
-        arg("price").kind(InputKind::Price),
-        arg("size").kind(InputKind::Amount).describe("Base-asset size. Accepted for market and required for limit."),
-        arg("amount").kind(InputKind::Amount),
-        arg("order_type").describe("Order type. Defaults to limit when --price is set, otherwise market."),
-        arg("tif").describe("Time in force: gtc, ioc, or alo."),
-        arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
-        arg("max_slippage_bps").describe("Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
-        arg("builder").kind(InputKind::ProtocolObjectAddress).describe("Builder address to receive the additional order fee. Requires --builder-fee-rate."),
-        arg("builder_fee_rate").describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder."),
-        arg("sub_builder").kind(InputKind::ProtocolObjectAddress).describe("Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Up to 5; shares sum to at most 100%. Requires --builder."),
-        arg("priority_rate").describe("Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps). Requires a limit order with --tif ioc, or --tif alo without --reduce-only."),
-        arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id."),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
-    ]);
+    .args(BUY_SELL_ARGS);
 
     async fn run(inv: &Invocation, args: &BuySellArgs) -> Result<(), anyhow::Error> {
         let create_args = args.clone().into_create(OrderSide::Buy);
@@ -1064,25 +947,7 @@ hyperliquid --format json --dry-run sell --coin ETH --price 3000 --size 0.1\n  \
 hyperliquid --format json sell --coin BTC --size 0.001 --yes")
     .prompt()
     .testnet_unprompted()
-    .args(&[
-        arg("coin").kind(InputKind::MarketSymbol).describe("Perpetual coin, spot pair, or outcome notation.").asset_input("coin"),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name.").resource_id("dex"),
-        arg("price").kind(InputKind::Price),
-        arg("size").kind(InputKind::Amount).describe("Base-asset size. Accepted for market and required for limit."),
-        arg("amount").kind(InputKind::Amount),
-        arg("order_type").describe("Order type. Defaults to limit when --price is set, otherwise market."),
-        arg("tif").describe("Time in force: gtc, ioc, or alo."),
-        arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
-        arg("max_slippage_bps").describe("Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
-        arg("builder").kind(InputKind::ProtocolObjectAddress).describe("Builder address to receive the additional order fee. Requires --builder-fee-rate."),
-        arg("builder_fee_rate").describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder."),
-        arg("sub_builder").kind(InputKind::ProtocolObjectAddress).describe("Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Up to 5; shares sum to at most 100%. Requires --builder."),
-        arg("priority_rate").describe("Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps). Requires a limit order with --tif ioc, or --tif alo without --reduce-only."),
-        arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id."),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
-    ]);
+    .args(BUY_SELL_ARGS);
 
     async fn run(inv: &Invocation, args: &BuySellArgs) -> Result<(), anyhow::Error> {
         let create_args = args.clone().into_create(OrderSide::Sell);
@@ -1110,25 +975,7 @@ hyperliquid --format json --dry-run outcome-buy --coin #10 --size 1\n  \
 hyperliquid --format json outcome-buy --coin #10 --size 1 --yes")
     .prompt()
     .testnet_unprompted()
-    .args(&[
-        arg("coin").kind(InputKind::MarketSymbol).describe("Outcome notation such as #10 or +10.").asset_input("coin"),
-        arg("price").kind(InputKind::Price).describe("Limit price. When omitted, attempts a market order."),
-        arg("size").kind(InputKind::Amount).describe("Outcome token size."),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name."),
-        arg("amount").kind(InputKind::Amount),
-        arg("order_type").describe("Order type. Defaults to limit when --price is set, otherwise market."),
-        arg("tif").describe("Time in force: gtc, ioc, or alo."),
-        arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
-        arg("max_slippage_bps").describe("Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
-        arg("builder").kind(InputKind::ProtocolObjectAddress).describe("Builder address to receive the additional order fee. Requires --builder-fee-rate."),
-        arg("builder_fee_rate").describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder."),
-        arg("sub_builder").kind(InputKind::ProtocolObjectAddress).describe("Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Requires --builder."),
-        arg("priority_rate").describe("Order write priority is not accepted on outcome markets; the flag is refused."),
-        arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id."),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
-    ]);
+    .args(OUTCOME_ARGS);
 
     async fn run(inv: &Invocation, args: &OutcomeOrderArgs) -> Result<(), anyhow::Error> {
         ensure_outcome_coin(&args.inner.coin)?;
@@ -1157,25 +1004,7 @@ hyperliquid --format json --dry-run outcome-sell --coin #10 --size 1\n  \
 hyperliquid --format json outcome-sell --coin #10 --size 1 --yes")
     .prompt()
     .testnet_unprompted()
-    .args(&[
-        arg("coin").kind(InputKind::MarketSymbol).describe("Outcome notation such as #10 or +10.").asset_input("coin"),
-        arg("price").kind(InputKind::Price).describe("Limit price. When omitted, attempts a market order."),
-        arg("size").kind(InputKind::Amount).describe("Outcome token size."),
-        arg("dex").kind(InputKind::VenueSelector).describe("HIP-3 DEX name."),
-        arg("amount").kind(InputKind::Amount),
-        arg("order_type").describe("Order type. Defaults to limit when --price is set, otherwise market."),
-        arg("tif").describe("Time in force: gtc, ioc, or alo."),
-        arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
-        arg("max_slippage_bps").describe("Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
-        arg("builder").kind(InputKind::ProtocolObjectAddress).describe("Builder address to receive the additional order fee. Requires --builder-fee-rate."),
-        arg("builder_fee_rate").describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder."),
-        arg("sub_builder").kind(InputKind::ProtocolObjectAddress).describe("Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Requires --builder."),
-        arg("priority_rate").describe("Order write priority is not accepted on outcome markets; the flag is refused."),
-        arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id."),
-        arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
-    ]);
+    .args(OUTCOME_ARGS);
 
     async fn run(inv: &Invocation, args: &OutcomeOrderArgs) -> Result<(), anyhow::Error> {
         ensure_outcome_coin(&args.inner.coin)?;
@@ -1192,8 +1021,7 @@ async fn watch_open_orders(
     let remote = inv.remote()?;
     let api = remote.api();
     let resolver = std::sync::Arc::new(inv.asset_resolver().await?);
-    let resolved = inv.resolve_signer()?;
-    let user = resolved.query_address();
+    let user = inv.resolve_signer_account().await?;
     let dex = dex.map(str::to_string);
 
     crate::watch::run_snapshot_watch(
@@ -1216,110 +1044,77 @@ fn ensure_outcome_coin(coin: &str) -> Result<(), CliError> {
     Ok(())
 }
 
-/// The context live commands run in. Fails before any side effect when the
-/// signer cannot sign live. `yes` waives the approval prompt, which only
-/// commands whose spec prompts on this network ask for.
-fn order_submission_context<'a>(
-    inv: &'a Invocation,
-    signer: &'a crate::signing::SelectedSigner,
-    spec: &CommandSpec,
-    yes: bool,
-    vault_address: Option<Address>,
-) -> Result<OrderSubmissionContext<'a>, CliError> {
-    let remote = inv.remote()?;
-    Ok(OrderSubmissionContext {
-        inv,
-        api: remote.api(),
-        signer,
-        vault_address,
-        requires_approval: spec.prompts_on(remote.network()) && !yes,
-    })
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::command_spec::Check;
+    use crate::network::Network;
 
-/// The dry-run `builder_approval`: what `maxBuilderFee` says about the builder
-/// fee a live run would carry. A preview is best effort, so it says nothing
-/// when there is no signer to name the account, the order acts for a vault, or
-/// the read fails (the entry then reads `unknown`).
-async fn add_builder_approval(
-    inv: &Invocation,
-    vault_address: Option<Address>,
-    builder: Option<&OrderBuilderFee>,
-    details: &mut serde_json::Value,
-) {
-    let (Some(fee), None) = (builder, vault_address) else {
-        return;
-    };
-    let Some(user) = inv
-        .resolve_signer()
-        .ok()
-        .map(|signer| signer.query_address())
-    else {
-        return;
-    };
-    let Ok(remote) = inv.remote() else {
-        return;
-    };
-    let approval = builder_check::check(remote.api(), user, fee).await;
-    if let Some(object) = details.as_object_mut() {
-        object.insert("builder_approval".to_string(), approval.to_json(user, fee));
+    /// Every command that places or changes orders, by spec.
+    fn order_specs() -> Vec<CommandSpec> {
+        vec![
+            OrdersCreate::SPEC,
+            OrdersScale::SPEC,
+            OrdersBatchCreate::SPEC,
+            OrdersTpsl::SPEC,
+            OrdersTrailingStop::SPEC,
+            OrdersCancel::SPEC,
+            OrdersCancelAll::SPEC,
+            OrdersModify::SPEC,
+            OrdersBatchModify::SPEC,
+            OrdersTwapCreate::SPEC,
+            OrdersTwapCancel::SPEC,
+            OrdersScheduleCancel::SPEC,
+            OrdersChase::SPEC,
+            OrdersBracket::SPEC,
+            Buy::SPEC,
+            Sell::SPEC,
+            OutcomeBuy::SPEC,
+            OutcomeSell::SPEC,
+        ]
     }
-}
 
-/// A dry-run `plan` whose `margin_mode`, when `--margin-mode` is absent, is the
-/// mode the account is set to for the market, read from `activeAssetData`. A
-/// preview is best effort, so the plan keeps its market-rule default when there
-/// is no account to read (no `--on-behalf-of`, no signer), the market is
-/// isolated-only (its rule is the mode), or the read fails.
-async fn preview_with_account_margin_mode(
-    inv: &Invocation,
-    vault_address: Option<Address>,
-    perp: Option<&PerpAsset>,
-    requested: Option<MarginModeArg>,
-    plan: OrderDryRunPlan,
-) -> OrderDryRunPlan {
-    let Some(perp) = perp.filter(|perp| requested.is_none() && perp.margin_rule.allows_cross())
-    else {
-        return plan;
-    };
-    let Some(user) = vault_address.or_else(|| {
-        inv.resolve_signer()
-            .ok()
-            .map(|signer| signer.query_address())
-    }) else {
-        return plan;
-    };
-    let Ok(remote) = inv.remote() else {
-        return plan;
-    };
-    match fetch_current_margin_mode(remote.api(), user, perp).await {
-        Ok(margin_mode) => plan.with_account_margin_mode(margin_mode),
-        Err(_) => plan,
+    #[test]
+    fn a_command_has_a_yes_flag_exactly_when_it_asks_for_approval() {
+        for spec in order_specs() {
+            assert_eq!(
+                spec.arg("yes").is_some(),
+                spec.prompts_on(Network::Mainnet),
+                "{:?}",
+                spec.path
+            );
+        }
     }
-}
 
-/// The HIP-3 helper transfers a live run of these orders would make first, as
-/// the dry-run `side_effects`. A dry run signs nothing and needs no wallet, so
-/// without `--on-behalf-of` or a signer there is no account to read and the
-/// preview names none.
-async fn add_hip3_side_effects(
-    inv: &Invocation,
-    vault_address: Option<Address>,
-    orders: &[&PreparedOrder],
-    details: &mut serde_json::Value,
-) -> Result<(), anyhow::Error> {
-    let Some(user) = vault_address.or_else(|| {
-        inv.resolve_signer()
-            .ok()
-            .map(|signer| signer.query_address())
-    }) else {
-        return Ok(());
-    };
-    let helpers = plan_hip3_margin_transfers(inv.remote()?.api(), user, orders).await?;
-    if let (false, Some(object)) = (helpers.is_empty(), details.as_object_mut()) {
-        object.insert(
-            "side_effects".to_string(),
-            helpers.iter().map(Hip3MarginPlan::to_json).collect(),
-        );
+    #[test]
+    fn every_order_command_hardens_the_flags_it_shares_with_orders_create() {
+        let hardened = |spec: &CommandSpec, id: &str| spec.arg(id).map(|arg| arg.check.is_some());
+        for spec in [
+            OrdersCreate::SPEC,
+            Buy::SPEC,
+            Sell::SPEC,
+            OutcomeBuy::SPEC,
+            OutcomeSell::SPEC,
+        ] {
+            for id in [
+                "cloid",
+                "builder",
+                "builder_fee_rate",
+                "sub_builder",
+                "on_behalf_of",
+                "dex",
+            ] {
+                assert_eq!(hardened(&spec, id), Some(true), "{:?} {id}", spec.path);
+            }
+        }
+        for spec in order_specs() {
+            for id in ["on_behalf_of", "dex", "cloid"] {
+                assert_ne!(hardened(&spec, id), Some(false), "{:?} {id}", spec.path);
+            }
+        }
+        assert!(matches!(
+            Buy::SPEC.arg("coin").and_then(|arg| arg.check),
+            Some(Check::AssetInput("coin"))
+        ));
     }
-    Ok(())
 }

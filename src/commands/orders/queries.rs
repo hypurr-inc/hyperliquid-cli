@@ -1,9 +1,9 @@
 use hypersdk::Address;
 use hypersdk::hypercore::types::{BasicOrder, OrderStatus};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use super::args::StatusArgs;
-use super::cloid::parse_lookup_cloid;
+use super::cloid::{cloid_text, parse_lookup_cloid};
 use super::rendering::{OrderListOutput, OrderListRow};
 use crate::assets::AssetResolver;
 use crate::errors::{CliError, from_sdk};
@@ -12,7 +12,7 @@ use crate::invocation::Invocation;
 use crate::output::JsonValueOutput;
 use crate::wire::InfoRequest;
 
-pub async fn open(
+pub(super) async fn open(
     inv: &Invocation,
     resolver: &AssetResolver,
     user: Address,
@@ -66,17 +66,14 @@ pub async fn open_orders_output(
     ))
 }
 
-pub async fn status(
+pub(super) async fn status(
     inv: &Invocation,
     user: Address,
     args: &StatusArgs,
 ) -> Result<(), anyhow::Error> {
     let oid = match (args.oid, args.cloid.as_deref()) {
         (Some(oid), None) => serde_json::json!(oid),
-        (None, Some(cloid)) => {
-            let cloid = parse_lookup_cloid(cloid)?;
-            serde_json::json!(format!("{cloid:#x}"))
-        }
+        (None, Some(cloid)) => serde_json::json!(cloid_text(parse_lookup_cloid(cloid)?)),
         _ => {
             return Err(CliError::Configuration(
                 "orders status requires --oid or --cloid".to_string(),
@@ -84,11 +81,7 @@ pub async fn status(
             .into());
         }
     };
-    let request = OrderStatusRequest {
-        request_type: "orderStatus",
-        user,
-        oid,
-    };
+    let request = InfoRequest::user("orderStatus", user).field("oid", oid);
     let value = inv
         .remote()?
         .api()
@@ -98,16 +91,7 @@ pub async fn status(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OrderStatusRequest {
-    #[serde(rename = "type")]
-    request_type: &'static str,
-    user: Address,
-    oid: serde_json::Value,
-}
-
-pub async fn history(
+pub(super) async fn history(
     inv: &Invocation,
     resolver: &AssetResolver,
     user: Address,
@@ -130,14 +114,6 @@ pub async fn history(
 
 fn display_row(resolver: &AssetResolver, order: BasicOrder) -> OrderListRow {
     OrderListRow::from(order).with_display_coin(&|coin| resolver.display_coin(coin))
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HistoricalOrdersRequest {
-    #[serde(rename = "type")]
-    request_type: &'static str,
-    user: Address,
 }
 
 /// An order from `historicalOrders` with its status and the time it took it.
@@ -220,10 +196,7 @@ async fn historical_orders_raw(
     api: &ApiClient,
     user: Address,
 ) -> Result<Vec<HistoricalOrder>, CliError> {
-    let request = HistoricalOrdersRequest {
-        request_type: "historicalOrders",
-        user,
-    };
+    let request = InfoRequest::user("historicalOrders", user);
     let items = api
         .info::<Vec<HistoricalOrderItem>>(&request, "loading historical orders")
         .await?;

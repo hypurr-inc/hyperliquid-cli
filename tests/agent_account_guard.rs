@@ -51,6 +51,8 @@ async fn a_bare_api_wallet_key_is_refused_with_its_master_by_every_signer_derive
         &["positions", "list"][..],
         &["staking", "summary"],
         &["account", "orders"],
+        &["orders", "open"],
+        &["orders", "history"],
         &["api-wallet", "list"],
         &["subaccount", "list"],
         &["watch", "risk", "--max-events", "1"],

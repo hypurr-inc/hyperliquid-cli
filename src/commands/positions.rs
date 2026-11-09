@@ -13,14 +13,16 @@ use serde::{Serialize, Serializer};
 use crate::assets::canonical_dex;
 use crate::assets::{AssetResolver, PerpAsset};
 use crate::command_spec::{
-    CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, StreamBound, arg,
+    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, StreamBound, arg,
 };
 use crate::commands::actions;
 use crate::commands::rows::{ListRow, MISSING, Row, Rows, or_missing, style_column};
 use crate::commands::support::{print_dry_run_acting_for, resolve_optional_acting_account_target};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
+use crate::hints::update_leverage_command;
 use crate::invocation::Invocation;
+use crate::margin::{MarginModeArg, isolated_only_market};
 use crate::output;
 use crate::quantity::{self, Scale};
 use crate::stream::SnapshotWatchArgs;
@@ -316,22 +318,6 @@ fn margin_direction(ntli: i64) -> &'static str {
     if ntli < 0 { "remove" } else { "add" }
 }
 
-/// The ` --on-behalf-of <selector>` a suggested command needs to act on the
-/// same account as this run.
-fn on_behalf_of_flag(on_behalf_of: Option<&str>) -> String {
-    on_behalf_of
-        .map(|selector| format!(" --on-behalf-of {selector}"))
-        .unwrap_or_default()
-}
-
-/// The command that puts `coin` into isolated margin mode at `leverage`.
-fn isolate_command(coin: &str, leverage: impl fmt::Display, on_behalf_of: Option<&str>) -> String {
-    format!(
-        "positions update-leverage --coin {coin} --leverage {leverage} --isolated{}",
-        on_behalf_of_flag(on_behalf_of)
-    )
-}
-
 /// The open `coin` position of `account`, if any. A closed one is not open.
 async fn open_position(
     client: &HttpClient,
@@ -362,17 +348,30 @@ async fn ensure_isolated_position(
     match open_position(inv.remote()?.api().sdk(), account, perp).await? {
         None => Err(CliError::Unsupported(format!(
             "{account} has no open {coin} position, and isolated margin belongs to an open isolated position; open one first (set isolated mode with `{}`)",
-            isolate_command(&coin, "<N>", on_behalf_of)
+            update_leverage_command(&coin, "<N>", MarginModeArg::Isolated, on_behalf_of)
         ))),
         Some(position) if position.position.leverage.leverage_type != LeverageType::Isolated => {
             Err(CliError::Unsupported(format!(
                 "the {coin} position of {account} uses cross margin, which has no isolated margin to change; switch it first with `{}`",
-                isolate_command(&coin, position.position.leverage.value, on_behalf_of)
+                update_leverage_command(
+                    &coin,
+                    position.position.leverage.value,
+                    MarginModeArg::Isolated,
+                    on_behalf_of
+                )
             )))
         }
         Some(_) => Ok(()),
     }
 }
+
+/// `--on-behalf-of` as every `positions` action takes it.
+const ON_BEHALF_OF: ArgSpec = arg("on_behalf_of")
+    .kind(InputKind::ActingAccountSelector)
+    .describe(
+        "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
+    )
+    .resource_id("on-behalf-of selector");
 
 pub const GROUP: GroupSpec =
     GroupSpec::new(&["positions"], "Manage positions").aliases(&["position"]);
@@ -445,23 +444,31 @@ impl CliCommand for PositionsUpdateLeverage {
         arg("isolated")
             .kind(InputKind::Boolean)
             .describe("Use isolated margin mode. Required on isolated-only markets."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.").resource_id("on-behalf-of selector"),
+        ON_BEHALF_OF,
     ]);
 
     async fn run(inv: &Invocation, args: &UpdateLeverageArgs) -> Result<(), anyhow::Error> {
         let resolver = inv.trading_resolver().await?;
         let perp = resolve_perp_asset(&resolver, inv.remote()?.api().sdk(), &args.coin).await?;
         let (coin, asset) = (perp.display_name(), perp.index);
-        let is_cross = !args.isolated;
-        if is_cross && !perp.margin_rule.allows_cross() {
+        let mode = if args.isolated {
+            MarginModeArg::Isolated
+        } else {
+            MarginModeArg::Cross
+        };
+        if !mode.is_available_on(&perp) {
             return Err(CliError::Unsupported(format!(
-                "{coin} is an isolated-only market ({}), so cross margin is not available; run `{}`",
-                perp.margin_rule.as_str(),
-                isolate_command(&coin, args.leverage, args.on_behalf_of.as_deref())
+                "{}, so cross margin is not available; run `{}`",
+                isolated_only_market(&perp),
+                update_leverage_command(
+                    &coin,
+                    args.leverage,
+                    MarginModeArg::Isolated,
+                    args.on_behalf_of.as_deref()
+                )
             ))
             .into());
         }
-        let margin_mode = if is_cross { "cross" } else { "isolated" };
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
@@ -474,8 +481,8 @@ impl CliCommand for PositionsUpdateLeverage {
                     "asset": asset,
                     "network": inv.remote()?.network().to_string(),
                     "leverage": args.leverage,
-                    "margin_mode": margin_mode,
-                    "is_cross": is_cross,
+                    "margin_mode": mode.as_str(),
+                    "is_cross": mode.is_cross(),
                     "on_behalf_of": args.on_behalf_of,
                 }),
                 vault_address.map(|address| address.to_string()),
@@ -487,7 +494,7 @@ impl CliCommand for PositionsUpdateLeverage {
             &resolved,
             Action::UpdateLeverage(UpdateLeverage {
                 asset,
-                is_cross,
+                is_cross: mode.is_cross(),
                 leverage: args.leverage,
             }),
             actions::nonce_now(),
@@ -502,7 +509,7 @@ impl CliCommand for PositionsUpdateLeverage {
             status: "updated".to_string(),
             leverage: Some(args.leverage),
             target_leverage: None,
-            margin_mode: Some(margin_mode.to_string()),
+            margin_mode: Some(mode.to_string()),
             amount: None,
         }]));
         Ok(())
@@ -528,7 +535,7 @@ impl CliCommand for PositionsUpdateMargin {
         arg("amount")
             .kind(InputKind::Amount)
             .describe("Margin amount in USDC: positive adds isolated margin, negative removes it."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.").resource_id("on-behalf-of selector"),
+        ON_BEHALF_OF,
     ]);
 
     async fn run(inv: &Invocation, args: &UpdateMarginArgs) -> Result<(), anyhow::Error> {
@@ -611,7 +618,7 @@ impl CliCommand for PositionsTopUpMargin {
         arg("leverage")
             .kind(InputKind::Amount)
             .describe("Target leverage, a positive number such as 5 or 12.5."),
-        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.").resource_id("on-behalf-of selector"),
+        ON_BEHALF_OF,
     ]);
 
     async fn run(inv: &Invocation, args: &TopUpMarginArgs) -> Result<(), anyhow::Error> {
