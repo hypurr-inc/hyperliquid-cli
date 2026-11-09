@@ -1,14 +1,12 @@
 use clap::Args;
 use hypersdk::hypercore::CandleInterval;
 
-use crate::assets::{self, canonical_dex};
+use crate::assets::DexArg;
 use crate::cli_command::CliCommand;
 use crate::command_spec::{
     ArgSpec, CommandSpec, GroupSpec, InputKind, Lifecycle, OwsSupport, Risk, arg,
 };
-use crate::commands::common::market_input::{
-    parse_candle_interval, resolve_market_coin, resolve_perp_coin_or_fetch,
-};
+use crate::commands::common::market_input::{market_coin, parse_candle_interval, perp_coin};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::stream::SubscribeTarget;
@@ -97,7 +95,7 @@ pub struct SubscribeCandlesArgs {
 pub struct SubscribeAllMidsArgs {
     /// Perp dex name (HIP-3). Defaults to the first dex.
     #[arg(long)]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
     #[command(flatten)]
     pub stream: StreamBoundArgs,
 }
@@ -131,7 +129,7 @@ pub struct SubscribeUserDexArgs {
     pub user: Option<String>,
     /// Perp dex name (HIP-3); repeat to subscribe to several. Defaults to the first dex.
     #[arg(long)]
-    pub dex: Vec<String>,
+    pub dex: Vec<DexArg>,
     #[command(flatten)]
     pub stream: StreamBoundArgs,
 }
@@ -264,7 +262,10 @@ impl CliCommand for SubscribeAllMids {
     ]);
 
     async fn run(inv: &Invocation, args: &SubscribeAllMidsArgs) -> Result<(), anyhow::Error> {
-        let dex = canonical_dex(inv.remote()?.api(), args.dex.as_deref()).await?;
+        let dex = inv
+            .dex(args.dex.as_ref())
+            .await?
+            .map(|dex| dex.name.clone());
         stream(inv, SubscribeTarget::all_mids(dex), &args.stream).await
     }
 }
@@ -405,7 +406,7 @@ impl CliCommand for SubscribeTwapStates {
 
     async fn run(inv: &Invocation, args: &SubscribeUserDexArgs) -> Result<(), anyhow::Error> {
         let user = inv.resolve_user(args.user.as_deref()).await?;
-        let dexs = canonical_dexs(inv, &args.dex).await?;
+        let dexs = dex_names(inv, &args.dex).await?;
         stream(inv, SubscribeTarget::twap_states(user, dexs), &args.stream).await
     }
 }
@@ -454,8 +455,7 @@ impl CliCommand for SubscribeActiveAssetData {
 
     async fn run(inv: &Invocation, args: &SubscribeUserAssetArgs) -> Result<(), anyhow::Error> {
         let user = inv.resolve_user(args.user.as_deref()).await?;
-        let resolver = inv.asset_resolver().await?;
-        let coin = resolve_perp_coin_or_fetch(inv.remote()?.api(), &resolver, &args.asset).await?;
+        let coin = perp_coin(inv, &args.asset).await?;
         stream(
             inv,
             SubscribeTarget::active_asset_data(user, coin),
@@ -483,7 +483,7 @@ impl CliCommand for SubscribeClearinghouseState {
 
     async fn run(inv: &Invocation, args: &SubscribeUserDexArgs) -> Result<(), anyhow::Error> {
         let user = inv.resolve_user(args.user.as_deref()).await?;
-        let dexs = canonical_dexs(inv, &args.dex).await?;
+        let dexs = dex_names(inv, &args.dex).await?;
         stream(
             inv,
             SubscribeTarget::clearinghouse_state(user, dexs),
@@ -511,7 +511,7 @@ impl CliCommand for SubscribeOpenOrders {
 
     async fn run(inv: &Invocation, args: &SubscribeUserDexArgs) -> Result<(), anyhow::Error> {
         let user = inv.resolve_user(args.user.as_deref()).await?;
-        let dexs = canonical_dexs(inv, &args.dex).await?;
+        let dexs = dex_names(inv, &args.dex).await?;
         stream(inv, SubscribeTarget::open_orders(user, dexs), &args.stream).await
     }
 }
@@ -534,19 +534,16 @@ impl CliCommand for SubscribeSpotState {
     }
 }
 
-/// An asset input as the name the exchange subscribes with: dex-qualified for HIP-3.
-async fn market_coin(inv: &Invocation, asset: &str) -> Result<String, anyhow::Error> {
-    let resolver = inv.asset_resolver().await?;
-    Ok(resolve_market_coin(inv.remote()?.api(), &resolver, asset).await?)
-}
-
-/// Each `--dex` as the exchange's canonical spelling; no flag is the first dex.
-async fn canonical_dexs(
+/// Each `--dex` as the exchange's canonical name; no flag is the first dex.
+async fn dex_names(
     inv: &Invocation,
-    requested: &[String],
-) -> Result<Vec<Option<String>>, anyhow::Error> {
-    let requested: Vec<Option<&str>> = requested.iter().map(|dex| Some(dex.as_str())).collect();
-    Ok(assets::canonical_dexs(inv.remote()?.api(), &requested).await?)
+    requested: &[DexArg],
+) -> Result<Vec<Option<String>>, CliError> {
+    let mut names = Vec::with_capacity(requested.len());
+    for dex in requested {
+        names.push(inv.dex(Some(dex)).await?.map(|dex| dex.name.clone()));
+    }
+    Ok(names)
 }
 
 async fn stream(

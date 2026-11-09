@@ -3,12 +3,10 @@
 use hypersdk::{Address, Decimal};
 
 use crate::account_mode::fetch_abstraction;
+use crate::assets::USDC_TOKEN;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::spot_balances::{balance_of, user_spot_balances_raw};
-
-/// USDC is spot token 0 on every network.
-const USDC_TOKEN_INDEX: usize = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pool {
@@ -34,7 +32,7 @@ async fn available_usdc(
             .pools_collateral()
     {
         let balances = user_spot_balances_raw(api, user).await?;
-        let spot = balance_of(&balances, USDC_TOKEN_INDEX)
+        let spot = balance_of(&balances, USDC_TOKEN)
             .map(|balance| balance.total - balance.hold)
             .unwrap_or_default();
         return Ok((spot, "spot USDC"));

@@ -304,25 +304,20 @@ async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
             ]),
         )
         .await;
+    let spot_meta = json!({
+        "universe": [{"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}],
+        "tokens": [
+            {"name": "USDC", "index": 0, "tokenId": "0x00000000000000000000000000000000", "szDecimals": 6, "weiDecimals": 6, "evmContract": null},
+            {"name": "PURR", "index": 1, "tokenId": "0x00000000000000000000000000000001", "szDecimals": 0, "weiDecimals": 5, "evmContract": null}
+        ]
+    });
     server
-        .override_info(
-            json!({"type": "spotMeta"}),
-            json!({
-                "universe": [{"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}],
-                "tokens": [
-                    {"name": "USDC", "index": 0, "tokenId": "0x00000000000000000000000000000000", "szDecimals": 6, "weiDecimals": 6, "evmContract": null},
-                    {"name": "PURR", "index": 1, "tokenId": "0x00000000000000000000000000000001", "szDecimals": 0, "weiDecimals": 5, "evmContract": null}
-                ]
-            }),
-        )
+        .override_info(json!({"type": "spotMeta"}), spot_meta.clone())
         .await;
     server
         .mount_info(
             json!({"type": "spotMetaAndAssetCtxs"}),
-            json!([
-                {"universe": [], "tokens": []},
-                [{"coin": "PURR/USDC", "markPx": "0.1", "midPx": "0.1"}]
-            ]),
+            json!([spot_meta, [{"coin": "PURR/USDC", "markPx": "0.1", "midPx": "0.1"}]]),
         )
         .await;
 

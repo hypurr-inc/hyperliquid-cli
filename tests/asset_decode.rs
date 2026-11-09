@@ -211,3 +211,25 @@ async fn asset_search_says_on_stderr_when_metadata_is_unavailable() {
     assert!(stderr.contains("asset metadata unavailable"), "{stderr}");
     assert!(stderr.contains("outcome metadata unavailable"), "{stderr}");
 }
+
+#[tokio::test]
+async fn asset_search_names_why_a_dex_s_metadata_is_unavailable() {
+    // `xyz` is listed but its `meta` is not served, so the mock answers 404.
+    let server = ExchangeFixture::start().await;
+    server
+        .override_info(
+            json!({"type": "perpDexs"}),
+            json!([null, {"name": "xyz", "deployerFeeScale": "1"}]),
+        )
+        .await;
+
+    let assert = read(&server, &["asset", "search", "BTC"]).success();
+
+    let stderr = stderr_text(&assert);
+    let notice = stderr
+        .lines()
+        .find(|line| line.contains("HIP-3 dex xyz metadata unavailable, results are limited: "))
+        .unwrap_or_else(|| panic!("{stderr}"));
+    let reason = notice.split("results are limited: ").nth(1).unwrap();
+    assert!(!reason.trim().is_empty(), "{notice}");
+}

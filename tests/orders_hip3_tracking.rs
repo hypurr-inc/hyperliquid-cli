@@ -252,6 +252,12 @@ async fn cancel_all_with_a_dex_lists_that_dexs_open_orders_whatever_the_dex_is_s
     }
 
     assert_only_dex_xyz_was_listed(&server).await;
+    // The dex is validated and the market looked up on it from one dex list.
+    assert_eq!(
+        server.info_requests("perpDexs").await.len(),
+        2,
+        "one `perpDexs` read per run"
+    );
 }
 
 #[tokio::test]

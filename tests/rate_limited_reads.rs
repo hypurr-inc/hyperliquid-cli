@@ -239,7 +239,7 @@ async fn perps_list_through_a_rate_limit() {
         signed: false,
         dexes: no_dexes,
         extra_reads: no_reads,
-        kinds: &["meta", "spotMeta"],
+        kinds: &["meta"],
         answers: |answer| answer.as_array().is_some_and(|rows| rows.len() == 2),
     }
     .run_all()
@@ -253,7 +253,7 @@ async fn perps_get_through_a_rate_limit() {
         signed: false,
         dexes: no_dexes,
         extra_reads: no_reads,
-        kinds: &["meta", "spotMeta"],
+        kinds: &["meta"],
         answers: |answer| answer["name"] == "BTC",
     }
     .run_all()

@@ -12,11 +12,10 @@ use hypersdk::hypercore::types::{
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 use serde_json::json;
+use tokio::sync::OnceCell;
 
-use crate::account_mode::{
-    AccountMode, DexCollateral, UnifiedRisk, fetch_abstraction, load_dex_collateral,
-    unified_account_ratio,
-};
+use crate::account_mode::{AccountMode, UnifiedRisk, fetch_abstraction, unified_account_ratio};
+use crate::assets::DexCollateral;
 use crate::cli_command::CliCommand;
 use crate::clock::{self, DurationError};
 use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
@@ -199,7 +198,7 @@ pub async fn watch_risk(
     let bounds = StreamBounds::watch_risk(&args.stream);
 
     stream::run_stream(async {
-        let mut watcher = RiskWatcher::new(api, user, args).await?;
+        let mut watcher = RiskWatcher::new(inv, api, user, args).await?;
         stream::poll_stream(&mut watcher, args.interval, bounds, |alert| {
             emit_alert(alert, session)
         })
@@ -221,6 +220,7 @@ fn emit_alert(alert: RiskAlert, session: &Session) -> Result<(), anyhow::Error> 
 }
 
 struct RiskWatcher<'a> {
+    inv: &'a Invocation,
     api: &'a ApiClient,
     user: Address,
     enabled: Vec<RiskRule>,
@@ -229,24 +229,26 @@ struct RiskWatcher<'a> {
     flat_announced: bool,
     /// Each perp dex's collateral token, read when a unified account first
     /// needs it. A dex deployed after that is not part of the ratio.
-    dex_collateral: Option<Vec<DexCollateral>>,
+    dex_collateral: OnceCell<DexCollateral>,
 }
 
 impl<'a> RiskWatcher<'a> {
     async fn new(
+        inv: &'a Invocation,
         api: &'a ApiClient,
         user: Address,
         args: &WatchRiskArgs,
     ) -> Result<Self, anyhow::Error> {
         let fills = api.sdk().user_fills(user).await?;
         Ok(Self {
+            inv,
             api,
             user,
             enabled: enabled_rules(args),
             min_severity: args.min_severity,
             state: RiskEvalState::new(position_open_times(&fills)),
             flat_announced: false,
-            dex_collateral: None,
+            dex_collateral: OnceCell::new(),
         })
     }
 
@@ -260,26 +262,22 @@ impl<'a> RiskWatcher<'a> {
     ) -> Result<MarginBasis, anyhow::Error> {
         match mode {
             AccountMode::Unified => {
-                if self.dex_collateral.is_none() {
-                    self.dex_collateral = Some(load_dex_collateral(self.api).await?);
-                }
-                let dexes = self.dex_collateral.as_deref().unwrap_or_default();
+                let collateral = self
+                    .dex_collateral
+                    .get_or_try_init(|| async {
+                        self.inv.dex_list().await?.collateral_tokens(self.api).await
+                    })
+                    .await?;
                 let mut others = Vec::new();
-                for dex in dexes {
-                    if let Some(name) = &dex.dex {
-                        let other = self
-                            .api
-                            .sdk()
-                            .clearinghouse_state(self.user, Some(name.clone()))
-                            .await?;
-                        others.push((dex.token, other));
-                    }
+                for (name, token) in &collateral.dexes {
+                    let other = self
+                        .api
+                        .sdk()
+                        .clearinghouse_state(self.user, Some(name.clone()))
+                        .await?;
+                    others.push((*token, other));
                 }
-                let default_token = dexes
-                    .iter()
-                    .find(|dex| dex.dex.is_none())
-                    .map_or(0, |dex| dex.token);
-                let mut states = vec![(default_token, state)];
+                let mut states = vec![(collateral.default_token, state)];
                 states.extend(others.iter().map(|(token, other)| (*token, other)));
                 let balances = user_spot_balances_raw(self.api, self.user).await?;
                 Ok(MarginBasis::UnifiedRatio(unified_account_ratio(

@@ -21,11 +21,17 @@ struct RawSpotClearinghouseState {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawSpotBalance {
     pub coin: String,
-    pub token: Option<usize>,
+    pub token: Option<u32>,
     pub hold: Decimal,
     pub total: Decimal,
     #[serde(rename = "entryNtl")]
     pub entry_ntl: Decimal,
+}
+
+/// The balance of spot token `token`. A row that names no token (an outcome
+/// balance) is no token's.
+pub(crate) fn balance_of(balances: &[RawSpotBalance], token: u32) -> Option<&RawSpotBalance> {
+    balances.iter().find(|balance| balance.token == Some(token))
 }
 
 pub(crate) async fn user_spot_balances_raw(
@@ -39,11 +45,6 @@ pub(crate) async fn user_spot_balances_raw(
         )
         .await?;
     Ok(state.balances)
-}
-
-/// The entry for spot token `token`, when the account holds one.
-pub(crate) fn balance_of(balances: &[RawSpotBalance], token: usize) -> Option<&RawSpotBalance> {
-    balances.iter().find(|balance| balance.token == Some(token))
 }
 
 #[cfg(test)]

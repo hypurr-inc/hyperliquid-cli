@@ -102,9 +102,9 @@ pub(super) async fn resolve_perp(
     dex: Option<&str>,
     coin: &str,
 ) -> Result<PerpAsset, CliError> {
-    Ok(resolver
+    resolver
         .resolve_perp_or_fetch(client, &qualify_dex_asset(dex, coin))
-        .await?)
+        .await
 }
 
 /// The perpetual market `coin` and `dex` name, for a command that only trades
@@ -140,17 +140,9 @@ async fn resolve_tradable_asset(
         return Ok(Market::Outcome(OutcomeAsset::new(notation)));
     }
 
-    let query = qualify_dex_asset(dex, coin);
-    let perp_err = match resolver.resolve_perp_or_fetch(client, &query).await {
-        Ok(perp) => return Ok(Market::Perp(perp)),
-        Err(err) => err,
-    };
-    if !matches!(parse_asset_query(&query), AssetQuery::Hip3 { .. })
-        && let Ok(spot) = resolver.resolve_spot(&query)
-    {
-        return Ok(Market::Spot(spot));
-    }
-    Err(perp_err.into())
+    resolver
+        .resolve_tradable_or_fetch(client, &qualify_dex_asset(dex, coin))
+        .await
 }
 
 struct Venue {

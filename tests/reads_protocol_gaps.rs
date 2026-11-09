@@ -221,16 +221,24 @@ async fn a_perp_that_is_not_listed_is_diagnosed_from_the_list_the_command_read()
 
     assert_eq!(assert.get_output().status.code(), Some(13));
     assert_eq!(server.info_requests("meta").await.len(), 1);
+    // A default-dex market is named in USDC: no spot metadata is read to say so.
+    assert!(server.info_requests("spotMeta").await.is_empty());
+    assert!(server.info_requests("perpDexs").await.is_empty());
 }
 
 #[tokio::test]
 async fn a_spot_pair_that_is_not_listed_is_diagnosed_from_the_list_the_command_read() {
-    let server = ExchangeFixture::start().await;
+    let server = exchange_with_spot_contexts(json!([])).await;
 
-    let assert = read(&server, &["spot", "get", "NOPE/USDC"]).failure();
+    let assert = read(&server, &["spot", "get", "PUR/USDC"]).failure();
 
     assert_eq!(assert.get_output().status.code(), Some(13));
-    assert_eq!(server.info_requests("spotMeta").await.len(), 1);
+    assert!(
+        String::from_utf8_lossy(&assert.get_output().stdout).contains("Did you mean PURR/USDC"),
+        "a miss is diagnosed from the metadata the one read carried"
+    );
+    assert_eq!(server.info_requests("spotMetaAndAssetCtxs").await.len(), 1);
+    assert!(server.info_requests("spotMeta").await.is_empty());
 }
 
 #[tokio::test]
@@ -622,24 +630,27 @@ async fn spot_token_refuses_a_malformed_token_id_and_an_unknown_name() {
     assert!(server.info_requests("tokenDetails").await.is_empty());
 }
 
-#[tokio::test]
-async fn spot_get_adds_prices_and_volume_from_the_asset_context() {
+/// An exchange whose `spotMetaAndAssetCtxs` lists `contexts` after the HYPE
+/// spot metadata, which is its first element. `spotMeta` is left at the
+/// fixture's USDC-only answer, so a command that read it would not find HYPE.
+async fn exchange_with_spot_contexts(contexts: Value) -> ExchangeFixture {
     let server = ExchangeFixture::start().await;
-    server
-        .override_info(json!({"type": "spotMeta"}), spot_meta_with_hype())
-        .await;
     server
         .mount_info(
             json!({"type": "spotMetaAndAssetCtxs"}),
-            json!([
-                {"universe": [], "tokens": []},
-                [
-                    {"coin": "@107", "markPx": "9", "midPx": "9"},
-                    {"coin": "PURR/USDC", "markPx": "0.09155", "midPx": "0.0915055", "prevDayPx": "0.099126", "dayNtlVlm": "990489.1359", "dayBaseVlm": "10566932.0"}
-                ]
-            ]),
+            json!([spot_meta_with_hype(), contexts]),
         )
         .await;
+    server
+}
+
+#[tokio::test]
+async fn spot_get_adds_prices_and_volume_from_the_asset_context() {
+    let server = exchange_with_spot_contexts(json!([
+        {"coin": "@107", "markPx": "9", "midPx": "9"},
+        {"coin": "PURR/USDC", "markPx": "0.09155", "midPx": "0.0915055", "prevDayPx": "0.099126", "dayNtlVlm": "990489.1359", "dayBaseVlm": "10566932.0"}
+    ]))
+    .await;
 
     let pair = read_json(&server, &["spot", "get", "PURR/USDC"]);
 
@@ -650,20 +661,16 @@ async fn spot_get_adds_prices_and_volume_from_the_asset_context() {
     assert_eq!(pair["day_notional_volume"], "990489.1359");
     assert_eq!(pair["day_base_volume"], "10566932.0");
     assert_eq!(pair["tick_size_at_price_1"], json!("0.0001"));
+    // The context read carries the spot metadata: nothing else is read for it.
+    assert_eq!(server.info_requests("spotMetaAndAssetCtxs").await.len(), 1);
+    assert!(server.info_requests("spotMeta").await.is_empty());
 }
 
 #[tokio::test]
 async fn spot_get_leaves_prices_null_for_a_market_with_no_book() {
-    let server = ExchangeFixture::start().await;
-    server
-        .override_info(json!({"type": "spotMeta"}), spot_meta_with_hype())
-        .await;
-    server
-        .mount_info(
-            json!({"type": "spotMetaAndAssetCtxs"}),
-            json!([{"universe": [], "tokens": []}, [{"coin": "PURR/USDC", "markPx": "0.1", "midPx": null}]]),
-        )
-        .await;
+    let server =
+        exchange_with_spot_contexts(json!([{"coin": "PURR/USDC", "markPx": "0.1", "midPx": null}]))
+            .await;
 
     let pair = read_json(&server, &["spot", "get", "PURR/USDC"]);
 
@@ -970,22 +977,11 @@ async fn account_rate_limit_reads_the_request_budget() {
 
 #[tokio::test]
 async fn spot_get_matches_a_pair_to_its_context_by_the_at_index_key() {
-    let server = ExchangeFixture::start().await;
-    server
-        .override_info(json!({"type": "spotMeta"}), spot_meta_with_hype())
-        .await;
-    server
-        .mount_info(
-            json!({"type": "spotMetaAndAssetCtxs"}),
-            json!([
-                {"universe": [], "tokens": []},
-                [
-                    {"coin": "PURR/USDC", "markPx": "0.1", "midPx": "0.1"},
-                    {"coin": "@107", "markPx": "73.724", "midPx": "73.7235", "dayNtlVlm": "5.5"}
-                ]
-            ]),
-        )
-        .await;
+    let server = exchange_with_spot_contexts(json!([
+        {"coin": "PURR/USDC", "markPx": "0.1", "midPx": "0.1"},
+        {"coin": "@107", "markPx": "73.724", "midPx": "73.7235", "dayNtlVlm": "5.5"}
+    ]))
+    .await;
 
     let pair = read_json(&server, &["spot", "get", "HYPE/USDC"]);
 

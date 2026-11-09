@@ -8,13 +8,11 @@ use hypersdk::hypercore::{
 };
 use serde::Serialize;
 
-use crate::assets::canonical_dex;
+use crate::assets::DexArg;
 use crate::cli_command::CliCommand;
 use crate::clock;
 use crate::command_spec::{CommandSpec, InputKind, arg};
-use crate::commands::common::market_input::{
-    parse_candle_interval, resolve_market_coin, resolve_perp_coin_or_fetch,
-};
+use crate::commands::common::market_input::{market_coin, parse_candle_interval, perp_coin};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
@@ -331,8 +329,7 @@ async fn book(
     aggregation: BookAggregationArgs,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let resolver = inv.asset_resolver().await?;
-    let coin = resolve_market_coin(remote.api(), &resolver, coin).await?;
+    let coin = market_coin(inv, coin).await?;
     inv.print(&book_snapshot_for(remote.chain(), &coin, aggregation).await?);
     Ok(())
 }
@@ -353,8 +350,7 @@ async fn candles(
     limit: usize,
 ) -> Result<(), anyhow::Error> {
     let client = inv.remote()?.api();
-    let resolver = inv.asset_resolver().await?;
-    let coin = resolve_market_coin(client, &resolver, coin).await?;
+    let coin = market_coin(inv, coin).await?;
     inv.print(&candles_snapshot_for(client, &coin, interval, limit).await?);
     Ok(())
 }
@@ -389,8 +385,7 @@ async fn candles_snapshot_for(
 
 async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let resolver = inv.asset_resolver().await?;
-    let coin = resolve_market_coin(remote.api(), &resolver, coin).await?;
+    let coin = market_coin(inv, coin).await?;
     let book = fetch_l2_book(remote.chain(), &coin, BookAggregationArgs::default()).await?;
     inv.print(&One::new(spread_row_from_book(&coin, &book)?));
     Ok(())
@@ -398,8 +393,7 @@ async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
 
 async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let resolver = inv.asset_resolver().await?;
-    let coin = resolve_perp_coin_or_fetch(remote.api(), &resolver, coin).await?;
+    let coin = perp_coin(inv, coin).await?;
     let end_time = clock::now_ms();
     let start_time = end_time.saturating_sub(FUNDING_LOOKBACK.as_millis() as u64);
 
@@ -420,10 +414,10 @@ async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Error> {
+async fn mids(inv: &Invocation, dex: Option<&DexArg>) -> Result<(), anyhow::Error> {
     let selected = inv.session().json_options().selected_fields();
     let client = inv.remote()?.api();
-    let dex = canonical_dex(client, dex).await?;
+    let dex = inv.dex(dex).await?.map(|dex| dex.name.clone());
     inv.print(&mids_snapshot(client, dex.as_deref(), selected).await?);
     Ok(())
 }
@@ -552,7 +546,7 @@ pub struct MidsArgs {
     pub watch: SnapshotWatchArgs,
     /// Perp dex name (HIP-3). Defaults to the first dex.
     #[arg(long)]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -639,9 +633,9 @@ impl CliCommand for Mids {
 
     async fn run(inv: &Invocation, args: &MidsArgs) -> Result<(), anyhow::Error> {
         if args.watch.watch {
-            watch_mids(inv, args.dex.as_deref(), args.watch.max_ticks).await
+            watch_mids(inv, args.dex.as_ref(), args.watch.max_ticks).await
         } else {
-            mids(inv, args.dex.as_deref()).await
+            mids(inv, args.dex.as_ref()).await
         }
     }
 }
@@ -737,8 +731,7 @@ async fn watch_book(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let chain = remote.chain();
-    let resolver = inv.asset_resolver().await?;
-    let subscription_coin = resolve_market_coin(remote.api(), &resolver, coin).await?;
+    let subscription_coin = market_coin(inv, coin).await?;
 
     crate::watch::run_snapshot_watch(
         inv,
@@ -756,13 +749,13 @@ async fn watch_book(
 
 async fn watch_mids(
     inv: &Invocation,
-    dex: Option<&str>,
+    dex: Option<&DexArg>,
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let client = remote.api();
     let selected = inv.session().json_options().selected_fields();
-    let dex = canonical_dex(client, dex).await?;
+    let dex = inv.dex(dex).await?.map(|dex| dex.name.clone());
 
     crate::watch::run_snapshot_watch(
         inv,
@@ -787,8 +780,7 @@ async fn watch_candles(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let client = remote.api();
-    let resolver = inv.asset_resolver().await?;
-    let subscription_coin = resolve_market_coin(client, &resolver, coin).await?;
+    let subscription_coin = market_coin(inv, coin).await?;
 
     crate::watch::run_snapshot_watch(
         inv,

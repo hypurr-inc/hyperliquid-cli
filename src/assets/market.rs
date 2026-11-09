@@ -1,3 +1,4 @@
+use hypersdk::Decimal;
 use hypersdk::hypercore::PriceTick;
 
 use crate::errors::CliError;
@@ -90,6 +91,14 @@ pub struct PerpAsset {
     pub sz_decimals: u32,
     pub collateral: String,
     pub margin_rule: MarginRule,
+    /// Absent when `meta` states none; `perps list` refuses such a market.
+    pub max_leverage: Option<u64>,
+    /// The legacy `onlyIsolated` flag, as stated.
+    pub only_isolated: bool,
+    /// The exchange no longer lists the market for trading.
+    pub delisted: bool,
+    /// Only HIP-3 markets state one.
+    pub deployer_fee_scale: Option<Decimal>,
 }
 
 impl PerpAsset {
@@ -101,6 +110,13 @@ impl PerpAsset {
             None => self.name.clone(),
         }
     }
+
+    /// The price step at a price of 1, which `perps get` shows; `None` when the
+    /// market has no price grid.
+    #[must_use]
+    pub fn tick_size_at_price_1(&self) -> Option<String> {
+        tick_size_at_price_1(perp_price_tick(i64::from(self.sz_decimals)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,23 +126,33 @@ pub struct SpotAsset {
     pub base: String,
     pub quote: String,
     pub base_sz_decimals: u32,
+    pub quote_sz_decimals: u32,
 }
 
 impl SpotAsset {
     /// Coin key info and websocket endpoints use for this pair.
     ///
-    /// Only PURR/USDC is addressed by name; every other pair by `@<spot index>`.
+    /// Only the first pair (PURR/USDC) is addressed by name; every other pair
+    /// by `@<spot index>`.
     #[must_use]
     pub fn info_coin(&self) -> String {
-        if self.base.eq_ignore_ascii_case("PURR")
-            && self.quote.eq_ignore_ascii_case("USDC")
-            && self.index == asset_id::spot_asset_index(0)
-        {
+        if self.index == asset_id::spot_asset_index(0) {
             self.symbol.clone()
         } else {
             asset_id::spot_coin_key(self.index)
         }
     }
+
+    /// The price step at a price of 1, which `spot list` shows; `None` when the
+    /// market has no price grid.
+    #[must_use]
+    pub fn tick_size_at_price_1(&self) -> Option<String> {
+        tick_size_at_price_1(spot_price_tick(i64::from(self.base_sz_decimals)))
+    }
+}
+
+fn tick_size_at_price_1(grid: PriceTick) -> Option<String> {
+    grid.tick_for(Decimal::from(1)).map(|tick| tick.to_string())
 }
 
 /// Outcome market side, held as the notation the user typed (`#10` / `+10`).
@@ -192,6 +218,10 @@ pub(crate) mod test_support {
             sz_decimals: 8,
             collateral: "USDC".to_string(),
             margin_rule: MarginRule::CrossOrIsolated,
+            max_leverage: Some(50),
+            only_isolated: false,
+            delisted: false,
+            deployer_fee_scale: None,
         }
     }
 
@@ -209,6 +239,7 @@ pub(crate) mod test_support {
             base: base.to_string(),
             quote: quote.to_string(),
             base_sz_decimals: 8,
+            quote_sz_decimals: 8,
         }
     }
 }

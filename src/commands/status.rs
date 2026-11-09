@@ -61,7 +61,7 @@ pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let api = remote.api();
     let probe_start = Instant::now();
-    let perps = DexMeta::load(api, None).await?.markets;
+    let perps = DexMeta::load(api, None).await?;
     let mids = api.sdk().all_mids(None).await?;
     let latency = probe_start.elapsed();
 
@@ -70,7 +70,7 @@ pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
         api_url: remote.api().base_url().to_string(),
         health: "healthy".to_string(),
         latency_ms: latency.as_millis(),
-        perps_count: perps.len(),
+        perps_count: perps.market_count(),
         mids_count: mids.len(),
         rate_limit_status: "ok".to_string(),
         rate_limit_note: rate_limit_note(),

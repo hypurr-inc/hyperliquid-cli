@@ -3,6 +3,7 @@ use hypersdk::hypercore::Chain;
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
+use crate::assets::USDC_NAME;
 use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, GroupSpec, InputKind, YES, arg};
 use crate::commands::common::direction::TransferDirection;
@@ -258,7 +259,7 @@ fn transfer_dry_run_value(
         "direction": args.direction.to_string(),
         "is_deposit": action.is_deposit,
         "usd": action.usd,
-        "asset": "USDC",
+        "asset": USDC_NAME,
         "network": chain.to_string(),
         "reversibility": SubaccountActionKind::TransferUsdc.reversibility(),
     })

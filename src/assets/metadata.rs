@@ -1,27 +1,30 @@
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
-
 use alloy::primitives::B128;
+use hypersdk::hypercore::SpotToken;
 use hypersdk::hypercore::types::SendToken;
-use hypersdk::hypercore::{Chain, SpotToken};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::wire::InfoRequest;
 
 use super::asset_id;
-use super::dexes::{DexMeta, PerpDex, PerpDexList, PerpListing, USDC_NAME};
+use super::dexes::{DexMeta, PerpDex, PerpDexList, USDC_NAME, USDC_TOKEN};
 use super::market::{PerpAsset, SpotAsset};
-use super::query::{eq_asset_name, strip_dex_prefix};
+use super::query::eq_asset_name;
 
-const METADATA_TTL: Duration = Duration::from_secs(60);
+/// A HIP-3 dex whose metadata could not be read, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnavailableDex {
+    pub name: String,
+    pub reason: String,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AssetMetadata {
     pub(super) perps: Vec<PerpAsset>,
     pub(super) spots: Vec<SpotAsset>,
-    pub(super) unavailable_dexes: Vec<String>,
+    pub(super) unavailable_dexes: Vec<UnavailableDex>,
 }
 
 impl AssetMetadata {
@@ -38,48 +41,39 @@ impl AssetMetadata {
     /// loaded here; they are looked up live on demand.
     pub async fn load(api: &ApiClient) -> Result<Self, CliError> {
         let (perps, spot_meta) = load_default_dex(api).await?;
-        Ok(Self {
-            perps,
-            spots: spot_assets(spot_meta.into_listings())?,
-            unavailable_dexes: Vec::new(),
-        })
+        Ok(Self::from_assets(perps, spot_meta.into_assets()?))
     }
 
-    /// The metadata of markets a command already loaded, so it resolves a name
-    /// against them without reading them again.
-    pub fn from_listings(perps: Vec<PerpAsset>, spots: Vec<SpotListing>) -> Result<Self, CliError> {
-        Ok(Self {
-            perps,
-            spots: spot_assets(spots)?,
-            unavailable_dexes: Vec::new(),
-        })
-    }
-
-    /// [`Self::load`] plus every HIP-3 market, for `asset search` and
+    /// [`Self::load`] plus every HIP-3 market of `dexes`, for `asset search` and
     /// `asset decode`.
     ///
     /// A HIP-3 DEX whose own metadata fails to load does not fail the whole
-    /// load: it is listed in [`Self::unavailable_dexes`], and resolving one of
-    /// its markets reports that failure instead of "asset not found". A failed
-    /// `perpDexs` listing fails the load.
-    pub async fn load_with_hip3(api: &ApiClient) -> Result<Self, CliError> {
+    /// load: it is listed in [`Self::unavailable_dexes`] with the reason, and
+    /// resolving one of its markets reports that failure instead of "asset not
+    /// found".
+    pub(crate) async fn load_with_hip3(
+        api: &ApiClient,
+        dexes: &PerpDexList,
+    ) -> Result<Self, CliError> {
         let (mut perps, spot_meta) = load_default_dex(api).await?;
 
         let mut unavailable_dexes = Vec::new();
-        let dexes = PerpDexList::load(api).await?;
         for (dex, meta) in dexes.iter().zip(dexes.read_metas(api).await) {
             match meta {
                 Ok(meta) => {
                     let collateral = spot_meta.collateral_name(meta.collateral_token);
                     perps.extend(meta.into_assets(Some(dex), &collateral));
                 }
-                Err(_) => unavailable_dexes.push(dex.name.clone()),
+                Err(err) => unavailable_dexes.push(UnavailableDex {
+                    name: dex.name.clone(),
+                    reason: err.to_string(),
+                }),
             }
         }
 
         Ok(Self {
             perps,
-            spots: spot_assets(spot_meta.into_listings())?,
+            spots: spot_meta.into_assets()?,
             unavailable_dexes,
         })
     }
@@ -96,7 +90,7 @@ impl AssetMetadata {
 
     /// HIP-3 DEXes whose metadata failed to load, so their markets are missing.
     #[must_use]
-    pub fn unavailable_dexes(&self) -> &[String] {
+    pub fn unavailable_dexes(&self) -> &[UnavailableDex] {
         &self.unavailable_dexes
     }
 }
@@ -109,16 +103,21 @@ async fn load_default_dex(api: &ApiClient) -> Result<(Vec<PerpAsset>, RawSpotMet
 }
 
 /// The perp markets of `dex` (`None` is the default dex) as the exchange
-/// lists them, each with its asset id and collateral.
-pub(crate) async fn load_perp_listings(
+/// lists them, each with its asset id and collateral. The spot metadata is read
+/// only to name a collateral token other than USDC.
+pub(crate) async fn load_perp_markets(
     api: &ApiClient,
     dex: Option<&PerpDex>,
-) -> Result<Vec<PerpListing>, CliError> {
+) -> Result<Vec<PerpAsset>, CliError> {
     let meta = DexMeta::load(api, dex.map(|dex| dex.name.as_str())).await?;
-    let collateral = load_raw_spot_meta(api)
-        .await?
-        .collateral_name(meta.collateral_token);
-    Ok(meta.into_listings(dex, &collateral))
+    let collateral = if meta.collateral_token == USDC_TOKEN {
+        USDC_NAME.to_string()
+    } else {
+        load_raw_spot_meta(api)
+            .await?
+            .collateral_name(meta.collateral_token)
+    };
+    Ok(meta.into_assets(dex, &collateral))
 }
 
 fn sz_decimals(value: i64, market: &str) -> Result<u32, CliError> {
@@ -127,30 +126,6 @@ fn sz_decimals(value: i64, market: &str) -> Result<u32, CliError> {
             "exchange metadata for {market} has an invalid size precision: {value}"
         ))
     })
-}
-
-fn spot_assets(listings: Vec<SpotListing>) -> Result<Vec<SpotAsset>, CliError> {
-    listings.into_iter().map(spot_asset_from_listing).collect()
-}
-
-fn spot_asset_from_listing(listing: SpotListing) -> Result<SpotAsset, CliError> {
-    Ok(SpotAsset {
-        base_sz_decimals: sz_decimals(listing.base_sz_decimals, &listing.symbol)?,
-        symbol: listing.symbol,
-        index: listing.index,
-        base: listing.base,
-        quote: listing.quote,
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpotListing {
-    pub symbol: String,
-    pub index: usize,
-    pub base: String,
-    pub quote: String,
-    pub base_sz_decimals: i64,
-    pub quote_sz_decimals: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,10 +156,22 @@ impl SpotTokenListing {
 
 /// Load all spot markets from `spotMeta`, skipping entries whose token
 /// references do not resolve.
-pub async fn load_spot_markets(api: &ApiClient) -> Result<Vec<SpotListing>, CliError> {
-    load_raw_spot_meta(api)
-        .await
-        .map(RawSpotMeta::into_listings)
+pub async fn load_spot_markets(api: &ApiClient) -> Result<Vec<SpotAsset>, CliError> {
+    load_raw_spot_meta(api).await?.into_assets()
+}
+
+/// [`load_spot_markets`] with the per-market contexts of
+/// `spotMetaAndAssetCtxs`, whose first element is `spotMeta`: one read for both.
+pub async fn load_spot_markets_with_contexts<C: DeserializeOwned>(
+    api: &ApiClient,
+) -> Result<(Vec<SpotAsset>, Vec<C>), CliError> {
+    let (meta, contexts): (RawSpotMeta, Vec<C>) = api
+        .info(
+            &InfoRequest::new("spotMetaAndAssetCtxs"),
+            "loading spot asset contexts",
+        )
+        .await?;
+    Ok((meta.into_assets()?, contexts))
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -228,19 +215,24 @@ impl RawSpotMeta {
             .map_or_else(|| USDC_NAME.to_string(), |token| token.name.clone())
     }
 
-    fn into_listings(self) -> Vec<SpotListing> {
+    /// The spot markets whose base and quote tokens the metadata lists.
+    fn into_assets(self) -> Result<Vec<SpotAsset>, CliError> {
         self.universe
             .iter()
             .filter_map(|item| {
                 let base = self.token(*item.tokens.first()?)?;
                 let quote = self.token(*item.tokens.get(1)?)?;
-                Some(SpotListing {
-                    symbol: format!("{}/{}", base.name, quote.name),
-                    index: asset_id::spot_asset_index(item.index),
+                Some((item.index, base, quote))
+            })
+            .map(|(index, base, quote)| {
+                let symbol = format!("{}/{}", base.name, quote.name);
+                Ok(SpotAsset {
+                    base_sz_decimals: sz_decimals(base.sz_decimals, &symbol)?,
+                    quote_sz_decimals: sz_decimals(quote.sz_decimals, &symbol)?,
+                    symbol,
+                    index: asset_id::spot_asset_index(index),
                     base: base.name.clone(),
                     quote: quote.name.clone(),
-                    base_sz_decimals: base.sz_decimals,
-                    quote_sz_decimals: quote.sz_decimals,
                 })
             })
             .collect()
@@ -302,81 +294,19 @@ pub(crate) async fn load_hip3_market(
     api: &ApiClient,
     dex: &PerpDex,
     token: &str,
-) -> Result<Option<PerpListing>, CliError> {
-    Ok(load_perp_listings(api, Some(dex))
+) -> Result<Option<PerpAsset>, CliError> {
+    Ok(load_perp_markets(api, Some(dex))
         .await?
         .into_iter()
-        .find(|listing| {
-            let display_token = strip_dex_prefix(&listing.market.name, &dex.name);
-            display_token.eq_ignore_ascii_case(token)
-                || listing.market.name.eq_ignore_ascii_case(token)
+        .find(|asset| {
+            asset.name.eq_ignore_ascii_case(token)
+                || asset.display_name().eq_ignore_ascii_case(token)
         }))
-}
-
-#[derive(Debug, Clone)]
-struct CachedMetadata {
-    metadata: AssetMetadata,
-    fetched_at: Instant,
-}
-
-impl CachedMetadata {
-    fn is_fresh_at(&self, now: Instant) -> bool {
-        now.duration_since(self.fetched_at) <= METADATA_TTL
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct MetadataCache {
-    cached: Mutex<Vec<(Chain, CachedMetadata)>>,
-}
-
-impl MetadataCache {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub async fn get_or_load(&self, api: &ApiClient) -> Result<AssetMetadata, CliError> {
-        let chain = api.chain();
-        if let Some(metadata) = self.fresh_metadata_for_chain_at(chain, Instant::now()) {
-            return Ok(metadata);
-        }
-
-        let metadata = AssetMetadata::load(api).await?;
-        self.store_for_chain(chain, metadata.clone(), Instant::now());
-        Ok(metadata)
-    }
-
-    fn store_for_chain(&self, chain: Chain, metadata: AssetMetadata, fetched_at: Instant) {
-        let mut cached = self.cached.lock().expect("metadata cache lock poisoned");
-        cached.retain(|(cached_chain, _)| *cached_chain != chain);
-        cached.push((
-            chain,
-            CachedMetadata {
-                metadata,
-                fetched_at,
-            },
-        ));
-    }
-
-    fn fresh_metadata_for_chain_at(&self, chain: Chain, now: Instant) -> Option<AssetMetadata> {
-        self.cached
-            .lock()
-            .expect("metadata cache lock poisoned")
-            .iter()
-            .find(|(cached_chain, cached)| *cached_chain == chain && cached.is_fresh_at(now))
-            .map(|(_, cached)| cached.metadata.clone())
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::market::test_support::perp;
     use super::*;
-
-    fn fixture_metadata(asset_name: &str, asset_index: usize) -> AssetMetadata {
-        AssetMetadata::from_assets(vec![perp(asset_name, asset_index)], Vec::new())
-    }
 
     fn raw_meta(value: serde_json::Value) -> RawSpotMeta {
         serde_json::from_value(value).unwrap()
@@ -397,7 +327,7 @@ mod tests {
             ]
         }));
 
-        let markets = raw.into_listings();
+        let markets = raw.into_assets().unwrap();
 
         assert_eq!(markets.len(), 1);
         assert_eq!(markets[0].symbol, "PURR/USDC");
@@ -472,7 +402,7 @@ mod tests {
             }))
         };
 
-        assert_eq!(raw().into_listings().len(), 1);
+        assert_eq!(raw().into_assets().unwrap().len(), 1);
         let err = raw().into_tokens().unwrap_err();
         assert!(err.to_string().contains("invalid tokenId"), "{err}");
     }
@@ -486,62 +416,17 @@ mod tests {
     }
 
     #[test]
-    fn spot_listing_with_invalid_size_precision_fails_conversion() {
-        let listing = SpotListing {
-            symbol: "BAD/USDC".to_string(),
-            index: 10_001,
-            base: "BAD".to_string(),
-            quote: "USDC".to_string(),
-            base_sz_decimals: -3,
-            quote_sz_decimals: 6,
-        };
+    fn a_spot_market_with_an_invalid_size_precision_fails_the_conversion() {
+        let raw = raw_meta(serde_json::json!({
+            "tokens": [
+                {"name": "USDC", "index": 0, "szDecimals": 6},
+                {"name": "BAD", "index": 1, "szDecimals": -3}
+            ],
+            "universe": [{"name": "BAD/USDC", "index": 1, "tokens": [1, 0]}]
+        }));
 
-        assert!(spot_asset_from_listing(listing).is_err());
-    }
+        let err = raw.into_assets().unwrap_err();
 
-    #[test]
-    fn metadata_cache_entries_are_independent_per_chain() {
-        let cache = MetadataCache::new();
-        let now = Instant::now();
-        let mainnet_metadata = fixture_metadata("BTC", 0);
-        let testnet_metadata = fixture_metadata("TESTBTC", 10);
-
-        cache.store_for_chain(Chain::Mainnet, mainnet_metadata.clone(), now);
-        cache.store_for_chain(Chain::Testnet, testnet_metadata.clone(), now);
-
-        assert_eq!(
-            cache.fresh_metadata_for_chain_at(Chain::Mainnet, now),
-            Some(mainnet_metadata)
-        );
-        assert_eq!(
-            cache.fresh_metadata_for_chain_at(Chain::Testnet, now),
-            Some(testnet_metadata)
-        );
-    }
-
-    #[test]
-    fn metadata_cache_ttl_is_applied_per_chain() {
-        let cache = MetadataCache::new();
-        let now = Instant::now();
-        let stale_mainnet_fetched_at = now - METADATA_TTL - Duration::from_secs(1);
-        let fresh_testnet_fetched_at = now - METADATA_TTL + Duration::from_secs(1);
-        let testnet_metadata = fixture_metadata("TESTBTC", 10);
-
-        cache.store_for_chain(
-            Chain::Mainnet,
-            fixture_metadata("BTC", 0),
-            stale_mainnet_fetched_at,
-        );
-        cache.store_for_chain(
-            Chain::Testnet,
-            testnet_metadata.clone(),
-            fresh_testnet_fetched_at,
-        );
-
-        assert_eq!(cache.fresh_metadata_for_chain_at(Chain::Mainnet, now), None);
-        assert_eq!(
-            cache.fresh_metadata_for_chain_at(Chain::Testnet, now),
-            Some(testnet_metadata)
-        );
+        assert!(err.to_string().contains("BAD/USDC"), "{err}");
     }
 }

@@ -8,6 +8,7 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::types::{OrderGrouping, TimeInForce, TpSl};
 use serde::{Deserialize, Serialize};
 
+use crate::assets::DexArg;
 use crate::clock::parse_lifetime;
 use crate::errors::CliError;
 use crate::margin::MarginModeArg;
@@ -306,7 +307,7 @@ pub struct CancelAllArgs {
 
     /// HIP-3 DEX for the --coin filter
     #[arg(long, requires = "coin")]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
 
     /// Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id
     #[arg(long)]

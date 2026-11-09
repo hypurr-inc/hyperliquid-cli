@@ -1,6 +1,5 @@
 //! The account-mode domain: an account's abstraction mode, where its balances
-//! live under each mode, the collateral token of each perp dex and the unified
-//! account risk.
+//! live under each mode and the unified account risk.
 //!
 //! Layer rule: below `commands`; it reads the API and never imports a command
 //! or a presentation type. `account abstraction` prints it, and order
@@ -13,7 +12,6 @@ use hypersdk::hypercore::types::{ClearinghouseState, LeverageType};
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
-use crate::assets::{DexMeta, PerpDexList};
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::spot_balances::{RawSpotBalance, balance_of};
@@ -125,30 +123,6 @@ pub async fn fetch_abstraction(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DexCollateral {
-    /// `None` is the default dex.
-    pub dex: Option<String>,
-    /// Spot token index of the collateral, 0 being USDC.
-    pub token: u32,
-}
-
-pub async fn load_dex_collateral(api: &ApiClient) -> Result<Vec<DexCollateral>, CliError> {
-    let default = DexMeta::load(api, None).await?;
-    let dexes = PerpDexList::load(api).await?;
-    let mut collateral = vec![DexCollateral {
-        dex: None,
-        token: default.collateral_token,
-    }];
-    for (dex, meta) in dexes.metas(api).await? {
-        collateral.push(DexCollateral {
-            dex: Some(dex.name.clone()),
-            token: meta.collateral_token,
-        });
-    }
-    Ok(collateral)
-}
-
 /// How close a unified account is to liquidation, per the account-abstraction
 /// docs: the worst collateral token's cross maintenance margin over what the
 /// account holds of it that isolated positions do not claim.
@@ -194,10 +168,7 @@ pub(crate) fn unified_account_ratio(
         if maintenance <= Decimal::ZERO {
             continue;
         }
-        let held = usize::try_from(token)
-            .ok()
-            .and_then(|index| balance_of(balances, index))
-            .map(|balance| balance.total);
+        let held = balance_of(balances, token).map(|balance| balance.total);
         let available = held.map_or(Decimal::ZERO, |held| held - isolated);
         if available <= Decimal::ZERO {
             return Some(UnifiedRisk::Uncovered {
@@ -298,7 +269,7 @@ mod tests {
         .unwrap()
     }
 
-    fn balance(token: usize, total: &str) -> RawSpotBalance {
+    fn balance(token: u32, total: &str) -> RawSpotBalance {
         RawSpotBalance {
             coin: format!("T{token}"),
             token: Some(token),

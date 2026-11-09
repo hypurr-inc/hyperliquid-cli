@@ -31,7 +31,7 @@ use super::{
     batch_modify, cancel, cancel_all, create, modify, place_batch, schedule_cancel, tpsl,
     twap_cancel, twap_create,
 };
-use crate::assets::canonical_dex;
+use crate::assets::DexArg;
 use crate::cli_command::CliCommand;
 use crate::clock;
 use crate::command_spec::{
@@ -179,7 +179,7 @@ pub struct OpenOrdersArgs {
     pub watch: SnapshotWatchArgs,
     /// Perp dex name (HIP-3). Defaults to the first dex.
     #[arg(long)]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
 }
 
 pub struct OrdersOpen;
@@ -208,8 +208,10 @@ impl CliCommand for OrdersOpen {
     async fn run(inv: &Invocation, args: &OpenOrdersArgs) -> Result<(), anyhow::Error> {
         // Validate once, before either path: a watch must not start on a dex that
         // cannot be read, and both paths send the canonical spelling.
-        let client = inv.remote()?.api();
-        let dex = canonical_dex(client, args.dex.as_deref()).await?;
+        let dex = inv
+            .dex(args.dex.as_ref())
+            .await?
+            .map(|dex| dex.name.clone());
         if args.watch.watch {
             watch_open_orders(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
@@ -1084,7 +1086,7 @@ async fn watch_open_orders(
 }
 
 fn ensure_outcome_coin(coin: &str) -> Result<(), CliError> {
-    crate::assets::asset_id::parse_outcome_notation(coin)?;
+    crate::assets::parse_outcome_notation(coin)?;
     Ok(())
 }
 
