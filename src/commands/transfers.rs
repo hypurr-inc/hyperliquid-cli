@@ -5,6 +5,7 @@ use hypersdk::hypercore::{Chain, SpotToken};
 
 use crate::assets::require_spot_token;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::abstraction::fetch_abstraction;
 use crate::commands::actions;
 use crate::commands::confirm;
 use crate::commands::rows::{ListRow, Row, Rows};
@@ -20,7 +21,6 @@ use crate::mode::Mode;
 use crate::quantity;
 use crate::signing::{SelectedSigner, Signs};
 use crate::wire::{AddressRole, address};
-use hypersdk::hypercore::HttpClient;
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
@@ -302,8 +302,8 @@ async fn send(
     args: &SendArgs,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let (api, chain, client) = (remote.api(), remote.chain(), remote.api().sdk());
-    ensure_perp_balance(client, signer.query_address(), args.amount).await?;
+    let (api, chain) = (remote.api(), remote.chain());
+    ensure_usdc_available(api, signer.query_address(), args.amount).await?;
     confirm_transfer(
         inv.mode(),
         args.yes,
@@ -464,8 +464,8 @@ async fn withdraw(
     args: &WithdrawArgs,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let (api, chain, client) = (remote.api(), remote.chain(), remote.api().sdk());
-    ensure_perp_balance(client, signer.query_address(), args.amount).await?;
+    let (api, chain) = (remote.api(), remote.chain());
+    ensure_usdc_available(api, signer.query_address(), args.amount).await?;
     confirm_transfer(
         inv.mode(),
         args.yes,
@@ -520,14 +520,14 @@ async fn class_transfer(
     kind: TransferActionKind,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let (api, client) = (remote.api(), remote.api().sdk());
+    let api = remote.api();
     let balance_user = signer.query_address();
     let to_perp = kind == TransferActionKind::SpotToPerp;
     let amount = args.amount;
     if to_perp {
         ensure_spot_usdc_balance(api, balance_user, amount).await?;
     } else {
-        ensure_perp_balance(client, balance_user, amount).await?;
+        ensure_usdc_available(api, balance_user, amount).await?;
     }
 
     let question = if to_perp {
@@ -611,17 +611,21 @@ fn parse_asset_target(input: &str, flag: &str) -> Result<ParsedAssetTarget, CliE
     })
 }
 
+async fn spot_usdc_available(api: &ApiClient, user: Address) -> Result<Decimal, CliError> {
+    Ok(user_spot_balances_raw(api, user)
+        .await?
+        .into_iter()
+        .find(|balance| balance.coin.eq_ignore_ascii_case("USDC"))
+        .map(|balance| balance.total - balance.hold)
+        .unwrap_or_default())
+}
+
 async fn ensure_spot_usdc_balance(
     api: &ApiClient,
     user: Address,
     amount: Decimal,
 ) -> Result<(), CliError> {
-    let available = user_spot_balances_raw(api, user)
-        .await?
-        .into_iter()
-        .find(|balance| balance.coin.eq_ignore_ascii_case("USDC"))
-        .map(|balance| balance.total - balance.hold)
-        .unwrap_or_default();
+    let available = spot_usdc_available(api, user).await?;
     if available < amount {
         return Err(CliError::Unsupported(format!(
             "insufficient balance: requested {amount} USDC, available spot USDC {available}"
@@ -630,12 +634,24 @@ async fn ensure_spot_usdc_balance(
     Ok(())
 }
 
-async fn ensure_perp_balance(
-    client: &HttpClient,
+/// Refuse a spend of `amount` USDC the account cannot cover. A standard account
+/// spends from its perp balance; a pooled one (unified or portfolio margin)
+/// keeps every balance in the spot state, where the perp `withdrawable` is not
+/// the real balance.
+async fn ensure_usdc_available(
+    api: &ApiClient,
     user: Address,
     amount: Decimal,
 ) -> Result<(), CliError> {
-    let available = client
+    if fetch_abstraction(api, user)
+        .await?
+        .normalized_mode
+        .pools_collateral()
+    {
+        return ensure_spot_usdc_balance(api, user, amount).await;
+    }
+    let available = api
+        .sdk()
         .clearinghouse_state(user, None)
         .await
         .map_err(from_sdk)?

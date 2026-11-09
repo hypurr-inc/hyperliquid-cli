@@ -2866,7 +2866,7 @@
         "supported": true
       },
       "dangerous": true,
-      "description": "Set account abstraction for the signer (userSetAbstraction). Use --dry-run to preview; confirm or pass -y for live submit.",
+      "description": "Set account abstraction for the signer (userSetAbstraction). `disabled` is Standard: separate perp and spot balances. Cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode; unified-account and portfolio-margin accounts are limited to 50k actions per day. Use --dry-run to preview; confirm or pass -y for live submit.",
       "dry_run": "optional",
       "group": "account",
       "lifecycle": "live_mutating",

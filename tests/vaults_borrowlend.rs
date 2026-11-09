@@ -219,6 +219,28 @@ async fn mock_vault_action_server() -> MockServer {
     server
 }
 
+async fn mount_borrow_lend_user_state(server: &MockServer, state: Value) {
+    mount_borrow_lend_user_state_at(server, state, 5).await;
+}
+
+/// Outranks the state `mock_borrowlend_server` already serves.
+async fn override_borrow_lend_user_state(server: &MockServer, state: Value) {
+    mount_borrow_lend_user_state_at(server, state, 1).await;
+}
+
+async fn mount_borrow_lend_user_state_at(server: &MockServer, state: Value, priority: u8) {
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(serde_json::json!({
+            "type": "borrowLendUserState",
+            "user": VALID_ADDRESS
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(state))
+        .with_priority(priority)
+        .mount(server)
+        .await;
+}
+
 async fn mock_borrowlend_server() -> MockServer {
     let server = MockServer::start().await;
     mount_override_healthcheck(&server).await;
@@ -309,36 +331,42 @@ async fn mock_borrowlend_server() -> MockServer {
         .mount(&server)
         .await;
 
+    mount_borrow_lend_user_state(
+        &server,
+        serde_json::json!({
+            "tokenToState": [
+                [0, {
+                    "borrow": {"basis": "0.0", "value": "0.0"},
+                    "supply": {"basis": "40.0", "value": "42.5"}
+                }],
+                [150, {
+                    "borrow": {"basis": "3.5", "value": "3.75"},
+                    "supply": {"basis": "0.0", "value": "0.0"}
+                }],
+                [7, {
+                    "borrow": {"basis": "0.0", "value": "0.0"},
+                    "supply": {"basis": "0.0", "value": "0.0"}
+                }]
+            ],
+            "health": "healthy",
+            "healthFactor": null
+        }),
+    )
+    .await;
+    // The spot balances of an account are not its borrow/lend position: a
+    // unified account holds a different number there.
     Mock::given(method("POST"))
         .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({
-            "type": "spotClearinghouseState",
-            "user": VALID_ADDRESS
-        })))
+        .and(body_partial_json(
+            serde_json::json!({"type": "spotClearinghouseState"}),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "balances": [
-                {
-                    "coin": "USDC",
-                    "token": 0,
-                    "hold": "0",
-                    "total": "42.5",
-                    "entryNtl": "42.5"
-                },
-                {
-                    "coin": "HYPE",
-                    "token": 150,
-                    "hold": "1.25",
-                    "total": "-3.75",
-                    "entryNtl": "-3.75"
-                },
-                {
-                    "coin": "+100",
-                    "hold": "0.0",
-                    "total": "0.0",
-                    "entryNtl": "0.0"
-                }
-            ]
+            "balances": [{
+                "coin": "USDC", "token": 0, "hold": "0",
+                "total": "0.004554", "entryNtl": "0"
+            }]
         })))
+        .expect(0)
         .mount(&server)
         .await;
 
@@ -953,10 +981,84 @@ async fn borrowlend_user_splits_supplied_and_borrowed_balances_without_wallet() 
         .iter()
         .find(|position| position["token"] == "HYPE")
         .unwrap();
+    assert_eq!(usdc["supply_basis"], "40");
     assert_eq!(hype["supplied"], "0");
     assert_eq!(hype["borrowed"], "3.75");
-    assert_eq!(hype["hold"], "1.25");
-    assert!(positions.iter().all(|position| position["token"] != "+100"));
+    assert_eq!(hype["borrow_basis"], "3.5");
+    assert_eq!(positions.len(), 2, "an all-zero token is not a position");
+    assert_eq!(json["health"], "healthy");
+    assert!(json["health_factor"].is_null());
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn borrowlend_user_reports_an_unhealthy_state_and_its_factor() {
+    let env = IsolatedHome::new();
+    let server = mock_borrowlend_server().await;
+    override_borrow_lend_user_state(
+        &server,
+        serde_json::json!({
+            "tokenToState": [[999, {
+                "borrow": {"basis": "1", "value": "2"},
+                "supply": {"basis": "0", "value": "0"}
+            }]],
+            "health": "liquidatable",
+            "healthFactor": 0.97
+        }),
+    )
+    .await;
+
+    let output = env
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .args(["--format", "json", "borrowlend", "user", VALID_ADDRESS])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(json["health"], "liquidatable");
+    assert_eq!(json["health_factor"], "0.97");
+    // A token the spot metadata does not list keeps its index as its name.
+    assert_eq!(json["positions"][0]["token"], "#999");
+    assert_eq!(json["positions"][0]["borrowed"], "2");
+}
+
+#[tokio::test]
+async fn borrowlend_user_of_a_zero_state_unified_account_is_empty_but_healthy() {
+    let env = IsolatedHome::new();
+    let server = MockServer::start().await;
+    mount_override_healthcheck(&server).await;
+    mount_borrow_lend_user_state(
+        &server,
+        serde_json::json!({"tokenToState": [], "health": "healthy", "healthFactor": null}),
+    )
+    .await;
+
+    let output = env
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .args(["--format", "json", "borrowlend", "user", VALID_ADDRESS])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["positions"], serde_json::json!([]));
+    assert_eq!(json["health"], "healthy");
+    assert!(json["health_factor"].is_null());
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .args(["--format", "table", "borrowlend", "user", VALID_ADDRESS])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "No borrow/lend positions (health: healthy).",
+        ));
 }
 
 #[tokio::test]
@@ -987,7 +1089,7 @@ async fn borrowlend_user_table_and_pretty_show_borrowed_amounts_as_positive() {
             .filter(|field| *field != "│" && *field != "|")
             .collect::<Vec<_>>();
 
-        assert_eq!(fields, vec![VALID_ADDRESS, "HYPE", "0", "3.75", "1.25"]);
+        assert_eq!(fields, vec![VALID_ADDRESS, "HYPE", "0", "3.75", "healthy"]);
     }
 }
 

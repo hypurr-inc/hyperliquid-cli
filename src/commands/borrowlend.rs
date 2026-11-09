@@ -8,7 +8,6 @@ use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs,
 use crate::commands::actions;
 use crate::commands::rows::{ListRow, One, Row, Rows, style_column};
 use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
-use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
 use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
@@ -93,22 +92,91 @@ struct RawReserveState {
     total_borrowed: Decimal,
 }
 
+/// `borrowLendUserState`: the account's borrow/lend positions and the
+/// protocol's own verdict on their health. Unlike spot balances it is the
+/// account's actual supply and borrow, whatever the account abstraction.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RawBorrowLendUserState {
+    token_to_state: Vec<(u32, RawTokenState)>,
+    /// The protocol's verdict: `healthy` or a state it is not.
+    pub(crate) health: String,
+    #[serde(default)]
+    health_factor: Option<JsonDecimal>,
+}
+
+impl RawBorrowLendUserState {
+    pub(crate) fn health_factor(&self) -> Option<Decimal> {
+        self.health_factor.map(|factor| factor.0)
+    }
+}
+
+pub(crate) async fn fetch_user_state(
+    api: &ApiClient,
+    user: Address,
+) -> Result<RawBorrowLendUserState, CliError> {
+    api.info(
+        &InfoRequest::user("borrowLendUserState", user),
+        "loading user borrow/lend state",
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+struct RawTokenState {
+    borrow: RawLegState,
+    supply: RawLegState,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawLegState {
+    basis: JsonDecimal,
+    value: JsonDecimal,
+}
+
+/// A decimal the API may send as a JSON string or number.
+#[derive(Debug, Clone, Copy)]
+struct JsonDecimal(Decimal);
+
+impl<'de> Deserialize<'de> for JsonDecimal {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = match serde_json::Value::deserialize(deserializer)? {
+            serde_json::Value::String(text) => text,
+            serde_json::Value::Number(number) => number.to_string(),
+            other => {
+                return Err(serde::de::Error::custom(format!(
+                    "expected a decimal, found {other}"
+                )));
+            }
+        };
+        raw.parse::<Decimal>()
+            .or_else(|_| Decimal::from_scientific(&raw))
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct UserBorrowLendPosition {
     token: String,
-    token_index: usize,
+    token_index: u32,
     #[serde(with = "rust_decimal::serde::str")]
     supplied: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     borrowed: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
-    hold: Decimal,
+    supply_basis: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    borrow_basis: Decimal,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserBorrowLendOutput {
     user: String,
     positions: Vec<UserBorrowLendPosition>,
+    health: String,
+    health_factor: Option<Decimal>,
+    empty_message: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -201,7 +269,14 @@ impl Row for BorrowLendActionRow {
 
 impl TableData for UserBorrowLendOutput {
     fn headers(&self) -> Vec<&str> {
-        vec!["User", "Token", "Supplied", "Borrowed", "Hold"]
+        vec![
+            "User",
+            "Token",
+            "Supplied",
+            "Borrowed",
+            "Health",
+            "Health Factor",
+        ]
     }
 
     fn rows(&self) -> Vec<Vec<String>> {
@@ -213,20 +288,25 @@ impl TableData for UserBorrowLendOutput {
                     row.token.clone(),
                     row.supplied.to_string(),
                     row.borrowed.to_string(),
-                    row.hold.to_string(),
+                    self.health.clone(),
+                    self.health_factor
+                        .map(|factor| factor.to_string())
+                        .unwrap_or_default(),
                 ]
             })
             .collect()
     }
 
     fn empty_message(&self) -> Option<&str> {
-        Some("No borrow/lend positions.")
+        Some(&self.empty_message)
     }
 
     fn to_json_value(&self) -> serde_json::Value {
         serde_json::json!({
             "user": self.user,
             "positions": self.positions,
+            "health": self.health,
+            "health_factor": self.health_factor.map(|factor| factor.to_string()),
         })
     }
 }
@@ -252,16 +332,19 @@ async fn get(inv: &Invocation, token: &str) -> Result<(), anyhow::Error> {
 }
 
 async fn user(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    let positions = user_spot_balances_raw(inv.remote()?.api(), user)
-        .await?
-        .into_iter()
-        .filter_map(UserBorrowLendPosition::from_balance)
-        .collect::<Vec<_>>();
+    let api = inv.remote()?.api();
+    let state = fetch_user_state(api, user).await?;
+    let token_names = if state.token_to_state.is_empty() {
+        Default::default()
+    } else {
+        match token_names_by_index(api.sdk()).await {
+            Ok(names) => names,
+            Err(BorrowLendInfoError::Cli(err)) => return Err(err.into()),
+            Err(BorrowLendInfoError::EndpointUnavailable) => Default::default(),
+        }
+    };
 
-    inv.print(&UserBorrowLendOutput {
-        user: user.to_string(),
-        positions,
-    });
+    inv.print(&UserBorrowLendOutput::new(user, state, &token_names));
     Ok(())
 }
 
@@ -508,27 +591,36 @@ fn decimal_to_wei(amount: Decimal, decimals: i64) -> Result<u64, CliError> {
     })
 }
 
-impl UserBorrowLendPosition {
-    /// The borrow/lend position a spot balance holds, if it is a token balance
-    /// with anything in it.
-    fn from_balance(balance: RawSpotBalance) -> Option<Self> {
-        let token_index = balance.token?;
-        if balance.total.is_zero() && balance.hold.is_zero() {
-            return None;
+impl UserBorrowLendOutput {
+    fn new(
+        user: Address,
+        state: RawBorrowLendUserState,
+        token_names: &std::collections::HashMap<u32, String>,
+    ) -> Self {
+        let health_factor = state.health_factor();
+        let positions = state
+            .token_to_state
+            .into_iter()
+            .filter(|(_, token)| !token.supply.value.0.is_zero() || !token.borrow.value.0.is_zero())
+            .map(|(token_index, token)| UserBorrowLendPosition {
+                token: token_names
+                    .get(&token_index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("#{token_index}")),
+                token_index,
+                supplied: token.supply.value.0.normalize(),
+                borrowed: token.borrow.value.0.normalize(),
+                supply_basis: token.supply.basis.0.normalize(),
+                borrow_basis: token.borrow.basis.0.normalize(),
+            })
+            .collect();
+        Self {
+            user: user.to_string(),
+            positions,
+            empty_message: format!("No borrow/lend positions (health: {}).", state.health),
+            health: state.health,
+            health_factor,
         }
-        let (supplied, borrowed) = if balance.total < Decimal::ZERO {
-            (Decimal::ZERO, -balance.total)
-        } else {
-            (balance.total, Decimal::ZERO)
-        };
-
-        Some(Self {
-            token: balance.coin,
-            token_index,
-            supplied,
-            borrowed,
-            hold: balance.hold,
-        })
     }
 }
 
@@ -774,25 +866,58 @@ mod tests {
         assert!(err.to_string().contains("--max is only supported"));
     }
 
-    fn balance(coin: &str, token: Option<usize>, total: &str, hold: &str) -> RawSpotBalance {
-        RawSpotBalance {
-            coin: coin.to_string(),
-            token,
-            hold: hold.parse().unwrap(),
-            total: total.parse().unwrap(),
-            entry_ntl: Decimal::ZERO,
-        }
+    fn user_state(raw: &str) -> RawBorrowLendUserState {
+        serde_json::from_str(raw).unwrap()
+    }
+
+    fn names() -> std::collections::HashMap<u32, String> {
+        [(0, "USDC".to_string()), (150, "HYPE".to_string())].into()
     }
 
     #[test]
-    fn positions_come_only_from_non_empty_token_balances() {
-        assert!(UserBorrowLendPosition::from_balance(balance("+100", None, "5", "0")).is_none());
-        assert!(UserBorrowLendPosition::from_balance(balance("USDC", Some(0), "0", "0")).is_none());
+    fn positions_come_from_the_api_state_and_skip_empty_tokens() {
+        let state = user_state(
+            r#"{"tokenToState":[
+                [0,{"borrow":{"basis":"0.0","value":"0.0"},"supply":{"basis":"5000.5","value":"5074.42"}}],
+                [150,{"borrow":{"basis":"3.0","value":"3.75"},"supply":{"basis":"0.0","value":"0.0"}}],
+                [7,{"borrow":{"basis":"0.0","value":"0.0"},"supply":{"basis":"0.0","value":"0.0"}}],
+                [9,{"borrow":{"basis":"0.0","value":"0.0"},"supply":{"basis":"1","value":2}}]
+            ],"health":"healthy","healthFactor":1.5}"#,
+        );
 
-        let borrowed =
-            UserBorrowLendPosition::from_balance(balance("USDC", Some(0), "-3", "1")).unwrap();
-        assert_eq!(borrowed.borrowed, Decimal::from(3));
-        assert_eq!(borrowed.supplied, Decimal::ZERO);
-        assert_eq!(borrowed.hold, Decimal::ONE);
+        let output = UserBorrowLendOutput::new(Address::ZERO, state, &names());
+
+        let rows: Vec<_> = output
+            .positions
+            .iter()
+            .map(|row| (row.token.as_str(), row.supplied, row.borrowed))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("USDC", Decimal::new(507_442, 2), Decimal::ZERO),
+                ("HYPE", Decimal::ZERO, Decimal::new(375, 2)),
+                ("#9", Decimal::from(2), Decimal::ZERO),
+            ]
+        );
+        assert_eq!(output.positions[0].supply_basis, Decimal::new(50_005, 1));
+        assert_eq!(output.health, "healthy");
+        assert_eq!(output.health_factor, Some(Decimal::new(15, 1)));
+    }
+
+    #[test]
+    fn a_null_health_factor_and_an_empty_state_decode() {
+        let output = UserBorrowLendOutput::new(
+            Address::ZERO,
+            user_state(r#"{"tokenToState":[],"health":"healthy","healthFactor":null}"#),
+            &names(),
+        );
+
+        assert!(output.positions.is_empty());
+        assert_eq!(output.health_factor, None);
+        assert_eq!(
+            output.to_json_value()["health_factor"],
+            serde_json::Value::Null
+        );
     }
 }

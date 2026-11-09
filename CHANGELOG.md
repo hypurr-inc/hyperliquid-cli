@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Transfers check the balance the account really spends: `transfer send`, `withdraw` and `perp-to-spot` compare the amount with the spot USDC available (total less hold) when the account is unified or portfolio-margin, where the perp `withdrawable` is not the balance and used to refuse valid transfers with a false `insufficient balance`; standard accounts keep the perp `withdrawable` check.
+- `account portfolio` adds `summary.account_mode` and, for unified and portfolio-margin accounts, `summary.perp_state_is_partial: true`; pretty output notes that the balances live in the spot balance. The perp figures are unchanged.
+- `watch risk` measures `margin_usage` by the account's mode: a unified account by the documented unified-account ratio (maintenance margin over collateral less isolated margin, worst collateral token), a portfolio-margin account by the `health` of `borrowLendUserState` (alert when it is not `healthy`). Their alert payloads carry a `basis` key; standard and dex-abstraction accounts are unchanged.
+- `borrowlend user` reads `borrowLendUserState` instead of reinterpreting spot balances, whose numbers were wrong for unified accounts. Positions carry `supplied`, `borrowed`, `supply_basis` and `borrow_basis`; the output adds `health` and `health_factor`. The `hold` key is gone: it described spot holds, not borrow/lend.
+- Orders on a HIP-3 dex under dex abstraction no longer get a helper `sendAsset`: the exchange moves the collateral itself in that mode, as it does for unified and portfolio-margin accounts.
+- `account abstraction set` help and schema describe the protocol cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode, and unified and portfolio-margin accounts are limited to 50k actions per day.
+
 ## 0.18.0 - 2026-11-09
 
 Highlights:

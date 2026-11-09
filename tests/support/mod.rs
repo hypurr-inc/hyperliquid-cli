@@ -746,6 +746,15 @@ pub async fn mount_account_state(
     Mock::given(method("POST"))
         .and(path("/info"))
         .and(body_partial_json(
+            serde_json::json!({"type": "userAbstraction"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("disabled")))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
             serde_json::json!({"type": "subAccounts"}),
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
