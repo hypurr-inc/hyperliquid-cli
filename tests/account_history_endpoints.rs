@@ -465,3 +465,60 @@ async fn account_history_endpoints_staking_history_is_exposed() {
     assert_eq!(history[0]["delta"]["type"], "delegate");
     assert_eq!(history[0]["delta"]["amount"], "250000000");
 }
+
+#[tokio::test]
+async fn account_fills_json_exposes_public_fill_fields() {
+    let env = IsolatedHome::new();
+    let server = history_server().await;
+    mount_info(
+        &server,
+        serde_json::json!({"type": "userFills", "user": USER}),
+        serde_json::json!([fixture_fill("BTC", 4242)]),
+    )
+    .await;
+
+    let json = json_stdout(
+        env.command_with_server(&server)
+            .args(["--format", "json", "account", "fills", USER])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    );
+
+    let fill = &json[0];
+    assert_eq!(fill["coin"], "BTC");
+    assert_eq!(fill["price"], "50000");
+    assert_eq!(fill["size"], "0.1");
+    assert_eq!(fill["direction"], "Open Long");
+    assert_eq!(fill["closed_pnl"], "0");
+    assert_eq!(fill["fee"], "0.01");
+    assert_eq!(fill["fee_token"], "USDC");
+    assert_eq!(fill["oid"], 4242);
+    assert_eq!(fill["time"], 1_700_000_000_000_u64);
+}
+
+#[tokio::test]
+async fn account_fills_with_no_rows_print_an_empty_json_array() {
+    let env = IsolatedHome::new();
+    let server = history_server().await;
+    mount_info(
+        &server,
+        serde_json::json!({"type": "userFills", "user": USER}),
+        serde_json::json!([]),
+    )
+    .await;
+
+    let json = json_stdout(
+        env.command_with_server(&server)
+            .args(["--format", "json", "account", "fills", USER])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    );
+
+    assert_eq!(json, serde_json::json!([]));
+}

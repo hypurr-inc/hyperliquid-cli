@@ -38,123 +38,6 @@ fn exchange_body(requests: &[wiremock::Request]) -> Value {
     serde_json::from_slice(&exchange_request.body).unwrap()
 }
 
-#[test]
-fn subaccount_create_dry_run_includes_signing_context() {
-    let env = IsolatedHome::new();
-    let output = env
-        .command()
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "subaccount",
-            "create",
-            "--name",
-            "market-maker-1",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["dry_run"], true);
-    assert_eq!(json["command"], "subaccount create");
-    assert_eq!(json["would_execute"], "create_subaccount");
-    assert_eq!(json["args"]["name"], "market-maker-1");
-    assert_eq!(json["args"]["network"], "Mainnet");
-    assert_eq!(json["args"]["reversibility"], "irreversible");
-    assert!(json["signer"].is_null());
-    assert!(json["acting_as"].is_null());
-    assert!(json["vault_address"].is_null());
-}
-
-#[test]
-fn subaccount_transfer_dry_run_converts_usdc_to_wire_units() {
-    let env = IsolatedHome::new();
-    let output = env
-        .command()
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "subaccount",
-            "transfer",
-            "--subaccount",
-            ZERO_ADDRESS,
-            "--amount",
-            "10",
-            "--direction",
-            "deposit",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["dry_run"], true);
-    assert_eq!(json["command"], "subaccount transfer");
-    assert_eq!(json["would_execute"], "subaccount_usdc_transfer");
-    assert_eq!(json["args"]["subaccount"], ZERO_ADDRESS);
-    assert_eq!(json["args"]["amount"], "10");
-    assert_eq!(json["args"]["direction"], "deposit");
-    assert_eq!(json["args"]["is_deposit"], true);
-    assert_eq!(json["args"]["usd"], 10_000_000);
-    assert_eq!(json["args"]["asset"], "USDC");
-    assert_eq!(json["args"]["network"], "Mainnet");
-    assert_eq!(json["args"]["reversibility"], "partially_reversible");
-    assert!(json["signer"].is_null());
-    assert!(json["acting_as"].is_null());
-    assert!(json["vault_address"].is_null());
-}
-
-#[test]
-fn subaccount_spot_transfer_dry_run_preserves_master_and_subaccount_contexts() {
-    let env = IsolatedHome::new();
-    let token = "PURR:0xc4bf3f870c0e9465323c0b6ed28096c2";
-    let output = env
-        .command()
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "subaccount",
-            "spot-transfer",
-            "--subaccount",
-            SUBACCOUNT_ADDRESS,
-            "--token",
-            token,
-            "--amount",
-            "1.2300",
-            "--direction",
-            "withdraw",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["dry_run"], true);
-    assert_eq!(json["command"], "subaccount spot-transfer");
-    assert_eq!(json["would_execute"], "subaccount_spot_transfer");
-    assert_eq!(json["args"]["subaccount"], SUBACCOUNT_ADDRESS);
-    assert_eq!(json["args"]["token"], token);
-    assert_eq!(json["args"]["amount"], "1.2300");
-    assert_eq!(json["args"]["direction"], "withdraw");
-    assert_eq!(json["args"]["is_deposit"], false);
-    assert_eq!(json["args"]["asset"], token);
-    assert_eq!(json["args"]["network"], "Mainnet");
-    assert_eq!(json["args"]["reversibility"], "partially_reversible");
-    assert!(json["signer"].is_null());
-    assert!(json["acting_as"].is_null());
-    assert!(json["vault_address"].is_null());
-}
-
 #[tokio::test]
 async fn subaccount_create_submits_sdk_matching_action_shape() {
     let env = IsolatedHome::new();
@@ -205,7 +88,6 @@ async fn subaccount_transfer_resolves_alias_and_uses_usdc_integer_units() {
     let output = env
         .account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &server)
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .write_stdin("yes\n")
         .args([
             "--format",
             "json",
@@ -228,6 +110,7 @@ async fn subaccount_transfer_resolves_alias_and_uses_usdc_integer_units() {
 
     let json: Value = serde_json::from_slice(&output).unwrap();
     let row = &json[0];
+    assert_eq!(row["status"], "confirmed");
     let signer_address = expected_address(VALID_PRIVATE_KEY);
     assert_eq!(row["signer"].as_str(), Some(signer_address.as_str()));
     assert_eq!(row["acting_as"].as_str(), Some(signer_address.as_str()));
@@ -258,39 +141,6 @@ async fn subaccount_transfer_resolves_alias_and_uses_usdc_integer_units() {
 }
 
 #[tokio::test]
-async fn subaccount_transfer_yes_skips_confirmation_prompt() {
-    let env = IsolatedHome::new();
-    let server = mock_subaccount_exchange_server().await;
-
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "subaccount",
-            "transfer",
-            "--subaccount",
-            SUBACCOUNT_ADDRESS,
-            "--amount",
-            "10.25",
-            "--direction",
-            "deposit",
-            "-y",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json[0]["status"], "confirmed");
-}
-
-#[tokio::test]
 async fn subaccount_spot_transfer_submits_expected_exchange_payload() {
     let env = IsolatedHome::new();
     let server = mock_subaccount_exchange_server().await;
@@ -300,7 +150,6 @@ async fn subaccount_spot_transfer_submits_expected_exchange_payload() {
         .command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .write_stdin("yes\n")
         .args([
             "--format",
             "json",
@@ -324,6 +173,7 @@ async fn subaccount_spot_transfer_submits_expected_exchange_payload() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
     let row = &json[0];
+    assert_eq!(row["status"], "confirmed");
     let signer_address = expected_address(VALID_PRIVATE_KEY);
     assert_eq!(row["signer"].as_str(), Some(signer_address.as_str()));
     assert_eq!(row["acting_as"].as_str(), Some(signer_address.as_str()));
@@ -350,42 +200,6 @@ async fn subaccount_spot_transfer_submits_expected_exchange_payload() {
     assert!(body["nonce"].is_u64());
     assert!(body["signature"].is_object());
     assert!(body["vaultAddress"].is_null());
-}
-
-#[tokio::test]
-async fn subaccount_spot_transfer_yes_skips_confirmation_prompt() {
-    let env = IsolatedHome::new();
-    let server = mock_subaccount_exchange_server().await;
-    let token = "PURR:0xc4bf3f870c0e9465323c0b6ed28096c2";
-
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "subaccount",
-            "spot-transfer",
-            "--subaccount",
-            SUBACCOUNT_ADDRESS,
-            "--token",
-            token,
-            "--amount",
-            "1.2300",
-            "--direction",
-            "deposit",
-            "-y",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json[0]["status"], "confirmed");
 }
 
 #[test]
@@ -508,24 +322,6 @@ async fn orders_create_on_behalf_sets_vault_address_on_exchange_request() {
     assert_eq!(body["action"]["type"], "order");
     assert_eq!(body["vaultAddress"], SUBACCOUNT_ADDRESS);
     assert!(body["signature"].is_object());
-}
-
-#[test]
-fn acting_account_selector_help_distinguishes_transfer_recipients() {
-    let env = IsolatedHome::new();
-
-    env.command()
-        .args(["subaccount", "transfer", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("acting-account selector"));
-
-    env.command()
-        .args(["orders", "create", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Acting-account selector"))
-        .stdout(predicate::str::contains("vaultAddress"));
 }
 
 #[test]

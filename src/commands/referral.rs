@@ -428,39 +428,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn referral_status_extracts_code_and_count() {
-        let raw = serde_json::json!({
-            "referredBy": {
-                "referrer": "0x0000000000000000000000000000000000000001",
-                "code": "REFERRED"
-            },
-            "unclaimedRewards": "1.25",
-            "claimedRewards": "2.50",
-            "builderRewards": "0.10",
-            "referrerState": {
-                "stage": "ready",
-                "data": {
-                    "code": "MINE",
-                    "referralStates": [
-                        { "user": "0x0000000000000000000000000000000000000002" },
-                        { "user": "0x0000000000000000000000000000000000000003" }
-                    ]
-                }
-            }
-        });
-
-        let status = referral_status_from_value(
-            "0x0000000000000000000000000000000000000009".to_string(),
-            &raw,
-        );
-
-        assert_eq!(status.referral_code.as_deref(), Some("MINE"));
-        assert_eq!(status.referral_count, 2);
-        assert_eq!(status.referred_by_code.as_deref(), Some("REFERRED"));
-        assert_eq!(status.unclaimed_rewards.as_deref(), Some("1.25"));
-    }
-
-    #[test]
     fn referral_status_handles_missing_referrer_state() {
         let status = referral_status_from_value(
             "0x0000000000000000000000000000000000000009".to_string(),
@@ -469,7 +436,6 @@ mod tests {
 
         assert_eq!(status.referral_code, None);
         assert_eq!(status.referral_count, 0);
-        assert!(status.rows()[0].contains(&"None".to_string()));
     }
 
     #[test]

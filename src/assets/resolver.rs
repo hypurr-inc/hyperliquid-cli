@@ -332,21 +332,25 @@ mod tests {
 
         assert_eq!(suggestions("BTCC", candidates), vec!["BTC"]);
         assert_eq!(suggestions("ETHH", ["ETH", "ETC"]), vec!["ETH"]);
+        assert_eq!(
+            suggestions("BT", ["BTC", "ETH", "BLUR", "BONK", "PURR/USDC"]),
+            vec!["BTC"]
+        );
         assert!(suggestions("NOTACOIN", candidates).is_empty());
-        assert!(suggestions("ZZZZZZZZ", candidates).is_empty());
+        assert!(suggestions("ZZZZZZZZ", ["ZEC", "BTC", "ETH"]).is_empty());
+    }
+
+    #[test]
+    fn long_placeholder_names_get_no_loose_suggestion() {
+        let candidates = ["BTC", "ETH", "BLUR", "BONK"];
+
+        assert!(suggestions("INVALIDCOIN", candidates).is_empty());
+        assert!(suggestions(&"A".repeat(40), candidates).is_empty());
     }
 
     #[test]
     fn suggestion_ties_prefer_earlier_candidate() {
         assert_eq!(suggestions("BTX", ["BTC", "BTT"]), vec!["BTC"]);
-    }
-
-    #[test]
-    fn suggestion_thresholds_stay_tight() {
-        assert_eq!(suggestion_threshold("BT"), 1);
-        assert_eq!(suggestion_threshold("BTCC"), 1);
-        assert_eq!(suggestion_threshold("NOTACOIN"), 2);
-        assert_eq!(suggestion_threshold("A".repeat(40).as_str()), 3);
     }
 
     #[test]
@@ -357,6 +361,12 @@ mod tests {
             err,
             AssetError::NotFound { asset, suggestion }
                 if asset == "BTCC" && suggestion.as_deref() == Some("BTC")
+        ));
+
+        let err = resolver().resolve_spot("PUR/USDC").unwrap_err();
+        assert!(matches!(
+            err,
+            AssetError::NotFound { suggestion, .. } if suggestion.as_deref() == Some("PURR/USDC")
         ));
     }
 

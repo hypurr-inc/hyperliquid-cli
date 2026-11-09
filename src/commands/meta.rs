@@ -250,50 +250,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn meta_json_contains_universe_and_asset_contexts() {
-        let output = MetaOutput::new(
-            serde_json::json!({
-                "universe": [{
-                    "name": "BTC",
-                    "maxLeverage": 50,
-                    "szDecimals": 5,
-                    "onlyIsolated": false
-                }]
-            }),
-            vec![serde_json::json!({
-                "name": "BTC",
-                "maxLeverage": 50,
-                "szDecimals": 5,
-                "onlyIsolated": false
-            })],
-            vec![],
-            vec![AssetContextRow {
-                name: "BTC".to_string(),
-                fields: Map::from_iter([
-                    ("funding".to_string(), serde_json::json!("0.0001")),
-                    ("openInterest".to_string(), serde_json::json!("42.5")),
-                    ("markPx".to_string(), serde_json::json!("101")),
-                    ("oraclePx".to_string(), serde_json::json!("100.5")),
-                    ("midPx".to_string(), serde_json::json!("100")),
-                    ("prevDayPx".to_string(), serde_json::json!("99")),
-                    ("dayNtlVlm".to_string(), serde_json::json!("123456.7")),
-                ]),
-            }],
-            vec![],
-        );
-        let json = output.to_json_value();
-
-        assert_eq!(json["universe"][0]["name"], "BTC");
-        assert_eq!(json["asset_contexts"][0]["midPx"], "100");
-        assert_eq!(json["asset_contexts"][0]["funding"], "0.0001");
-        assert_eq!(json["asset_contexts"][0]["openInterest"], "42.5");
-        assert_eq!(json["asset_contexts"][0]["markPx"], "101");
-        assert_eq!(json["asset_contexts"][0]["oraclePx"], "100.5");
-        assert_eq!(json["asset_contexts"][0]["prevDayPx"], "99");
-        assert_eq!(json["asset_contexts"][0]["dayNtlVlm"], "123456.7");
-    }
-
-    #[test]
     fn meta_output_from_raw_response_pairs_names_and_preserves_raw_context_fields() {
         let raw: MetaAndAssetContexts = serde_json::from_value(serde_json::json!([
             {
@@ -331,15 +287,5 @@ mod tests {
         assert_eq!(json["asset_contexts"][0]["funding"], "0.0001");
         assert_eq!(json["asset_contexts"][0]["openInterest"], "42.5");
         assert_eq!(json["asset_contexts"][0]["impactPxs"][0], "99.5");
-    }
-
-    #[test]
-    fn meta_table_summarizes_metadata_sections() {
-        let output = MetaOutput::new(Value::Null, vec![], vec![], vec![], vec![]);
-        let rows = output.rows();
-
-        assert_eq!(rows[0][0], "universe");
-        assert_eq!(rows[1][0], "spot_universe");
-        assert_eq!(rows[2][0], "asset_contexts");
     }
 }

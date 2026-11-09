@@ -90,6 +90,7 @@ mod tests {
                 token: "TOKEN".into()
             }
         );
+        assert_eq!(parse_asset_query("#10"), AssetQuery::Outcome("#10".into()));
         assert_eq!(parse_asset_query("+11"), AssetQuery::Outcome("+11".into()));
     }
 }

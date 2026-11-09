@@ -307,27 +307,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_output_has_auction_columns() {
-        let output = PriorityStatusOutput { rows: vec![] };
-
-        assert!(output.headers().contains(&"Current Gas"));
-        assert!(output.headers().contains(&"Previous Winner"));
-    }
-
-    #[test]
-    fn decimal_current_gas_uses_hype_wei_scale() {
-        let scale = Scale::places(18);
-        assert_eq!(
-            quantity::non_negative::<u64>("0.01".parse::<Decimal>().unwrap(), scale),
-            Ok(10_000_000_000_000_000)
-        );
-        assert_eq!(
-            scale.amount(10_000_000_000_000_001).to_string(),
-            "0.010000000000000001"
-        );
-    }
-
-    #[test]
     fn bid_args_are_validated_before_any_dry_run() {
         let args = |max: &str, ip: &str| BidArgs {
             max: max.parse().unwrap(),

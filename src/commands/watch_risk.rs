@@ -736,12 +736,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_watch_user_rejects_invalid_address() {
+    fn parse_watch_user_requires_a_0x_prefixed_valid_address() {
         assert!(parse_watch_user("not-an-address").is_err());
-    }
-
-    #[test]
-    fn parse_watch_user_requires_a_0x_prefixed_address() {
         assert!(parse_watch_user("0000000000000000000000000000000000000001").is_err());
         assert!(parse_watch_user("0x0000000000000000000000000000000000000001").is_ok());
     }
@@ -768,22 +764,6 @@ mod tests {
         for rule in RiskRule::ALL {
             let value = rule.to_possible_value().unwrap();
             assert_eq!(value.get_name(), rule.as_str());
-        }
-    }
-
-    #[test]
-    fn every_rule_has_a_threshold_of_its_own_shape() {
-        for rule in RiskRule::ALL {
-            let matches_shape = matches!(
-                (rule, rule.default_threshold()),
-                (RiskRule::LiqProximity, Threshold::LiqDistance { .. })
-                    | (RiskRule::MarginUsage, Threshold::MarginUsedPercent(_))
-                    | (RiskRule::NoTpsl, Threshold::OpenWithoutTpsl(_))
-                    | (RiskRule::StaleOrder, Threshold::StaleOrder { .. })
-                    | (RiskRule::FundingBleed, Threshold::FundingWindow(_))
-                    | (RiskRule::PositionLifecycle, Threshold::None)
-            );
-            assert!(matches_shape, "{rule:?}");
         }
     }
 

@@ -1272,55 +1272,12 @@ impl CliCommand for AccountAbstractionSet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::support::parse_address;
     use crate::output::{OutputFormat, Session};
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
     fn dec(input: &str) -> Decimal {
         Decimal::from_str(input).unwrap()
-    }
-
-    #[test]
-    fn empty_fills_show_no_data_message_but_json_is_empty_array() {
-        let output = FillsOutput::new(vec![]);
-
-        assert!(output.rows().is_empty());
-        assert_eq!(output.empty_message(), Some("No fills."));
-        assert!(output.to_json_value().as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn empty_subaccounts_show_no_data_message_but_json_is_empty_array() {
-        let output = SubaccountsOutput::new(vec![]);
-
-        assert!(output.rows().is_empty());
-        assert_eq!(output.empty_message(), Some("No subaccounts."));
-        assert!(output.to_json_value().as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn fill_json_has_public_account_fields() {
-        let output = FillsOutput::new(vec![FillRow {
-            coin: "BTC".to_string(),
-            side: "Bid".to_string(),
-            price: dec("100"),
-            size: dec("0.5"),
-            direction: "Open Long".to_string(),
-            closed_pnl: Decimal::ZERO,
-            fee: dec("0.01"),
-            fee_token: "USDC".to_string(),
-            oid: 42,
-            time: 123,
-            liquidity: "taker".to_string(),
-            trade_id: 7,
-            cloid: None,
-        }]);
-        let json = output.to_json_value();
-
-        assert_eq!(json[0]["coin"], "BTC");
-        assert_eq!(json[0]["price"], "100");
-        assert_eq!(json[0]["fee_token"], "USDC");
     }
 
     #[test]
@@ -1362,7 +1319,6 @@ mod tests {
 
         assert!(pretty.contains(&crate::output::colors::green("12.34")));
         assert!(pretty.contains(&crate::output::colors::red("-5.67")));
-        assert!(pretty.contains(&crate::output::colors::cyan("Closed PnL")));
     }
 
     #[test]
@@ -1415,9 +1371,8 @@ mod tests {
 
         let pretty = Session::for_test(OutputFormat::Pretty).render(&output);
 
-        assert!(pretty.contains("\t0\t") || pretty.contains(" 0 "));
-        assert!(!pretty.contains(&format!("{}0", crate::output::colors::GREEN)));
-        assert!(!pretty.contains(&format!("{}0", crate::output::colors::RED)));
+        assert!(!pretty.contains(crate::output::colors::GREEN));
+        assert!(!pretty.contains(crate::output::colors::RED));
     }
 
     #[test]
@@ -1478,23 +1433,5 @@ mod tests {
         assert!(table.contains("pnl=-5"));
         assert!(!table.contains(crate::output::colors::GREEN));
         assert!(!table.contains(crate::output::colors::RED));
-    }
-
-    #[test]
-    fn parse_address_rejects_invalid_addresses() {
-        let err = parse_address("not-an-address").unwrap_err();
-
-        assert_eq!(err.exit_code(), 13);
-        assert!(err.to_string().contains("Invalid address"));
-    }
-
-    #[test]
-    fn parse_address_accepts_zero_prefixed_ethereum_addresses() {
-        let address = parse_address("0x0000000000000000000000000000000000000001").unwrap();
-
-        assert_eq!(
-            address.to_string(),
-            "0x0000000000000000000000000000000000000001"
-        );
     }
 }

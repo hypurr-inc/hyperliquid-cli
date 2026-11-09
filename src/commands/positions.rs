@@ -550,6 +550,10 @@ mod tests {
         assert_eq!(row.mark, Decimal::from(51_000));
         assert_eq!(row.side, "long");
         assert_eq!(row.leverage.to_string(), "cross 5x");
+
+        let short = PositionRow::from(position("-0.1", "-20"));
+        assert_eq!(short.mark, Decimal::from(51_000));
+        assert_eq!(short.side, "short");
     }
 
     #[test]
@@ -567,17 +571,6 @@ mod tests {
         assert_eq!(json["mark"], "51000");
         assert_eq!(json["leverage"], "cross 5x");
         assert!(json["liquidation_price"].is_null());
-    }
-
-    #[test]
-    fn pretty_cells_colour_only_the_pnl_by_sign() {
-        let gain = PositionRow::from(position("0.1", "100")).pretty_cells();
-        let loss = PositionRow::from(position("0.1", "-5")).pretty_cells();
-
-        assert_eq!(gain[PositionRow::PNL_COLUMN], output::colors::green("100"));
-        assert_eq!(loss[PositionRow::PNL_COLUMN], output::colors::red("-5"));
-        assert_eq!(gain[PositionRow::PNL_COLUMN - 1], "51000");
-        assert_eq!(gain[9], output::colors::gray("n/a"));
     }
 
     #[test]

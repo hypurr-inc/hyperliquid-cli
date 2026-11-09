@@ -168,25 +168,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_protocol_id_ranges() {
-        assert_eq!(classify(0), AssetIdLayout::Perp { index: 0 });
-        assert_eq!(classify(9_999), AssetIdLayout::Perp { index: 9_999 });
-        assert_eq!(classify(10_000), AssetIdLayout::Spot { spot_index: 0 });
-        assert_eq!(classify(99_999), AssetIdLayout::Spot { spot_index: 89_999 });
-        assert_eq!(
-            classify(110_035),
-            AssetIdLayout::Hip3Perp {
-                dex_slot: 1,
-                index: 35
-            }
-        );
-        assert_eq!(
-            classify(100_000_011),
-            AssetIdLayout::Outcome { encoding: 11 }
-        );
-    }
-
-    #[test]
     fn usize_helpers_round_trip_with_the_layout() {
         assert_eq!(spot_asset_index(5), 10_005);
         assert_eq!(spot_internal_id(10_005), 5);

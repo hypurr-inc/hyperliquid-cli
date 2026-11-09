@@ -12,13 +12,22 @@ use hypersdk::hypercore::signing::sign_l1_action;
 use predicates::prelude::*;
 use serde::Serialize;
 use serde_json::{Map, Value};
-use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, mount_all_mids};
+use support::{
+    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address,
+    mount_all_mids,
+};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const VALID_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const VALIDATOR_ADDRESS: &str = "0x0000000000000000000000000000000000000002";
 const HYPERLIQUID_EIP_PREFIX: &str = "HyperliquidTransaction:";
+
+fn assert_signed_by_test_key(json: &Value) {
+    let signer = expected_address(VALID_PRIVATE_KEY);
+    assert_eq!(json["signer"], signer);
+    assert_eq!(json["acting_as"], signer);
+}
 
 sol! {
     struct TokenDelegate {
@@ -326,39 +335,65 @@ async fn staking_rewards_json_shows_reward_amounts() {
 }
 
 #[tokio::test]
-async fn staking_delegate_submits_token_delegate_action() {
-    let env = IsolatedHome::new();
+async fn staking_actions_report_action_and_reversibility_in_json_output() {
+    let cases: [(&[&str], &str, &str); 5] = [
+        (
+            &[
+                "delegate",
+                "--validator",
+                VALIDATOR_ADDRESS,
+                "--amount",
+                "1.5",
+            ],
+            "delegate",
+            "partially_reversible",
+        ),
+        (
+            &[
+                "undelegate",
+                "--validator",
+                VALIDATOR_ADDRESS,
+                "--amount",
+                "4",
+            ],
+            "undelegate",
+            "partially_reversible",
+        ),
+        (
+            &["deposit", "--amount", "3"],
+            "deposit",
+            "partially_reversible",
+        ),
+        (
+            &["withdraw", "--amount", "2"],
+            "withdraw",
+            "partially_reversible",
+        ),
+        (&["claim-rewards"], "claim-rewards", "irreversible"),
+    ];
     let server = mock_staking_action_server().await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "staking",
-            "delegate",
-            "--validator",
-            VALIDATOR_ADDRESS,
-            "--amount",
-            "1.5",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("delegate"))
-        .stdout(predicate::str::contains("submitted"))
-        .stdout(predicate::str::contains(VALIDATOR_ADDRESS));
+    for (args, action, reversibility) in cases {
+        let env = IsolatedHome::new();
+        let output = env
+            .command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+            .args(["--format", "json", "staking"])
+            .args(args)
+            .arg("--testnet")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&output).unwrap();
 
-    let requests = server.received_requests().await.unwrap();
-    let exchange_request = requests
-        .iter()
-        .find(|request| request.url.path() == "/exchange")
-        .expect("expected /exchange request");
-    let body: Value = serde_json::from_slice(&exchange_request.body).unwrap();
-    assert_eq!(body["action"]["type"], "tokenDelegate");
-    assert_eq!(body["action"]["validator"], VALIDATOR_ADDRESS);
-    assert_eq!(body["action"]["isUndelegate"], false);
-    assert_eq!(body["action"]["wei"], 150000000_u64);
-    assert_eq!(body["action"]["hyperliquidChain"], "Testnet");
+        assert_eq!(json["action"], action);
+        assert_eq!(json["status"], "submitted", "{action}");
+        assert_eq!(json["reversibility"], reversibility, "{action}");
+        assert_eq!(json["network"], "Testnet", "{action}");
+    }
 }
 
 #[tokio::test]
@@ -397,8 +432,7 @@ async fn staking_withdraw_notes_seven_day_queue() {
             .unwrap()
             .contains("7-day withdrawal queue")
     );
-    assert!(json["signer"].as_str().unwrap().starts_with("0x"));
-    assert!(json["acting_as"].as_str().unwrap().starts_with("0x"));
+    assert_signed_by_test_key(&json);
 
     let requests = server.received_requests().await.unwrap();
     let exchange_request = requests
@@ -619,57 +653,44 @@ async fn staking_action_payloads_and_signatures_match_hyperliquid_shapes() {
     );
 }
 
-#[tokio::test]
-async fn staking_deposit_undelegate_and_claim_rewards_submit_expected_actions() {
-    let env = IsolatedHome::new();
-    let server = mock_staking_action_server().await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["staking", "deposit", "--amount", "3", "--testnet"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("deposit"));
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "staking",
-            "undelegate",
-            "--validator",
+#[test]
+fn staking_rejects_invalid_validators_and_amounts_before_auth() {
+    let zero = "0x0000000000000000000000000000000000000000";
+    let unprefixed = "0000000000000000000000000000000000000002";
+    let cases: [(&str, &str, i32, &str); 4] = [
+        (
+            zero,
+            "1",
+            2,
+            "validator address must not be the zero address",
+        ),
+        (unprefixed, "1", 13, "Invalid address"),
+        (
             VALIDATOR_ADDRESS,
-            "--amount",
-            "4",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("undelegate"));
+            "0",
+            2,
+            "amount must be greater than zero",
+        ),
+        (VALIDATOR_ADDRESS, "0.000000001", 2, "amount"),
+    ];
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["staking", "claim-rewards", "--testnet"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("claim-rewards"));
-
-    let requests = server.received_requests().await.unwrap();
-    let action_types = requests
-        .iter()
-        .filter(|request| request.url.path() == "/exchange")
-        .map(|request| {
-            let body: Value = serde_json::from_slice(&request.body).unwrap();
-            body["action"]["type"].as_str().unwrap().to_string()
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(
-        action_types,
-        vec!["cDeposit", "tokenDelegate", "claimRewards"]
-    );
+    for (validator, amount, code, message) in cases {
+        let env = IsolatedHome::new();
+        env.command()
+            .args([
+                "staking",
+                "delegate",
+                "--validator",
+                validator,
+                "--amount",
+                amount,
+                "--testnet",
+            ])
+            .assert()
+            .code(code)
+            .stdout(predicate::str::is_empty())
+            .stderr(predicate::str::contains(message));
+    }
 }
 
 #[tokio::test]
@@ -716,8 +737,7 @@ async fn staking_link_dry_run_previews_verified_shape_and_warning() {
             .unwrap()
             .contains("permanent")
     );
-    assert!(json["signer"].as_str().unwrap().starts_with("0x"));
-    assert!(json["acting_as"].as_str().unwrap().starts_with("0x"));
+    assert_signed_by_test_key(&json);
     assert!(json["vault_address"].is_null());
 
     let finalize_output = env
@@ -784,13 +804,7 @@ async fn staking_link_initiate_and_finalize_submit_verified_actions() {
             .unwrap()
             .contains("permanent")
     );
-    assert!(initiate_json["signer"].as_str().unwrap().starts_with("0x"));
-    assert!(
-        initiate_json["acting_as"]
-            .as_str()
-            .unwrap()
-            .starts_with("0x")
-    );
+    assert_signed_by_test_key(&initiate_json);
 
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
