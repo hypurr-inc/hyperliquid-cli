@@ -9,7 +9,7 @@ use std::io::{self, BufRead, Write};
 
 use crate::errors::CliError;
 use crate::mode::Mode;
-use crate::output::{colors, terminal};
+use crate::output::colors;
 
 /// Ask a yes/no question. Only `y` or `yes` (any case) confirm.
 ///
@@ -41,7 +41,7 @@ pub fn read_line(mode: &Mode, label: &str, input: &str) -> Result<String, CliErr
         eprintln!();
         return Err(stdin_ended(input, "an answer"));
     };
-    if !terminal::stdin_is_terminal() {
+    if !mode.terminal.stdin {
         // Piped answers aren't echoed, so end the prompt line ourselves.
         eprintln!();
     }
@@ -102,7 +102,7 @@ pub fn confirm_typed(
 /// can prompt. Piped stdin supplies the secret directly: the first line, without
 /// its line ending. End of input is missing input.
 pub fn read_secret(mode: &Mode, label: &str, input: &str) -> Result<String, CliError> {
-    let value = if terminal::stdin_is_terminal() {
+    let value = if mode.terminal.stdin {
         ensure_can_prompt(mode, input)?;
         write_label(label)?;
         let value = rpassword::read_password().map_err(io_error)?;

@@ -6,6 +6,7 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::{ClearinghouseState, Fill, SubAccount, UserVaultEquity};
 use serde::Serialize;
 
+use crate::assets::canonical_dex;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
 use crate::commands::abstraction::fetch_abstraction;
 use crate::commands::confirm;
@@ -14,7 +15,7 @@ use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
 use crate::commands::rows::{ListRow, One, Row, Rows, or_missing, style_column};
 use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
-use crate::commands::support::{canonical_dex, print_dry_run, require_master_signer};
+use crate::commands::support::{print_dry_run, require_master_signer};
 use crate::commands::user_signed::{self, UserSigned};
 use crate::errors::CliError;
 use crate::errors::from_sdk;

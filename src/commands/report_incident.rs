@@ -1,9 +1,9 @@
 use clap::Args;
 
 use super::issue_report::{IssueReport, environment_lines};
-use crate::command_spec::{CliCommand, CommandSpec, DryRunPolicy, InputKind, Lifecycle, Risk, arg};
-use crate::errors::LastError;
+use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
 use crate::invocation::Invocation;
+use crate::report::LastError;
 
 #[derive(Args, Debug, Clone)]
 pub struct ReportIncidentArgs {
@@ -33,16 +33,12 @@ pub struct ReportIncident;
 impl CliCommand for ReportIncident {
     type Args = ReportIncidentArgs;
 
-    const SPEC: CommandSpec = CommandSpec::read(
+    const SPEC: CommandSpec = CommandSpec::local_tool(
         &["report-incident"],
         "system",
         "Generate or submit an incident bug report to GitHub",
         "Generates a pre-filled GitHub issue URL with CLI version, environment details, and error diagnostics. If not provided, inspects the last error recorded by the CLI. Agents can inspect the issue URL and markdown body directly from JSON.",
     )
-    .lifecycle(Lifecycle::InteractiveLocal)
-    .risk(Risk::None)
-    .dry_run(DryRunPolicy::NotSupported)
-    .local()
     .args(&[
         arg("command").kind(InputKind::Identifier),
         arg("error").kind(InputKind::Identifier),
@@ -51,7 +47,7 @@ impl CliCommand for ReportIncident {
     ]);
 
     async fn run(inv: &Invocation, args: &ReportIncidentArgs) -> Result<(), anyhow::Error> {
-        let last_error = LastError::load();
+        let last_error = LastError::load(inv.settings().env());
 
         let cmd_str = args
             .command
@@ -94,6 +90,7 @@ impl CliCommand for ReportIncident {
             body,
             "bug,agent-incident",
             args.open,
+            inv.mode(),
         ));
         Ok(())
     }

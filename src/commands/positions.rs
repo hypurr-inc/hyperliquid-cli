@@ -11,12 +11,13 @@ use hypersdk::hypercore::types::{Action, AssetPosition, LeverageType, PositionDa
 use serde::{Serialize, Serializer};
 
 use crate::assets::AssetResolver;
+use crate::assets::canonical_dex;
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, StreamBound, arg,
 };
 use crate::commands::actions;
 use crate::commands::rows::{ListRow, MISSING, Row, Rows, or_missing, style_column};
-use crate::commands::support::{canonical_dex, print_dry_run};
+use crate::commands::support::print_dry_run;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
@@ -468,7 +469,7 @@ async fn watch_positions(
     let dex = dex.map(str::to_string);
 
     crate::watch::run_snapshot_watch(
-        inv.session(),
+        inv,
         "Live positions",
         remote.chain(),
         vec![Subscription::WebData3 { user }],

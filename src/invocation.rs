@@ -283,7 +283,6 @@ mod tests {
     use super::*;
     use crate::command_spec::{CliCommand, NoArgs};
     use crate::output::JsonRenderOptions;
-    use crate::output::terminal::OutputEnv;
 
     struct Probe;
 
@@ -298,14 +297,12 @@ mod tests {
     }
 
     fn invocation(flags: InvocationFlags) -> Invocation {
-        let env = OutputEnv::default();
-        let session = Session::new(OutputFormat::Json, JsonRenderOptions::default(), env);
-        let mode = Mode::new(
+        let mode = Mode::default().running(
+            OutputFormat::Json,
             flags.non_interactive,
-            true,
             flags.payload_from_stdin(),
-            &env,
         );
+        let session = Session::new(JsonRenderOptions::default(), &mode);
         let settings =
             Settings::detached(crate::settings::EnvSource::fixed::<&str, &str>([]), None);
         Invocation::new(settings, session, mode, flags, &Probe::SPEC)

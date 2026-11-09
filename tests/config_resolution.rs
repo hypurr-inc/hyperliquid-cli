@@ -3,7 +3,6 @@
 //   network:     --testnet > HYPERLIQUID_NETWORK > config file > mainnet
 
 use assert_cmd::Command;
-#[allow(dead_code)]
 mod support;
 
 use std::fs;
@@ -59,7 +58,7 @@ impl ConfigHome {
     }
 
     fn command(&self) -> Command {
-        let mut command = support::hyperliquid_command();
+        let mut command = support::hermetic_command();
         command
             .env("HOME", &self.home_dir)
             .env("XDG_CONFIG_HOME", &self.xdg_config_home);

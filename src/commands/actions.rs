@@ -1,12 +1,12 @@
 use alloy::dyn_abi::{Eip712Types, Resolver, TypedData};
 use alloy::primitives::keccak256;
 use alloy::sol_types::SolStruct;
-use chrono::Utc;
 use hypersdk::Address;
 use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::types::{Action, Response, Signature};
 use serde::Serialize;
 
+use crate::clock;
 use crate::errors::{self, CliError};
 use crate::http_api::ApiClient;
 use crate::response_sanitization::Untrusted;
@@ -19,6 +19,8 @@ struct SignedJsonActionRequest {
     nonce: u64,
     signature: Signature,
     vault_address: Option<hypersdk::Address>,
+    /// The exchange takes an optional expiry; no command sets one, and the
+    /// request has always carried the key as `null`.
     expires_after: Option<u64>,
 }
 
@@ -29,6 +31,7 @@ struct RawL1ActionRequest<'a, A> {
     nonce: u64,
     signature: Signature,
     vault_address: Option<Address>,
+    /// See [`SignedJsonActionRequest::expires_after`].
     expires_after: Option<u64>,
 }
 
@@ -36,7 +39,6 @@ struct RawL1ActionRequest<'a, A> {
 pub(crate) struct RawL1ActionMetadata {
     nonce: u64,
     vault_address: Option<Address>,
-    expires_after: Option<u64>,
 }
 
 impl RawL1ActionMetadata {
@@ -44,7 +46,6 @@ impl RawL1ActionMetadata {
         Self {
             nonce,
             vault_address: None,
-            expires_after: None,
         }
     }
 
@@ -54,10 +55,11 @@ impl RawL1ActionMetadata {
     }
 }
 
-/// Current timestamp in milliseconds for Hyperliquid nonces.
+/// The nonce of an exchange action: the current time in milliseconds, which
+/// the exchange accepts inside a window around its own clock.
 #[must_use]
 pub(crate) fn nonce_now() -> u64 {
-    Utc::now().timestamp_millis() as u64
+    clock::now_ms()
 }
 
 pub(crate) async fn send_l1_action(
@@ -123,7 +125,6 @@ pub(crate) async fn send_raw_l1_json_action<A: Serialize>(
         action,
         metadata.nonce,
         metadata.vault_address,
-        metadata.expires_after,
     )
     .await?;
     let request = RawL1ActionRequest {
@@ -131,7 +132,7 @@ pub(crate) async fn send_raw_l1_json_action<A: Serialize>(
         nonce: metadata.nonce,
         signature,
         vault_address: metadata.vault_address,
-        expires_after: metadata.expires_after,
+        expires_after: None,
     };
     post_json_raw(api, &request, context).await
 }
@@ -160,9 +161,8 @@ async fn sign_raw_l1_action<A: Serialize>(
     action: &A,
     nonce: u64,
     vault_address: Option<Address>,
-    expires_after: Option<u64>,
 ) -> Result<Signature, CliError> {
-    let connection_id = raw_rmp_hash(action, nonce, vault_address, expires_after)
+    let connection_id = raw_rmp_hash(action, nonce, vault_address)
         .map_err(|err| CliError::Internal(anyhow::anyhow!("failed to encode action: {err}")))?;
     signer.sign_l1_connection_id(chain, connection_id).await
 }
@@ -171,7 +171,6 @@ fn raw_rmp_hash<T: Serialize>(
     value: &T,
     nonce: u64,
     maybe_vault_address: Option<Address>,
-    maybe_expires_after: Option<u64>,
 ) -> Result<alloy::primitives::B256, rmp_serde::encode::Error> {
     let mut bytes = rmp_serde::to_vec_named(value)?;
     bytes.extend(nonce.to_be_bytes());
@@ -181,11 +180,6 @@ fn raw_rmp_hash<T: Serialize>(
         bytes.extend(vault_address.as_slice());
     } else {
         bytes.push(0);
-    }
-
-    if let Some(expires_after) = maybe_expires_after {
-        bytes.push(0);
-        bytes.extend(expires_after.to_be_bytes());
     }
 
     Ok(keccak256(bytes))

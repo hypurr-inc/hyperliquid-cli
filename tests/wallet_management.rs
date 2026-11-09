@@ -484,7 +484,7 @@ fn read_only_legacy_wallet_lookup_does_not_migrate_key_storage() {
 #[test]
 fn secret_taking_commands_warn_about_argument_exposure_in_help() {
     for args in [["wallet", "import", "--help"], ["account", "add", "--help"]] {
-        support::hyperliquid_command()
+        support::hermetic_command()
             .args(args)
             .assert()
             .success()
@@ -492,7 +492,7 @@ fn secret_taking_commands_warn_about_argument_exposure_in_help() {
             .stdout(predicate::str::contains("shell history"));
     }
 
-    support::hyperliquid_command()
+    support::hermetic_command()
         .args(["setup", "--help"])
         .assert()
         .success()

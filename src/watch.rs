@@ -16,10 +16,13 @@ use futures::StreamExt;
 use hypersdk::hypercore::{Chain, Subscription, WebSocket, ws::Event as WsEvent};
 
 use crate::errors::CliError;
-use crate::output::{self, OutputFormat, Session, TableData, terminal};
+use crate::invocation::Invocation;
+use crate::mode::{Mode, NON_INTERACTIVE_FLAG};
+use crate::output::{self, OutputFormat, Session, TableData};
+use crate::settings::env;
 use crate::stream::{
-    CONNECTION_LOST_NOTICE, EXIT_SIGINT, JSON_LINES_STDIN_NOTICE, JSON_LINES_STDOUT_NOTICE,
-    StreamBounds, StreamEnd, run_stream, write_stdout_line,
+    CONNECTION_LOST_NOTICE, EXIT_SIGINT, JSON_LINES_DRIVEN_NOTICE, JSON_LINES_STDIN_NOTICE,
+    JSON_LINES_STDOUT_NOTICE, StreamBounds, StreamEnd, run_stream, write_stdout_line,
 };
 use crate::ws::websocket_for_chain;
 
@@ -171,7 +174,7 @@ impl WatchInput for RealWatchInput {
 }
 
 pub async fn run_snapshot_watch<T, F, Fut>(
-    session: &Session,
+    inv: &Invocation,
     title: &str,
     chain: Chain,
     subscriptions: Vec<Subscription>,
@@ -183,24 +186,16 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, anyhow::Error>>,
 {
+    let session = inv.session();
+    let mode = inv.mode();
     let format = session.format();
-    let bounds = StreamBounds::snapshot_watch(max_ticks);
-    let stdin_is_tty = terminal::stdin_is_terminal();
-    let stdout_is_tty = session.env().stdout_tty;
-    let render_mode =
-        snapshot_watch_render_mode(format, bounds.max_items, stdin_is_tty, stdout_is_tty)?;
+    let bounds = StreamBounds::snapshot_watch(max_ticks, inv.settings().env());
+    let render_mode = snapshot_watch_render_mode(mode, bounds.max_items)?;
 
     // A human format that reaches the NDJSON path was asked for explicitly:
     // non-terminal stdout defaults to JSON before this point.
     if render_mode == SnapshotWatchRenderMode::Ndjson && format != OutputFormat::Json {
-        eprintln!(
-            "{}",
-            if stdout_is_tty {
-                JSON_LINES_STDIN_NOTICE
-            } else {
-                JSON_LINES_STDOUT_NOTICE
-            }
-        );
+        eprintln!("{}", json_lines_notice(mode));
     }
 
     run_stream(async move {
@@ -291,31 +286,58 @@ where
     }
 }
 
+/// The TUI needs a person at a terminal on both streams; anything else is
+/// NDJSON when bounded and refused when not.
 fn snapshot_watch_render_mode(
-    format: OutputFormat,
+    mode: &Mode,
     max_ticks: Option<usize>,
-    stdin_is_tty: bool,
-    stdout_is_tty: bool,
 ) -> Result<SnapshotWatchRenderMode, CliError> {
-    if format == OutputFormat::Json {
+    if mode.machine_format() {
         return Ok(SnapshotWatchRenderMode::Ndjson);
     }
+    if mode.full_screen() {
+        return Ok(SnapshotWatchRenderMode::Tui(mode.format));
+    }
+    if max_ticks.is_some() {
+        return Ok(SnapshotWatchRenderMode::Ndjson);
+    }
+    Err(tui_refused(mode))
+}
 
-    match (stdin_is_tty, stdout_is_tty) {
-        (true, true) => Ok(SnapshotWatchRenderMode::Tui(format)),
-        _ if max_ticks.is_some() => Ok(SnapshotWatchRenderMode::Ndjson),
-        (false, false) => Err(non_tty_watch_error("stdin and stdout are not TTYs")),
-        (false, true) => Err(non_tty_watch_error("stdin is not a TTY")),
-        (true, false) => Err(non_tty_watch_error("stdout is not a TTY")),
+/// Why a human format streams NDJSON instead of drawing the TUI.
+fn json_lines_notice(mode: &Mode) -> &'static str {
+    if !mode.terminal.stdout {
+        JSON_LINES_STDOUT_NOTICE
+    } else if !mode.terminal.stdin {
+        JSON_LINES_STDIN_NOTICE
+    } else {
+        JSON_LINES_DRIVEN_NOTICE
     }
 }
 
-fn non_tty_watch_error(reason: &str) -> CliError {
+fn tui_refused(mode: &Mode) -> CliError {
+    let (subject, reason) = match (mode.terminal.stdin, mode.terminal.stdout) {
+        (false, false) => (
+            "Non-TTY watch output",
+            "stdin and stdout are not TTYs".to_string(),
+        ),
+        (false, true) => ("Non-TTY watch output", "stdin is not a TTY".to_string()),
+        (true, false) => ("Non-TTY watch output", "stdout is not a TTY".to_string()),
+        (true, true) => (
+            "Watch output of a driven run",
+            format!(
+                "{}, {} or {} is driving this run",
+                env::AGENT,
+                env::CI,
+                NON_INTERACTIVE_FLAG
+            ),
+        ),
+    };
     CliError::Unsupported(format!(
-        "Non-TTY watch output cannot enter the alternate-screen TUI safely ({reason}). \
+        "{subject} cannot enter the alternate-screen TUI safely ({reason}). \
          For scripts/agents, pass --format json and --max-ticks <N> \
          (or set {}) to receive bounded NDJSON.",
-        crate::settings::env::WATCH_MAX_TICKS
+        env::WATCH_MAX_TICKS
     ))
 }
 
@@ -350,6 +372,7 @@ async fn try_read_key_event() -> Result<Option<KeyEvent>, anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::terminal::Terminal;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use std::collections::VecDeque;
     use std::sync::{
@@ -365,24 +388,96 @@ mod tests {
             (Pretty, None, true, true, Tui(Pretty)),
             (Table, Some(1), true, true, Tui(Table)),
             (Json, None, false, false, Ndjson),
+            (Json, None, true, true, Ndjson),
             (Pretty, Some(1), false, false, Ndjson),
             (Table, Some(1), true, false, Ndjson),
             (Pretty, Some(1), false, true, Ndjson),
         ] {
             assert_eq!(
-                snapshot_watch_render_mode(format, max_ticks, stdin_tty, stdout_tty).unwrap(),
+                snapshot_watch_render_mode(&mode(format, stdin_tty, stdout_tty), max_ticks)
+                    .unwrap(),
                 expected,
                 "{format:?} ticks={max_ticks:?} stdin={stdin_tty} stdout={stdout_tty}"
             );
         }
     }
 
+    fn mode(format: OutputFormat, stdin: bool, stdout: bool) -> Mode {
+        Mode {
+            format,
+            terminal: Terminal {
+                stdin,
+                stdout,
+                stderr: true,
+            },
+            ..Mode::default()
+        }
+    }
+
+    #[test]
+    fn an_agent_ci_or_non_interactive_run_never_draws_the_tui_even_on_a_terminal() {
+        let on_a_terminal = mode(OutputFormat::Pretty, true, true);
+        for (name, driven) in [
+            (
+                "agent",
+                Mode {
+                    agent: true,
+                    ..on_a_terminal
+                },
+            ),
+            (
+                "ci",
+                Mode {
+                    ci: true,
+                    ..on_a_terminal
+                },
+            ),
+            (
+                "non-interactive",
+                Mode {
+                    non_interactive_flag: true,
+                    ..on_a_terminal
+                },
+            ),
+        ] {
+            assert_eq!(
+                snapshot_watch_render_mode(&driven, Some(3)).unwrap(),
+                SnapshotWatchRenderMode::Ndjson,
+                "{name}: bounded"
+            );
+            let refused = snapshot_watch_render_mode(&driven, None).unwrap_err();
+            assert_eq!(refused.exit_code(), 13, "{name}: unbounded");
+            let message = refused.to_string();
+            assert!(message.contains("--format json"), "{name}: {message}");
+            assert!(message.contains("is driving this run"), "{name}: {message}");
+            assert_eq!(
+                json_lines_notice(&driven),
+                JSON_LINES_DRIVEN_NOTICE,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ndjson_notice_names_the_stream_that_is_not_a_terminal() {
+        assert_eq!(
+            json_lines_notice(&mode(OutputFormat::Pretty, true, false)),
+            JSON_LINES_STDOUT_NOTICE
+        );
+        assert_eq!(
+            json_lines_notice(&mode(OutputFormat::Pretty, false, true)),
+            JSON_LINES_STDIN_NOTICE
+        );
+    }
+
     #[test]
     fn unbounded_watch_without_both_terminals_is_refused_with_the_json_alternative() {
         for (stdin_tty, stdout_tty) in [(false, true), (true, false), (false, false)] {
-            let error =
-                snapshot_watch_render_mode(OutputFormat::Pretty, None, stdin_tty, stdout_tty)
-                    .unwrap_err();
+            let error = snapshot_watch_render_mode(
+                &mode(OutputFormat::Pretty, stdin_tty, stdout_tty),
+                None,
+            )
+            .unwrap_err();
             assert_eq!(
                 error.exit_code(),
                 13,

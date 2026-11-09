@@ -50,7 +50,7 @@ pub async fn update(inv: &Invocation) -> Result<(), anyhow::Error> {
         return Ok(());
     }
 
-    let install_method = InstallMethod::detect(&current_exe);
+    let install_method = InstallMethod::detect(&current_exe, inv.settings().env());
     if install_method != InstallMethod::Standalone {
         return Err(CliError::Unsupported(format!(
             "Can't update {} in place: it was installed with {}.\nUpgrade:\n    {}",
@@ -255,7 +255,7 @@ impl TableData for UpdateResult {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        crate::output::serialize_row(self)
     }
 }
 
