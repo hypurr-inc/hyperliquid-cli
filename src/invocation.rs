@@ -202,11 +202,14 @@ impl Invocation {
     /// Print the answer, then the "Completed in" footer for interactive runs.
     pub fn print(&self, data: &dyn TableData) {
         self.session.print(data);
+        if self.mode.timing_footer() {
+            eprintln!("{}", self.session.timing_footer());
+        }
     }
 
     /// Print the answer without the timing footer.
     pub fn print_untimed(&self, data: &dyn TableData) {
-        self.session.print_untimed(data);
+        self.session.print(data);
     }
 
     // ── Prompting, dry run and payload ──────────────────────────────────
@@ -259,8 +262,7 @@ impl Invocation {
                 DryRunRunContext::new(remote.network(), signer)
             })
         };
-        self.session
-            .print_untimed(&envelope.with_run_context(context));
+        self.session.print(&envelope.with_run_context(context));
     }
 
     // ── Network, signer and assets ──────────────────────────────────────

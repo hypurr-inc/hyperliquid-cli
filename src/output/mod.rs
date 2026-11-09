@@ -24,6 +24,7 @@ use clap::ValueEnum;
 use serde_json::Value;
 use std::fmt;
 use std::io::Write;
+use std::sync::OnceLock;
 use tabwriter::TabWriter;
 
 use crate::response_sanitization::is_format_char;
@@ -383,9 +384,9 @@ pub fn serialize_row<T: serde::Serialize + ?Sized>(row: &T) -> Value {
 /// shape is valuable for agents after normalizing object keys to snake_case.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonValueOutput {
-    headers: Vec<String>,
-    rows: Vec<Vec<String>>,
     value: Value,
+    /// Headers and rows, built on the first table render: JSON output never needs them.
+    table: OnceLock<(Vec<String>, Vec<Vec<String>>)>,
     empty_message: &'static str,
 }
 
@@ -394,24 +395,26 @@ impl JsonValueOutput {
     /// modes when the response has no rows, for example `No orders.`.
     #[must_use]
     pub fn new(value: Value, empty_message: &'static str) -> Self {
-        let value = snake_case_json_keys(value);
-        let (headers, rows) = json_value_table_rows(&value);
         Self {
-            headers,
-            rows,
-            value,
+            value: snake_case_json_keys(value),
+            table: OnceLock::new(),
             empty_message,
         }
+    }
+
+    fn table(&self) -> &(Vec<String>, Vec<Vec<String>>) {
+        self.table
+            .get_or_init(|| json_value_table_rows(&self.value))
     }
 }
 
 impl TableData for JsonValueOutput {
     fn headers(&self) -> Vec<&str> {
-        self.headers.iter().map(String::as_str).collect()
+        self.table().0.iter().map(String::as_str).collect()
     }
 
     fn rows(&self) -> Vec<Vec<String>> {
-        self.rows.clone()
+        self.table().1.clone()
     }
 
     fn empty_message(&self) -> Option<&str> {
@@ -485,7 +488,7 @@ fn array_table_rows(values: &[Value]) -> (Vec<String>, Vec<Vec<String>>) {
     (headers, rows)
 }
 
-fn json_cell(value: &Value) -> String {
+pub(crate) fn json_cell(value: &Value) -> String {
     match value {
         Value::Null => String::new(),
         Value::String(value) => value.clone(),

@@ -68,21 +68,19 @@ impl Session {
     }
 
     /// `data` as one compact JSON line with this session's projection, for NDJSON streams.
-    pub fn render_json_line(&self, data: &dyn TableData) -> Result<String, serde_json::Error> {
-        Ok(json_text(&self.json.apply(data.to_json_value()), false))
+    #[must_use]
+    pub fn render_json_line(&self, data: &dyn TableData) -> String {
+        json_text(&self.json.apply(data.to_json_value()), false)
     }
 
-    /// Print the answer to stdout (empty-state and truncation notices to stderr),
-    /// then the "Completed in" footer when the run is interactive.
+    /// The gray "Completed in" line for the time since the session started.
+    #[must_use]
+    pub fn timing_footer(&self) -> String {
+        colors::stderr::gray(&format_timing(self.started.elapsed()))
+    }
+
+    /// Print the answer to stdout; empty-state and truncation notices go to stderr.
     pub fn print(&self, data: &dyn TableData) {
-        self.print_untimed(data);
-        if let Some(line) = timing_footer(self.started.elapsed(), self.format, self.env) {
-            eprintln!("{line}");
-        }
-    }
-
-    /// Print the answer without the timing footer.
-    pub fn print_untimed(&self, data: &dyn TableData) {
         print_rendered(&render_outcome(
             data,
             self.format,
@@ -102,15 +100,6 @@ fn print_rendered(rendered: &Rendered) {
     }
 }
 
-/// The timing footer for a finished command, or `None` when it must stay silent:
-/// JSON output, agent or CI runs, and any stderr that is not a terminal.
-fn timing_footer(duration: Duration, format: OutputFormat, env: OutputEnv) -> Option<String> {
-    if format == OutputFormat::Json || !env.stderr_tty || env.agent || env.ci {
-        return None;
-    }
-    Some(colors::stderr::gray(&format_timing(duration)))
-}
-
 fn format_timing(duration: Duration) -> String {
     format!("Completed in {}", format::duration(duration))
 }
@@ -118,14 +107,6 @@ fn format_timing(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn tty_env() -> OutputEnv {
-        OutputEnv {
-            stdout_tty: true,
-            stderr_tty: true,
-            ..OutputEnv::default()
-        }
-    }
 
     #[test]
     fn format_timing_is_compact() {
@@ -139,54 +120,31 @@ mod tests {
         );
     }
 
+    struct Rows;
+    impl TableData for Rows {
+        fn headers(&self) -> Vec<&str> {
+            vec!["Name"]
+        }
+        fn rows(&self) -> Vec<Vec<String>> {
+            vec![vec!["BTC".to_string()]]
+        }
+        fn to_json_value(&self) -> serde_json::Value {
+            serde_json::json!({"name": "BTC", "price": "1"})
+        }
+    }
+
     #[test]
-    fn timing_footer_only_for_human_formats_on_a_terminal() {
-        let duration = Duration::from_millis(1234);
-        assert!(timing_footer(duration, OutputFormat::Json, tty_env()).is_none());
-        assert!(timing_footer(duration, OutputFormat::Pretty, OutputEnv::default()).is_none());
-        assert!(
-            timing_footer(
-                duration,
-                OutputFormat::Pretty,
-                OutputEnv {
-                    agent: true,
-                    ..tty_env()
-                }
-            )
-            .is_none()
+    fn json_line_is_compact_and_projected() {
+        let session = Session::new(
+            OutputFormat::Json,
+            JsonRenderOptions::from_cli(Some("name"), false, None),
+            OutputEnv::default(),
         );
-        assert!(
-            timing_footer(
-                duration,
-                OutputFormat::Table,
-                OutputEnv {
-                    ci: true,
-                    ..tty_env()
-                }
-            )
-            .is_none()
-        );
-        assert_eq!(
-            timing_footer(duration, OutputFormat::Pretty, tty_env()).as_deref(),
-            Some("Completed in 1.2s")
-        );
+        assert_eq!(session.render_json_line(&Rows), r#"{"name":"BTC"}"#);
     }
 
     #[test]
     fn sessions_do_not_share_projection() {
-        struct Rows;
-        impl TableData for Rows {
-            fn headers(&self) -> Vec<&str> {
-                vec!["Name"]
-            }
-            fn rows(&self) -> Vec<Vec<String>> {
-                vec![vec!["BTC".to_string()]]
-            }
-            fn to_json_value(&self) -> serde_json::Value {
-                serde_json::json!({"name": "BTC", "price": "1"})
-            }
-        }
-
         let selecting = Session::new(
             OutputFormat::Json,
             JsonRenderOptions::from_cli(Some("name"), false, None),
