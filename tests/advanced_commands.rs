@@ -337,9 +337,9 @@ async fn exchange_requests(server: &MockServer) -> usize {
 #[tokio::test]
 async fn hip3_margin_helper_does_not_transfer_when_the_dex_balance_cannot_be_read() {
     let (assert, server) = hip3_order_attempt(false).await;
-    assert
-        .failure()
-        .stderr(predicate::str::contains("clearinghouse_state"));
+    assert.code(12).stderr(predicate::str::contains(
+        "The Hyperliquid API failed to process the request.",
+    ));
     assert_eq!(
         exchange_requests(&server).await,
         0,

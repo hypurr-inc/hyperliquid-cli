@@ -1,11 +1,11 @@
 use alloy::sol;
 use clap::Args;
+use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::types::{
-    Action, AgentSendAsset, AssetTarget, SendAsset, SendToken, SpotSend, UsdSend,
+    Action, AgentSendAsset, AssetTarget, SendAsset, SpotSend, UsdSend,
 };
-use hypersdk::hypercore::{Chain, SpotToken};
 
-use crate::assets::require_spot_token;
+use crate::assets::{SpotTokenListing, require_spot_token};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, YES_FOR_AUTOMATION, arg};
 use crate::commands::actions;
 use crate::commands::funds::{self, Pool};
@@ -333,7 +333,7 @@ async fn spot_send(
     inv: &Invocation,
     signer: &SelectedSigner,
     destination: Address,
-    token: SpotToken,
+    token: SpotTokenListing,
     args: &SpotSendArgs,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
@@ -363,7 +363,7 @@ async fn spot_send(
     let nonce = nonce::next();
     let spot_send = SpotSend {
         destination,
-        token: SendToken(token.clone()),
+        token: token.send_token(),
         amount: args.amount,
         time: nonce,
     }
@@ -482,12 +482,12 @@ fn from_subaccount_address(raw: &str) -> Result<Address, CliError> {
 /// An [`AssetMove`] with its token resolved.
 struct ResolvedMove {
     mv: AssetMove,
-    token: SpotToken,
+    token: SpotTokenListing,
 }
 
 impl ResolvedMove {
     async fn resolve(remote: &Remote, mv: AssetMove) -> Result<Self, anyhow::Error> {
-        let token = require_spot_token(remote.api().sdk(), &mv.token).await?;
+        let token = require_spot_token(remote.api(), &mv.token).await?;
         Ok(Self { mv, token })
     }
 
@@ -509,7 +509,7 @@ impl ResolvedMove {
         } = &self.mv;
         let (destination, amount) = (*to, *amount);
         let from_sub_account = from_subaccount.clone().unwrap_or_default();
-        let token = SendToken(self.token.clone());
+        let token = self.token.send_token();
         let action = if form.is_some() {
             Action::AgentSendAsset(
                 AgentSendAsset {
@@ -855,7 +855,7 @@ impl CliCommand for TransferSpotSend {
 
     async fn run(inv: &Invocation, args: &SpotSendArgs) -> Result<(), anyhow::Error> {
         let destination = validate_spot_send_args(args)?;
-        let token = require_spot_token(inv.remote()?.api().sdk(), &args.token).await?;
+        let token = require_spot_token(inv.remote()?.api(), &args.token).await?;
         if inv.dry_run() {
             return print_dry_run(
                 inv,

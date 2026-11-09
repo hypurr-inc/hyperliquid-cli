@@ -261,20 +261,22 @@ fn classify_known(message: &str) -> Option<CliError> {
         .or_else(|| server_error_from_text(message))
 }
 
-/// Map `HTTP <5xx> body=<text>` text to [`CliError::ApiStatus`].
-///
-/// The server answered, so a 5xx is an API failure, not a connectivity problem.
-fn server_error_from_text(text: &str) -> Option<CliError> {
+/// The status in `HTTP <code> ...` text, the way `hypersdk` words a non-2xx reply.
+pub fn http_status_in_text(text: &str) -> Option<u16> {
     let lower = text.to_lowercase();
     let rest = &lower[lower.find("http ")? + "http ".len()..];
     let digits = rest
         .chars()
         .take_while(char::is_ascii_digit)
         .collect::<String>();
-    let status: u16 = (digits.len() == 3).then(|| digits.parse().ok()).flatten()?;
-    if !is_server_status(status) {
-        return None;
-    }
+    (digits.len() == 3).then(|| digits.parse().ok()).flatten()
+}
+
+/// Map `HTTP <5xx> body=<text>` text to [`CliError::ApiStatus`].
+///
+/// The server answered, so a 5xx is an API failure, not a connectivity problem.
+fn server_error_from_text(text: &str) -> Option<CliError> {
+    let status = http_status_in_text(text).filter(|status| is_server_status(*status))?;
     let code = reqwest::StatusCode::from_u16(status).ok()?;
     let body = text
         .split_once("body=")
@@ -321,6 +323,11 @@ pub fn from_sdk(err: anyhow::Error) -> CliError {
         .chain()
         .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
     {
+        // The server answered: a reply that does not decode is not a
+        // connectivity problem.
+        if request_err.is_decode() {
+            return CliError::Internal(anyhow::anyhow!("couldn't decode the reply: {request_err}"));
+        }
         return network_error(request_err, None);
     }
 
@@ -479,6 +486,40 @@ mod tests {
         let err = from_sdk(anyhow::Error::new(request_err).context("[open_orders] request"));
         assert_eq!(err.exit_code(), 12);
         assert!(matches!(err, CliError::Unavailable(_)));
+    }
+
+    /// `hypersdk` once decoded a rate-limit body (`null`) as market metadata and
+    /// the decode error was reported as an unreachable API.
+    #[tokio::test]
+    async fn sdk_decode_failure_is_not_an_unreachable_api() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        #[derive(Debug, serde::Deserialize)]
+        struct Meta {
+            #[allow(dead_code)]
+            universe: Vec<String>,
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("null", "application/json"))
+            .mount(&server)
+            .await;
+        let decode_err = reqwest::Client::new()
+            .post(server.uri())
+            .send()
+            .await
+            .unwrap()
+            .json::<Meta>()
+            .await
+            .unwrap_err();
+        assert!(decode_err.is_decode());
+
+        let err = from_sdk(anyhow::Error::new(decode_err));
+
+        assert!(matches!(err, CliError::Internal(_)), "{err:?}");
+        assert!(!err.to_string().contains("Couldn't reach"), "{err}");
     }
 
     #[test]

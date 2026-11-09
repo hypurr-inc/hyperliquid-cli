@@ -84,6 +84,8 @@
 - `api-wallet create|approve|revoke --dry-run` no longer draws nonces: a preview used to raise the machine-wide nonce mark and write the data directory. The preview's `approval_action.nonce` is now the clock time.
 - A vault wallet whose Hyperliquid account address is malformed is an error (`ows_malformed_response`) when the default signer is chosen, as it already was in `account ls`; the default signer lookup used to skip such a wallet silently.
 - Builder, protocol (validator, staking-link user, sub-builder) and watched-account addresses accept an uppercase `0X` prefix, as `--account` and `api-wallet --agent-address` always did.
+- A rate-limited read exits `11` with reason `rate_limited` on every path, and is retried first like an `/info` read (jittered backoff, a longer wait after a 429). Reads through the `hypersdk` client (`account orders|portfolio`, `positions list`, `status`, `mids`, `candles`, orders planning, ...) were not retried, and the exchange's 429 (`null` or an nginx page as the body) was decoded as market metadata and reported as `Couldn't reach api.hyperliquid.xyz. invalid type: null, expected struct PerpTokens` (exit `12`, `network_error`). Perp, spot, dex and token metadata is now read through the same retrying `/info` client as the rest, and a reply that does not decode is never reported as unreachable ([#42](https://github.com/hypurr-inc/hyperliquid-cli/issues/42)).
+- `orders create` on a HIP-3 market, when the read of the dex balance for the margin helper fails, exits with the API's error class (`11` for a rate limit, `12` for a 5xx) instead of exit `1` with the SDK's raw text.
 
 ## 0.18.0 - 2026-11-09
 

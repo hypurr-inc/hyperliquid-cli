@@ -210,7 +210,7 @@ impl CliCommand for OrdersOpen {
     async fn run(inv: &Invocation, args: &OpenOrdersArgs) -> Result<(), anyhow::Error> {
         // Validate once, before either path: a watch must not start on a dex that
         // cannot be read, and both paths send the canonical spelling.
-        let client = inv.remote()?.api().sdk();
+        let client = inv.remote()?.api();
         let dex = canonical_dex(client, args.dex.as_deref()).await?;
         if args.watch.watch {
             watch_open_orders(inv, dex.as_deref(), args.watch.max_ticks).await
@@ -321,8 +321,8 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
 
     async fn run(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error> {
         let spec = OrderSpec::from_create(args)?;
-        let client = inv.remote()?.api().sdk();
-        let resolver = inv.trading_resolver().await?;
+        let client = inv.remote()?.api();
+        let resolver = inv.asset_resolver().await?;
         let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         let submission = prepare_create_order(client, &resolver, inv.settings(), &spec).await?;
         if inv.dry_run() {
@@ -386,8 +386,8 @@ impl CliCommand for OrdersScale {
 
     async fn run(inv: &Invocation, args: &ScaleArgs) -> Result<(), anyhow::Error> {
         let ladder = ScaleLadder::from_args(args)?;
-        let client = inv.remote()?.api().sdk();
-        let resolver = inv.trading_resolver().await?;
+        let client = inv.remote()?.api();
+        let resolver = inv.asset_resolver().await?;
         let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         let prepared =
             prepare_scale_batch(client, &resolver, inv.settings(), args, &ladder).await?;
@@ -441,8 +441,8 @@ impl CliCommand for OrdersBatchCreate {
     async fn run(inv: &Invocation, args: &BatchCreateArgs) -> Result<(), anyhow::Error> {
         validate_batch_create_args(args)?;
         let orders = read_validated_batch_create_orders(args)?;
-        let client = inv.remote()?.api().sdk();
-        let resolver = inv.trading_resolver().await?;
+        let client = inv.remote()?.api();
+        let resolver = inv.asset_resolver().await?;
         let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         let prepared = prepare_batch_create_orders(
             client,
@@ -499,8 +499,8 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
 
     async fn run(inv: &Invocation, args: &TpslArgs) -> Result<(), anyhow::Error> {
         let spec = TpslSpec::from_flags(args)?;
-        let client = inv.remote()?.api().sdk();
-        let resolver = inv.trading_resolver().await?;
+        let client = inv.remote()?.api();
+        let resolver = inv.asset_resolver().await?;
         let perp = resolve_perp(client, &resolver, spec.dex.as_deref(), &spec.coin).await?;
         let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
@@ -551,8 +551,8 @@ hyperliquid --format json orders trailing-stop --coin ETH --side sell --size 0.5
 
     async fn run(inv: &Invocation, args: &TrailingStopArgs) -> Result<(), anyhow::Error> {
         validate_trailing_stop_args(args)?;
-        let client = inv.remote()?.api().sdk();
-        let resolver = inv.trading_resolver().await?;
+        let client = inv.remote()?.api();
+        let resolver = inv.asset_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
         let plan = prepare_trailing_stop_plan(&perp, args)?;
         let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
@@ -592,7 +592,7 @@ impl CliCommand for OrdersCancel {
         if inv.dry_run() {
             return run.preview(cancel_dry_run_plan(args)?);
         }
-        let resolver = inv.trading_resolver().await?;
+        let resolver = inv.asset_resolver().await?;
         let signer = inv.resolve_signer()?;
         cancel(run.context(&signer)?, &resolver, args).await
     }
@@ -622,9 +622,9 @@ impl CliCommand for OrdersCancelAll {
 
     async fn run(inv: &Invocation, args: &CancelAllArgs) -> Result<(), anyhow::Error> {
         let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
-        let resolver = inv.trading_resolver().await?;
+        let resolver = inv.asset_resolver().await?;
         if inv.dry_run() {
-            let client = inv.remote()?.api().sdk();
+            let client = inv.remote()?.api();
             return run.preview(cancel_all_dry_run_plan(client, &resolver, args).await?);
         }
         let signer = inv.resolve_signer()?;
@@ -668,7 +668,7 @@ impl CliCommand for OrdersModify {
         if inv.dry_run() {
             return run.preview(modify_dry_run_plan(args));
         }
-        let resolver = inv.trading_resolver().await?;
+        let resolver = inv.asset_resolver().await?;
         let signer = inv.resolve_signer()?;
         modify(run.context(&signer)?, &resolver, &identifier, args).await
     }
@@ -715,7 +715,7 @@ hyperliquid --format json orders batch-modify --orders-file modifications.json -
         if inv.dry_run() {
             return run.preview(batch_modify_dry_run_plan(&orders, args));
         }
-        let resolver = inv.trading_resolver().await?;
+        let resolver = inv.asset_resolver().await?;
         let signer = inv.resolve_signer()?;
         batch_modify(run.context(&signer)?, &resolver, &orders, args.always_place).await
     }
@@ -756,8 +756,8 @@ impl CliCommand for OrdersTwapCreate {
     ]);
 
     async fn run(inv: &Invocation, args: &TwapCreateArgs) -> Result<(), anyhow::Error> {
-        let client = inv.remote()?.api().sdk();
-        let resolver = inv.trading_resolver().await?;
+        let client = inv.remote()?.api();
+        let resolver = inv.asset_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
         let plan = prepare_twap_create_plan(&perp, args)?;
         let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
@@ -794,8 +794,8 @@ impl CliCommand for OrdersTwapCancel {
     ]);
 
     async fn run(inv: &Invocation, args: &TwapCancelArgs) -> Result<(), anyhow::Error> {
-        let client = inv.remote()?.api().sdk();
-        let resolver = inv.trading_resolver().await?;
+        let client = inv.remote()?.api();
+        let resolver = inv.asset_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
         let plan = prepare_twap_cancel_plan(&perp, args);
         let run = OrderRun::unprompted(inv, args.on_behalf_of.as_deref())?;
@@ -879,8 +879,8 @@ hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeou
 
     async fn run(inv: &Invocation, args: &ChaseArgs) -> Result<(), anyhow::Error> {
         let timeout = chase_timeout(inv, args)?;
-        let client = inv.remote()?.api().sdk();
-        let resolver = inv.trading_resolver().await?;
+        let client = inv.remote()?.api();
+        let resolver = inv.asset_resolver().await?;
         let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             let plan = chase_dry_run_plan(client, &resolver, inv.settings(), args, timeout).await?;
@@ -930,8 +930,8 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
 
     async fn run(inv: &Invocation, args: &BracketArgs) -> Result<(), anyhow::Error> {
         validate_bracket_args(args)?;
-        let client = inv.remote()?.api().sdk();
-        let resolver = inv.trading_resolver().await?;
+        let client = inv.remote()?.api();
+        let resolver = inv.asset_resolver().await?;
         let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             let plan = bracket_dry_run_plan(client, &resolver, inv.settings(), args).await?;

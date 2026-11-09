@@ -6,7 +6,8 @@
 //! URL for the API.
 //!
 //! `/info` reads retry transient failures (connect error, timeout, 5xx, 429)
-//! with jittered backoff. `/exchange` posts are sent exactly once: after the
+//! with jittered backoff, and so do the reads made through the SDK client
+//! ([`Sdk`], [`ApiClient::sdk`]). `/exchange` posts are sent exactly once: after the
 //! request leaves, a timeout, reset, 5xx, or unreadable reply is an unknown
 //! outcome ([`CliError::UnknownOutcome`]), never a reason to resend.
 
@@ -25,6 +26,10 @@ use crate::errors::{
 };
 use crate::network::Network;
 use crate::response_sanitization::Untrusted;
+
+mod sdk;
+
+pub use sdk::Sdk;
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -77,6 +82,86 @@ struct AttemptError {
     transient: bool,
 }
 
+/// What a failed read attempt tells the retry loop.
+struct Transient {
+    /// The status that made the attempt transient; `None` for a transport failure.
+    status: Option<StatusCode>,
+    /// `Retry-After` in whole seconds, when the server sent one.
+    retry_after: Option<u64>,
+}
+
+/// How a read is retried: the same rule for the `/info` client and for every
+/// `hypersdk` read, so a rate limit is waited out the same way on any path.
+#[derive(Clone, Copy)]
+struct ReadPolicy {
+    /// Wait before each automatic read retry; the read is retried once per entry.
+    backoff: &'static [Duration],
+    /// Wait before each read retry that follows a 429 without `Retry-After`.
+    rate_limit_backoff: &'static [Duration],
+    on_retry: Option<fn()>,
+}
+
+impl ReadPolicy {
+    const fn new() -> Self {
+        Self {
+            backoff: &READ_RETRY_BACKOFF,
+            rate_limit_backoff: &RATE_LIMIT_RETRY_BACKOFF,
+            on_retry: None,
+        }
+    }
+
+    /// The backoff table for the retry after `status`. A 429 that names its
+    /// own wait (`Retry-After`) is waited out by that wait; one that doesn't
+    /// gets the longer rate-limit backoff.
+    fn backoff_for(
+        self,
+        status: Option<StatusCode>,
+        retry_after: Option<u64>,
+    ) -> &'static [Duration] {
+        if status == Some(StatusCode::TOO_MANY_REQUESTS) && retry_after.is_none() {
+            self.rate_limit_backoff
+        } else {
+            self.backoff
+        }
+    }
+
+    /// Run `attempt` until it succeeds, fails for good, or runs out of retries
+    /// and wait budget; the last outcome is returned. An attempt reports a
+    /// transient failure alongside its outcome.
+    async fn retrying<R>(self, mut attempt: impl AsyncFnMut() -> (R, Option<Transient>)) -> R {
+        let mut waited = Duration::ZERO;
+        let mut retries = 0;
+        let mut announced = false;
+        loop {
+            let (outcome, transient) = attempt().await;
+            let Some(Transient {
+                status,
+                retry_after,
+            }) = transient
+            else {
+                return outcome;
+            };
+
+            let backoff = self.backoff_for(status, retry_after);
+            let Some(delay) = read_retry_delay(backoff, retries, retry_after) else {
+                return outcome;
+            };
+            if waited + delay > RETRY_TOTAL_BUDGET {
+                return outcome;
+            }
+            if !announced {
+                announced = true;
+                if let Some(observer) = self.on_retry {
+                    observer();
+                }
+            }
+            tokio::time::sleep(delay).await;
+            waited += delay;
+            retries += 1;
+        }
+    }
+}
+
 /// An answered `/info` read whose transport failures and rate limits are
 /// already classified. The status is left for the caller to read, because
 /// some endpoints say "unsupported request" with a 4xx.
@@ -115,11 +200,7 @@ pub struct ApiClient {
     sdk: HttpClient,
     http: OnceLock<Result<reqwest::Client, String>>,
     timeout: Duration,
-    /// Wait before each automatic read retry; the read is retried once per entry.
-    retry_backoff: &'static [Duration],
-    /// Wait before each read retry that follows a 429 without `Retry-After`.
-    rate_limit_backoff: &'static [Duration],
-    on_retry: Option<fn()>,
+    policy: ReadPolicy,
     /// `--expires-after`: how long after signing a signed action stays valid.
     request_lifetime: Option<Duration>,
 }
@@ -149,9 +230,7 @@ impl ApiClient {
             sdk: network.http_client(api_override),
             http: OnceLock::new(),
             timeout: DEFAULT_API_TIMEOUT,
-            retry_backoff: &READ_RETRY_BACKOFF,
-            rate_limit_backoff: &RATE_LIMIT_RETRY_BACKOFF,
-            on_retry: None,
+            policy: ReadPolicy::new(),
             request_lifetime: None,
         }
     }
@@ -160,7 +239,7 @@ impl ApiClient {
     /// a person the wait is deliberate.
     #[must_use]
     pub fn on_retry(mut self, observer: fn()) -> Self {
-        self.on_retry = Some(observer);
+        self.policy.on_retry = Some(observer);
         self
     }
 
@@ -186,30 +265,15 @@ impl ApiClient {
 
     #[cfg(test)]
     fn with_retry_backoff(mut self, backoff: &'static [Duration]) -> Self {
-        self.retry_backoff = backoff;
-        self.rate_limit_backoff = backoff;
+        self.policy.backoff = backoff;
+        self.policy.rate_limit_backoff = backoff;
         self
     }
 
     #[cfg(test)]
     fn with_rate_limit_backoff(mut self, backoff: &'static [Duration]) -> Self {
-        self.rate_limit_backoff = backoff;
+        self.policy.rate_limit_backoff = backoff;
         self
-    }
-
-    /// The backoff table for the retry after `status`. A 429 that names its
-    /// own wait (`Retry-After`) is waited out by that wait; one that doesn't
-    /// gets the longer rate-limit backoff.
-    fn backoff_for(
-        &self,
-        status: Option<StatusCode>,
-        retry_after: Option<u64>,
-    ) -> &'static [Duration] {
-        if status == Some(StatusCode::TOO_MANY_REQUESTS) && retry_after.is_none() {
-            self.rate_limit_backoff
-        } else {
-            self.retry_backoff
-        }
     }
 
     #[must_use]
@@ -218,8 +282,8 @@ impl ApiClient {
     }
 
     #[must_use]
-    pub fn sdk(&self) -> &HttpClient {
-        &self.sdk
+    pub fn sdk(&self) -> Sdk<'_> {
+        Sdk::new(&self.sdk, self.policy)
     }
 
     /// The URL this client talks to: the loopback override, else the public endpoint.
@@ -403,40 +467,30 @@ impl ApiClient {
     async fn read(&self, request: &impl Serialize) -> Result<Reply, CliError> {
         let url = self.endpoint("/info");
 
-        let mut waited = Duration::ZERO;
-        let mut retries = 0;
-        let mut announced = false;
-        loop {
-            let (outcome, retry_after, status) = match self
-                .send_once(&url, request, self.timeout, Disposition::Read)
-                .await
-            {
-                Ok(reply) if is_transient_status(reply.status) => {
-                    let (retry_after, status) = (reply.retry_after, Some(reply.status));
-                    (Ok(reply), retry_after, status)
+        self.policy
+            .retrying(async || {
+                match self
+                    .send_once(&url, request, self.timeout, Disposition::Read)
+                    .await
+                {
+                    Ok(reply) if is_transient_status(reply.status) => {
+                        let transient = Transient {
+                            status: Some(reply.status),
+                            retry_after: reply.retry_after,
+                        };
+                        (Ok(reply), Some(transient))
+                    }
+                    Ok(reply) => (Ok(reply), None),
+                    Err(attempt) => {
+                        let transient = attempt.transient.then_some(Transient {
+                            status: None,
+                            retry_after: None,
+                        });
+                        (Err(attempt.error), transient)
+                    }
                 }
-                Ok(reply) => return Ok(reply),
-                Err(attempt) if attempt.transient => (Err(attempt.error), None, None),
-                Err(attempt) => return Err(attempt.error),
-            };
-
-            let backoff = self.backoff_for(status, retry_after);
-            let Some(delay) = read_retry_delay(backoff, retries, retry_after) else {
-                return outcome;
-            };
-            if waited + delay > RETRY_TOTAL_BUDGET {
-                return outcome;
-            }
-            if !announced {
-                announced = true;
-                if let Some(observer) = self.on_retry {
-                    observer();
-                }
-            }
-            tokio::time::sleep(delay).await;
-            waited += delay;
-            retries += 1;
-        }
+            })
+            .await
     }
 }
 
@@ -727,7 +781,7 @@ mod tests {
     #[test]
     fn a_429_without_retry_after_gets_the_longer_backoff() {
         let client = ApiClient::new(Network::Mainnet, None);
-        let tables = |status, retry_after| client.backoff_for(status, retry_after);
+        let tables = |status, retry_after| client.policy.backoff_for(status, retry_after);
 
         assert_eq!(
             tables(Some(StatusCode::TOO_MANY_REQUESTS), None),

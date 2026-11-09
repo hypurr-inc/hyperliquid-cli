@@ -892,7 +892,7 @@ impl CliCommand for AccountOrders {
     async fn run(inv: &Invocation, args: &OrdersArgs) -> Result<(), anyhow::Error> {
         let user = args.user.resolve(inv).await?;
         let api = inv.remote()?.api();
-        let dex = canonical_dex(api.sdk(), args.dex.as_deref()).await?;
+        let dex = canonical_dex(api, args.dex.as_deref()).await?;
         let resolver = inv.asset_resolver().await?;
         inv.print(&orders::open_orders_output(api, &resolver, user, dex.as_deref()).await?);
         Ok(())
@@ -919,7 +919,7 @@ impl CliCommand for AccountPortfolio {
         let user = args.user.resolve(inv).await?;
         let api = inv.remote()?.api();
         let client = api.sdk();
-        let dex = canonical_dex(client, args.dex.as_deref()).await?;
+        let dex = canonical_dex(api, args.dex.as_deref()).await?;
         let account_mode = fetch_abstraction(api, user).await?.normalized_mode;
         let state = client
             .clearinghouse_state(user, dex.clone())
@@ -1145,7 +1145,7 @@ impl CliCommand for AccountAssetData {
         let user = args.user.resolve(inv).await?;
         let resolver = inv.asset_resolver().await?;
         let perp = resolver
-            .resolve_perp_or_fetch(inv.remote()?.api().sdk(), &args.coin)
+            .resolve_perp_or_fetch(inv.remote()?.api(), &args.coin)
             .await
             .map_err(CliError::from)?;
         print_info_value(

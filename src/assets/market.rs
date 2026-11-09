@@ -1,4 +1,4 @@
-use hypersdk::hypercore::{MarginMode, PerpMarket, PriceTick};
+use hypersdk::hypercore::PriceTick;
 
 use crate::errors::CliError;
 
@@ -40,17 +40,7 @@ pub enum MarginRule {
 
 impl MarginRule {
     /// The rule `meta` states, preferring `marginMode` over the legacy flag.
-    #[must_use]
-    pub fn from_sdk(only_isolated: bool, margin_mode: Option<MarginMode>) -> Self {
-        match margin_mode {
-            Some(MarginMode::StrictIsolated) => Self::StrictIsolated,
-            Some(MarginMode::NoCross) => Self::NoCross,
-            None => Self::from_legacy_flag(only_isolated),
-        }
-    }
-
-    /// [`Self::from_sdk`] for raw `meta`, where `marginMode` is the wire string.
-    /// A value this CLI does not know falls back to the legacy flag.
+    /// A `marginMode` this CLI does not know falls back to the legacy flag.
     #[must_use]
     pub(super) fn from_wire(only_isolated: bool, margin_mode: Option<&str>) -> Self {
         match margin_mode {
@@ -58,11 +48,6 @@ impl MarginRule {
             Some("noCross") => Self::NoCross,
             _ => Self::from_legacy_flag(only_isolated),
         }
-    }
-
-    #[must_use]
-    pub fn of_market(market: &PerpMarket) -> Self {
-        Self::from_sdk(market.isolated_margin, market.margin_mode)
     }
 
     fn from_legacy_flag(only_isolated: bool) -> Self {
@@ -246,15 +231,6 @@ mod tests {
         ] {
             assert_eq!(MarginRule::from_wire(only_isolated, mode), expected);
         }
-        assert_eq!(
-            MarginRule::from_sdk(true, Some(MarginMode::StrictIsolated)),
-            MarginRule::StrictIsolated
-        );
-        assert_eq!(
-            MarginRule::from_sdk(true, Some(MarginMode::NoCross)),
-            MarginRule::NoCross
-        );
-        assert_eq!(MarginRule::from_sdk(true, None), MarginRule::IsolatedOnly);
     }
 
     #[test]

@@ -1,17 +1,18 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use hypersdk::hypercore::{Chain, HttpClient, PerpMarket, SpotMarket, SpotToken};
+use alloy::primitives::B128;
+use hypersdk::hypercore::types::SendToken;
+use hypersdk::hypercore::{Chain, SpotToken};
 use serde::Deserialize;
 
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::wire::InfoRequest;
 
 use super::asset_id;
-use super::dexes::{DexMeta, PerpDex, PerpDexList, USDC_NAME};
-use super::market::{MarginRule, PerpAsset, SpotAsset};
+use super::dexes::{DexMeta, PerpDex, PerpDexList, PerpListing, USDC_NAME};
+use super::market::{PerpAsset, SpotAsset};
 use super::query::{eq_asset_name, strip_dex_prefix};
 
 const METADATA_TTL: Duration = Duration::from_secs(60);
@@ -33,42 +34,36 @@ impl AssetMetadata {
         }
     }
 
-    /// HIP-3 markets are not loaded here; they are looked up live on demand.
+    /// The default dex's perps and every spot market. HIP-3 markets are not
+    /// loaded here; they are looked up live on demand.
     pub async fn load(api: &ApiClient) -> Result<Self, CliError> {
-        let perps = api.sdk().perps().await.map_err(from_sdk)?;
-        let spots = load_spot_markets(api).await?;
-        Self::from_listings(&perps, spots)
-    }
-
-    /// The metadata of markets a command already loaded, so it resolves a name
-    /// against them without reading them again.
-    pub fn from_listings(perps: &[PerpMarket], spots: Vec<SpotListing>) -> Result<Self, CliError> {
+        let (perps, spot_meta) = load_default_dex(api).await?;
         Ok(Self {
-            perps: perps
-                .iter()
-                .map(|market| perp_asset_from_market(market, None))
-                .collect::<Result<_, _>>()?,
-            spots: spots
-                .into_iter()
-                .map(spot_asset_from_listing)
-                .collect::<Result<_, _>>()?,
+            perps,
+            spots: spot_assets(spot_meta.into_listings())?,
             unavailable_dexes: Vec::new(),
         })
     }
 
-    /// Used when the `hypersdk` loader cannot decode a network's metadata and by
-    /// `asset search`/`asset decode`, which need every HIP-3 market.
+    /// The metadata of markets a command already loaded, so it resolves a name
+    /// against them without reading them again.
+    pub fn from_listings(perps: Vec<PerpAsset>, spots: Vec<SpotListing>) -> Result<Self, CliError> {
+        Ok(Self {
+            perps,
+            spots: spot_assets(spots)?,
+            unavailable_dexes: Vec::new(),
+        })
+    }
+
+    /// [`Self::load`] plus every HIP-3 market, for `asset search` and
+    /// `asset decode`.
     ///
     /// A HIP-3 DEX whose own metadata fails to load does not fail the whole
     /// load: it is listed in [`Self::unavailable_dexes`], and resolving one of
     /// its markets reports that failure instead of "asset not found". A failed
     /// `perpDexs` listing fails the load.
-    pub async fn load_raw(api: &ApiClient) -> Result<Self, CliError> {
-        let default_meta = DexMeta::load(api, None).await?;
-        let spot_meta = load_raw_spot_meta(api).await?;
-
-        let default_collateral = spot_meta.collateral_name(default_meta.collateral_token);
-        let mut perps = default_meta.into_assets(None, &default_collateral);
+    pub async fn load_with_hip3(api: &ApiClient) -> Result<Self, CliError> {
+        let (mut perps, spot_meta) = load_default_dex(api).await?;
 
         let mut unavailable_dexes = Vec::new();
         let dexes = PerpDexList::load(api).await?;
@@ -82,15 +77,9 @@ impl AssetMetadata {
             }
         }
 
-        let spots = spot_meta
-            .into_listings()
-            .into_iter()
-            .map(spot_asset_from_listing)
-            .collect::<Result<Vec<_>, _>>()?;
-
         Ok(Self {
             perps,
-            spots,
+            spots: spot_assets(spot_meta.into_listings())?,
             unavailable_dexes,
         })
     }
@@ -112,6 +101,27 @@ impl AssetMetadata {
     }
 }
 
+/// The default dex's perps and the spot metadata that names their collateral.
+async fn load_default_dex(api: &ApiClient) -> Result<(Vec<PerpAsset>, RawSpotMeta), CliError> {
+    let meta = DexMeta::load(api, None).await?;
+    let spot_meta = load_raw_spot_meta(api).await?;
+    let collateral = spot_meta.collateral_name(meta.collateral_token);
+    Ok((meta.into_assets(None, &collateral), spot_meta))
+}
+
+/// The perp markets of `dex` (`None` is the default dex) as the exchange
+/// lists them, each with its asset id and collateral.
+pub(crate) async fn load_perp_listings(
+    api: &ApiClient,
+    dex: Option<&PerpDex>,
+) -> Result<Vec<PerpListing>, CliError> {
+    let meta = DexMeta::load(api, dex.map(|dex| dex.name.as_str())).await?;
+    let collateral = load_raw_spot_meta(api)
+        .await?
+        .collateral_name(meta.collateral_token);
+    Ok(meta.into_listings(dex, &collateral))
+}
+
 fn sz_decimals(value: i64, market: &str) -> Result<u32, CliError> {
     u32::try_from(value).map_err(|_| {
         CliError::Internal(anyhow::anyhow!(
@@ -120,23 +130,8 @@ fn sz_decimals(value: i64, market: &str) -> Result<u32, CliError> {
     })
 }
 
-/// Convert an SDK perp market, dropping the `dex:` prefix HIP-3 names carry.
-pub(super) fn perp_asset_from_market(
-    market: &PerpMarket,
-    dex: Option<String>,
-) -> Result<PerpAsset, CliError> {
-    let name = match dex.as_deref() {
-        Some(dex_name) => strip_dex_prefix(&market.name, dex_name).to_string(),
-        None => market.name.clone(),
-    };
-    Ok(PerpAsset {
-        sz_decimals: sz_decimals(market.sz_decimals, &market.name)?,
-        margin_rule: MarginRule::of_market(market),
-        name,
-        index: market.index,
-        dex,
-        collateral: market.collateral.name.clone(),
-    })
+fn spot_assets(listings: Vec<SpotListing>) -> Result<Vec<SpotAsset>, CliError> {
+    listings.into_iter().map(spot_asset_from_listing).collect()
 }
 
 fn spot_asset_from_listing(listing: SpotListing) -> Result<SpotAsset, CliError> {
@@ -149,7 +144,7 @@ fn spot_asset_from_listing(listing: SpotListing) -> Result<SpotAsset, CliError> 
     })
 }
 
-/// A spot market as listed by the exchange, whichever loader produced it.
+/// A spot market as `spotMeta` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotListing {
     pub symbol: String,
@@ -160,31 +155,39 @@ pub struct SpotListing {
     pub quote_sz_decimals: i64,
 }
 
-impl From<SpotMarket> for SpotListing {
-    fn from(market: SpotMarket) -> Self {
-        let [base, quote] = &market.tokens;
-        Self {
-            symbol: market.symbol(),
-            index: market.index,
-            base: base.name.clone(),
-            quote: quote.name.clone(),
-            base_sz_decimals: base.sz_decimals,
-            quote_sz_decimals: quote.sz_decimals,
-        }
+/// A spot token as `spotMeta` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpotTokenListing {
+    pub name: String,
+    pub index: u32,
+    pub token_id: B128,
+    pub sz_decimals: i64,
+    pub wei_decimals: i64,
+}
+
+impl SpotTokenListing {
+    /// The token as a transfer action names it (`name:tokenId`). Only the name
+    /// and id reach the wire; the EVM fields of the SDK type are not read.
+    pub fn send_token(&self) -> SendToken {
+        SendToken(SpotToken {
+            name: self.name.clone(),
+            index: self.index,
+            token_id: self.token_id,
+            evm_contract: None,
+            cross_chain_address: None,
+            sz_decimals: self.sz_decimals,
+            wei_decimals: self.wei_decimals,
+            evm_extra_decimals: 0,
+        })
     }
 }
 
-/// Load all spot markets through `hypersdk`, falling back to raw `spotMeta`
-/// (which skips entries with broken token references) when the SDK cannot
-/// decode it. A failed fallback reports the SDK error.
+/// Load all spot markets from `spotMeta`, skipping entries whose token
+/// references do not resolve.
 pub async fn load_spot_markets(api: &ApiClient) -> Result<Vec<SpotListing>, CliError> {
-    match api.sdk().spot().await {
-        Ok(markets) => Ok(markets.into_iter().map(SpotListing::from).collect()),
-        Err(spot_err) => load_raw_spot_meta(api)
-            .await
-            .map(RawSpotMeta::into_listings)
-            .map_err(|_| from_sdk(spot_err)),
-    }
+    load_raw_spot_meta(api)
+        .await
+        .map(RawSpotMeta::into_listings)
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -208,6 +211,12 @@ struct RawSpotToken {
     name: String,
     index: u32,
     sz_decimals: i64,
+    /// Parsed only where a token itself is wanted, so a market list never
+    /// fails on a token's id.
+    #[serde(default)]
+    token_id: Option<String>,
+    #[serde(default)]
+    wei_decimals: Option<i64>,
 }
 
 impl RawSpotMeta {
@@ -239,41 +248,72 @@ impl RawSpotMeta {
             })
             .collect()
     }
+
+    fn into_tokens(self) -> Result<Vec<SpotTokenListing>, CliError> {
+        self.tokens
+            .into_iter()
+            .map(|token| {
+                let invalid = |what: String| {
+                    CliError::Internal(anyhow::anyhow!(
+                        "exchange metadata for spot token {} has {what}",
+                        token.name
+                    ))
+                };
+                let token_id = token
+                    .token_id
+                    .as_deref()
+                    .ok_or_else(|| invalid("no tokenId".to_string()))?
+                    .parse::<B128>()
+                    .map_err(|_| invalid("an invalid tokenId".to_string()))?;
+                Ok(SpotTokenListing {
+                    token_id,
+                    wei_decimals: token
+                        .wei_decimals
+                        .ok_or_else(|| invalid("no weiDecimals".to_string()))?,
+                    name: token.name,
+                    index: token.index,
+                    sz_decimals: token.sz_decimals,
+                })
+            })
+            .collect()
+    }
 }
 
 async fn load_raw_spot_meta(api: &ApiClient) -> Result<RawSpotMeta, CliError> {
-    api.info(&InfoRequest::new("spotMeta"), "loading raw spot metadata")
+    api.info(&InfoRequest::new("spotMeta"), "loading spot metadata")
         .await
 }
 
+/// Every spot token `spotMeta` lists.
+pub async fn load_spot_tokens(api: &ApiClient) -> Result<Vec<SpotTokenListing>, CliError> {
+    load_raw_spot_meta(api).await?.into_tokens()
+}
+
 /// The spot token called `name`, ignoring case and surrounding whitespace.
-pub async fn require_spot_token(client: &HttpClient, name: &str) -> Result<SpotToken, CliError> {
+pub async fn require_spot_token(api: &ApiClient, name: &str) -> Result<SpotTokenListing, CliError> {
     let name = name.trim();
-    client
-        .spot_tokens()
-        .await
-        .map_err(from_sdk)?
+    load_spot_tokens(api)
+        .await?
         .into_iter()
         .find(|token| eq_asset_name(&token.name, name))
         .ok_or_else(|| CliError::Unsupported(format!("spot token \"{name}\" not found")))
 }
 
-/// Look up one market of `dex` live through the SDK client.
+/// Look up one market of `dex` live.
 ///
 /// `Ok(None)` means the DEX exists but lists no such market.
 pub(crate) async fn load_hip3_market(
-    client: &HttpClient,
+    api: &ApiClient,
     dex: &PerpDex,
     token: &str,
-) -> Result<Option<PerpMarket>, CliError> {
-    Ok(client
-        .perps_from(dex.sdk())
-        .await
-        .map_err(from_sdk)?
+) -> Result<Option<PerpListing>, CliError> {
+    Ok(load_perp_listings(api, Some(dex))
+        .await?
         .into_iter()
-        .find(|market| {
-            let display_token = strip_dex_prefix(&market.name, &dex.name);
-            display_token.eq_ignore_ascii_case(token) || market.name.eq_ignore_ascii_case(token)
+        .find(|listing| {
+            let display_token = strip_dex_prefix(&listing.market.name, &dex.name);
+            display_token.eq_ignore_ascii_case(token)
+                || listing.market.name.eq_ignore_ascii_case(token)
         }))
 }
 
@@ -383,6 +423,62 @@ mod tests {
         assert_eq!(raw.collateral_name(360), "USDH");
         assert_eq!(raw.collateral_name(1), "USDH");
         assert_eq!(raw.collateral_name(999), "USDC");
+    }
+
+    #[test]
+    fn a_spot_token_carries_the_id_a_transfer_names_it_by() {
+        let raw = raw_meta(serde_json::json!({
+            "tokens": [
+                {"name": "USDC", "index": 0, "szDecimals": 8, "weiDecimals": 8,
+                 "tokenId": "0x6d1e7cde53ba9467b783cb7c530ce054", "evmContract": null},
+                {"name": "PURR", "index": 1, "szDecimals": 0, "weiDecimals": 5,
+                 "tokenId": "0xc1fb593aeffbeb02f85e0308e9956a90",
+                 "evmContract": {"address": "0x391e5a2d5a9a3e6d2b5f1b2d7b3f7e1d3c5a8b9c", "evm_extra_wei_decimals": -2}}
+            ],
+            "universe": []
+        }));
+
+        let tokens = raw.into_tokens().unwrap();
+
+        assert_eq!(tokens[1].index, 1);
+        assert_eq!((tokens[1].sz_decimals, tokens[1].wei_decimals), (0, 5));
+        assert_eq!(
+            tokens[1].send_token().to_string(),
+            "PURR:0xc1fb593aeffbeb02f85e0308e9956a90"
+        );
+        assert_eq!(
+            tokens[0].send_token().to_string(),
+            "USDC:0x6d1e7cde53ba9467b783cb7c530ce054"
+        );
+    }
+
+    #[test]
+    fn a_token_without_an_id_is_named_not_guessed() {
+        let raw = raw_meta(serde_json::json!({
+            "tokens": [{"name": "USDC", "index": 0, "szDecimals": 8}],
+            "universe": []
+        }));
+
+        let err = raw.into_tokens().unwrap_err();
+
+        assert!(err.to_string().contains("USDC") && err.to_string().contains("tokenId"));
+    }
+
+    #[test]
+    fn a_malformed_token_id_spares_the_market_list_but_not_the_token_read() {
+        let raw = || {
+            raw_meta(serde_json::json!({
+                "tokens": [
+                    {"name": "USDC", "index": 0, "tokenId": "0x0", "szDecimals": 6, "weiDecimals": 6},
+                    {"name": "PURR", "index": 1, "tokenId": "0x1", "szDecimals": 0, "weiDecimals": 0}
+                ],
+                "universe": [{"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}]
+            }))
+        };
+
+        assert_eq!(raw().into_listings().len(), 1);
+        let err = raw().into_tokens().unwrap_err();
+        assert!(err.to_string().contains("invalid tokenId"), "{err}");
     }
 
     #[test]

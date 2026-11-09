@@ -1,12 +1,13 @@
 use std::time::{Duration, Instant};
 
 use hypersdk::Decimal;
+use hypersdk::hypercore::Cloid;
 use hypersdk::hypercore::types::OrderResponseStatus;
-use hypersdk::hypercore::{Cloid, HttpClient};
 use serde_json::json;
 
 use crate::assets::{AssetResolver, Market};
 use crate::errors::CliError;
+use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
 use crate::settings::Settings;
@@ -55,7 +56,7 @@ fn quote_spec(
 }
 
 pub(super) async fn chase_dry_run_plan(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     settings: &Settings,
     args: &ChaseArgs,
@@ -120,7 +121,7 @@ pub(super) async fn chase(
         .refuse_unattended_without_yes("chase", &format!("hyperliquid --format json {EXAMPLE}"))?;
 
     let started = Instant::now();
-    let client = context.api.sdk();
+    let client = context.api;
     let perp = resolve_perp_market(
         client,
         resolver,
@@ -285,8 +286,7 @@ async fn place_chase_quote(
     cloid: Cloid,
 ) -> Result<OrderResponseStatus, anyhow::Error> {
     let spec = quote_spec(args, price, size, Some(cloid))?;
-    let prepared =
-        prepare_order_in(context.api.sdk(), market, context.inv.settings(), &spec).await?;
+    let prepared = prepare_order_in(context.api, market, context.inv.settings(), &spec).await?;
     let statuses = submit_orders(
         context,
         &Ungated::Chase.cleared(),

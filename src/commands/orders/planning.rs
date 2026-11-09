@@ -6,11 +6,11 @@
 use std::collections::HashMap;
 
 use chrono::Utc;
+use hypersdk::hypercore::Cloid;
 use hypersdk::hypercore::types::{
     AssetPosition, OrderGrouping, OrderRequest, OrderTypePlacement, TimeInForce, TpSl,
     TrailingStop, TrailingStopRetracement,
 };
-use hypersdk::hypercore::{Cloid, HttpClient};
 use hypersdk::{Address, Decimal};
 
 use super::args::{
@@ -35,6 +35,7 @@ use crate::assets::{
 };
 use crate::builder_fee::{self, BuilderFee};
 use crate::errors::{CliError, from_sdk};
+use crate::http_api::ApiClient;
 use crate::margin::{MarginModeArg, MarginPlan};
 use crate::settings::Settings;
 
@@ -96,7 +97,7 @@ impl ScheduleCancelPlan {
 /// not list yet. Command code obtains a perp only here, and planners take the
 /// resulting [`PerpAsset`], so none can run against an unresolved market.
 pub(super) async fn resolve_perp(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     dex: Option<&str>,
     coin: &str,
@@ -110,7 +111,7 @@ pub(super) async fn resolve_perp(
 /// perpetuals. Like [`resolve_perp`], but a market of another kind is named
 /// in the error, as `command` (such as `orders bracket`) refusing it.
 pub(super) async fn resolve_perp_market(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     command: &str,
     dex: Option<&str>,
@@ -127,7 +128,7 @@ pub(super) async fn resolve_perp_market(
 /// The market `coin` and `dex` name, fetching a HIP-3 market the resolver does
 /// not list yet.
 async fn resolve_tradable_asset(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     coin: &str,
     dex: Option<&str>,
@@ -206,13 +207,14 @@ fn mid_key(market: &Market, coin: &str, dex: Option<&str>) -> Result<(String, St
 /// The current mid of `market`. `coin` and `dex` are the flags that named it,
 /// for the error that says the mid was not available.
 pub(super) async fn market_mid_price(
-    client: &HttpClient,
+    client: &ApiClient,
     market: &Market,
     coin: &str,
     dex: Option<&str>,
 ) -> Result<Decimal, CliError> {
     let (key, label) = mid_key(market, coin, dex)?;
     let mids = client
+        .sdk()
         .all_mids(market_dex(market))
         .await
         .map_err(from_sdk)?;
@@ -266,7 +268,7 @@ fn order_builder_fee(
 }
 
 pub(super) async fn prepare_order(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     settings: &Settings,
     spec: &OrderSpec,
@@ -278,7 +280,7 @@ pub(super) async fn prepare_order(
 /// Plan one order on an already resolved market. A command that places many
 /// orders on one market resolves it once and plans each order here.
 pub(super) async fn prepare_order_in(
-    client: &HttpClient,
+    client: &ApiClient,
     market: &Market,
     settings: &Settings,
     spec: &OrderSpec,
@@ -290,7 +292,7 @@ pub(super) async fn prepare_order_in(
 
 /// Plan one order, already validated for `market`, with its builder fee.
 async fn plan_order(
-    client: &HttpClient,
+    client: &ApiClient,
     market: &Market,
     spec: &OrderSpec,
     builder: Option<BuilderFee>,
@@ -416,7 +418,7 @@ async fn plan_order(
 }
 
 pub(super) async fn prepare_create_order(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     settings: &Settings,
     spec: &OrderSpec,
@@ -435,7 +437,7 @@ pub(super) async fn prepare_create_order(
 }
 
 pub(super) async fn prepare_scale_batch(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     settings: &Settings,
     args: &ScaleArgs,
@@ -484,7 +486,7 @@ pub(super) async fn prepare_scale_batch(
 }
 
 pub(super) async fn prepare_batch_create_orders(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     settings: &Settings,
     orders: Vec<BatchCreateOrder>,
@@ -511,7 +513,7 @@ pub(super) async fn prepare_batch_create_orders(
 }
 
 async fn prepare_order_batch(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     settings: &Settings,
     specs: Vec<OrderSpec>,
@@ -699,11 +701,12 @@ fn position_tpsl_triggers(
 }
 
 pub(super) async fn fetch_position(
-    client: &HttpClient,
+    client: &ApiClient,
     user: Address,
     perp: &PerpAsset,
 ) -> Result<Option<AssetPosition>, CliError> {
     Ok(client
+        .sdk()
         .clearinghouse_state(user, perp.dex.clone())
         .await
         .map_err(from_sdk)?
@@ -734,7 +737,7 @@ fn position_close_side_and_size(
 }
 
 pub(super) async fn prepare_position_tpsl_batch(
-    client: &HttpClient,
+    client: &ApiClient,
     perp: &PerpAsset,
     user: Address,
     spec: &TpslSpec,

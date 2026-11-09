@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::assets::DexMeta;
 use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
@@ -52,10 +53,10 @@ pub const RATE_LIMIT_NOTE: &str = "no rate-limit response observed; 429 response
 
 pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let client = remote.api().sdk();
+    let api = remote.api();
     let probe_start = Instant::now();
-    let perps = client.perps().await.map_err(from_sdk)?;
-    let mids = client.all_mids(None).await.map_err(from_sdk)?;
+    let perps = DexMeta::load(api, None).await?.markets;
+    let mids = api.sdk().all_mids(None).await.map_err(from_sdk)?;
     let latency = probe_start.elapsed();
 
     inv.print(&StatusOutput {

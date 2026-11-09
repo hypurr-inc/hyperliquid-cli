@@ -9,6 +9,7 @@ use super::args::BPS_DENOMINATOR;
 use super::prepared::PreparedOrder;
 use crate::commands::abstraction::fetch_abstraction;
 use crate::commands::transfers::{self, AssetMove, AssetVenue};
+use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::signing::SelectedSigner;
@@ -103,7 +104,8 @@ async fn plan_dex_transfer(
     let dest_available = api
         .sdk()
         .clearinghouse_state(user, Some(dest_dex.to_string()))
-        .await?
+        .await
+        .map_err(from_sdk)?
         .withdrawable;
     if dest_available >= required {
         return Ok(None);

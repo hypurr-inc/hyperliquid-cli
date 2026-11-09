@@ -263,7 +263,7 @@ impl CliCommand for SubscribeAllMids {
     ]);
 
     async fn run(inv: &Invocation, args: &SubscribeAllMidsArgs) -> Result<(), anyhow::Error> {
-        let dex = canonical_dex(inv.remote()?.api().sdk(), args.dex.as_deref()).await?;
+        let dex = canonical_dex(inv.remote()?.api(), args.dex.as_deref()).await?;
         stream(inv, SubscribeTarget::all_mids(dex), &args.stream).await
     }
 }
@@ -454,8 +454,7 @@ impl CliCommand for SubscribeActiveAssetData {
     async fn run(inv: &Invocation, args: &SubscribeUserAssetArgs) -> Result<(), anyhow::Error> {
         let user = inv.resolve_user(args.user.as_deref()).await?;
         let resolver = inv.asset_resolver().await?;
-        let coin =
-            resolve_perp_coin_or_fetch(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
+        let coin = resolve_perp_coin_or_fetch(inv.remote()?.api(), &resolver, &args.asset).await?;
         stream(
             inv,
             SubscribeTarget::active_asset_data(user, coin),
@@ -537,7 +536,7 @@ impl CliCommand for SubscribeSpotState {
 /// An asset input as the name the exchange subscribes with: dex-qualified for HIP-3.
 async fn market_coin(inv: &Invocation, asset: &str) -> Result<String, anyhow::Error> {
     let resolver = inv.asset_resolver().await?;
-    Ok(resolve_market_coin(inv.remote()?.api().sdk(), &resolver, asset).await?)
+    Ok(resolve_market_coin(inv.remote()?.api(), &resolver, asset).await?)
 }
 
 /// Each `--dex` as the exchange's canonical spelling; no flag is the first dex.
@@ -546,7 +545,7 @@ async fn canonical_dexs(
     requested: &[String],
 ) -> Result<Vec<Option<String>>, anyhow::Error> {
     let requested: Vec<Option<&str>> = requested.iter().map(|dex| Some(dex.as_str())).collect();
-    Ok(assets::canonical_dexs(inv.remote()?.api().sdk(), &requested).await?)
+    Ok(assets::canonical_dexs(inv.remote()?.api(), &requested).await?)
 }
 
 async fn stream(

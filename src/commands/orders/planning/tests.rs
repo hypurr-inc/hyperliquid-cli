@@ -1,6 +1,5 @@
 use std::time::Duration;
 
-use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::types::TimeInForce;
 
 use super::*;
@@ -10,6 +9,8 @@ use crate::commands::orders::args::{
     CreateTpslGroupingArg, DEFAULT_MARKET_ORDER_SLIPPAGE_BPS, PositionTpslGroupingArg, TpslArgs,
 };
 use crate::commands::orders::validation::{MAX_BATCH_ORDER_COUNT, validate_order_for_market};
+use crate::http_api::ApiClient;
+use crate::network::Network;
 use crate::settings::EnvSource;
 
 fn resolver() -> AssetResolver {
@@ -40,7 +41,7 @@ fn settings() -> Settings {
 }
 
 async fn prepare(args: &CreateArgs) -> Result<PreparedOrder, CliError> {
-    let client = HttpClient::new(Chain::Testnet);
+    let client = ApiClient::new(Network::Testnet, None);
     prepare_order(
         &client,
         &resolver(),
@@ -407,7 +408,7 @@ fn scale_args(total_size: Decimal, start: Decimal, end: Decimal, count: usize) -
 async fn prepare_scale(args: &ScaleArgs) -> Result<PreparedOrderBatch, CliError> {
     let ladder = ScaleLadder::from_args(args)?;
     prepare_scale_batch(
-        &HttpClient::new(Chain::Testnet),
+        &ApiClient::new(Network::Testnet, None),
         &resolver(),
         &settings(),
         args,

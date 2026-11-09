@@ -424,18 +424,6 @@ impl Invocation {
         let metadata = self.metadata.get_or_load(self.remote()?.api()).await?;
         Ok(AssetResolver::new(metadata))
     }
-
-    /// Like [`Self::asset_resolver`], falling back to the raw exchange metadata
-    /// when the SDK cannot decode the universe. The SDK reports a reply it
-    /// cannot decode as an unclassified failure, so every classified one (the
-    /// network, a rate limit, a rejected credential, an HTTP status) is the
-    /// answer, not a reason to ask again.
-    pub async fn trading_resolver(&self) -> Result<AssetResolver, CliError> {
-        match self.asset_resolver().await {
-            Err(CliError::Internal(_)) => AssetResolver::load_raw(self.remote()?.api()).await,
-            other => other,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -722,34 +710,6 @@ mod tests {
         assert!(flags.payload_from_stdin());
         assert!(flags.has_payload());
         assert!(!InvocationFlags::default().payload_from_stdin());
-    }
-
-    #[tokio::test]
-    async fn a_classified_metadata_failure_is_not_retried_against_the_raw_metadata() {
-        use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
-
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/info"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&server)
-            .await;
-        let settings =
-            Settings::detached(EnvSource::fixed([(env::API_BASE_URL, server.uri())]), None);
-        let inv = invocation_over(settings, InvocationFlags::default(), &Probe::SPEC);
-
-        let direct = inv.asset_resolver().await.unwrap_err();
-        assert!(!matches!(direct, CliError::Internal(_)), "{direct}");
-        let after_direct = server.received_requests().await.unwrap().len();
-
-        inv.trading_resolver().await.unwrap_err();
-        let after_trading = server.received_requests().await.unwrap().len();
-        assert_eq!(
-            after_trading,
-            after_direct * 2,
-            "only the SDK's own load ran again, not the raw metadata fallback"
-        );
     }
 
     /// An invocation signing with `KEY` as a bare private key against a mock
