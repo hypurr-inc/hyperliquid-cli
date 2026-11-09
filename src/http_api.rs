@@ -100,6 +100,8 @@ pub struct ApiClient {
     sdk: HttpClient,
     http: OnceLock<Result<reqwest::Client, String>>,
     timeout: Duration,
+    /// Wait before each automatic read retry; the read is retried once per entry.
+    retry_backoff: &'static [Duration],
     on_retry: Option<fn()>,
 }
 
@@ -128,6 +130,7 @@ impl ApiClient {
             sdk: network.http_client(api_override),
             http: OnceLock::new(),
             timeout: DEFAULT_API_TIMEOUT,
+            retry_backoff: &READ_RETRY_BACKOFF,
             on_retry: None,
         }
     }
@@ -146,6 +149,12 @@ impl ApiClient {
         self
     }
 
+    #[cfg(test)]
+    fn with_retry_backoff(mut self, backoff: &'static [Duration]) -> Self {
+        self.retry_backoff = backoff;
+        self
+    }
+
     #[must_use]
     pub fn chain(&self) -> Chain {
         self.chain
@@ -160,11 +169,6 @@ impl ApiClient {
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.label
-    }
-
-    #[must_use]
-    pub fn has_override(&self) -> bool {
-        self.has_override
     }
 
     /// POST `request` to `/info` and decode the JSON answer.
@@ -202,7 +206,7 @@ impl ApiClient {
             .await
             .map_err(|attempt| attempt.error)?;
         ensure_success(&reply, Disposition::Mutation)?;
-        decode_json(&reply.body, "").map_err(|_| {
+        serde_json::from_str(&reply.body).map_err(|_| {
             CliError::unknown_outcome("The exchange replied with a response the CLI couldn't read")
         })
     }
@@ -310,7 +314,7 @@ impl ApiClient {
                 Err(attempt) => return Err(attempt.error),
             };
 
-            let Some(delay) = read_retry_delay(retries, retry_after) else {
+            let Some(delay) = read_retry_delay(self.retry_backoff, retries, retry_after) else {
                 return outcome;
             };
             if waited + delay > RETRY_TOTAL_BUDGET {
@@ -375,8 +379,12 @@ fn retry_after_seconds(headers: &HeaderMap) -> Option<u64> {
 
 /// Delay before retry number `retries + 1`, or `None` when out of retries or
 /// the server asked for a wait longer than [`RETRY_AFTER_CAP`].
-fn read_retry_delay(retries: usize, retry_after: Option<u64>) -> Option<Duration> {
-    let base = *READ_RETRY_BACKOFF.get(retries)?;
+fn read_retry_delay(
+    backoff: &[Duration],
+    retries: usize,
+    retry_after: Option<u64>,
+) -> Option<Duration> {
+    let base = *backoff.get(retries)?;
     let jitter = 0.75 + 0.5 * rand::random::<f64>();
     let backoff = base.mul_f64(jitter);
     match retry_after.map(Duration::from_secs) {
@@ -419,12 +427,10 @@ fn ensure_success(reply: &Reply, disposition: Disposition) -> Result<(), CliErro
 fn decode_json<T: DeserializeOwned>(body: &str, context: &'static str) -> Result<T, CliError> {
     serde_json::from_str::<T>(body).map_err(|err| {
         let body = Untrusted::from_remote(body);
-        let prefix = if context.is_empty() {
-            format!("decode failed: {err}; body=")
-        } else {
-            format!("decode failed while {context}: {err}; body=")
-        };
-        CliError::internal_with_remote(prefix, &body)
+        CliError::internal_with_remote(
+            format!("decode failed while {context}: {err}; body="),
+            &body,
+        )
     })
 }
 
@@ -436,8 +442,12 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// Retries wait milliseconds here, so a test never sleeps the real backoff.
+    static FAST_BACKOFF: [Duration; 2] = [Duration::from_millis(1), Duration::from_millis(2)];
+
     fn client_for(uri: &str) -> ApiClient {
         ApiClient::new(Network::Mainnet, Some(reqwest::Url::parse(uri).unwrap()))
+            .with_retry_backoff(&FAST_BACKOFF)
     }
 
     fn reply(status: StatusCode, body: &str) -> Reply {
@@ -490,22 +500,26 @@ mod tests {
     #[test]
     fn retry_delay_is_jittered_and_bounded() {
         for _ in 0..50 {
-            let first = read_retry_delay(0, None).unwrap();
-            assert!(first >= Duration::from_millis(187) && first <= Duration::from_millis(313));
-            let second = read_retry_delay(1, None).unwrap();
-            assert!(second >= Duration::from_millis(562) && second <= Duration::from_millis(938));
+            for (retry, base) in READ_RETRY_BACKOFF.iter().enumerate() {
+                let delay = read_retry_delay(&READ_RETRY_BACKOFF, retry, None).unwrap();
+                assert!(
+                    delay >= base.mul_f64(0.75) && delay <= base.mul_f64(1.25),
+                    "retry {retry}: {delay:?} around {base:?}"
+                );
+            }
         }
-        assert!(read_retry_delay(2, None).is_none(), "only two retries");
+        assert!(
+            read_retry_delay(&READ_RETRY_BACKOFF, READ_RETRY_BACKOFF.len(), None).is_none(),
+            "no retries beyond the backoff table"
+        );
     }
 
     #[test]
     fn retry_delay_honors_retry_after_up_to_the_cap() {
-        assert_eq!(read_retry_delay(0, Some(2)), Some(Duration::from_secs(2)));
-        assert_eq!(read_retry_delay(0, Some(5)), Some(Duration::from_secs(5)));
-        assert!(
-            read_retry_delay(0, Some(6)).is_none(),
-            "a longer ask is reported, not waited"
-        );
+        let delay = |asked| read_retry_delay(&READ_RETRY_BACKOFF, 0, Some(asked));
+        assert_eq!(delay(2), Some(Duration::from_secs(2)));
+        assert_eq!(delay(5), Some(Duration::from_secs(5)));
+        assert!(delay(6).is_none(), "a longer ask is reported, not waited");
     }
 
     #[tokio::test]

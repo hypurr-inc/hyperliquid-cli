@@ -1,72 +1,31 @@
-//! Environment facts that shape output: which standard streams are terminals
-//! and whether an agent or CI drives the run.
+//! Facts about the terminal and boolean environment variables.
 //!
-//! Human formats shape themselves by stream: bordered tables and indented JSON
-//! on a terminal, tab-separated tables and compact JSON on a pipe. Colors and
-//! prompts read the same probes, so every module agrees on what a terminal is.
+//! [`Terminal`] is probed once at startup and owned by [`crate::mode::Mode`],
+//! so every module agrees on what a terminal is: bordered tables and indented
+//! JSON on a terminal, tab-separated tables and compact JSON on a pipe.
 
 use std::io::IsTerminal;
 
-use crate::settings::{EnvSource, env as settings_env};
+use crate::settings::EnvSource;
 
-#[derive(Clone, Copy)]
-enum Stream {
-    Stdin,
-    Stdout,
-    Stderr,
+/// Which standard streams are terminals.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Terminal {
+    pub stdin: bool,
+    pub stdout: bool,
+    pub stderr: bool,
 }
 
-#[cfg(not(test))]
-fn probe(stream: Stream) -> bool {
-    match stream {
-        Stream::Stdin => std::io::stdin().is_terminal(),
-        Stream::Stdout => std::io::stdout().is_terminal(),
-        Stream::Stderr => std::io::stderr().is_terminal(),
-    }
-}
-
-#[cfg(test)]
-thread_local! {
-    static TEST_TTY: std::cell::Cell<Option<(bool, bool)>> = const { std::cell::Cell::new(None) };
-}
-
-/// Unit tests never see the developer's stdout or stderr as terminals unless a
-/// test opts in with [`with_tty_for_test`].
-#[cfg(test)]
-fn probe(stream: Stream) -> bool {
-    let tty = TEST_TTY.with(std::cell::Cell::get);
-    match stream {
-        Stream::Stdin => std::io::stdin().is_terminal(),
-        Stream::Stdout => tty.is_some_and(|tty| tty.0),
-        Stream::Stderr => tty.is_some_and(|tty| tty.1),
-    }
-}
-
-#[must_use]
-pub fn stdin_is_terminal() -> bool {
-    probe(Stream::Stdin)
-}
-
-#[must_use]
-pub fn stdout_is_terminal() -> bool {
-    probe(Stream::Stdout)
-}
-
-#[must_use]
-pub fn stderr_is_terminal() -> bool {
-    probe(Stream::Stderr)
-}
-
-#[cfg(test)]
-pub fn with_tty_for_test<T>(stdout: bool, stderr: bool, f: impl FnOnce() -> T) -> T {
-    struct Restore(Option<(bool, bool)>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            TEST_TTY.with(|cell| cell.set(self.0));
+impl Terminal {
+    /// The process's real standard streams. Only the entry point calls this.
+    #[must_use]
+    pub fn probe() -> Self {
+        Self {
+            stdin: std::io::stdin().is_terminal(),
+            stdout: std::io::stdout().is_terminal(),
+            stderr: std::io::stderr().is_terminal(),
         }
     }
-    let _restore = Restore(TEST_TTY.with(|cell| cell.replace(Some((stdout, stderr)))));
-    f()
 }
 
 /// A boolean environment variable, parsed by [`parse_flag`]: the one place
@@ -108,33 +67,6 @@ pub fn parse_flag(raw: &str) -> EnvFlag {
 #[must_use]
 pub fn env_flag(env: &EnvSource, name: &str) -> EnvFlag {
     env.get(name).map_or(EnvFlag::Unset, |raw| parse_flag(&raw))
-}
-
-/// Terminal and environment facts about this run, probed once at startup and
-/// carried by the output session.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct OutputEnv {
-    pub stdout_tty: bool,
-    pub stderr_tty: bool,
-    pub agent: bool,
-    pub ci: bool,
-    /// `--format` was given on the command line, so no default may override it.
-    pub explicit_format: bool,
-}
-
-impl OutputEnv {
-    #[must_use]
-    pub fn probe(explicit_format: bool, env: &EnvSource) -> Self {
-        Self {
-            stdout_tty: stdout_is_terminal(),
-            stderr_tty: stderr_is_terminal(),
-            // An invalid `HYPERLIQUID_AGENT` counts as off here;
-            // [`crate::mode::validate_env`] rejects it.
-            agent: env_flag(env, settings_env::AGENT) == EnvFlag::On,
-            ci: env_flag(env, settings_env::CI).on_unless_off(),
-            explicit_format,
-        }
-    }
 }
 
 #[cfg(test)]

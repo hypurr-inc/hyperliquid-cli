@@ -31,11 +31,9 @@ pub fn version_cache_file(env: &EnvSource) -> Option<PathBuf> {
 }
 
 /// File where the most recent error envelope is recorded for `report-incident`.
-/// Written while an error is being reported, with no settings to consult, so it
-/// follows the process environment.
 #[must_use]
-pub fn last_error_file() -> Option<PathBuf> {
-    config_dir(&EnvSource::Process).map(|dir| dir.join("last_error.json"))
+pub fn last_error_file(env: &EnvSource) -> Option<PathBuf> {
+    config_dir(env).map(|dir| dir.join("last_error.json"))
 }
 
 /// A nonempty override bypasses platform directory discovery entirely.

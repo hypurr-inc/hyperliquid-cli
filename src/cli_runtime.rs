@@ -2,8 +2,8 @@
 //! the payload, dry-run and confirmation policy, resolve the API endpoint, run.
 //! What each step does for a command comes from its `CommandSpec`.
 
-use clap::{ArgMatches, CommandFactory};
-use hyperliquid_cli::command_registry::CommandRegistry;
+use clap::ArgMatches;
+use clap::parser::MatchesError;
 use hyperliquid_cli::command_spec::{
     CommandSpec, ConfirmationPolicy, DryRunPolicy, RawPayloadPolicy, YES_ARG, check_args,
     supplied_secrets,
@@ -13,8 +13,7 @@ use hyperliquid_cli::input_hardening::{validate_input_path, validate_resource_id
 use hyperliquid_cli::invocation::{Invocation, InvocationFlags};
 use hyperliquid_cli::stream::require_bound;
 
-use crate::cli_shell::Selected;
-use crate::{Cli, SECRET_GLOBALS};
+use crate::cli_shell::{Redactions, Selected};
 
 pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyhow::Error> {
     let spec = selected.entry.spec;
@@ -26,13 +25,13 @@ pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyho
     if mode.machine_context()
         && let Some(bound) = spec.stream
     {
-        require_bound(bound, &selected.matches)?;
+        require_bound(bound, &selected.matches, inv.settings().env())?;
     }
 
     if inv.flags().has_payload() {
         validate_raw_payload_supported(spec)?;
     }
-    validate_prompt_policy(&inv, spec, &selected.matches)?;
+    validate_prompt_policy(&inv, &selected)?;
     if inv.dry_run() && spec.dry_run != DryRunPolicy::Optional {
         return Err(CliError::Unsupported(spec.dry_run_refusal.map_or_else(
             || "--dry-run is only supported for mutating commands with preview support".to_string(),
@@ -53,8 +52,9 @@ pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyho
         .into());
     }
 
-    if inv.remote()?.api().has_override() && spec.uses_api() {
-        inv.remote()?.api().probe_override().await?;
+    let api = inv.remote()?.api();
+    if spec.uses_api() {
+        api.probe_override().await?;
     }
 
     selected.bound.run(&inv).await
@@ -91,23 +91,25 @@ pub(crate) struct Confirmation {
 
 impl Confirmation {
     /// Read `--yes` from the matched command itself, so the answer can't drift
-    /// from the options the command actually defines.
-    pub(crate) fn from_matches(matches: &ArgMatches) -> Self {
+    /// from the options the command actually defines. A command without the
+    /// option does not support it; any other lookup failure is a bug.
+    pub(crate) fn from_matches(matches: &ArgMatches) -> Result<Self, CliError> {
         match matches.try_get_one::<bool>(YES_ARG) {
-            Ok(Some(given)) => Self {
-                supported: true,
-                given: *given,
-            },
-            _ => Self::default(),
+            Ok(given) => Ok(Self {
+                supported: given.is_some(),
+                given: given.copied().unwrap_or(false),
+            }),
+            Err(MatchesError::UnknownArgument { .. }) => Ok(Self::default()),
+            Err(err) => Err(CliError::Internal(anyhow::anyhow!(
+                "--{YES_ARG} is not a flag: {err}"
+            ))),
         }
     }
 }
 
-fn validate_prompt_policy(
-    inv: &Invocation,
-    spec: &CommandSpec,
-    matches: &ArgMatches,
-) -> Result<(), CliError> {
+fn validate_prompt_policy(inv: &Invocation, selected: &Selected) -> Result<(), CliError> {
+    let spec = selected.entry.spec;
+    let matches = &selected.matches;
     let mode = inv.mode();
     if mode.machine_context() && supplied_secrets(spec, matches).next().is_some() {
         return Err(CliError::Unsupported(
@@ -115,12 +117,12 @@ fn validate_prompt_policy(
                 .to_string(),
         ));
     }
-    let confirmation = Confirmation::from_matches(matches);
+    let confirmation = Confirmation::from_matches(matches)?;
     if inv.dry_run()
         || mode.can_prompt()
         || spec.confirmation != ConfirmationPolicy::Prompt
         || confirmation.given
-        || !confirmation_applies(spec, matches)
+        || !confirmation_applies(spec, matches)?
     {
         return Ok(());
     }
@@ -130,25 +132,29 @@ fn validate_prompt_policy(
         return Ok(());
     }
 
-    Err(confirmation_required_error(spec, matches, confirmation))
+    Err(confirmation_required_error(selected, confirmation))
 }
 
 /// `account remove` with no selector has nothing to confirm yet: its run fails
 /// on the missing selector (missing input) instead of prompting for one.
-fn confirmation_applies(spec: &CommandSpec, matches: &ArgMatches) -> bool {
-    spec.confirms_with_arg
-        .is_none_or(|id| matches.try_contains_id(id).unwrap_or(false))
+fn confirmation_applies(spec: &CommandSpec, matches: &ArgMatches) -> Result<bool, CliError> {
+    let Some(id) = spec.confirms_with_arg else {
+        return Ok(true);
+    };
+    matches.try_contains_id(id).map_err(|err| {
+        CliError::Internal(anyhow::anyhow!(
+            "{} confirms with `{id}`, which it does not define: {err}",
+            spec.key()
+        ))
+    })
 }
 
 /// Name the blocked command, then give the safe next steps: a runnable
 /// `--dry-run` preview when supported, and the `--yes` rerun only for use
 /// after a human approves.
-fn confirmation_required_error(
-    spec: &CommandSpec,
-    matches: &ArgMatches,
-    confirmation: Confirmation,
-) -> CliError {
-    let args = replay_args(std::env::args().skip(1), &Redactions::of(spec, matches));
+fn confirmation_required_error(selected: &Selected, confirmation: Confirmation) -> CliError {
+    let spec = selected.entry.spec;
+    let args = replay_args(selected.args.iter().cloned(), &selected.redactions);
     let preview = (spec.dry_run == DryRunPolicy::Optional).then(|| {
         let mut argv = vec!["--dry-run".to_string()];
         argv.extend(args.iter().cloned());
@@ -166,47 +172,6 @@ fn confirmation_required_error(
         ),
         preview,
         approve,
-    }
-}
-
-/// The secret inputs of one run: what a suggested command must not repeat.
-/// They come from the global secret options and from the secret args the
-/// command's spec declares, never from a second list.
-#[derive(Debug, Default)]
-struct Redactions {
-    /// Long option names (`--private-key`) whose values are secrets.
-    options: Vec<String>,
-    /// Secret positional values typed on the command line.
-    values: Vec<String>,
-}
-
-impl Redactions {
-    fn of(spec: &CommandSpec, matches: &ArgMatches) -> Self {
-        let mut redactions = Self::default();
-        let cli = Cli::command();
-        redactions.options.extend(
-            cli.get_arguments()
-                .filter(|arg| SECRET_GLOBALS.contains(&arg.get_id().as_str()))
-                .filter_map(|arg| arg.get_long())
-                .map(|long| format!("--{long}")),
-        );
-        let contract = CommandRegistry::get().find_path(spec.path);
-        for secret in supplied_secrets(spec, matches) {
-            let long = contract
-                .and_then(|contract| contract.input(secret.id))
-                .and_then(|input| input.long.as_deref());
-            match long {
-                Some(long) => redactions.options.push(format!("--{long}")),
-                None => redactions.values.extend(
-                    matches
-                        .get_raw(secret.id)
-                        .into_iter()
-                        .flatten()
-                        .map(|value| value.to_string_lossy().into_owned()),
-                ),
-            }
-        }
-        redactions
     }
 }
 
@@ -253,17 +218,19 @@ fn replay_command(args: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::cli_shell::try_parse_cli_from;
+    use crate::{Cli, SECRET_GLOBALS};
+    use clap::CommandFactory;
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_string()).collect()
     }
 
     fn redactions_for(argv: &[&str]) -> Redactions {
-        let selected = try_parse_cli_from(argv.iter().copied())
+        try_parse_cli_from(argv.iter().copied())
             .unwrap()
             .selected
-            .unwrap();
-        Redactions::of(selected.entry.spec, &selected.matches)
+            .unwrap()
+            .redactions
     }
 
     #[test]
@@ -341,6 +308,7 @@ mod tests {
                     .unwrap()
                     .matches,
             )
+            .unwrap()
         };
         let with_yes = parse(&["hyperliquid", "wallet", "export", "main", "--yes"]);
         assert!(with_yes.supported && with_yes.given);

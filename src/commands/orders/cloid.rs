@@ -3,7 +3,7 @@
 
 use hypersdk::hypercore::Cloid;
 
-use crate::commands::actions;
+use crate::clock;
 use crate::errors::CliError;
 
 /// The client order id of an order that has none: the exchange's all-zero id.
@@ -65,7 +65,7 @@ pub(super) fn parse_lookup_cloid(input: &str) -> Result<Cloid, CliError> {
 /// bracket entry): nonce-derived high bytes plus a per-run sequence.
 pub(super) fn generated_cloid(seq: u64) -> Cloid {
     let mut bytes = [0u8; 16];
-    bytes[..8].copy_from_slice(&actions::nonce_now().to_be_bytes());
+    bytes[..8].copy_from_slice(&clock::now_ms().to_be_bytes());
     bytes[8..].copy_from_slice(&seq.to_be_bytes());
     Cloid::new(bytes)
 }

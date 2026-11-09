@@ -6,28 +6,11 @@
 //! live here so the file's shape is defined once.
 
 use std::path::Path;
-use std::sync::OnceLock;
 
 use serde::Deserialize;
 
-use super::{CliError, ErrorEnvelope};
-
-static COMMAND_PATH: OnceLock<String> = OnceLock::new();
-
-/// Record the registered command the line selected, as its space-joined path
-/// (`orders create`). Failure diagnostics and the panic message quote it.
-pub fn set_command_path(path: &[&str]) {
-    let _ = COMMAND_PATH.set(path.join(" "));
-}
-
-/// The command recorded by [`set_command_path`]; `None` before one is selected.
-#[must_use]
-pub fn command_path() -> Option<&'static str> {
-    COMMAND_PATH
-        .get()
-        .map(String::as_str)
-        .filter(|path| !path.is_empty())
-}
+use crate::errors::{CliError, ErrorEnvelope};
+use crate::settings::EnvSource;
 
 /// The parts of the recorded envelope that an incident report quotes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -54,8 +37,8 @@ impl LastError {
     /// The latest recorded failure, or `None` when nothing was recorded or the
     /// file isn't a recorded envelope.
     #[must_use]
-    pub fn load() -> Option<Self> {
-        Self::read(&crate::paths::last_error_file()?)
+    pub fn load(env: &EnvSource) -> Option<Self> {
+        Self::read(&crate::paths::last_error_file(env)?)
     }
 
     fn read(path: &Path) -> Option<Self> {
@@ -93,14 +76,14 @@ impl LastError {
 
 /// Write `err` as the latest failure. Best effort: failing to write the record
 /// must not hide the error being reported.
-pub(super) fn record(err: &CliError) {
-    let Some(path) = crate::paths::last_error_file() else {
+pub(super) fn record(err: &CliError, command: Option<&str>, env: &EnvSource) {
+    let Some(path) = crate::paths::last_error_file(env) else {
         return;
     };
-    let _ = write(&path, err, command_path().map(str::to_owned));
+    let _ = write(&path, err, command);
 }
 
-fn write(path: &Path, err: &CliError, command: Option<String>) -> std::io::Result<()> {
+fn write(path: &Path, err: &CliError, command: Option<&str>) -> std::io::Result<()> {
     let mut envelope = ErrorEnvelope::from_cli_error(err);
     if let Some(command) = command {
         envelope.data.insert("command".into(), command.into());
@@ -114,23 +97,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_selected_command_is_one_space_joined_path() {
-        assert_eq!(command_path(), None);
-        set_command_path(&["orders", "create"]);
-        assert_eq!(command_path(), Some("orders create"));
-    }
-
-    #[test]
     fn recorded_failure_round_trips_through_the_reader() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("last_error.json");
 
-        write(
-            &path,
-            &CliError::rate_limited(),
-            Some("orders create".into()),
-        )
-        .unwrap();
+        write(&path, &CliError::rate_limited(), Some("orders create")).unwrap();
 
         assert_eq!(
             LastError::read(&path),
@@ -172,7 +143,7 @@ mod tests {
         write(
             &path,
             &CliError::Configuration("secret detail".into()),
-            Some("orders create".into()),
+            Some("orders create"),
         )
         .unwrap();
 

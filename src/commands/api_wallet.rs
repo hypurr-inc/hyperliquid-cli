@@ -8,13 +8,20 @@ use serde::Serialize;
 use crate::auth;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
 use crate::commands::actions;
-use crate::commands::support::{parse_address, require_master_signer};
+use crate::commands::support::require_master_signer;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
 use crate::output::{OutputFormat, TableData};
 use crate::signing::{SelectedSigner, Signs};
+
+/// Parse a raw address string strictly as an Ethereum 40-hex-character address.
+fn parse_address(raw: &str) -> Result<Address, CliError> {
+    raw.trim()
+        .parse::<Address>()
+        .map_err(|_| CliError::Unsupported(format!("Invalid address: {}", raw.trim())))
+}
 
 const MAX_AGENT_EXPIRATION_MS: u64 = 180 * 24 * 60 * 60 * 1000;
 const REVOKE_REPLACEMENT_EXPIRATION_MS: u64 = 60 * 1000;

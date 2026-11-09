@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use super::terminal;
+use super::terminal::{self, Terminal};
 use crate::settings::{EnvSource, env as settings_env};
 
 pub const CYAN: &str = "\x1b[36m";
@@ -73,14 +73,18 @@ pub mod stderr {
 }
 
 /// Per-stream color decision: `(stdout, stderr)`.
+///
+/// Process-wide because table cells are styled where they are built, far from
+/// any session. [`init`] sets it once at startup; until then nothing is styled.
 static STREAMS: OnceLock<(bool, bool)> = OnceLock::new();
 
-/// Resolve color once per process. Later calls are ignored.
-pub fn init(no_color_flag: bool, env: &EnvSource) {
-    let _ = STREAMS.set(resolve(no_color_flag, env));
+/// Resolve color once per process from the run's terminal and environment.
+/// Later calls are ignored.
+pub fn init(no_color_flag: bool, env: &EnvSource, terminal: Terminal) {
+    let _ = STREAMS.set(resolve(no_color_flag, env, terminal));
 }
 
-fn resolve(no_color_flag: bool, env: &EnvSource) -> (bool, bool) {
+fn resolve(no_color_flag: bool, env: &EnvSource, terminal: Terminal) -> (bool, bool) {
     let no_color_env = env
         .get_os(settings_env::NO_COLOR)
         .is_some_and(|value| !value.is_empty());
@@ -91,10 +95,7 @@ fn resolve(no_color_flag: bool, env: &EnvSource) -> (bool, bool) {
         no_color_flag || no_color_env,
         terminal::env_flag(env, settings_env::FORCE_COLOR),
         dumb,
-        (
-            terminal::stdout_is_terminal(),
-            terminal::stderr_is_terminal(),
-        ),
+        (terminal.stdout, terminal.stderr),
     )
 }
 
@@ -126,17 +127,14 @@ thread_local! {
     static TEST_STREAMS: std::cell::Cell<Option<(bool, bool)>> = const { std::cell::Cell::new(None) };
 }
 
-// Unit tests never inherit the developer's terminal or environment.
-#[cfg(test)]
+/// Unit tests never inherit the developer's terminal or environment: until a
+/// test opts in with [`with_streams_for_test`], nothing is styled.
 fn streams() -> (bool, bool) {
-    TEST_STREAMS
-        .with(|cell| cell.get())
-        .unwrap_or((false, false))
-}
-
-#[cfg(not(test))]
-fn streams() -> (bool, bool) {
-    *STREAMS.get_or_init(|| resolve(false, &EnvSource::Process))
+    #[cfg(test)]
+    if let Some(streams) = TEST_STREAMS.with(std::cell::Cell::get) {
+        return streams;
+    }
+    STREAMS.get().copied().unwrap_or((false, false))
 }
 
 #[cfg(test)]
@@ -166,28 +164,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn helpers_are_plain_when_disabled() {
-        assert_eq!(cyan("x"), "x");
-        assert_eq!(green("x"), "x");
-        assert_eq!(red("x"), "x");
-        assert_eq!(gray("x"), "x");
-        assert_eq!(yellow("x"), "x");
-        assert_eq!(stderr::gray("x"), "x");
-        assert_eq!(stderr::yellow("x"), "x");
-    }
-
-    #[test]
-    fn helpers_style_when_enabled() {
+    fn each_helper_follows_its_own_stream() {
         with_streams_for_test(true, false, || {
             assert_eq!(cyan("x"), paint(CYAN, "x"));
-            assert_eq!(green("x"), paint(GREEN, "x"));
             assert_eq!(stderr::gray("x"), "x");
         });
         with_streams_for_test(false, true, || {
             assert_eq!(cyan("x"), "x");
             assert_eq!(stderr::gray("x"), paint(GRAY, "x"));
-            assert_eq!(stderr::yellow("x"), paint(YELLOW, "x"));
         });
+    }
+
+    #[test]
+    fn resolution_reads_the_given_terminal_and_environment() {
+        let tty = Terminal {
+            stdin: true,
+            stdout: true,
+            stderr: false,
+        };
+        let none = EnvSource::fixed::<&str, &str>([]);
+        let with = |name: &'static str| EnvSource::fixed([(name, "1")]);
+        assert_eq!(resolve(false, &none, tty), (true, false));
+        assert_eq!(resolve(true, &none, tty), (false, false));
+        assert_eq!(resolve(false, &with("NO_COLOR"), tty), (false, false));
+        assert_eq!(
+            resolve(false, &with("FORCE_COLOR"), Terminal::default()),
+            (true, true)
+        );
+        assert_eq!(
+            resolve(false, &EnvSource::fixed([("TERM", "dumb")]), tty),
+            (false, false)
+        );
     }
 
     #[test]
