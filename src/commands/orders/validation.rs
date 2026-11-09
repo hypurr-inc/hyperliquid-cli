@@ -191,10 +191,12 @@ impl OrderKind {
     }
 }
 
-/// The builder fee the user asked for. `Default` defers to the configured
-/// default builder, if any.
+/// The builder fee an order should carry. `Default` defers to the configured
+/// default builder, if any; `None` carries no builder fee and never consults
+/// that configuration (generated batch legs are sent without one).
 #[derive(Debug, Clone, Copy)]
 pub(super) enum BuilderRequest {
+    None,
     Default,
     Explicit { address: Address, fee: u64 },
 }
@@ -274,7 +276,7 @@ impl OrderSpec {
             kind: OrderKind::Limit { price, size, tif },
             reduce_only: false,
             cloid: None,
-            builder: BuilderRequest::Default,
+            builder: BuilderRequest::None,
             margin_mode: None,
             tpsl: None,
         })

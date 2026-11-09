@@ -285,6 +285,7 @@ fn order_builder_fee(
 ) -> Result<Option<OrderBuilderFee>, CliError> {
     let spot_buy = matches!(market, Market::Spot(_)) && side == OrderSide::Buy;
     let (address, fee) = match request {
+        BuilderRequest::None => return Ok(None),
         BuilderRequest::Explicit { address, fee } => {
             if spot_buy {
                 return Err(CliError::Unsupported(

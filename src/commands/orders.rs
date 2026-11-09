@@ -2125,8 +2125,7 @@ mod tests {
         );
         let err = planning::prepare_scale_batch(&client, &resolver(), &args)
             .await
-            .err()
-            .expect("size lost to the lot must be rejected");
+            .expect_err("size lost to the lot must be rejected");
         assert_eq!(err.exit_code(), 2);
         assert!(err.to_string().contains("lot size"), "{err}");
     }
@@ -2143,8 +2142,7 @@ mod tests {
         );
         let err = planning::prepare_scale_batch(&client, &resolver(), &args)
             .await
-            .err()
-            .expect("collapsed ladder must be rejected");
+            .expect_err("collapsed ladder must be rejected");
         assert_eq!(err.exit_code(), 2);
         assert!(err.to_string().contains("same tick"), "{err}");
     }

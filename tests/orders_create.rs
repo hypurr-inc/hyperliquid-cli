@@ -1119,6 +1119,74 @@ async fn orders_scale_dry_run_json_preserves_on_behalf_of_signing_context() {
 }
 
 #[tokio::test]
+async fn generated_batch_legs_never_consult_the_default_builder_configuration() {
+    // A half-configured default builder is a configuration error for orders
+    // that can carry a builder fee, but scale and batch-create legs are sent
+    // without one, so they must not fail on it.
+    let half_configured = "0x1111111111111111111111111111111111111111";
+    let server = mock_order_server_without_exchange().await;
+
+    for args in [
+        vec![
+            "orders",
+            "scale",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--start-price",
+            "80000",
+            "--end-price",
+            "90000",
+            "--total-size",
+            "0.005",
+            "--orders",
+            "5",
+        ],
+        vec![
+            "orders",
+            "batch-create",
+            "--orders-file",
+            "tests/fixtures/orders_batch_create.json",
+        ],
+    ] {
+        IsolatedHome::new()
+            .command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .env("HYPERLIQUID_DEFAULT_BUILDER_ADDRESS", half_configured)
+            .args(["--format", "json", "--dry-run"])
+            .args(args)
+            .arg("--testnet")
+            .assert()
+            .success();
+    }
+
+    IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env("HYPERLIQUID_DEFAULT_BUILDER_ADDRESS", half_configured)
+        .args([
+            "--format",
+            "json",
+            "--dry-run",
+            "orders",
+            "create",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--price",
+            "50000",
+            "--size",
+            "0.1",
+            "--testnet",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("both must be configured"));
+}
+
+#[tokio::test]
 async fn orders_batch_create_dry_run_reads_fixture() {
     let env = IsolatedHome::new();
     let server = mock_order_server_without_exchange().await;
