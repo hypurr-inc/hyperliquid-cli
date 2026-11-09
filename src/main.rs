@@ -3,12 +3,11 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use hyperliquid_cli::auth::SignerFlags;
-use hyperliquid_cli::command_spec::CliCommand;
-use hyperliquid_cli::commands::update::Update;
 use hyperliquid_cli::errors;
 use hyperliquid_cli::invocation::{Invocation, InvocationFlags};
-use hyperliquid_cli::mode::Mode;
 use hyperliquid_cli::output;
+use hyperliquid_cli::output::terminal::Terminal;
+use hyperliquid_cli::report;
 use hyperliquid_cli::settings::Settings;
 
 #[cfg(test)]
@@ -17,8 +16,8 @@ mod cli_runtime;
 mod cli_shell;
 
 use cli_shell::{
-    ParsedCli, exit_for_clap_error, install_panic_hook, print_help_to_stdout, startup,
-    try_parse_cli_from,
+    ParsedCli, exit_for_clap_error, install_panic_hook, name_command_in_panics,
+    print_help_to_stdout, startup, try_parse_cli_from,
 };
 
 const GLOBAL_OPTIONS: &str = "Global Options";
@@ -147,44 +146,31 @@ struct Cli {
     payload_file: Option<String>,
 }
 
-fn error_output(format: output::OutputFormat) -> errors::ErrorOutput {
-    match format {
-        output::OutputFormat::Json => errors::ErrorOutput::Json,
-        output::OutputFormat::Pretty | output::OutputFormat::Table => errors::ErrorOutput::Human,
-    }
-}
-
 #[tokio::main]
 async fn main() {
     install_panic_hook();
     let raw_args: Vec<OsString> = std::env::args_os().collect();
     let settings = Settings::from_process();
+    let terminal = Terminal::probe();
     let ParsedCli {
         cli,
         selected,
         requested_format,
     } = match try_parse_cli_from(&raw_args) {
         Ok(parsed) => parsed,
-        Err(err) => exit_for_clap_error(err, &raw_args, settings.env()),
+        Err(err) => exit_for_clap_error(err, &raw_args, terminal, settings.env()),
     };
-    output::colors::init(cli.no_color, settings.env());
-    if let Some(selected) = &selected {
-        errors::set_command_path(selected.entry.spec.path);
+    output::colors::init(cli.no_color, settings.env(), terminal);
+    let command = selected
+        .as_ref()
+        .map(|selected| selected.entry.spec.path.join(" "));
+    if let Some(command) = &command {
+        name_command_in_panics(command);
     }
-    let (env, format) = match startup(requested_format, settings.env()) {
-        Ok(started) => started,
-        Err((err, format)) => errors::exit_with_error(err, error_output(format)),
-    };
-    let session = output::Session::new(
-        format,
-        output::JsonRenderOptions::from_cli(
-            cli.select.as_deref(),
-            cli.results_only,
-            cli.max_results,
-        ),
-        env,
-    );
-    let no_update_check = cli.no_update_check;
+    let skip_update_check = cli.no_update_check
+        || selected
+            .as_ref()
+            .is_some_and(|selected| selected.entry.spec.skips_update_check);
     let flags = InvocationFlags {
         testnet: cli.testnet,
         dry_run: cli.dry_run,
@@ -200,20 +186,21 @@ async fn main() {
             ows_signer: cli.ows_signer,
         },
     };
-    let mode = Mode::new(
-        flags.non_interactive,
-        format == output::OutputFormat::Json,
-        flags.payload_from_stdin(),
-        &env,
-    );
-    let is_update_command = selected
-        .as_ref()
-        .is_some_and(|selected| selected.entry.spec.path == Update::SPEC.path);
-    let update_check_handle = hyperliquid_cli::update::maybe_start_update_check(
+    let env = settings.env().clone();
+    let mode = match startup(requested_format, &flags, terminal, &env) {
+        Ok(mode) => mode,
+        Err((err, format)) => report::exit_with_error(err, format, command.as_deref(), &env),
+    };
+    let session = output::Session::new(
+        output::JsonRenderOptions::from_cli(
+            cli.select.as_deref(),
+            cli.results_only,
+            cli.max_results,
+        ),
         &mode,
-        no_update_check || is_update_command,
-        settings.env(),
     );
+    let update_check_handle =
+        hyperliquid_cli::update::maybe_start_update_check(&mode, skip_update_check, &env);
 
     let result = match selected {
         Some(selected) => {
@@ -227,8 +214,12 @@ async fn main() {
         // clap usage errors (exit 2) are handled by exit_for_clap_error before
         // the command runs, so they don't go through this path.
         hyperliquid_cli::update::flush_update_check_silent(update_check_handle).await;
-        let cli_err = errors::from_anyhow(err);
-        errors::exit_with_error(cli_err, error_output(format));
+        report::exit_with_error(
+            errors::from_anyhow(err),
+            mode.format,
+            command.as_deref(),
+            &env,
+        );
     }
 
     hyperliquid_cli::update::flush_update_check(update_check_handle).await;

@@ -757,20 +757,24 @@ pub fn warn(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mode::Mode;
 
-    fn plain_env() -> terminal::OutputEnv {
-        terminal::OutputEnv::default()
+    fn plain_env() -> Mode {
+        Mode::default()
     }
 
-    fn tty_env() -> terminal::OutputEnv {
-        terminal::OutputEnv {
-            stdout_tty: true,
-            ..terminal::OutputEnv::default()
+    fn tty_env() -> Mode {
+        Mode {
+            terminal: terminal::Terminal {
+                stdout: true,
+                ..terminal::Terminal::default()
+            },
+            ..Mode::default()
         }
     }
 
-    fn render_with(data: &dyn TableData, format: OutputFormat, env: terminal::OutputEnv) -> String {
-        Session::new(format, JsonRenderOptions::default(), env).render(data)
+    fn render_with(data: &dyn TableData, format: OutputFormat, mode: Mode) -> String {
+        Session::new(JsonRenderOptions::default(), &Mode { format, ..mode }).render(data)
     }
 
     fn render(data: &dyn TableData, format: OutputFormat) -> String {

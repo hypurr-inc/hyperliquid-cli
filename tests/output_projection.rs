@@ -6,7 +6,7 @@ use hyperliquid_cli::commands::orderbook::{
 use hyperliquid_cli::commands::perps::{PerpMarketRow, PerpMarketsOutput};
 use hyperliquid_cli::commands::spot::{SpotMarketRow, SpotMarketsOutput};
 use hyperliquid_cli::commands::status::StatusOutput;
-use hyperliquid_cli::output::terminal::OutputEnv;
+use hyperliquid_cli::mode::Mode;
 use hyperliquid_cli::output::{JsonRenderOptions, OutputFormat, Session};
 use rust_decimal::Decimal;
 use serde_json::{Map, Value};
@@ -17,10 +17,13 @@ fn json_session(select: Option<&str>) -> Session {
 }
 
 fn json_session_with_limit(select: Option<&str>, max_results: Option<usize>) -> Session {
+    let mode = Mode {
+        format: OutputFormat::Json,
+        ..Mode::default()
+    };
     Session::new(
-        OutputFormat::Json,
         JsonRenderOptions::from_cli(select, false, max_results),
-        OutputEnv::default(),
+        &mode,
     )
 }
 

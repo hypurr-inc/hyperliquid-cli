@@ -298,6 +298,7 @@ async fn fake_subscribe_stream_applies_select_to_subscription_lines() {
         &mut events,
         &mut output_bytes,
         &options,
+        false,
     )
     .await
     .unwrap();
@@ -325,6 +326,7 @@ async fn fake_subscribe_stream_limits_nested_all_mids_payload() {
         &mut events,
         &mut output_bytes,
         &options,
+        false,
     )
     .await
     .unwrap();
@@ -353,6 +355,7 @@ async fn fake_subscribe_stream_emits_matching_event_envelopes() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await
     .unwrap();
@@ -379,6 +382,7 @@ async fn fake_subscribe_stream_ignores_non_matching_events_until_close() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await;
 
@@ -408,6 +412,7 @@ async fn fake_subscribe_stream_max_events_counts_only_emitted_events() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await
     .unwrap();
@@ -442,6 +447,7 @@ async fn fake_subscribe_stream_marks_reconnect_with_one_stream_gap_warning() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await
     .unwrap();
@@ -474,6 +480,7 @@ async fn fake_subscribe_stream_gap_warning_survives_select_projection() {
         &mut events,
         &mut output,
         &options,
+        false,
     )
     .await
     .unwrap();
@@ -588,6 +595,7 @@ async fn fake_subscribe_stream_max_zero_emits_only_subscribed_envelope() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await
     .unwrap();
@@ -609,6 +617,7 @@ async fn fake_subscribe_stream_idle_timeout_bounds_quiet_max_events() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await;
 
@@ -637,6 +646,7 @@ async fn fake_fills_subscribe_stream_ignores_non_fill_user_events_before_fill() 
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await
     .unwrap();

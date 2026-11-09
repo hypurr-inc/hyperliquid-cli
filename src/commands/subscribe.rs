@@ -6,7 +6,7 @@ use crate::command_spec::{
 };
 use crate::commands::orderbook::{parse_candle_interval, resolve_market_coin};
 use crate::invocation::Invocation;
-use crate::stream::{StreamBoundArgs, StreamBounds, SubscribeTarget};
+use crate::stream::{StreamBoundArgs, SubscribeTarget};
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["subscribe"], "Stream real-time market and account events")
     .long_about("Stream real-time market and account events over WebSocket.\n\
@@ -204,11 +204,5 @@ async fn stream(
     target: SubscribeTarget,
     bounds: &StreamBoundArgs,
 ) -> Result<(), anyhow::Error> {
-    crate::stream::stream_subscription(
-        inv.session(),
-        inv.remote()?.chain(),
-        target,
-        StreamBounds::subscribe(bounds),
-    )
-    .await
+    crate::stream::stream_subscription(inv, inv.remote()?.chain(), target, bounds).await
 }

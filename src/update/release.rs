@@ -4,12 +4,12 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::errors::CliError;
-use crate::settings::env;
+use crate::settings::{EnvSource, env};
 
-/// Must match the repository and archive names the release workflow publishes.
-pub(super) const REPO: &str = "hypurr-inc/hyperliquid-cli";
-const LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/hypurr-inc/hyperliquid-cli/releases/latest";
+/// The GitHub repository, as `owner/name`: the one spelling every release,
+/// download and issue URL derives from. Must match the repository and archive
+/// names the release workflow publishes.
+pub const REPO: &str = "hypurr-inc/hyperliquid-cli";
 const USER_AGENT: &str = "hyperliquid-cli";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -57,7 +57,7 @@ impl ReleaseClient {
     pub async fn latest_version(&self) -> Result<String, CliError> {
         let release = self
             .get(
-                LATEST_RELEASE_URL,
+                &format!("https://api.github.com/repos/{REPO}/releases/latest"),
                 "update check failed",
                 Some(FETCH_TIMEOUT),
             )
@@ -164,9 +164,9 @@ pub(super) enum InstallMethod {
 }
 
 impl InstallMethod {
-    pub fn detect(exe: &Path) -> Self {
+    pub fn detect(exe: &Path, source: &EnvSource) -> Self {
         let home = dirs::home_dir();
-        let cargo_home = std::env::var_os(env::CARGO_HOME).map(PathBuf::from);
+        let cargo_home = source.get_os(env::CARGO_HOME).map(PathBuf::from);
         let resolved = std::fs::canonicalize(exe).ok();
         [Some(exe), resolved.as_deref()]
             .into_iter()
@@ -262,6 +262,14 @@ mod tests {
             err_arm
                 .to_string()
                 .contains("update is not supported on windows/aarch64")
+        );
+    }
+
+    #[test]
+    fn repo_matches_the_cargo_repository() {
+        assert_eq!(
+            format!("https://github.com/{REPO}"),
+            env!("CARGO_PKG_REPOSITORY")
         );
     }
 

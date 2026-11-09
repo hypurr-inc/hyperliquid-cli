@@ -12,9 +12,48 @@ use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::output::TableData;
 
+/// The schema entries asked for: the JSON they print, and the table rows built
+/// from the same contracts.
 #[derive(Debug, Clone)]
 pub struct SchemaOutput {
-    value: Value,
+    json: Value,
+    rows: Vec<Vec<String>>,
+}
+
+impl SchemaOutput {
+    /// The entry of the one command named by its exact path.
+    fn one(contract: &CommandContract) -> Result<Self, CliError> {
+        Ok(Self {
+            json: schema_entry(contract)?,
+            rows: vec![table_row(contract)],
+        })
+    }
+
+    /// A list of entries, in registry order.
+    fn many<'a>(contracts: impl Iterator<Item = &'a CommandContract>) -> Result<Self, CliError> {
+        let contracts: Vec<_> = contracts.collect();
+        Ok(Self {
+            json: Value::Array(
+                contracts
+                    .iter()
+                    .map(|contract| schema_entry(contract))
+                    .collect::<Result<_, _>>()?,
+            ),
+            rows: contracts
+                .iter()
+                .map(|contract| table_row(contract))
+                .collect(),
+        })
+    }
+}
+
+fn table_row(contract: &CommandContract) -> Vec<String> {
+    vec![
+        contract.command.clone(),
+        contract.category.clone(),
+        contract.dangerous.to_string(),
+        contract.description.clone(),
+    ]
 }
 
 impl TableData for SchemaOutput {
@@ -23,41 +62,11 @@ impl TableData for SchemaOutput {
     }
 
     fn rows(&self) -> Vec<Vec<String>> {
-        let commands: Vec<Value> = match &self.value {
-            Value::Array(values) => values.clone(),
-            value => vec![value.clone()],
-        };
-        commands
-            .iter()
-            .map(|command| {
-                vec![
-                    command
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    command
-                        .get("group")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    command
-                        .get("dangerous")
-                        .and_then(Value::as_bool)
-                        .map(|value| value.to_string())
-                        .unwrap_or_default(),
-                    command
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                ]
-            })
-            .collect()
+        self.rows.clone()
     }
 
     fn to_json_value(&self) -> Value {
-        self.value.clone()
+        self.json.clone()
     }
 }
 
@@ -68,35 +77,29 @@ pub fn show(inv: &Invocation, command_path: &[String]) -> Result<(), anyhow::Err
 
 /// One command's entry: its contract plus the JSON schema of its inputs.
 fn schema_entry(contract: &CommandContract) -> Result<Value, CliError> {
-    let mut entry =
-        serde_json::to_value(contract).map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
-    let schema = json_schema(contract)?;
-    entry
-        .as_object_mut()
-        .expect("a contract serializes to an object")
-        .insert("json_schema".into(), schema);
-    Ok(entry)
-}
-
-fn schema_entries<'a>(
-    contracts: impl Iterator<Item = &'a CommandContract>,
-) -> Result<Value, CliError> {
-    contracts
-        .map(schema_entry)
-        .collect::<Result<Vec<_>, _>>()
-        .map(Value::Array)
+    #[derive(serde::Serialize)]
+    struct Entry<'a> {
+        #[serde(flatten)]
+        contract: &'a CommandContract,
+        json_schema: Value,
+    }
+    serde_json::to_value(Entry {
+        contract,
+        json_schema: json_schema(contract)?,
+    })
+    .map_err(|err| CliError::Internal(anyhow::anyhow!(err)))
 }
 
 pub fn schema_query(command_path: &[String]) -> Result<SchemaOutput, anyhow::Error> {
     let contracts = CommandRegistry::get().commands();
 
-    let value = if command_path.is_empty() {
-        schema_entries(contracts.iter())?
+    let output = if command_path.is_empty() {
+        SchemaOutput::many(contracts.iter())?
     } else if let Some(contract) = contracts
         .iter()
         .find(|contract| contract.command_path.as_slice() == command_path)
     {
-        schema_entry(contract)?
+        SchemaOutput::one(contract)?
     } else {
         let mut matches = contracts
             .iter()
@@ -109,10 +112,10 @@ pub fn schema_query(command_path: &[String]) -> Result<SchemaOutput, anyhow::Err
             ))
             .into());
         }
-        schema_entries(matches)?
+        SchemaOutput::many(matches)?
     };
 
-    Ok(SchemaOutput { value })
+    Ok(output)
 }
 
 fn command_path_is_prefix(prefix: &[String], command_path: &[String]) -> bool {
@@ -225,5 +228,38 @@ hyperliquid --format json --select command,description schema orders",
 
     async fn run(inv: &Invocation, args: &SchemaArgs) -> Result<(), anyhow::Error> {
         show(inv, &args.command_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_table_rows_come_from_the_contracts_the_json_entries_are_built_from() {
+        let path = ["orders".to_string(), "create".to_string()];
+        let output = schema_query(&path).unwrap();
+        let contract = CommandRegistry::get()
+            .find_path(&["orders", "create"])
+            .unwrap();
+        assert_eq!(
+            output.rows(),
+            vec![vec![
+                contract.command.clone(),
+                contract.category.clone(),
+                "true".to_string(),
+                contract.description.clone(),
+            ]]
+        );
+        let entry = output.to_json_value();
+        assert_eq!(entry["command"], contract.command.as_str());
+        assert!(entry["json_schema"].is_object());
+
+        let all = schema_query(&[]).unwrap();
+        assert_eq!(all.rows().len(), CommandRegistry::get().commands().len());
+        assert_eq!(
+            all.to_json_value().as_array().unwrap().len(),
+            all.rows().len()
+        );
     }
 }
