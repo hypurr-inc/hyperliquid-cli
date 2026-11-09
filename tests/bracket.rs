@@ -52,3 +52,30 @@ fn orders_bracket_help_includes_examples() {
         .stdout(predicate::str::contains("Examples:"))
         .stdout(predicate::str::contains("--dry-run"));
 }
+
+#[test]
+fn bracket_refuses_a_zero_entry_timeout() {
+    IsolatedHome::new()
+        .command()
+        .args([
+            "--dry-run",
+            "--testnet",
+            "orders",
+            "bracket",
+            "--coin",
+            "ETH",
+            "--side",
+            "buy",
+            "--size",
+            "0.1",
+            "--take-profit",
+            "+10%",
+            "--stop-loss",
+            "-5%",
+            "--entry-timeout",
+            "0s",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("greater than zero"));
+}

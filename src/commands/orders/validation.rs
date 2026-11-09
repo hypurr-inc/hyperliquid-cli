@@ -1,23 +1,25 @@
+use std::num::NonZeroUsize;
 use std::path::Path;
-use std::time::Duration;
 
 use hypersdk::hypercore::types::{Side, TpSl};
 use hypersdk::hypercore::{Cloid, PriceTick};
 use hypersdk::{Address, Decimal};
 use rust_decimal::RoundingStrategy;
 
-use super::planning::order_identifier;
-use super::{
-    BPS_DENOMINATOR, BatchCreateArgs, BatchCreateOrder, BracketArgs, CreateArgs, CreateOrderType,
-    CreateTpslGroupingArg, MAX_BATCH_ORDER_COUNT, MAX_MARKET_ORDER_SLIPPAGE_BPS,
-    MIN_MARKET_ORDER_SLIPPAGE_BPS, MarginModeArg, ModifyArgs, OrderSide, ScaleArgs, TifArg,
-    TpslArgs, TriggerPriceSpec, TwapCreateArgs, parse_cloid,
+use super::args::{
+    BatchCreateArgs, BatchCreateOrder, BracketArgs, CreateArgs, CreateOrderType,
+    CreateTpslGroupingArg, MAX_MARKET_ORDER_SLIPPAGE_BPS, MIN_MARKET_ORDER_SLIPPAGE_BPS,
+    MarginModeArg, OrderSide, ScaleArgs, TifArg, TpslArgs, TriggerPriceSpec, TwapCreateArgs,
 };
-use crate::assets::Market;
+use super::cloid::parse_cloid;
+use crate::assets::{Market, PerpAsset};
 use crate::builder_fee::MaxFeeRate;
 use crate::errors::CliError;
 use crate::input_hardening::{FilePolicy, read_json_file};
 use crate::wire::{self, AddressRole};
+
+pub(super) const BPS_DENOMINATOR: i64 = 10_000;
+pub(super) const MAX_BATCH_ORDER_COUNT: usize = 500;
 
 /// How the exchange constrains prices and sizes on one market.
 ///
@@ -36,7 +38,7 @@ pub(super) struct MarketPrecision {
 impl MarketPrecision {
     pub(super) fn of(market: &Market) -> Self {
         match market {
-            Market::Perp(perp) => Self::perp(perp.sz_decimals),
+            Market::Perp(perp) => Self::of_perp(perp),
             Market::Spot(spot) => Self::spot(spot.base_sz_decimals),
             // Outcome size decimals are not verified; they trade on the spot tick grid in whole lots.
             Market::Outcome(_) => Self::spot(0),
@@ -47,7 +49,12 @@ impl MarketPrecision {
     /// perps, 8 for spot) has no decimals left: it takes whole-number prices.
     /// [`PriceTick`] treats that as an invalid market, so the budget is
     /// clamped here, once.
-    pub(super) fn perp(sz_decimals: u32) -> Self {
+    pub(super) fn of_perp(perp: &PerpAsset) -> Self {
+        Self::perp(perp.sz_decimals)
+    }
+
+    /// A perp market given by its size decimals; prefer [`MarketPrecision::of_perp`].
+    fn perp(sz_decimals: u32) -> Self {
         Self {
             sz_decimals,
             price_tick: PriceTick::for_perp(i64::from(sz_decimals.min(6))),
@@ -211,11 +218,8 @@ impl BuilderRequest {
                 address: wire::address(raw_builder, AddressRole::Builder)?,
                 fee: MaxFeeRate::parse(raw_fee)?.tenths_bps(),
             }),
-            (Some(_), None) => Err(CliError::Configuration(
-                "orders create --builder requires --builder-fee-rate".to_string(),
-            )),
-            (None, Some(_)) => Err(CliError::Configuration(
-                "orders create --builder-fee-rate requires --builder".to_string(),
+            (Some(_), None) | (None, Some(_)) => Err(CliError::Configuration(
+                "--builder and --builder-fee-rate must be given together".to_string(),
             )),
             (None, None) => Ok(Self::Default),
         }
@@ -461,27 +465,80 @@ pub(super) fn validate_order_for_market(spec: &OrderSpec, market: &Market) -> Re
     Ok(())
 }
 
-pub fn validate_scale_args(args: &ScaleArgs) -> Result<(), CliError> {
-    positive_price(Some(args.start_price), "start-price")?;
-    positive_price(Some(args.end_price), "end-price")?;
-    positive_quantity(Some(args.total_size), "total-size")?;
-    if args.order_count == 0 {
-        return Err(CliError::Configuration(
-            "orders scale requires --orders greater than zero".to_string(),
-        ));
+/// The ladder `orders scale` describes: `order_count` limit orders at evenly
+/// spaced prices from `start_price` to `end_price`, each for an equal share of
+/// `total_size`. Building one is the only place the ladder's flags are
+/// checked, and a ladder cannot have zero orders.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ScaleLadder {
+    start_price: Decimal,
+    end_price: Decimal,
+    total_size: Decimal,
+    order_count: NonZeroUsize,
+}
+
+impl ScaleLadder {
+    pub(super) fn from_args(args: &ScaleArgs) -> Result<Self, CliError> {
+        positive_price(Some(args.start_price), "start-price")?;
+        positive_price(Some(args.end_price), "end-price")?;
+        positive_quantity(Some(args.total_size), "total-size")?;
+        let Some(order_count) = NonZeroUsize::new(args.order_count) else {
+            return Err(CliError::Configuration(
+                "orders scale requires --orders greater than zero".to_string(),
+            ));
+        };
+        if args.order_count > MAX_BATCH_ORDER_COUNT {
+            return Err(CliError::Configuration(format!(
+                "orders scale supports at most {MAX_BATCH_ORDER_COUNT} orders"
+            )));
+        }
+        if args.order_count > 1 && args.start_price == args.end_price {
+            return Err(CliError::Configuration(
+                "orders scale requires different start and end prices when --orders is greater than one"
+                    .to_string(),
+            ));
+        }
+        Ok(Self {
+            start_price: args.start_price,
+            end_price: args.end_price,
+            total_size: args.total_size,
+            order_count,
+        })
     }
-    if args.order_count > MAX_BATCH_ORDER_COUNT {
-        return Err(CliError::Configuration(format!(
-            "orders scale supports at most {MAX_BATCH_ORDER_COUNT} orders"
-        )));
+
+    pub(super) fn total_size(&self) -> Decimal {
+        self.total_size
     }
-    if args.order_count > 1 && args.start_price == args.end_price {
-        return Err(CliError::Configuration(
-            "orders scale requires different start and end prices when --orders is greater than one"
-                .to_string(),
-        ));
+
+    pub(super) fn prices(&self) -> Vec<Decimal> {
+        let count = self.order_count.get();
+        if count == 1 {
+            return vec![self.start_price];
+        }
+        let step = (self.end_price - self.start_price) / Decimal::from(count - 1);
+        (0..count)
+            .map(|index| self.start_price + step * Decimal::from(index))
+            .collect()
     }
-    Ok(())
+
+    /// The size of each order: `total_size` split into equal shares.
+    pub(super) fn leg_size(&self) -> Result<Decimal, CliError> {
+        let count = Decimal::from(self.order_count.get());
+        let per_leg = self.total_size / count;
+        if per_leg <= Decimal::ZERO {
+            return Err(CliError::Configuration(
+                "orders scale total size is too small to distribute across requested orders"
+                    .to_string(),
+            ));
+        }
+        if per_leg * count != self.total_size {
+            return Err(CliError::Configuration(
+                "orders scale total size cannot be evenly distributed across requested orders"
+                    .to_string(),
+            ));
+        }
+        Ok(per_leg)
+    }
 }
 
 pub fn validate_batch_create_args(args: &BatchCreateArgs) -> Result<(), CliError> {
@@ -598,8 +655,6 @@ fn validate_tpsl_triggers(
     stop_loss: Option<&TriggerPriceSpec>,
     size: Option<Decimal>,
 ) -> Result<(), CliError> {
-    validate_trigger_price_spec(take_profit, "take-profit")?;
-    validate_trigger_price_spec(stop_loss, "stop-loss")?;
     positive_quantity(size, "size")?;
     if take_profit.is_none() && stop_loss.is_none() {
         return Err(CliError::Configuration(
@@ -613,19 +668,6 @@ fn validate_tpsl_triggers(
     {
         return Err(CliError::Configuration(
             "orders tpsl --take-profit and --stop-loss cannot be equal".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-pub fn validate_modify_args(args: &ModifyArgs) -> Result<(), CliError> {
-    order_identifier(args.order_id, args.cloid.as_deref(), "modify", parse_cloid)?;
-    positive_price(args.price, "price")?;
-    positive_price(args.trigger_price, "trigger-price")?;
-    positive_quantity(args.size, "size")?;
-    if args.price.is_none() && args.trigger_price.is_none() && args.size.is_none() {
-        return Err(CliError::Configuration(
-            "orders modify requires --price, --trigger-price, or --size".to_string(),
         ));
     }
     Ok(())
@@ -714,19 +756,7 @@ fn require_flags<const N: usize>(
     Ok(values.map(|(value, _)| value.unwrap_or_default()))
 }
 
-fn validate_trigger_price_spec(
-    value: Option<&TriggerPriceSpec>,
-    name: &'static str,
-) -> Result<(), CliError> {
-    match value {
-        Some(TriggerPriceSpec::Absolute(price)) if *price <= Decimal::ZERO => {
-            Err(CliError::Configuration(format!("{name} must be positive")))
-        }
-        _ => Ok(()),
-    }
-}
-
-fn positive_price(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
+pub(super) fn positive_price(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
     match value {
         Some(value) if value <= Decimal::ZERO => {
             Err(CliError::Configuration(format!("{name} must be positive")))
@@ -735,7 +765,7 @@ fn positive_price(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
     }
 }
 
-fn positive_quantity(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
+pub(super) fn positive_quantity(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
     match value {
         Some(value) if value <= Decimal::ZERO => Err(CliError::Configuration(format!(
             "{name} must be greater than zero"
@@ -878,37 +908,6 @@ impl LegReader<'_> {
             }
         }
     }
-}
-
-pub(crate) fn parse_relative_duration(input: &str) -> Result<Duration, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("duration cannot be empty".to_string());
-    }
-
-    let (number_part, multiplier, unit_name) = match trimmed.chars().last().unwrap() {
-        's' | 'S' => (&trimmed[..trimmed.len() - 1], 1_u64, "seconds"),
-        'm' | 'M' => (&trimmed[..trimmed.len() - 1], 60_u64, "minutes"),
-        'h' | 'H' => (&trimmed[..trimmed.len() - 1], 60 * 60, "hours"),
-        'd' | 'D' => (&trimmed[..trimmed.len() - 1], 24 * 60 * 60, "days"),
-        ch if ch.is_ascii_digit() => (trimmed, 1_u64, "seconds"),
-        _ => {
-            return Err(
-                "duration must be a positive integer with optional s/m/h/d suffix".to_string(),
-            );
-        }
-    };
-
-    let value = number_part
-        .parse::<u64>()
-        .map_err(|_| format!("duration {unit_name} must be a positive integer"))?;
-    if value == 0 {
-        return Err("duration must be greater than zero".to_string());
-    }
-    value
-        .checked_mul(multiplier)
-        .map(Duration::from_secs)
-        .ok_or_else(|| "duration is too large".to_string())
 }
 
 #[cfg(test)]

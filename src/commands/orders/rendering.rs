@@ -3,8 +3,9 @@ use hypersdk::hypercore::BasicOrder;
 use hypersdk::hypercore::types::{OrderResponseStatus, OrderType, TimeInForce};
 use serde::Serialize;
 
+use super::args::TpslGroupingArg;
 use super::exchange::{Placement, Rejected, status_error};
-use super::{PreparedOrder, PreparedTpslLeg, TpslGroupingArg};
+use super::prepared::{PreparedOrder, PreparedTpslLeg};
 use crate::errors::{CliError, NextCommand, partial_results_fields};
 use crate::output::{self, TableData};
 
@@ -116,11 +117,11 @@ impl OrderConfirmation {
             side: prepared.side.to_string(),
             order_type: prepared.order_type.to_string(),
             trigger_price: prepared.trigger_price.map(|price| price.to_string()),
-            amount: prepared.amount.map(|amount| amount.to_string()),
-            amount_unit: prepared
+            amount: prepared
                 .amount
                 .as_ref()
-                .map(|_| prepared.amount_unit.clone()),
+                .map(|amount| amount.value.to_string()),
+            amount_unit: prepared.amount.as_ref().map(|amount| amount.unit.clone()),
             tif: prepared.tif.map(|tif| tif.to_string()),
             reduce_only: prepared.request.reduce_only,
             warning: prepared.warning.clone(),
@@ -211,7 +212,7 @@ impl TableData for OrderConfirmationOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
@@ -319,7 +320,7 @@ impl TableData for TpslOrderConfirmationOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
@@ -355,7 +356,7 @@ impl TableData for CancelConfirmationOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
@@ -382,7 +383,7 @@ impl TableData for CancelAllSummaryOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
@@ -395,17 +396,31 @@ pub(super) struct CancelLeg {
 }
 
 impl CancelLeg {
-    pub(super) fn from_status(order_id: u64, status: &OrderResponseStatus) -> Self {
+    /// The leg for one cancelled order. The exchange answers a cancel with
+    /// `success` or an error; any other status did not confirm the cancel, so
+    /// it is reported as a failure rather than as a cancel.
+    pub(super) fn from_status(order_id: u64, status: OrderResponseStatus) -> Self {
         match status {
+            OrderResponseStatus::Success => Self {
+                order_id,
+                status: "cancelled",
+                error: None,
+            },
             OrderResponseStatus::Error(err) => Self {
                 order_id,
                 status: "failed",
                 error: Some(Rejected::new(err)),
             },
-            _ => Self {
+            other @ (OrderResponseStatus::Resting { .. }
+            | OrderResponseStatus::Filled { .. }
+            | OrderResponseStatus::WaitingForTrigger
+            | OrderResponseStatus::WaitingForFill) => Self {
                 order_id,
-                status: "cancelled",
-                error: None,
+                status: "failed",
+                error: Some(Rejected::new(format!(
+                    "unexpected {} status for a cancel",
+                    Placement::classify(other).label()
+                ))),
             },
         }
     }
@@ -437,12 +452,72 @@ impl TableData for CancelLegsOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
 /// Command to run after a partial result to see what is live on the exchange.
 pub(super) const CHECK_LIVE_COMMAND: &str = "hyperliquid orders open";
+
+/// The exchange answered with a different number of statuses than orders sent,
+/// so some orders may be live without a matching row.
+fn status_count_mismatch(statuses: usize, orders: usize) -> CliError {
+    CliError::Internal(anyhow::anyhow!(
+        "The exchange returned {statuses} {} for {orders} {}. Check what is live:\n    {CHECK_LIVE_COMMAND}",
+        output::format::noun(statuses, "status", "statuses"),
+        output::format::noun(orders, "order", "orders"),
+    ))
+}
+
+/// Each of `legs` with the status the exchange gave it. The one place the
+/// count is checked: a short or long answer fails instead of misattributing.
+pub(super) fn pair_statuses<T>(
+    legs: &[T],
+    statuses: Vec<OrderResponseStatus>,
+) -> Result<Vec<(&T, OrderResponseStatus)>, CliError> {
+    if statuses.len() != legs.len() {
+        return Err(status_count_mismatch(statuses.len(), legs.len()));
+    }
+    Ok(legs.iter().zip(statuses).collect())
+}
+
+/// The one status the exchange gave a single order. Anything else is the same
+/// count mismatch [`pair_statuses`] reports.
+pub(super) fn single_status(
+    statuses: Vec<OrderResponseStatus>,
+) -> Result<OrderResponseStatus, CliError> {
+    match <[OrderResponseStatus; 1]>::try_from(statuses) {
+        Ok([status]) => Ok(status),
+        Err(statuses) => Err(status_count_mismatch(statuses.len(), 1)),
+    }
+}
+
+/// What a batch was doing when some of its legs failed.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum BatchVerb {
+    PlaceOrders,
+    PlaceTpsl,
+    CancelAll,
+}
+
+impl BatchVerb {
+    /// Leads the headline: "{done} 1 of 2 orders".
+    pub(super) fn done(self) -> &'static str {
+        match self {
+            Self::PlaceOrders | Self::PlaceTpsl => "Placed",
+            Self::CancelAll => "Cancelled",
+        }
+    }
+
+    /// Completes "Couldn't ..." when every leg failed.
+    pub(super) fn action(self) -> &'static str {
+        match self {
+            Self::PlaceOrders => "place orders",
+            Self::PlaceTpsl => "place TP/SL orders",
+            Self::CancelAll => "cancel all orders",
+        }
+    }
+}
 
 /// The ` --on-behalf-of <selector>` a suggested command needs to act on the
 /// same account as this run; empty when the run acts for its own account.
@@ -471,7 +546,6 @@ pub(super) fn partial_results_error(headline: &str, lead: &str, commands: &[Stri
 /// top-level error path stays silent for `PartialResults`.
 pub(super) struct PartialBatchOutput {
     pub(super) legs: Box<dyn TableData>,
-    pub(super) legs_key: &'static str,
     pub(super) succeeded: usize,
     pub(super) failed: usize,
     pub(super) headline: String,
@@ -511,7 +585,7 @@ impl TableData for PartialBatchOutput {
         document.insert("succeeded".into(), self.succeeded.into());
         document.insert("failed".into(), self.failed.into());
         document.insert("total".into(), (self.succeeded + self.failed).into());
-        document.insert(self.legs_key.into(), self.legs.to_json_value());
+        document.insert("orders".into(), self.legs.to_json_value());
         serde_json::Value::Object(document)
     }
 }
@@ -552,7 +626,7 @@ impl TableData for ModifyConfirmationOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
@@ -692,7 +766,7 @@ impl TableData for OrderListOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
@@ -746,7 +820,7 @@ impl TableData for TwapCreateOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
@@ -780,7 +854,7 @@ impl TableData for TwapCancelOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
@@ -828,7 +902,7 @@ impl TableData for ScheduleCancelOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
@@ -894,7 +968,6 @@ mod tests {
     fn partial_batch_document_carries_the_partial_results_keys() {
         let partial = PartialBatchOutput {
             legs: Box::new(OrderListOutput::new(Vec::new(), "none")),
-            legs_key: "orders",
             succeeded: 1,
             failed: 1,
             headline: "Placed 1 of 2 orders. 1 failed.".to_string(),
@@ -906,6 +979,53 @@ mod tests {
         assert_eq!(document["total"], 2);
         assert_eq!(document["next"][0]["command"], CHECK_LIVE_COMMAND);
         assert!(document.get("next_command").is_none());
+    }
+
+    #[test]
+    fn statuses_pair_with_legs_only_when_the_counts_agree() {
+        let legs = [1, 2];
+        let paired = pair_statuses(
+            &legs,
+            vec![
+                OrderResponseStatus::Success,
+                OrderResponseStatus::WaitingForFill,
+            ],
+        )
+        .unwrap();
+        assert_eq!(paired.len(), 2);
+        assert_eq!(*paired[1].0, 2);
+
+        for statuses in [Vec::new(), vec![OrderResponseStatus::Success; 3]] {
+            let count = statuses.len();
+            let err = pair_statuses(&legs, statuses).unwrap_err();
+            assert!(
+                err.to_string().contains(&format!(
+                    "returned {count} {} for 2 orders",
+                    if count == 1 { "status" } else { "statuses" }
+                )),
+                "{err}"
+            );
+            assert!(err.to_string().contains(CHECK_LIVE_COMMAND), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_cancel_leg_is_cancelled_only_on_success() {
+        let leg = |status| CancelLeg::from_status(7, status);
+        assert_eq!(leg(OrderResponseStatus::Success).status, "cancelled");
+
+        let failed = leg(OrderResponseStatus::Error(
+            "Order was never placed".to_string(),
+        ));
+        assert_eq!(failed.status, "failed");
+        assert!(failed.error.is_some());
+
+        let unexpected = leg(OrderResponseStatus::Resting {
+            oid: 7,
+            cloid: None,
+        });
+        assert_eq!(unexpected.status, "failed");
+        assert!(unexpected.error.unwrap().raw().contains("resting"));
     }
 
     #[test]

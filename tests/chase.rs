@@ -43,3 +43,31 @@ fn chase_help_mentions_offset_and_timeout() {
         .stdout(predicate::str::contains("Examples:"))
         .stdout(predicate::str::contains("--dry-run"));
 }
+
+#[test]
+fn chase_refuses_an_interval_or_timeout_that_is_not_a_whole_positive_duration() {
+    for (flag, value) in [
+        ("--interval", "100ms"),
+        ("--interval", "0s"),
+        ("--timeout", "0s"),
+    ] {
+        IsolatedHome::new()
+            .command()
+            .args([
+                "--dry-run",
+                "--testnet",
+                "orders",
+                "chase",
+                "--coin",
+                "ETH",
+                "--side",
+                "buy",
+                "--size",
+                "0.5",
+                flag,
+                value,
+            ])
+            .assert()
+            .code(2);
+    }
+}

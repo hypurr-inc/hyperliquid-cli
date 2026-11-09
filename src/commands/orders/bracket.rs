@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
+use hypersdk::Decimal;
 use hypersdk::hypercore::{Cloid, HttpClient};
-use hypersdk::{Address, Decimal};
 use serde_json::json;
 
 use crate::assets::{AssetResolver, Market, PerpAsset};
@@ -9,20 +9,19 @@ use crate::errors::{CliError, NextCommand, partial_results_fields};
 use crate::output::TableData;
 use crate::settings::Settings;
 
+use super::args::{BracketArgs, CreateArgs, CreateOrderType, TifArg};
+use super::cloid::generated_cloid;
+use super::context::OrderSubmissionContext;
 use super::exchange::{Placement, rejection_error};
-use super::live_order::{
-    DEFAULT_TRACKING_TIMEOUT, LiveOrder, elapsed_ms, generated_cloid, send_tracked_action,
-};
+use super::live_order::{CloidAsset, LiveOrder, elapsed_ms, send_tracked_action};
 use super::planning::{
-    CreateOrderSubmission, create_dry_run_preview, market_dex, prepare_order_in,
-    resolve_perp_market, resolve_trigger_prices, tpsl_dry_run_plan, validate_tpsl_price_ordering,
+    create_dry_run_preview, market_dex, prepare_order_in, resolve_perp_market,
+    resolve_trigger_prices, tpsl_dry_run_plan, validate_tpsl_price_ordering,
 };
+use super::prepared::CreateOrderSubmission;
 use super::rendering::{CHECK_LIVE_COMMAND, on_behalf_of_flag, partial_results_error};
 use super::validation::{BuilderRequest, MarketSizing, OrderSpec, TpslSpec};
-use super::{
-    BracketArgs, CreateArgs, CreateOrderType, OrderExecutionContext, TifArg, place_prepared_single,
-    protect_position,
-};
+use super::{place_prepared_single, protect_position};
 
 const ENTRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -221,49 +220,38 @@ struct Followup {
 /// A bracket in flight: what each step needs to arm protection or to report
 /// how it ended.
 struct Bracket<'a> {
-    context: OrderExecutionContext<'a>,
+    context: OrderSubmissionContext<'a>,
     args: &'a BracketArgs,
     perp: PerpAsset,
-    vault_address: Option<Address>,
     started: Instant,
 }
 
 pub async fn bracket(
-    context: OrderExecutionContext<'_>,
+    context: OrderSubmissionContext<'_>,
+    resolver: &AssetResolver,
     args: &BracketArgs,
-    vault_address: Option<Address>,
 ) -> Result<(), anyhow::Error> {
     let entry = BracketEntry::from_args(args)?;
-    if context.submission.require_mainnet_confirmation {
-        return Err(CliError::Configuration(
-            "Can't place a bracket on mainnet without --yes. Rerun with --yes once you approve it:\n    \
-             hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take-profit +10% --stop-loss -5% --yes"
-                .to_string(),
-        )
-        .into());
-    }
+    context.refuse_unattended_without_yes(
+        "place a bracket",
+        "hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take-profit +10% --stop-loss -5%",
+    )?;
 
     let started = Instant::now();
-    let client = context.submission.api.sdk();
-    let cloid = generated_cloid(1)?;
+    let client = context.api.sdk();
+    let cloid = generated_cloid(1);
     let spec = entry.spec(args, Some(cloid))?;
     let perp = resolve_perp_market(
         client,
-        context.resolver,
+        resolver,
         "orders bracket",
         args.dex.as_deref(),
         &args.coin,
     )
     .await?;
     let market = Market::Perp(perp.clone());
-    let prepared =
-        prepare_order_in(client, &market, context.submission.inv.settings(), &spec).await?;
-    let asset = u32::try_from(prepared.request.asset).map_err(|_| {
-        CliError::Internal(anyhow::anyhow!(
-            "bracket entry asset index {} does not fit cancel-by-cloid",
-            prepared.request.asset
-        ))
-    })?;
+    let prepared = prepare_order_in(client, &market, context.inv.settings(), &spec).await?;
+    let asset = CloidAsset::new(prepared.request.asset)?;
     let requested_size = prepared.size();
 
     // Fail fast before the entry executes: the protection legs must be
@@ -281,13 +269,9 @@ pub async fn bracket(
         context,
         args,
         perp,
-        vault_address,
         started,
     };
-    let statuses = place_prepared_single(context, &prepared, vault_address).await?;
-    let entry_status = statuses.into_iter().next().ok_or_else(|| {
-        CliError::Internal(anyhow::anyhow!("bracket entry returned no order status"))
-    })?;
+    let entry_status = place_prepared_single(context, &prepared).await?;
 
     let mut tracking = match Placement::classify(entry_status) {
         Placement::Filled { total_sz, oid, .. } => {
@@ -314,34 +298,26 @@ pub async fn bracket(
     };
 
     // Poll the entry order itself (not position presence) so pre-existing
-    // exposure cannot falsely complete the bracket.
-    let timeout = if args.entry_timeout.is_zero() {
-        DEFAULT_TRACKING_TIMEOUT
-    } else {
-        args.entry_timeout
-    };
-    let user = context.submission.account(vault_address);
+    // exposure cannot falsely complete the bracket. The timeout is how long to
+    // wait for the fill, so it counts from the moment the entry is resting.
+    let user = context.account();
     let dex = market_dex(&market);
-    while started.elapsed() < timeout {
+    let deadline = Instant::now() + args.entry_timeout;
+    while Instant::now() < deadline {
         tokio::time::sleep(ENTRY_POLL_INTERVAL).await;
-        let open_size = match tracking.open_size_now(client, user, dex.clone()).await {
-            Ok(open_size) => open_size,
-            Err(err) => {
-                return Err(run.report_unprotected(
-                    &EntryRef::of(&tracking),
-                    Exposure::Resting,
-                    "Couldn't check it",
-                    &err,
-                ));
-            }
-        };
-        if open_size <= Decimal::ZERO {
-            let filled = requested_size - tracking.open_size;
+        if let Err(err) = tracking.refresh(client, user, dex.clone()).await {
+            return Err(run.report_unprotected(
+                &EntryRef::of(&tracking),
+                Exposure::Resting,
+                "Couldn't check it",
+                &err,
+            ));
+        }
+        if tracking.is_gone() {
             return run
-                .arm_protection(&EntryRef::of(&tracking), filled, "armed")
+                .arm_protection(&EntryRef::of(&tracking), requested_size, "armed")
                 .await;
         }
-        tracking.open_size = open_size;
     }
 
     // Entry timed out: cancel the remainder so it cannot fill unprotected,
@@ -396,10 +372,9 @@ impl Bracket<'_> {
             ));
         }
         if let Err(err) = protect_position(
-            self.context.submission,
+            self.context,
             &self.perp,
             &TpslSpec::protecting(self.args, Some(filled)),
-            self.vault_address,
         )
         .await
         {
@@ -411,7 +386,6 @@ impl Bracket<'_> {
             ));
         }
         self.context
-            .submission
             .inv
             .print(&self.result(status, filled.to_string()));
         Ok(())
@@ -421,9 +395,8 @@ impl Bracket<'_> {
     /// unprotected later.
     async fn cancel_entry(&self, tracking: &LiveOrder) -> Result<(), CliError> {
         send_tracked_action(
-            self.context.submission,
+            self.context,
             tracking.cancel_prefer_oid(),
-            self.vault_address,
             "bracket entry cancel failed",
         )
         .await?;
@@ -497,7 +470,7 @@ impl Bracket<'_> {
                 .map(|followup| followup.commands.clone())
                 .unwrap_or_default(),
         });
-        self.context.submission.inv.print(&result);
+        self.context.inv.print(&result);
         match followup {
             Some(followup) => {
                 partial_results_error(&headline, followup.lead, &followup.commands).into()
@@ -573,8 +546,8 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
+    use crate::commands::orders::args::{OrderSide, TriggerPriceSpec};
     use crate::commands::orders::validation::ClosingSize;
-    use crate::commands::orders::{OrderSide, TriggerPriceSpec};
 
     fn sample_args() -> BracketArgs {
         BracketArgs {

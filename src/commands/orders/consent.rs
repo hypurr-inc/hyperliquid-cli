@@ -1,11 +1,13 @@
 use std::io::{self, Write};
 
 use chrono::Utc;
-use hypersdk::{Address, Decimal};
+use hypersdk::Address;
 
-use super::{
-    OrderBuilderFee, OrderSubmissionContext, PreparedOrder, PreparedOrderBatch, PreparedTpslBatch,
-    TpslLegKind, TwapCreatePlan, planning::ScheduleCancelPlan,
+use super::context::OrderSubmissionContext;
+use super::exchange::OrderBuilderFee;
+use super::planning::{ScheduleCancelPlan, TwapCreatePlan};
+use super::prepared::{
+    PreparedOrder, PreparedOrderBatch, PreparedTpslBatch, QuoteAmount, TpslLegKind,
 };
 use crate::errors::CliError;
 use crate::mode::Mode;
@@ -13,6 +15,39 @@ use crate::network::Network;
 use crate::output;
 use crate::prompt;
 use crate::signing::SelectedSigner;
+
+/// What the user is asked to approve. It names the error a decline fails with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConsentKind {
+    Order,
+    Tpsl,
+    ScaleOrders,
+    BatchOrders,
+    Twap,
+    ScheduleCancel,
+    TrailingStop,
+    CancelAll,
+}
+
+impl ConsentKind {
+    pub(super) fn declined(self) -> CliError {
+        let (label, cancelled) = match self {
+            Self::Order => ("order", "order placement"),
+            Self::Tpsl => ("TP/SL", "order placement"),
+            Self::ScaleOrders => ("scale order", "order placement"),
+            Self::BatchOrders => ("batch order", "order placement"),
+            Self::Twap => ("TWAP", "TWAP creation"),
+            Self::ScheduleCancel => ("schedule-cancel", "action"),
+            Self::TrailingStop => ("trailing stop", "trailing stop placement"),
+            Self::CancelAll => {
+                return CliError::Configuration("cancel-all aborted".to_string());
+            }
+        };
+        CliError::Configuration(format!(
+            "Mainnet {label} confirmation required; {cancelled} cancelled. Rerun with --yes for deliberate automation."
+        ))
+    }
+}
 
 pub(super) fn confirm_cancel_all(
     coin: Option<&str>,
@@ -50,7 +85,8 @@ pub(super) fn confirm_mainnet_order(
 ) -> Result<bool, CliError> {
     let amount = prepared
         .amount
-        .map(|amount| format!(", amount {amount} {}", prepared.amount_unit))
+        .as_ref()
+        .map(|QuoteAmount { value, unit }| format!(", amount {value} {unit}"))
         .unwrap_or_default();
     let trigger = prepared
         .trigger_price
@@ -166,14 +202,13 @@ pub(super) struct ConsentTarget<'a> {
 impl<'a> ConsentTarget<'a> {
     pub(super) fn new(
         submission: OrderSubmissionContext<'a>,
-        vault_address: Option<Address>,
         builder: Option<&'a OrderBuilderFee>,
     ) -> Self {
         Self {
             mode: submission.inv.mode(),
             network: Network::from(submission.api.chain()),
             signer: submission.signer,
-            vault_address,
+            vault_address: submission.vault_address,
             builder,
         }
     }
@@ -194,7 +229,7 @@ impl<'a> ConsentTarget<'a> {
             lines.push(format!(
                 "Builder: {} (max fee {}%)",
                 builder.b,
-                Decimal::new(i64::try_from(builder.f).unwrap_or(i64::MAX), 3).normalize()
+                builder.percent()
             ));
         }
         lines
@@ -216,4 +251,52 @@ pub(super) fn ask_confirmation(
         writeln!(stderr, "{line}").map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
     }
     prompt::confirm_warning(target.mode, question, "--yes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_declined_approval_names_what_was_cancelled() {
+        for (kind, message) in [
+            (
+                ConsentKind::Order,
+                "Mainnet order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::Tpsl,
+                "Mainnet TP/SL confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::ScaleOrders,
+                "Mainnet scale order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::BatchOrders,
+                "Mainnet batch order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::Twap,
+                "Mainnet TWAP confirmation required; TWAP creation cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::ScheduleCancel,
+                "Mainnet schedule-cancel confirmation required; action cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::TrailingStop,
+                "Mainnet trailing stop confirmation required; trailing stop placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (ConsentKind::CancelAll, "cancel-all aborted"),
+        ] {
+            let err = kind.declined();
+            assert_eq!(err.exit_code(), 2, "{kind:?}");
+            assert_eq!(
+                err.to_string(),
+                format!("Configuration error: {message}"),
+                "{kind:?}"
+            );
+        }
+    }
 }

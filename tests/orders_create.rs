@@ -2716,3 +2716,137 @@ async fn a_batch_rejected_for_rate_limits_on_every_leg_exits_11() {
         .assert()
         .code(11);
 }
+
+fn create_btc_limit(env: &IsolatedHome, server: &MockServer) -> assert_cmd::Command {
+    let mut command = env.command();
+    command
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "--format",
+            "json",
+            "orders",
+            "create",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--price",
+            "50000",
+            "--size",
+            "0.001",
+            "--testnet",
+        ]);
+    command
+}
+
+#[tokio::test]
+async fn a_single_order_answered_with_no_status_is_an_error_not_an_empty_table() {
+    let env = IsolatedHome::new();
+    let server = mock_order_server_with_statuses("cross", serde_json::json!([])).await;
+
+    let assert = create_btc_limit(&env, &server).assert().code(1);
+
+    let document: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let error = document["error"].as_str().unwrap();
+    assert!(
+        error.contains("The exchange returned 0 statuses for 1 order"),
+        "{error}"
+    );
+    assert!(error.contains("hyperliquid orders open"), "{error}");
+    assert_eq!(document["category"], "internal");
+}
+
+#[tokio::test]
+async fn a_single_order_answered_with_two_statuses_is_an_error() {
+    let env = IsolatedHome::new();
+    let server = mock_order_server_with_statuses(
+        "cross",
+        serde_json::json!([
+            { "resting": { "oid": 1, "cloid": null } },
+            { "resting": { "oid": 2, "cloid": null } },
+        ]),
+    )
+    .await;
+
+    create_btc_limit(&env, &server)
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "The exchange returned 2 statuses for 1 order",
+        ));
+}
+
+#[tokio::test]
+async fn a_batch_answered_with_too_few_statuses_names_the_mismatch() {
+    let env = IsolatedHome::new();
+    let server = mock_batch_order_server_with_statuses(vec![
+        serde_json::json!({"resting": {"oid": 331, "cloid": null}}),
+    ])
+    .await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "--format",
+            "json",
+            "orders",
+            "batch-create",
+            "--orders-file",
+            "tests/fixtures/orders_batch_create.json",
+            "--testnet",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "The exchange returned 1 status for 2 orders",
+        ));
+}
+
+#[tokio::test]
+async fn a_normal_tpsl_order_sends_its_builder_fee_with_the_whole_batch() {
+    let env = IsolatedHome::new();
+    let server = mock_grouped_order_server().await;
+    let builder = "0x8c967E73E7B15087c42A10D344cFf4c96D877f1D";
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "--format",
+            "json",
+            "orders",
+            "create",
+            "--coin",
+            "ETH",
+            "--side",
+            "buy",
+            "--price",
+            "2000",
+            "--size",
+            "0.1",
+            "--take-profit",
+            "2200",
+            "--stop-loss",
+            "1900",
+            "--grouping",
+            "normal-tpsl",
+            "--builder",
+            builder,
+            "--builder-fee-rate",
+            "0.01%",
+            "--testnet",
+        ])
+        .assert()
+        .success();
+
+    let body = exchange_order_body(&server).await;
+    assert_eq!(body["action"]["grouping"], "normalTpsl");
+    assert_eq!(body["action"]["orders"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        body["action"]["builder"]["b"],
+        "0x8c967e73e7b15087c42a10d344cff4c96d877f1d"
+    );
+    assert_eq!(body["action"]["builder"]["f"], 10);
+}
