@@ -90,7 +90,7 @@ pub(crate) fn address(raw: &str, role: AddressRole<'_>) -> Result<Address, CliEr
             CliError::Configuration(match err {
                 HexAddressError::Zero => format!("{scope}address must not be the zero address"),
                 HexAddressError::Format => {
-                    format!("{scope}address must be a 0x-prefixed 40-byte hex string")
+                    format!("{scope}address must be a 0x-prefixed string of 40 hex digits")
                 }
             })
         }),
@@ -156,7 +156,7 @@ mod tests {
         let err = address("INVALID", AddressRole::Explicit(None)).unwrap_err();
         assert!(
             err.to_string()
-                .ends_with("address must be a 0x-prefixed 40-byte hex string")
+                .ends_with("address must be a 0x-prefixed string of 40 hex digits")
         );
         assert!(address(ADDRESS, AddressRole::Explicit(None)).is_ok());
     }

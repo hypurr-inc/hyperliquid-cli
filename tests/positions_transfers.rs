@@ -999,7 +999,7 @@ fn transfer_invalid_address_exits_2() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains(
-            "address must be a 0x-prefixed 40-byte hex string",
+            "address must be a 0x-prefixed string of 40 hex digits",
         ));
 }
 

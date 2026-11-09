@@ -291,7 +291,7 @@ hyperliquid --format json search ETH --type perp --select cli_input
 hyperliquid --format json --dry-run buy --coin ETH --size 0.001
 ```
 
-Do not invent a second output language. Use `--select` / `--results-only` to project fields, then pass the chosen `coin` into `buy --dry-run`.
+Do not invent a second output language. Use `--select` / `--results-only` to project fields, then pass the chosen `cli_input` as `--coin` to `buy --dry-run`.
 
 ### Retry safety
 

@@ -620,7 +620,7 @@ async fn vault_search_rejects_malformed_user_before_network() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "address must be a 0x-prefixed 40-byte hex string",
+            "address must be a 0x-prefixed string of 40 hex digits",
         ));
 }
 
