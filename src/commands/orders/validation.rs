@@ -435,11 +435,14 @@ fn attached_tpsl(args: &CreateArgs) -> Result<Option<AttachedTpsl>, CliError> {
     }
 }
 
-/// The one owner of what a non-perpetual market cannot do. Perpetual markets
-/// accept every order the flags can describe.
+/// The one owner of what a market cannot do: a non-perpetual market refuses
+/// the perpetual-only flags, and a perpetual market only its own margin rule.
 pub(super) fn validate_order_for_market(spec: &OrderSpec, market: &Market) -> Result<(), CliError> {
-    if matches!(market, Market::Perp(_)) {
-        return Ok(());
+    if let Market::Perp(perp) = market {
+        return match spec.margin_mode {
+            Some(margin_mode) => validate_margin_mode_for_market(perp, margin_mode),
+            None => Ok(()),
+        };
     }
     if let Some(margin_mode) = spec.margin_mode {
         return Err(CliError::Configuration(format!(
@@ -461,6 +464,23 @@ pub(super) fn validate_order_for_market(spec: &OrderSpec, market: &Market) -> Re
         return Err(CliError::Unsupported(
             "orders create TP/SL grouping currently supports perpetual markets only".to_string(),
         ));
+    }
+    Ok(())
+}
+
+/// Refuse `--margin-mode cross` on a market that trades isolated only. The
+/// market's rule is public metadata, so this needs no account lookup and runs
+/// before any.
+pub(super) fn validate_margin_mode_for_market(
+    perp: &PerpAsset,
+    margin_mode: MarginModeArg,
+) -> Result<(), CliError> {
+    if margin_mode == MarginModeArg::Cross && !perp.margin_rule.allows_cross() {
+        return Err(CliError::Unsupported(format!(
+            "{} is an isolated-only market ({}), so --margin-mode cross is not available; use --margin-mode isolated or omit the flag",
+            perp.display_name(),
+            perp.margin_rule.as_str()
+        )));
     }
     Ok(())
 }

@@ -2002,7 +2002,8 @@
       "group": "trade",
       "input_kinds": {
         "coin": "market_symbol",
-        "isolated": "boolean"
+        "isolated": "boolean",
+        "on_behalf_of": "acting_account_selector"
       },
       "mutability": "live_mutating",
       "output_contract": "command_result_or_dry_run_envelope",
@@ -2025,7 +2026,8 @@
       "group": "trade",
       "input_kinds": {
         "amount": "amount",
-        "coin": "market_symbol"
+        "coin": "market_symbol",
+        "on_behalf_of": "acting_account_selector"
       },
       "mutability": "live_mutating",
       "output_contract": "command_result_or_dry_run_envelope",

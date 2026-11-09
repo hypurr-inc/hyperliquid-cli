@@ -6,7 +6,7 @@ use std::io::{self, Write};
 
 use chrono::Utc;
 use hypersdk::hypercore::types::{
-    Action, BatchOrder, LeverageType, OrderGrouping, OrderResponseStatus, ScheduleCancel,
+    Action, BatchOrder, OrderGrouping, OrderResponseStatus, ScheduleCancel,
 };
 
 use crate::assets::{AssetResolver, PerpAsset};
@@ -52,7 +52,7 @@ use existing::{
 };
 use hip3::{Hip3MarginPlan, execute_hip3_margin_transfers, plan_hip3_margin_transfers};
 use planning::{
-    ScheduleCancelPlan, ScheduledCancel, TwapCancelPlan, TwapCreatePlan, fetch_position,
+    ScheduleCancelPlan, ScheduledCancel, TwapCancelPlan, TwapCreatePlan, fetch_current_margin_mode,
     prepare_position_tpsl_batch,
 };
 use prepared::{CreateOrderSubmission, PreparedOrder, PreparedOrderBatch, PreparedTpslBatch};
@@ -63,9 +63,9 @@ use rendering::{
     OrderConfirmation, OrderConfirmationOutput, PartialBatchOutput, ScheduleCancelConfirmation,
     ScheduleCancelOutput, TpslOrderConfirmation, TpslOrderConfirmationOutput,
     TwapCancelConfirmation, TwapCancelOutput, TwapCreateConfirmation, TwapCreateOutput,
-    pair_statuses, single_status,
+    pair_statuses, single_status, update_leverage_command,
 };
-use validation::TpslSpec;
+use validation::{TpslSpec, validate_margin_mode_for_market};
 
 /// What a submission must clear before anything is sent, in the one order that
 /// is safe: the margin mode holds, the HIP-3 dexes are funded, the user
@@ -73,7 +73,7 @@ use validation::TpslSpec;
 /// [`clear_to_send`], so none can skip a step by spelling the sequence itself.
 struct Gate<'a> {
     kind: ConsentKind,
-    /// A perp position that must already use this margin mode.
+    /// A perp whose margin mode for the account must match this one.
     margin: Option<(&'a PerpAsset, MarginModeArg)>,
     /// The orders whose HIP-3 dex margin the helper transfer tops up. Only a
     /// single order (`orders create`, a bracket entry) funds; every other
@@ -319,47 +319,33 @@ async fn protect_position(
     }
 }
 
-/// Fail before placing an order when `--margin-mode` does not match the
-/// account's open position on `perp`.
+/// Fail before placing an order when `--margin-mode` does not match the margin
+/// mode the account is set to for `perp`. The account's setting comes from
+/// `activeAssetData`, so it is known before a position exists.
 async fn verify_margin_mode(
     context: OrderSubmissionContext<'_>,
     perp: &PerpAsset,
     margin_mode: MarginModeArg,
 ) -> Result<(), anyhow::Error> {
-    let coin = perp.name.as_str();
-    let Some(position) = fetch_position(context.api.sdk(), context.account(), perp).await? else {
-        if matches!(margin_mode, MarginModeArg::Cross) {
-            return Ok(());
-        }
-        return Err(CliError::Configuration(format!(
-            "orders with --margin-mode {margin_mode} require an open {coin} perp position so the mode can be verified; establish it first with `{}`",
-            update_leverage_command(coin, margin_mode)
-        ))
-        .into());
-    };
+    validate_margin_mode_for_market(perp, margin_mode)?;
+    if !perp.margin_rule.allows_cross() {
+        // An isolated-only market has no other mode to be in, so the check
+        // above already settled `isolated`.
+        return Ok(());
+    }
 
-    let actual_margin_mode = match position.position.leverage.leverage_type {
-        LeverageType::Cross => MarginModeArg::Cross,
-        LeverageType::Isolated => MarginModeArg::Isolated,
-    };
-    if actual_margin_mode != margin_mode {
+    let coin = perp.display_name();
+    let current = fetch_current_margin_mode(context.api, context.account(), perp).await?;
+    if current != margin_mode {
+        let acting_as = context.vault_address.map(|vault| vault.to_string());
         return Err(CliError::Configuration(format!(
-            "orders requested --margin-mode {margin_mode} but the current {coin} perp position is {actual_margin_mode}; use `{}` first",
-            update_leverage_command(coin, margin_mode)
+            "orders requested --margin-mode {margin_mode} but the current {coin} margin mode is {current}; use `{}` first",
+            update_leverage_command(&coin, margin_mode, acting_as.as_deref())
         ))
         .into());
     }
 
     Ok(())
-}
-
-fn update_leverage_command(coin: &str, margin_mode: MarginModeArg) -> String {
-    let isolated = if margin_mode == MarginModeArg::Isolated {
-        " --isolated"
-    } else {
-        ""
-    };
-    format!("positions update-leverage --coin {coin} --leverage <N>{isolated}")
 }
 
 /// Report a batch where some legs failed. Prints the per-leg result, then

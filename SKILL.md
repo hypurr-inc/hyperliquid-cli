@@ -324,6 +324,8 @@ Check the dry-run response fields:
 - `margin_mode`
 - `would_execute`
 
+`margin_mode` is the mode you requested; without `--margin-mode` it is the account's current mode for that market when a signer or `--on-behalf-of` is known, else the market default (`isolated` on isolated-only markets). Orders never set the mode: set it first with `positions update-leverage`.
+
 ### Cancel and cleanup
 
 ```bash

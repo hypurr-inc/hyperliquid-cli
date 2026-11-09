@@ -160,6 +160,22 @@ async fn mock_order_server_with_statuses(
         .await;
 
     Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
+            serde_json::json!({"type": "activeAssetData"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "user": "0x0000000000000000000000000000000000000001",
+            "coin": "BTC",
+            "leverage": {"type": leverage_type, "value": 5},
+            "maxTradeSzs": ["1", "1"],
+            "availableToTrade": ["1", "1"],
+            "markPx": "50000"
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
         .and(path("/exchange"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "status": "ok",
@@ -413,14 +429,14 @@ async fn exchange_order_body(server: &MockServer) -> Value {
     serde_json::from_slice(&exchange_request.body).unwrap()
 }
 
-async fn clearinghouse_state_request_body(server: &MockServer) -> Value {
+async fn info_request_body(server: &MockServer, request_type: &str) -> Value {
     let requests = server.received_requests().await.unwrap();
     requests
         .iter()
         .filter(|request| request.url.path() == "/info")
         .filter_map(|request| serde_json::from_slice::<Value>(&request.body).ok())
-        .find(|body| body["type"] == "clearinghouseState")
-        .expect("expected clearinghouseState request")
+        .find(|body| body["type"] == request_type)
+        .unwrap_or_else(|| panic!("expected {request_type} request"))
 }
 
 #[test]
@@ -2067,9 +2083,7 @@ async fn orders_create_rejects_margin_mode_mismatch_before_submission() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains("requested --margin-mode isolated"))
-        .stderr(predicate::str::contains(
-            "current BTC perp position is cross",
-        ))
+        .stderr(predicate::str::contains("current BTC margin mode is cross"))
         .stderr(predicate::str::contains(
             "positions update-leverage --coin BTC --leverage <N> --isolated",
         ));
@@ -2136,7 +2150,7 @@ async fn orders_create_validates_margin_mode_against_on_behalf_of_account() {
         .assert()
         .success();
 
-    let body = clearinghouse_state_request_body(&server).await;
+    let body = info_request_body(&server, "activeAssetData").await;
     assert_eq!(body["user"], subaccount);
 
     let order = exchange_order_body(&server).await;

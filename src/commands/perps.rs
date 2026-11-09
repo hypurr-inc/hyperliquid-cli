@@ -4,8 +4,8 @@ use hypersdk::hypercore::PerpMarket;
 use serde::Serialize;
 
 use crate::assets::{
-    AssetQuery, eq_asset_name, find_perp_dex, load_hip3_market, normalize_dex, parse_asset_query,
-    qualify_dex_asset,
+    AssetQuery, MarginRule, eq_asset_name, find_perp_dex, load_hip3_market, normalize_dex,
+    parse_asset_query, qualify_dex_asset,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
@@ -38,6 +38,7 @@ pub struct PerpMarketRow {
     pub sz_decimals: i64,
     pub collateral: String,
     pub isolated_margin: bool,
+    pub margin_mode: &'static str,
     pub tick_size_at_price_1: Option<String>,
 }
 
@@ -47,6 +48,7 @@ impl From<PerpMarket> for PerpMarketRow {
             .tick_for(Decimal::from(1))
             .map(|tick| tick.to_string());
         Self {
+            margin_mode: MarginRule::of_market(&market).as_str(),
             name: market.name,
             index: market.index,
             max_leverage: market.max_leverage,
@@ -68,6 +70,7 @@ impl Row for PerpMarketRow {
         "Sz Decimals",
         "Collateral",
         "Isolated",
+        "Margin Mode",
         "Tick Size @ Price 1",
     ];
 
@@ -79,6 +82,7 @@ impl Row for PerpMarketRow {
             self.sz_decimals.to_string(),
             self.collateral.clone(),
             self.isolated_margin.to_string(),
+            self.margin_mode.to_string(),
             or_missing(self.tick_size_at_price_1.as_deref()),
         ]
     }
@@ -154,7 +158,7 @@ impl CliCommand for PerpsList {
         &["perps", "list"],
         "market",
         "List all perpetual markets",
-        "List perpetual markets.",
+        "List perpetual markets. margin_mode is cross_or_isolated, isolated_only (legacy onlyIsolated flag), no_cross (isolated only, margin removable) or strict_isolated (isolated only, margin not removable).",
     )
     .cli_aliases(&["ls"])
     .args(&[arg("dex")
@@ -176,7 +180,7 @@ impl CliCommand for PerpsGet {
         &["perps", "get"],
         "market",
         "Get details for a specific perpetual market",
-        "Get details for a perpetual market.",
+        "Get details for a perpetual market. margin_mode is cross_or_isolated, isolated_only (legacy onlyIsolated flag), no_cross (isolated only, margin removable) or strict_isolated (isolated only, margin not removable).",
     )
     .args(&[
         arg("coin")

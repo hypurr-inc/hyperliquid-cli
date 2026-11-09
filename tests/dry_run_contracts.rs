@@ -410,7 +410,8 @@ async fn position_action_previews_bind_validated_intent() {
                 "network": "testnet",
                 "leverage": 5,
                 "margin_mode": "isolated",
-                "is_cross": false
+                "is_cross": false,
+                "on_behalf_of": null
             },
             "signer": signer.clone(),
             "acting_as": signer.clone(),
@@ -447,7 +448,9 @@ async fn position_action_previews_bind_validated_intent() {
                 "network": "testnet",
                 "amount": "1000",
                 "ntli": 1_000_000_000_u64,
-                "margin_mode": "isolated"
+                "direction": "add",
+                "margin_mode": "isolated",
+                "on_behalf_of": null
             },
             "signer": signer,
             "acting_as": signer,

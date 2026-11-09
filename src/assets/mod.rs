@@ -7,7 +7,7 @@ mod resolver;
 
 #[cfg(test)]
 pub(crate) use market::test_support;
-pub use market::{Market, OutcomeAsset, PerpAsset, SpotAsset};
+pub use market::{MarginRule, Market, OutcomeAsset, PerpAsset, SpotAsset};
 pub use metadata::{
     AssetMetadata, MetadataCache, SpotListing, canonical_dex, load_spot_markets, require_spot_token,
 };
