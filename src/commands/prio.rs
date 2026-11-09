@@ -30,8 +30,8 @@ pub struct BidArgs {
     #[arg(long)]
     pub ip: String,
 
-    /// Slot index (0-4), where 0 is highest priority.
-    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u8).range(0..=4))]
+    /// Slot index (0-2), where 0 is highest priority. The exchange runs three independent auctions.
+    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u8).range(0..=2))]
     pub slot: u8,
 }
 

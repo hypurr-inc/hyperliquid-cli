@@ -6,7 +6,7 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::HttpClient;
 use hypersdk::hypercore::Subscription;
 use hypersdk::hypercore::api::UpdateLeverage;
-use hypersdk::hypercore::types::api::UpdateIsolatedMargin;
+use hypersdk::hypercore::types::api::{TopUpIsolatedOnlyMargin, UpdateIsolatedMargin};
 use hypersdk::hypercore::types::{Action, AssetPosition, LeverageType, PositionData};
 use serde::{Serialize, Serializer};
 
@@ -55,6 +55,22 @@ pub struct UpdateMarginArgs {
     /// Isolated margin to add (positive) or remove (negative), in USDC
     #[arg(long, allow_hyphen_values = true)]
     pub amount: Decimal,
+
+    /// Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+}
+
+/// Arguments for `positions top-up-margin`.
+#[derive(Args, Debug, Clone)]
+pub struct TopUpMarginArgs {
+    /// Perpetual coin (for example: BTC, ETH, SOL)
+    #[arg(long)]
+    pub coin: String,
+
+    /// Target leverage: isolated margin is added until the position reaches it
+    #[arg(long, allow_hyphen_values = true)]
+    pub leverage: Decimal,
 
     /// Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id
     #[arg(long)]
@@ -211,6 +227,9 @@ struct PositionActionConfirmation {
     status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     leverage: Option<u32>,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_leverage: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     margin_mode: Option<String>,
     #[serde(with = "rust_decimal::serde::str_option")]
@@ -235,6 +254,7 @@ impl Row for PositionActionConfirmation {
             self.status.clone(),
             self.leverage
                 .map(|leverage| leverage.to_string())
+                .or_else(|| self.target_leverage.map(|leverage| leverage.to_string()))
                 .unwrap_or_default(),
             self.margin_mode.clone().unwrap_or_default(),
             self.amount
@@ -330,6 +350,30 @@ async fn open_position(
         }))
 }
 
+/// Refuse a margin change on a position that has no isolated margin to change.
+/// The exchange would reject it with a terse error.
+async fn ensure_isolated_position(
+    inv: &Invocation,
+    account: Address,
+    perp: &PerpAsset,
+    on_behalf_of: Option<&str>,
+) -> Result<(), CliError> {
+    let coin = perp.display_name();
+    match open_position(inv.remote()?.api().sdk(), account, perp).await? {
+        None => Err(CliError::Unsupported(format!(
+            "{account} has no open {coin} position, and isolated margin belongs to an open isolated position; open one first (set isolated mode with `{}`)",
+            isolate_command(&coin, "<N>", on_behalf_of)
+        ))),
+        Some(position) if position.position.leverage.leverage_type != LeverageType::Isolated => {
+            Err(CliError::Unsupported(format!(
+                "the {coin} position of {account} uses cross margin, which has no isolated margin to change; switch it first with `{}`",
+                isolate_command(&coin, position.position.leverage.value, on_behalf_of)
+            )))
+        }
+        Some(_) => Ok(()),
+    }
+}
+
 pub const GROUP: GroupSpec =
     GroupSpec::new(&["positions"], "Manage positions").aliases(&["position"]);
 
@@ -374,7 +418,7 @@ impl CliCommand for PositionsList {
         if args.watch.watch {
             watch_positions(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
-            let user = inv.resolve_signer()?.query_address();
+            let user = inv.resolve_signer_account().await?;
             inv.print(&list_snapshot(client, user, dex.as_deref()).await?);
             Ok(())
         }
@@ -457,6 +501,7 @@ impl CliCommand for PositionsUpdateLeverage {
             action: "update-leverage".to_string(),
             status: "updated".to_string(),
             leverage: Some(args.leverage),
+            target_leverage: None,
             margin_mode: Some(margin_mode.to_string()),
             amount: None,
         }]));
@@ -519,28 +564,7 @@ impl CliCommand for PositionsUpdateMargin {
         }
         let resolved = inv.resolve_signer()?;
         let account = vault_address.unwrap_or_else(|| resolved.query_address());
-        let on_behalf_of = args.on_behalf_of.as_deref();
-        // Isolated margin belongs to an open isolated position; the exchange
-        // would reject anything else with a terse error.
-        match open_position(inv.remote()?.api().sdk(), account, &perp).await? {
-            None => {
-                return Err(CliError::Unsupported(format!(
-                    "{account} has no open {coin} position, and isolated margin belongs to an open isolated position; open one first (set isolated mode with `{}`)",
-                    isolate_command(&coin, "<N>", on_behalf_of)
-                ))
-                .into());
-            }
-            Some(position)
-                if position.position.leverage.leverage_type != LeverageType::Isolated =>
-            {
-                return Err(CliError::Unsupported(format!(
-                    "the {coin} position of {account} uses cross margin, which has no isolated margin to change; switch it first with `{}`",
-                    isolate_command(&coin, position.position.leverage.value, on_behalf_of)
-                ))
-                .into());
-            }
-            Some(_) => {}
-        }
+        ensure_isolated_position(inv, account, &perp, args.on_behalf_of.as_deref()).await?;
         actions::send_l1_action_raw(
             inv.remote()?.api(),
             &resolved,
@@ -560,8 +584,87 @@ impl CliCommand for PositionsUpdateMargin {
             action: "update-margin".to_string(),
             status: "updated".to_string(),
             leverage: None,
+            target_leverage: None,
             margin_mode: None,
             amount: Some(args.amount),
+        }]));
+        Ok(())
+    }
+}
+
+pub struct PositionsTopUpMargin;
+
+impl CliCommand for PositionsTopUpMargin {
+    type Args = TopUpMarginArgs;
+
+    const SPEC: CommandSpec = CommandSpec::signed(
+        &["positions", "top-up-margin"],
+        "trade",
+        "Top up isolated margin to a target leverage",
+        "Add isolated margin to an open isolated position until it reaches a target leverage (topUpIsolatedOnlyMargin), instead of a USDC amount as `positions update-margin` takes.",
+    )
+    .args(&[
+        arg("coin")
+            .kind(InputKind::MarketSymbol)
+            .describe("Perpetual coin.")
+            .resource_id("coin"),
+        arg("leverage")
+            .kind(InputKind::Amount)
+            .describe("Target leverage, a positive number such as 5 or 12.5."),
+        arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.").resource_id("on-behalf-of selector"),
+    ]);
+
+    async fn run(inv: &Invocation, args: &TopUpMarginArgs) -> Result<(), anyhow::Error> {
+        quantity::require_positive(args.leverage, "leverage")?;
+        let leverage = args.leverage.normalize();
+        let resolver = inv.trading_resolver().await?;
+        let perp = resolve_perp_asset(&resolver, inv.remote()?.api().sdk(), &args.coin).await?;
+        let (coin, asset) = (perp.display_name(), perp.index);
+        let vault_address =
+            resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
+        if inv.dry_run() {
+            return print_dry_run_acting_for(
+                inv,
+                "top_up_isolated_margin",
+                serde_json::json!({
+                    "coin": args.coin,
+                    "resolved_coin": coin,
+                    "asset": asset,
+                    "network": inv.remote()?.network().to_string(),
+                    "target_leverage": leverage.to_string(),
+                    "margin_mode": "isolated",
+                    "on_behalf_of": args.on_behalf_of,
+                }),
+                vault_address.map(|address| address.to_string()),
+            );
+        }
+        let resolved = inv.resolve_signer()?;
+        let account = vault_address.unwrap_or_else(|| resolved.query_address());
+        ensure_isolated_position(inv, account, &perp, args.on_behalf_of.as_deref()).await?;
+        let asset_id = u32::try_from(asset).map_err(|_| {
+            CliError::Internal(anyhow::anyhow!("asset id {asset} exceeds the wire range"))
+        })?;
+        actions::send_l1_action_raw(
+            inv.remote()?.api(),
+            &resolved,
+            Action::TopUpIsolatedOnlyMargin(TopUpIsolatedOnlyMargin {
+                asset: asset_id,
+                leverage,
+            }),
+            actions::nonce_now(),
+            vault_address,
+            "exchange action",
+        )
+        .await?;
+
+        inv.print(&Rows::new(vec![PositionActionConfirmation {
+            coin,
+            action: "top-up-margin".to_string(),
+            status: "updated".to_string(),
+            leverage: None,
+            target_leverage: Some(leverage),
+            margin_mode: None,
+            amount: None,
         }]));
         Ok(())
     }
@@ -574,8 +677,7 @@ async fn watch_positions(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let client = remote.api().sdk();
-    let resolved = inv.resolve_signer()?;
-    let user = resolved.query_address();
+    let user = inv.resolve_signer_account().await?;
     let dex = dex.map(str::to_string);
 
     crate::watch::run_snapshot_watch(

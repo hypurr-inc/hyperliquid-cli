@@ -829,7 +829,31 @@
       "dry_run": "optional",
       "group": "account",
       "input_kinds": {
+        "user": "acting_account_selector",
         "yes": "boolean"
+      },
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "raw_payload": "dry_run_only",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid account evm-big-blocks",
+      "command_path": [
+        "account",
+        "evm-big-blocks"
+      ],
+      "confirmation": "none",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "account",
+      "input_kinds": {
+        "disable": "boolean",
+        "enable": "boolean"
       },
       "mutability": "live_mutating",
       "output_contract": "command_result_or_dry_run_envelope",
@@ -1093,7 +1117,9 @@
       "dangerous": true,
       "dry_run": "optional",
       "group": "wallet",
-      "input_kinds": {},
+      "input_kinds": {
+        "unnamed": "boolean"
+      },
       "mutability": "live_mutating",
       "output_contract": "command_result_or_dry_run_envelope",
       "raw_payload": "dry_run_only",
@@ -1677,6 +1703,52 @@
       ]
     },
     {
+      "auth_required": true,
+      "command": "hyperliquid borrowlend repay <TOKEN> --amount <AMOUNT>",
+      "command_path": [
+        "borrowlend",
+        "repay"
+      ],
+      "confirmation": "none",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "market",
+      "input_kinds": {
+        "amount": "amount",
+        "token": "market_symbol"
+      },
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid borrowlend borrow <TOKEN> --amount <AMOUNT>",
+      "command_path": [
+        "borrowlend",
+        "borrow"
+      ],
+      "confirmation": "none",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "market",
+      "input_kinds": {
+        "amount": "amount",
+        "token": "market_symbol"
+      },
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
       "auth_required": false,
       "command": "hyperliquid prio status",
       "command_path": [
@@ -2039,6 +2111,30 @@
     },
     {
       "auth_required": true,
+      "command": "hyperliquid positions top-up-margin",
+      "command_path": [
+        "positions",
+        "top-up-margin"
+      ],
+      "confirmation": "none",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "trade",
+      "input_kinds": {
+        "coin": "market_symbol",
+        "leverage": "amount",
+        "on_behalf_of": "acting_account_selector"
+      },
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
       "command": "hyperliquid orders schedule-cancel",
       "command_path": [
         "orders",
@@ -2135,6 +2231,7 @@
       "group": "transfer",
       "input_kinds": {
         "amount": "amount",
+        "subaccount": "acting_account_selector",
         "yes": "boolean"
       },
       "mutability": "live_mutating",
@@ -2158,6 +2255,7 @@
       "group": "transfer",
       "input_kinds": {
         "amount": "amount",
+        "subaccount": "acting_account_selector",
         "yes": "boolean"
       },
       "mutability": "live_mutating",

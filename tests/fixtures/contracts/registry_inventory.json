@@ -2839,6 +2839,19 @@
           "short": null
         },
         {
+          "arg_type": "string",
+          "default": null,
+          "description": "Subaccount of the signer to set the mode for: subaccount address, wallet name, or wallet id. Defaults to the signer's own account.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "acting_account_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
           "arg_type": "boolean",
           "default": null,
           "description": "Skip confirmation prompt for live execution.",
@@ -2866,7 +2879,64 @@
         "supported": true
       },
       "dangerous": true,
-      "description": "Set account abstraction for the signer (userSetAbstraction). `disabled` is Standard: separate perp and spot balances. Cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode; unified-account and portfolio-margin accounts are limited to 50k actions per day. Use --dry-run to preview; confirm or pass -y for live submit.",
+      "description": "Set account abstraction for the signer or one of its subaccounts (userSetAbstraction); an API wallet sets its master account's mode with agentSetAbstraction. `disabled` is Standard: separate perp and spot balances. Cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode; unified-account and portfolio-margin accounts are limited to 50k actions per day. Use --dry-run to preview; confirm or pass -y for live submit.",
+      "dry_run": "optional",
+      "group": "account",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "account_state",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Route HyperEVM transactions to big blocks.",
+          "enum_values": [],
+          "id": "enable",
+          "input_kind": "boolean",
+          "long": "enable",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Route HyperEVM transactions back to small blocks.",
+          "enum_values": [],
+          "id": "disable",
+          "input_kind": "boolean",
+          "long": "disable",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid account evm-big-blocks",
+      "command_path": [
+        "account",
+        "evm-big-blocks"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": true,
+      "description": "Set the HyperCore user flag that routes the account's HyperEVM transactions to big blocks (--enable) or small blocks (--disable) (evmUserModify). Big blocks are for large contract deployments; the flag stays set until it is unset again. The account must already exist on HyperCore.",
       "dry_run": "optional",
       "group": "account",
       "lifecycle": "live_mutating",
@@ -3606,7 +3676,20 @@
           "long": "name",
           "multiple": false,
           "positional_index": null,
-          "required": true,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Revoke the unnamed API wallet.",
+          "enum_values": [],
+          "id": "unnamed",
+          "input_kind": "boolean",
+          "long": "unnamed",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
           "short": null
         }
       ],
@@ -3623,7 +3706,7 @@
         "supported": false
       },
       "dangerous": true,
-      "description": "Revoke a named API wallet by replacing it with a short-lived throwaway agent.",
+      "description": "Revoke a named API wallet by replacing it with a short-lived throwaway agent, or the unnamed API wallet (--unnamed) by replacing it with a throwaway agent whose key is discarded.",
       "dry_run": "optional",
       "group": "wallet",
       "lifecycle": "live_mutating",
@@ -4928,7 +5011,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw accepts --max.",
+          "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw and repay accept --max.",
           "enum_values": [],
           "id": "max",
           "input_kind": null,
@@ -5023,6 +5106,146 @@
       },
       "dangerous": true,
       "description": "Withdraw from a borrow/lend reserve with a wallet-signed borrowLend exchange action. Runs live without a confirmation prompt; --dry-run previews the action without submitting.",
+      "dry_run": "optional",
+      "group": "market",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Borrow/lend reserve token, for example USDC.",
+          "enum_values": [],
+          "id": "token",
+          "input_kind": "market_symbol",
+          "long": null,
+          "multiple": false,
+          "positional_index": 0,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Human-readable token amount.",
+          "enum_values": [],
+          "id": "amount",
+          "input_kind": "amount",
+          "long": "amount",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Repay the full borrow; sends amount=null in the exchange borrowLend action.",
+          "enum_values": [],
+          "id": "max",
+          "input_kind": null,
+          "long": "max",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid borrowlend repay <TOKEN> --amount <AMOUNT>",
+      "command_path": [
+        "borrowlend",
+        "repay"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": true,
+      "description": "Repay borrowed tokens with a wallet-signed borrowLend exchange action. Runs live without a confirmation prompt; --dry-run previews the action without submitting.",
+      "dry_run": "optional",
+      "group": "market",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Borrow/lend reserve token, for example USDC.",
+          "enum_values": [],
+          "id": "token",
+          "input_kind": "market_symbol",
+          "long": null,
+          "multiple": false,
+          "positional_index": 0,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Human-readable token amount to borrow.",
+          "enum_values": [],
+          "id": "amount",
+          "input_kind": "amount",
+          "long": "amount",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Not supported for borrow: the command rejects --max and requires --amount.",
+          "enum_values": [],
+          "id": "max",
+          "input_kind": null,
+          "long": "max",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid borrowlend borrow <TOKEN> --amount <AMOUNT>",
+      "command_path": [
+        "borrowlend",
+        "borrow"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": true,
+      "description": "Borrow USDC or USDT against supplied HYPE or BTC collateral with a wallet-signed borrowLend exchange action. Refused for portfolio-margin accounts, which borrow automatically. Runs live without a confirmation prompt; --dry-run previews the action without submitting.",
       "dry_run": "optional",
       "group": "market",
       "lifecycle": "live_mutating",
@@ -6690,6 +6913,76 @@
         {
           "arg_type": "string",
           "default": null,
+          "description": "Perpetual coin.",
+          "enum_values": [],
+          "id": "coin",
+          "input_kind": "market_symbol",
+          "long": "coin",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Target leverage, a positive number such as 5 or 12.5.",
+          "enum_values": [],
+          "id": "leverage",
+          "input_kind": "amount",
+          "long": "leverage",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
+          "enum_values": [],
+          "id": "on_behalf_of",
+          "input_kind": "acting_account_selector",
+          "long": "on-behalf-of",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid positions top-up-margin",
+      "command_path": [
+        "positions",
+        "top-up-margin"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": true,
+      "description": "Add isolated margin to an open isolated position until it reaches a target leverage (topUpIsolatedOnlyMargin), instead of a USDC amount as `positions update-margin` takes.",
+      "dry_run": "optional",
+      "group": "trade",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
           "description": "Relative duration, for example 30s or 5m.",
           "enum_values": [],
           "id": "in_duration",
@@ -7173,6 +7466,19 @@
           "short": null
         },
         {
+          "arg_type": "string",
+          "default": null,
+          "description": "Move the USDC of this subaccount instead of the signer's own account: subaccount address, wallet name, or wallet id.",
+          "enum_values": [],
+          "id": "subaccount",
+          "input_kind": "acting_account_selector",
+          "long": "subaccount",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
           "arg_type": "boolean",
           "default": null,
           "description": "Skip confirmation prompt for deliberate automation.",
@@ -7229,6 +7535,19 @@
           "multiple": false,
           "positional_index": null,
           "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Move the USDC of this subaccount instead of the signer's own account: subaccount address, wallet name, or wallet id.",
+          "enum_values": [],
+          "id": "subaccount",
+          "input_kind": "acting_account_selector",
+          "long": "subaccount",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
           "short": null
         },
         {
@@ -7539,7 +7858,7 @@
         "supported": true
       },
       "dangerous": true,
-      "description": "Send an asset between accounts, spot, perp, or DEX contexts.",
+      "description": "Send an asset between accounts, spot, perp, or DEX contexts. An API wallet signs agentSendAsset instead, which only sends to the account the funds leave (the master, or --from-subaccount).",
       "dry_run": "optional",
       "group": "transfer",
       "lifecycle": "live_mutating",
@@ -7843,7 +8162,7 @@
         "supported": false
       },
       "dangerous": true,
-      "description": "Claim staking rewards.",
+      "description": "Claim accrued referral and builder rewards (claimRewards). Staking rewards are redelegated to the validator automatically and are not claimed by this command.",
       "dry_run": "optional",
       "group": "staking",
       "lifecycle": "live_mutating",

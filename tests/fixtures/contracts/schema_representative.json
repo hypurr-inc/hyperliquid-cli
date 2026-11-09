@@ -862,7 +862,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw accepts --max.",
+          "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw and repay accept --max.",
           "enum_values": [],
           "id": "max",
           "input_kind": null,
@@ -898,7 +898,7 @@
             "type": "string"
           },
           "max": {
-            "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw accepts --max.",
+            "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw and repay accept --max.",
             "type": "string"
           },
           "token": {

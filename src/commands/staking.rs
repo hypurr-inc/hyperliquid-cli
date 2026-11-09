@@ -468,6 +468,14 @@ struct ClaimRewardsAction {
     action_type: &'static str,
 }
 
+/// The agent-signed form of `cDeposit`: an L1 action, `{"type":"cDeposit2","wei":N}`.
+#[derive(Debug, Serialize)]
+struct CDeposit2Action {
+    #[serde(rename = "type")]
+    action_type: &'static str,
+    wei: u64,
+}
+
 async fn summary(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
     let summary = staking_info(api, "delegatorSummary", user, "loading staking summary").await?;
@@ -729,7 +737,7 @@ impl CliCommand for StakingSummary {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        summary(inv, args.resolve(inv)?).await
+        summary(inv, args.resolve(inv).await?).await
     }
 }
 
@@ -764,7 +772,7 @@ impl CliCommand for StakingRewards {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        rewards(inv, args.resolve(inv)?).await
+        rewards(inv, args.resolve(inv).await?).await
     }
 }
 
@@ -782,7 +790,7 @@ impl CliCommand for StakingHistory {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        history(inv, args.resolve(inv)?).await
+        history(inv, args.resolve(inv).await?).await
     }
 }
 
@@ -824,8 +832,50 @@ async fn run_delegation(
     Ok(())
 }
 
-/// `staking deposit` and `staking withdraw`: `build` makes the action from the
-/// network name, the amount in wei and the nonce.
+/// `staking deposit`: an API wallet signs `cDeposit2` (an L1 action), anyone
+/// else the user-signed `cDeposit`.
+async fn run_deposit(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::Error> {
+    let kind = StakingActionKind::Deposit;
+    let wei = validate_amount_to_wei(args.amount)?;
+    if inv.dry_run() {
+        let mut preview = amount_dry_run_value(inv.remote()?.chain(), args, kind);
+        if inv
+            .preview_signer()?
+            .ok()
+            .is_some_and(SelectedSigner::is_stored_agent)
+        {
+            preview["action_type"] = "cDeposit2".into();
+        }
+        return print_dry_run(inv, kind.would_execute(), preview);
+    }
+    let signer = inv.resolve_signer()?;
+    let remote = inv.remote()?;
+    if signer.is_stored_agent() {
+        actions::send_raw_l1_json_action(
+            remote.api(),
+            &signer,
+            &CDeposit2Action {
+                action_type: "cDeposit2",
+                wei,
+            },
+            actions::RawL1ActionMetadata::new(actions::nonce_now()),
+            "deposit to staking",
+        )
+        .await?;
+    } else {
+        user_signed::submit(remote.api(), &signer, |hyperliquid_chain, nonce| CDeposit {
+            hyperliquidChain: hyperliquid_chain,
+            wei,
+            nonce,
+        })
+        .await?;
+    }
+    print_action_confirmation(inv, &signer, remote.chain(), kind, args.amount, None);
+    Ok(())
+}
+
+/// `staking withdraw`: `build` makes the action from the network name, the
+/// amount in wei and the nonce.
 async fn run_amount<T: UserSigned>(
     inv: &Invocation,
     args: &AmountArgs,
@@ -862,6 +912,7 @@ impl CliCommand for StakingDelegate {
         "Delegate HYPE to a validator.",
     )
     .signs(Signs::user_signed::<TokenDelegate>())
+    .master_only("tokenDelegate")
     .args(&[
         arg("validator")
             .kind(InputKind::ProtocolObjectAddress)
@@ -889,6 +940,7 @@ impl CliCommand for StakingUndelegate {
         "Undelegate HYPE from a validator.",
     )
     .signs(Signs::user_signed::<TokenDelegate>())
+    .master_only("tokenDelegate")
     .args(&[
         arg("validator")
             .kind(InputKind::ProtocolObjectAddress)
@@ -921,17 +973,7 @@ impl CliCommand for StakingDeposit {
         .describe("HYPE amount.")]);
 
     async fn run(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::Error> {
-        run_amount(
-            inv,
-            args,
-            StakingActionKind::Deposit,
-            |hyperliquid_chain, wei, nonce| CDeposit {
-                hyperliquidChain: hyperliquid_chain,
-                wei,
-                nonce,
-            },
-        )
-        .await
+        run_deposit(inv, args).await
     }
 }
 
@@ -947,6 +989,7 @@ impl CliCommand for StakingWithdraw {
         "Queue HYPE withdrawal from staking.",
     )
     .signs(Signs::user_signed::<CWithdraw>())
+    .master_only("cWithdraw")
     .args(&[arg("amount")
         .kind(InputKind::Amount)
         .describe("HYPE amount.")]);
@@ -974,8 +1017,8 @@ impl CliCommand for StakingClaimRewards {
     const SPEC: CommandSpec = CommandSpec::signed(
         &["staking", "claim-rewards"],
         "staking",
-        "Claim staking rewards",
-        "Claim staking rewards.",
+        "Claim referral and builder rewards",
+        "Claim accrued referral and builder rewards (claimRewards). Staking rewards are redelegated to the validator automatically and are not claimed by this command.",
     );
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
@@ -1004,6 +1047,7 @@ impl CliCommand for StakingLinkInitiate {
         "Initiate staking-link fee discount attribution from the trading account, targeting the staking user. This is control-affecting; use --dry-run first.",
     )
     .signs(Signs::user_signed::<LinkStakingUser>())
+    .master_only("linkStakingUser")
     .prompt()
     .args(&[
         arg("user").kind(InputKind::ProtocolObjectAddress).describe("Protocol user address for the staking account to link.").resource_id("staking-link user address"),
@@ -1027,6 +1071,7 @@ impl CliCommand for StakingLinkFinalize {
         "Finalize staking-link fee discount attribution from the staking account, targeting the trading user. Finalization may be permanent; use --dry-run first.",
     )
     .signs(Signs::user_signed::<LinkStakingUser>())
+    .master_only("linkStakingUser")
     .prompt()
     .args(&[
         arg("user").kind(InputKind::ProtocolObjectAddress).describe("Protocol user address for the trading account to link.").resource_id("staking-link user address"),

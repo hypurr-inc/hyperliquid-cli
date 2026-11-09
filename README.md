@@ -308,7 +308,8 @@ Canonical top-level aliases accepted by the CLI:
 | `account twap-history [ADDRESS_OR_WALLET]` | Query user TWAP order history. |
 | `account twap-fills [ADDRESS_OR_WALLET] [--start <TIME>] [--end <TIME>] [--aggregate-by-time]` | Query user TWAP slice fills. |
 | `account abstraction [ADDRESS]` | Read account abstraction mode for an address, or the selected account when `ADDRESS` is omitted. |
-| `account abstraction set --mode disabled\|unified-account\|portfolio-margin` | Set account abstraction for the configured signer; prompts unless `-y`. |
+| `account abstraction set --mode disabled\|unified-account\|portfolio-margin [--user <SUBACCOUNT>]` | Set account abstraction for the configured signer or one of its subaccounts; prompts unless `-y`. An API wallet sets its master account's mode with `agentSetAbstraction` and may not name another account. |
+| `account evm-big-blocks (--enable\|--disable)` | Route the account's HyperEVM transactions to big blocks or back to small blocks (`evmUserModify`). |
 | `subaccount list [ADDRESS_OR_WALLET]` | Query public subaccounts for a master address. |
 | `subaccount create --name <NAME>` | Create a subaccount signed by the master account. |
 | `account add [PRIVATE_KEY] [--alias <ALIAS>] [--type <TYPE>] [--default]` / `account ls` / `account set-default [SELECTOR]` / `account remove [SELECTOR] [-y]` | Manage stored wallets. |
@@ -317,7 +318,7 @@ Canonical top-level aliases accepted by the CLI:
 | `api-wallet list [ACCOUNT]` | List API wallets approved by a master account. |
 | `api-wallet revoke --name <NAME>` | Replace a named API wallet with a short-lived throwaway agent. |
 
-API wallets can sign trading actions for the approving master account, but they cannot withdraw. Use the master or subaccount address for info queries. When `api-wallet create` generates a local agent keypair, it prints the private key once before submitting `approveAgent` for that address; store that key securely because the CLI does not automatically recover it later.
+API wallets can sign trading actions for the approving master account, but they cannot withdraw. Use the master or subaccount address for info queries; a bare key that is an API wallet is refused by reads that would use its own, empty account, and the error names the master to pass instead. The user-signed actions (`transfer send|spot-send|withdraw|spot-to-perp|perp-to-spot`, `staking delegate|undelegate|withdraw|link`, `api-wallet approve|revoke`, `builder approve`) are refused up front for a stored API wallet with exit `13`. Three actions have an agent-signed form that a stored API wallet uses: `staking deposit` (`cDeposit2`), `transfer send-asset` to the account it leaves (`agentSendAsset`) and `account abstraction set` for its master (`agentSetAbstraction`). When `api-wallet create` generates a local agent keypair, it prints the private key once before submitting `approveAgent` for that address; store that key securely because the CLI does not automatically recover it later.
 
 Signer and acting-account flags intentionally share the same selector grammar where it is safe: raw `0x` address, stored wallet/account alias, or stored wallet/account id. Their roles differ. Global `--account` / `--wallet` selects the key that signs the action; per-command `--on-behalf-of` selects the protocol account, subaccount, or vault supplied as Hyperliquid `vaultAddress` for that action.
 
@@ -349,11 +350,12 @@ Signer and acting-account flags intentionally share the same selector grammar wh
 | `positions list [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | List open positions. `--dex` reads a HIP-3 DEX's account. |
 | `positions update-leverage --coin <COIN> --leverage <N> [--isolated] [--on-behalf-of <ACCOUNT_SELECTOR>]` | Set the leverage and margin mode (cross, or isolated with `--isolated`) for a market. Isolated-only markets refuse cross with exit `13`. |
 | `positions update-margin --coin <COIN> --amount <AMOUNT> [--on-behalf-of <ACCOUNT_SELECTOR>]` | Add (positive) or remove (negative) isolated margin on an open isolated position. Removal is refused on `strict_isolated` markets. |
-| `transfer spot-to-perp --amount <USDC> [-y]` | Move USDC from spot to perp. |
-| `transfer perp-to-spot --amount <USDC> [-y]` | Move USDC from perp to spot. |
+| `positions top-up-margin --coin <COIN> --leverage <N> [--on-behalf-of <ACCOUNT_SELECTOR>]` | Add isolated margin to an open isolated position until it reaches a target leverage (`topUpIsolatedOnlyMargin`). |
+| `transfer spot-to-perp --amount <USDC> [--subaccount <ACCOUNT_SELECTOR>] [-y]` | Move USDC from spot to perp, for the signer or one of its subaccounts. |
+| `transfer perp-to-spot --amount <USDC> [--subaccount <ACCOUNT_SELECTOR>] [-y]` | Move USDC from perp to spot, for the signer or one of its subaccounts. |
 | `transfer send --to <ADDRESS> --amount <USDC> [-y]` | Send USDC to another address. |
 | `transfer spot-send --to <ADDRESS> --token <TOKEN> --amount <AMOUNT> [-y]` | Send a spot token to another address. |
-| `transfer send-asset --to <ADDRESS> --source perp\|spot\|dex:<DEX> --dest perp\|spot\|dex:<DEX> --token <TOKEN> --amount <AMOUNT> [--from-subaccount <ADDRESS>] [-y]` | Send an asset between accounts, spot, perp, or DEX contexts. |
+| `transfer send-asset --to <ADDRESS> --source perp\|spot\|dex:<DEX> --dest perp\|spot\|dex:<DEX> --token <TOKEN> --amount <AMOUNT> [--from-subaccount <ADDRESS>] [-y]` | Send an asset between accounts, spot, perp, or DEX contexts. An API wallet signs `agentSendAsset`, which only sends to the account the funds leave. |
 | `transfer withdraw --to <ADDRESS> --amount <USDC> [-y]` | Withdraw USDC to Arbitrum. |
 | `subaccount transfer --subaccount <ACCOUNT_SELECTOR> --amount <USDC> --direction deposit\|withdraw [-y]` | Move USDC to or from a subaccount. The subaccount field is an acting-account selector, not a generic transfer recipient. |
 | `subaccount spot-transfer --subaccount <ACCOUNT_SELECTOR> --token <TOKEN> --amount <AMOUNT> --direction deposit\|withdraw [-y]` | Move a spot token to or from a subaccount. The subaccount field is an acting-account selector, not a generic transfer recipient. |
@@ -405,11 +407,11 @@ Outcome market notation (`#N` spot coin and `+N` token name) is available for di
 | `vault list [--kind protocol\|user\|normal\|child\|parent] [--user <ADDRESS>] [--limit <N>] [--sort tvl\|apr\|age\|name]` / `vault search <QUERY> [--user <ADDRESS>] [--limit <N>] [--sort tvl\|apr\|age\|name]` / `vault get <ADDRESS>` / `vault positions <ADDRESS>` | Discover and query vault state. `--user` includes user deposit context when the API returns it. |
 | `vault deposit --vault <ADDRESS> --amount <AMOUNT>` / `vault withdraw --vault <ADDRESS> --amount <AMOUNT>` | Submit vault transfers. |
 | `borrowlend rates` / `borrowlend get <TOKEN>` / `borrowlend user [ADDRESS]` | Query borrow/lend markets. |
-| `borrowlend supply <TOKEN> --amount <AMOUNT>` / `borrowlend withdraw <TOKEN> (--amount <AMOUNT>\|--max)` | Submit verified wallet-signed exchange `borrowLend` supply/withdraw actions; use `--dry-run` to inspect the action first. |
+| `borrowlend supply <TOKEN> --amount <AMOUNT>` / `borrowlend withdraw <TOKEN> (--amount <AMOUNT>\|--max)` / `borrowlend repay <TOKEN> (--amount <AMOUNT>\|--max)` / `borrowlend borrow <TOKEN> --amount <AMOUNT>` | Submit verified wallet-signed exchange `borrowLend` actions; use `--dry-run` to inspect the action first. Manual `borrow` is refused for portfolio-margin accounts, which borrow automatically. |
 | `builder max-fee --user <ADDRESS> --builder <ADDRESS>` | Query a user's approved max builder fee. |
 | `builder approved --user <ADDRESS>` | List all builders approved by a user with fee caps. |
 | `builder approve --builder <ADDRESS> --max-fee-rate <PERCENT> [-y]` | Approve or revoke a builder fee cap for the configured master signer. |
-| `prio status` / `prio bid --max <HYPE> --ip <IP> [--slot <N>]` | Query or bid in the gossip priority auction. |
+| `prio status` / `prio bid --max <HYPE> --ip <IP> [--slot <0-2>]` | Query or bid in the gossip priority auction (three independent slots; 0 is highest priority). |
 | `referral register <CODE>` / `referral set [CODE]` / `referral status` | Register your own referral code, set a referrer, or inspect referral state. |
 | `feedback (--scenario-json <JSON>\|--scenario-file <PATH\|->) [--contact <CONTACT>] [--tags <TAG>] [--url <URL>]` | Send structured CLI feedback as a scenario JSON object to the configured feedback endpoint; include `agent_address`, `signer_address`, or `wallet_address` in the scenario for rate-limit attribution, and use `--url` to override defaults. |
 | `schema [COMMAND...]` | Show machine-readable command schemas for agents. |

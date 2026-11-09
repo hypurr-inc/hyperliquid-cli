@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::assets::require_spot_token;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
+use crate::commands::abstraction::{AccountMode, fetch_abstraction};
 use crate::commands::actions;
 use crate::commands::rows::{ListRow, One, Row, Rows, style_column};
 use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
@@ -47,7 +48,7 @@ pub struct ActionArgs {
     /// Borrow/lend reserve token, for example USDC
     pub token: String,
 
-    /// Human-readable token amount. Omit with --max for maximum withdraw.
+    /// Human-readable token amount. Omit with --max for the maximum withdraw or the full repay.
     #[arg(long, allow_hyphen_values = true, conflicts_with = "max")]
     pub amount: Option<Decimal>,
 
@@ -61,13 +62,18 @@ pub struct ActionArgs {
 pub enum BorrowLendOperation {
     Supply,
     Withdraw,
+    Repay,
+    Borrow,
 }
 
 impl BorrowLendOperation {
-    fn encoded(self) -> u8 {
+    /// The CoreWriter `encodedOperation`. The docs name only supply (`0`) and
+    /// withdraw (`1`); repay and borrow have no documented encoding.
+    fn core_writer_encoding(self) -> Option<u8> {
         match self {
-            Self::Supply => 0,
-            Self::Withdraw => 1,
+            Self::Supply => Some(0),
+            Self::Withdraw => Some(1),
+            Self::Repay | Self::Borrow => None,
         }
     }
 
@@ -75,7 +81,16 @@ impl BorrowLendOperation {
         match self {
             Self::Supply => "supply",
             Self::Withdraw => "withdraw",
+            Self::Repay => "repay",
+            Self::Borrow => "borrow",
         }
+    }
+
+    /// Whether `--max` (a null amount) is a defined request: the maximum
+    /// withdraw and the full repay. Supplying "everything" or borrowing "as
+    /// much as possible" is not.
+    fn accepts_max(self) -> bool {
+        matches!(self, Self::Withdraw | Self::Repay)
     }
 }
 
@@ -356,35 +371,51 @@ fn action_preview(
     token: &SpotToken,
     wei: u64,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "operation": operation.as_str(),
-        "encoded_operation": operation.encoded(),
-        "token": token.name,
-        "token_index": token.index,
-        "amount": args.amount.map(|amount| amount.to_string()),
-        "max": args.max,
-        "network": chain.to_string(),
-        "wei": wei,
-        "reversibility": REVERSIBILITY,
-        "verified_shape": {
-            "transport": "HyperEVM CoreWriter.sendRawAction",
-            "action_id": CORE_WRITER_ACTION_ID,
-            "encoding_version": 1,
-            "solidity_types": ["uint8", "uint64", "uint64"],
-            "fields": {
-                "encodedOperation": operation.encoded(),
-                "token": token.index,
-                "wei": wei
-            }
-        },
-        "exchange_action": {
+    let mut preview = serde_json::Map::new();
+    preview.insert("operation".into(), operation.as_str().into());
+    if let Some(encoding) = operation.core_writer_encoding() {
+        preview.insert("encoded_operation".into(), encoding.into());
+    }
+    preview.insert("token".into(), token.name.clone().into());
+    preview.insert("token_index".into(), token.index.into());
+    preview.insert(
+        "amount".into(),
+        args.amount.map(|amount| amount.to_string()).into(),
+    );
+    preview.insert("max".into(), args.max.into());
+    preview.insert("network".into(), chain.to_string().into());
+    preview.insert("wei".into(), wei.into());
+    preview.insert("reversibility".into(), serde_json::json!(REVERSIBILITY));
+    if let Some(encoding) = operation.core_writer_encoding() {
+        preview.insert(
+            "verified_shape".into(),
+            serde_json::json!({
+                "transport": "HyperEVM CoreWriter.sendRawAction",
+                "action_id": CORE_WRITER_ACTION_ID,
+                "encoding_version": 1,
+                "solidity_types": ["uint8", "uint64", "uint64"],
+                "fields": {
+                    "encodedOperation": encoding,
+                    "token": token.index,
+                    "wei": wei
+                }
+            }),
+        );
+    }
+    preview.insert(
+        "exchange_action".into(),
+        serde_json::json!({
             "type": "borrowLend",
             "operation": operation.as_str(),
             "token": token.index,
             "amount": borrowlend_exchange_amount(args)
-        },
-        "live_submission": "enabled: wallet-signed /exchange borrowLend action shape verified against @nktkas/hyperliquid v0.31.0"
-    })
+        }),
+    );
+    preview.insert(
+        "live_submission".into(),
+        "enabled: wallet-signed /exchange borrowLend action shape verified against @nktkas/hyperliquid v0.31.0".into(),
+    );
+    serde_json::Value::Object(preview)
 }
 
 async fn action(
@@ -437,11 +468,11 @@ fn validate_action_args(operation: BorrowLendOperation, args: &ActionArgs) -> Re
             "borrow/lend action requires --amount <AMOUNT> or --max".to_string(),
         ));
     }
-    if operation == BorrowLendOperation::Supply && args.max {
-        return Err(CliError::Unsupported(
-            "borrow/lend supply requires --amount; --max is only supported for withdraw"
-                .to_string(),
-        ));
+    if args.max && !operation.accepts_max() {
+        return Err(CliError::Unsupported(format!(
+            "borrow/lend {} requires --amount; --max is only supported for withdraw and repay",
+            operation.as_str()
+        )));
     }
     Ok(())
 }
@@ -684,7 +715,7 @@ fn structured_unknown_request_error(body: &str) -> bool {
 
 pub const GROUP: GroupSpec = GroupSpec::new(
     &["borrowlend"],
-    "Supply, withdraw, and query borrow/lend reserves",
+    "Supply, withdraw, borrow, repay, and query borrow/lend reserves",
 );
 
 #[derive(Args, Debug, Clone)]
@@ -745,7 +776,7 @@ impl CliCommand for BorrowlendUser {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        user(inv, args.resolve(inv)?).await
+        user(inv, args.resolve(inv).await?).await
     }
 }
 
@@ -764,7 +795,7 @@ impl CliCommand for BorrowlendSupply {
     .args(&[
         arg("token").kind(InputKind::MarketSymbol).resource_id("token"),
         arg("amount").kind(InputKind::Amount).describe("Human-readable token amount to supply.").schema_required(),
-        arg("max").describe("Not supported for supply: the command rejects --max and requires --amount. Only withdraw accepts --max.").schema_string(),
+        arg("max").describe("Not supported for supply: the command rejects --max and requires --amount. Only withdraw and repay accept --max.").schema_string(),
     ]);
 
     async fn run(inv: &Invocation, args: &ActionArgs) -> Result<(), anyhow::Error> {
@@ -795,6 +826,65 @@ impl CliCommand for BorrowlendWithdraw {
     }
 }
 
+pub struct BorrowlendRepay;
+
+impl CliCommand for BorrowlendRepay {
+    type Args = ActionArgs;
+
+    const SPEC: CommandSpec = CommandSpec::signed(
+        &["borrowlend", "repay"],
+        "market",
+        "Repay a borrowed token to a borrow/lend reserve",
+        "Repay borrowed tokens with a wallet-signed borrowLend exchange action. Runs live without a confirmation prompt; --dry-run previews the action without submitting.",
+    )
+    .schema_command("hyperliquid borrowlend repay <TOKEN> --amount <AMOUNT>")
+    .args(&[
+        arg("token").kind(InputKind::MarketSymbol).resource_id("token"),
+        arg("amount").kind(InputKind::Amount).describe("Human-readable token amount."),
+        arg("max").describe("Repay the full borrow; sends amount=null in the exchange borrowLend action.").schema_string(),
+    ]);
+
+    async fn run(inv: &Invocation, args: &ActionArgs) -> Result<(), anyhow::Error> {
+        borrowlend_action(inv, BorrowLendOperation::Repay, args).await
+    }
+}
+
+pub struct BorrowlendBorrow;
+
+impl CliCommand for BorrowlendBorrow {
+    type Args = ActionArgs;
+
+    const SPEC: CommandSpec = CommandSpec::signed(
+        &["borrowlend", "borrow"],
+        "market",
+        "Borrow a token against supplied collateral",
+        "Borrow USDC or USDT against supplied HYPE or BTC collateral with a wallet-signed borrowLend exchange action. Refused for portfolio-margin accounts, which borrow automatically. Runs live without a confirmation prompt; --dry-run previews the action without submitting.",
+    )
+    .schema_command("hyperliquid borrowlend borrow <TOKEN> --amount <AMOUNT>")
+    .args(&[
+        arg("token").kind(InputKind::MarketSymbol).resource_id("token"),
+        arg("amount").kind(InputKind::Amount).describe("Human-readable token amount to borrow.").schema_required(),
+        arg("max").describe("Not supported for borrow: the command rejects --max and requires --amount.").schema_string(),
+    ]);
+
+    async fn run(inv: &Invocation, args: &ActionArgs) -> Result<(), anyhow::Error> {
+        borrowlend_action(inv, BorrowLendOperation::Borrow, args).await
+    }
+}
+
+/// Manual borrowing is available to standard and unified accounts only: under
+/// portfolio margin borrowing is automatic and the manual action is disabled
+/// (<https://hyperliquid.gitbook.io/hyperliquid-docs/support/faq/manual-borrows>).
+async fn ensure_manual_borrow_allowed(api: &ApiClient, account: Address) -> Result<(), CliError> {
+    let mode = fetch_abstraction(api, account).await?.normalized_mode;
+    if mode == AccountMode::PortfolioMargin {
+        return Err(CliError::Unsupported(format!(
+            "{account} is a portfolio-margin account: borrowing is automatic there and the manual borrow action is disabled; switch the account to standard or unified-account to borrow manually"
+        )));
+    }
+    Ok(())
+}
+
 async fn borrowlend_action(
     inv: &Invocation,
     operation: BorrowLendOperation,
@@ -805,6 +895,11 @@ async fn borrowlend_action(
     let token = require_spot_token(remote.api().sdk(), &args.token).await?;
     let wei = borrowlend_wei(args, token.wei_decimals)?;
     if inv.dry_run() {
+        if operation == BorrowLendOperation::Borrow
+            && let Some(signer) = inv.preview_signer()?.ok()
+        {
+            ensure_manual_borrow_allowed(remote.api(), signer.query_address()).await?;
+        }
         return print_dry_run(
             inv,
             &format!("{}_borrowlend", operation.as_str()),
@@ -813,6 +908,9 @@ async fn borrowlend_action(
     }
 
     let signer = inv.resolve_signer()?;
+    if operation == BorrowLendOperation::Borrow {
+        ensure_manual_borrow_allowed(remote.api(), signer.query_address()).await?;
+    }
     action(inv, &signer, operation, args, token).await
 }
 
@@ -864,6 +962,40 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("--max is only supported"));
+    }
+
+    #[test]
+    fn only_withdraw_and_repay_accept_max() {
+        let max = ActionArgs {
+            token: "USDC".to_string(),
+            amount: None,
+            max: true,
+        };
+
+        for (operation, accepted) in [
+            (BorrowLendOperation::Supply, false),
+            (BorrowLendOperation::Withdraw, true),
+            (BorrowLendOperation::Repay, true),
+            (BorrowLendOperation::Borrow, false),
+        ] {
+            assert_eq!(
+                validate_action_args(operation, &max).is_ok(),
+                accepted,
+                "{}",
+                operation.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn core_writer_names_only_supply_and_withdraw() {
+        assert_eq!(BorrowLendOperation::Supply.core_writer_encoding(), Some(0));
+        assert_eq!(
+            BorrowLendOperation::Withdraw.core_writer_encoding(),
+            Some(1)
+        );
+        assert_eq!(BorrowLendOperation::Repay.core_writer_encoding(), None);
+        assert_eq!(BorrowLendOperation::Borrow.core_writer_encoding(), None);
     }
 
     fn user_state(raw: &str) -> RawBorrowLendUserState {

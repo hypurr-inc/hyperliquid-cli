@@ -9,7 +9,9 @@
 
 use std::sync::OnceLock;
 
+use hypersdk::Address;
 use hypersdk::hypercore::Chain;
+use hypersdk::hypercore::UserRole;
 
 use crate::assets::{AssetResolver, MetadataCache};
 use crate::auth::{SignerFlags, SignerSelection};
@@ -22,6 +24,7 @@ use crate::network::Network;
 use crate::output::{OutputFormat, Session, TableData};
 use crate::settings::Settings;
 use crate::signing::SelectedSigner;
+use crate::wire::InfoRequest;
 
 /// The parsed global flags that shape an invocation.
 #[derive(Debug, Clone, Default)]
@@ -63,6 +66,9 @@ pub struct Remote {
     network: Network,
     api: ApiClient,
     signer: OnceLock<SelectedSigner>,
+    /// The master account when the selected signer proved to be an API wallet:
+    /// `None` for any other signer and when the role could not be read.
+    signer_master: OnceLock<Option<Address>>,
 }
 
 impl std::fmt::Debug for Remote {
@@ -206,6 +212,7 @@ impl Invocation {
             network,
             api: self.api_client_for(network)?,
             signer: OnceLock::new(),
+            signer_master: OnceLock::new(),
         };
         Ok(self.remote.get_or_init(|| remote))
     }
@@ -284,12 +291,56 @@ impl Invocation {
     }
 
     /// The account whose data a read command queries: the explicit selector, else
-    /// the selected signer's query address.
-    pub fn resolve_user(&self, selector: Option<&str>) -> Result<hypersdk::Address, anyhow::Error> {
+    /// the selected signer's own account ([`Self::resolve_signer_account`]).
+    pub async fn resolve_user(
+        &self,
+        selector: Option<&str>,
+    ) -> Result<hypersdk::Address, anyhow::Error> {
         match selector {
             Some(selector) => self.resolve_account(selector),
-            None => Ok(self.resolve_signer()?.query_address()),
+            None => self.resolve_signer_account().await,
         }
+    }
+
+    /// The account a read command shows when it names none: the selected
+    /// signer's. An API wallet has no account data of its own, so a bare key
+    /// that turns out to be one (a stored API wallet already reads its master)
+    /// is refused with the master it signs for, instead of answering with an
+    /// empty result. The role is read once per run; a failed read is not a reason
+    /// to refuse.
+    pub async fn resolve_signer_account(&self) -> Result<hypersdk::Address, anyhow::Error> {
+        let signer = self.resolve_signer()?;
+        if !signer.is_stored_agent()
+            && let Some(master) = self.signer_master(&signer).await
+        {
+            return Err(CliError::Unsupported(format!(
+                "the selected signer {} is an API wallet for {master}, which has no account data of its own and would read empty; query the master account instead: pass {master} as the account argument, or select the master wallet",
+                signer.address()
+            ))
+            .into());
+        }
+        Ok(signer.query_address())
+    }
+
+    /// The master `signer` is an API wallet of, if its `userRole` says so.
+    async fn signer_master(&self, signer: &SelectedSigner) -> Option<Address> {
+        let remote = self.remote().ok()?;
+        if let Some(known) = remote.signer_master.get() {
+            return *known;
+        }
+        let master = match remote
+            .api
+            .info::<UserRole>(
+                &InfoRequest::user("userRole", signer.address()),
+                "loading the signer's role",
+            )
+            .await
+        {
+            Ok(UserRole::Agent { user }) => Some(user),
+            Ok(_) | Err(_) => None,
+        };
+        let _ = remote.signer_master.set(master);
+        master
     }
 
     /// The address an account selector names, whether a command reads its data
