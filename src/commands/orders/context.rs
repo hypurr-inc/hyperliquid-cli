@@ -56,11 +56,32 @@ impl<'a> OrderSubmissionContext<'a> {
         action: &str,
         command: &str,
     ) -> Result<(), CliError> {
-        if !self.requires_approval {
-            return Ok(());
+        if self.requires_approval {
+            return Err(unattended_refusal(action, command));
         }
-        Err(CliError::Configuration(format!(
-            "Can't {action} on mainnet without --yes. Rerun with --yes once you approve it:\n    {command} --yes"
-        )))
+        Ok(())
+    }
+}
+
+/// The error for an unattended command that still needs approval; see
+/// [`OrderSubmissionContext::refuse_unattended_without_yes`].
+pub(super) fn unattended_refusal(action: &str, command: &str) -> CliError {
+    CliError::Configuration(format!(
+        "Can't {action} on mainnet without --yes. Rerun with --yes once you approve it:\n    {command} --yes"
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_refusal_names_the_action_and_the_command_to_rerun_with_yes() {
+        let err = unattended_refusal("chase", "hyperliquid --format json orders chase --coin ETH");
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "Configuration error: Can't chase on mainnet without --yes. Rerun with --yes once you approve it:\n    hyperliquid --format json orders chase --coin ETH --yes"
+        );
     }
 }

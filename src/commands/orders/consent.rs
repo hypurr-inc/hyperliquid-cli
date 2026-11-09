@@ -252,3 +252,51 @@ pub(super) fn ask_confirmation(
     }
     prompt::confirm_warning(target.mode, question, "--yes")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_declined_approval_names_what_was_cancelled() {
+        for (kind, message) in [
+            (
+                ConsentKind::Order,
+                "Mainnet order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::Tpsl,
+                "Mainnet TP/SL confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::ScaleOrders,
+                "Mainnet scale order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::BatchOrders,
+                "Mainnet batch order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::Twap,
+                "Mainnet TWAP confirmation required; TWAP creation cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::ScheduleCancel,
+                "Mainnet schedule-cancel confirmation required; action cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::TrailingStop,
+                "Mainnet trailing stop confirmation required; trailing stop placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (ConsentKind::CancelAll, "cancel-all aborted"),
+        ] {
+            let err = kind.declined();
+            assert_eq!(err.exit_code(), 2, "{kind:?}");
+            assert_eq!(
+                err.to_string(),
+                format!("Configuration error: {message}"),
+                "{kind:?}"
+            );
+        }
+    }
+}

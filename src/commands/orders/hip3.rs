@@ -46,17 +46,7 @@ pub async fn plan_hip3_margin_transfers(
     user: Address,
     orders: &[&PreparedOrder],
 ) -> Result<Vec<Hip3MarginPlan>, anyhow::Error> {
-    let mut by_dex: BTreeMap<&str, (&str, Decimal)> = BTreeMap::new();
-    for order in orders {
-        if let Some(perp) = order.perp()
-            && let Some(dex) = perp.dex.as_deref().filter(|dex| !dex.is_empty())
-        {
-            by_dex
-                .entry(dex)
-                .or_insert((perp.collateral.as_str(), Decimal::ZERO))
-                .1 += order.notional();
-        }
-    }
+    let by_dex = exposure_by_dex(orders);
     if by_dex.is_empty() {
         return Ok(Vec::new());
     }
@@ -76,6 +66,24 @@ pub async fn plan_hip3_margin_transfers(
         }
     }
     Ok(plans)
+}
+
+/// What the orders on each HIP-3 dex draw on: the dex's collateral token and
+/// the total notional of the orders placed there. Orders on the default dex are
+/// not listed.
+fn exposure_by_dex<'a>(orders: &[&'a PreparedOrder]) -> BTreeMap<&'a str, (&'a str, Decimal)> {
+    let mut by_dex: BTreeMap<&str, (&str, Decimal)> = BTreeMap::new();
+    for order in orders {
+        if let Some(perp) = order.perp()
+            && let Some(dex) = perp.dex.as_deref().filter(|dex| !dex.is_empty())
+        {
+            by_dex
+                .entry(dex)
+                .or_insert((perp.collateral.as_str(), Decimal::ZERO))
+                .1 += order.notional();
+        }
+    }
+    by_dex
 }
 
 async fn plan_dex_transfer(
@@ -142,7 +150,38 @@ pub async fn execute_hip3_margin_transfers(
 
 #[cfg(test)]
 mod tests {
+    use hypersdk::hypercore::types::{OrderRequest, OrderTypePlacement, TimeInForce};
+
     use super::*;
+    use crate::assets::test_support::{hip3_perp, perp};
+    use crate::assets::{Market, PerpAsset};
+    use crate::commands::orders::args::{CreateOrderType, OrderSide};
+
+    fn order(perp: PerpAsset, price: i64, size: i64) -> PreparedOrder {
+        PreparedOrder {
+            request: OrderRequest {
+                asset: perp.index,
+                is_buy: true,
+                limit_px: Decimal::from(price),
+                sz: Decimal::from(size),
+                reduce_only: false,
+                order_type: OrderTypePlacement::Limit {
+                    tif: TimeInForce::Gtc,
+                },
+                cloid: Default::default(),
+            },
+            coin: perp.display_name(),
+            market: Market::Perp(perp),
+            side: OrderSide::Buy,
+            order_type: CreateOrderType::Limit,
+            tif: None,
+            trigger_price: None,
+            amount: None,
+            warning: None,
+            builder: None,
+            margin_mode: None,
+        }
+    }
 
     #[test]
     fn required_margin_is_a_tenth_of_the_notional_plus_a_fifth() {
@@ -152,5 +191,22 @@ mod tests {
             Decimal::new(1_481, 2)
         );
         assert_eq!(required_margin(Decimal::ZERO), Decimal::ZERO);
+    }
+
+    #[test]
+    fn exposure_sums_the_notional_per_dex_and_skips_the_default_dex() {
+        let mut usdh = hip3_perp("abc", "C", 120_002);
+        usdh.collateral = "USDH".to_string();
+        let orders = [
+            order(hip3_perp("xyz", "A", 110_000), 2, 10),
+            order(hip3_perp("xyz", "B", 110_001), 3, 10),
+            order(usdh, 5, 4),
+            order(perp("BTC", 0), 50_000, 1),
+        ];
+        let refs: Vec<&PreparedOrder> = orders.iter().collect();
+        let by_dex = exposure_by_dex(&refs);
+        assert_eq!(by_dex.len(), 2);
+        assert_eq!(by_dex["xyz"], ("USDC", Decimal::from(50)));
+        assert_eq!(by_dex["abc"], ("USDH", Decimal::from(20)));
     }
 }

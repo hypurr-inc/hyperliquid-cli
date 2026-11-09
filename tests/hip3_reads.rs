@@ -54,8 +54,7 @@ struct DexScopedRead;
 
 impl wiremock::Match for DexScopedRead {
     fn matches(&self, request: &wiremock::Request) -> bool {
-        serde_json::from_slice::<Value>(&request.body)
-            .is_ok_and(|body| body.get("dex").is_some())
+        serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| body.get("dex").is_some())
     }
 }
 

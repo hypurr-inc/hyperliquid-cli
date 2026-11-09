@@ -508,7 +508,9 @@ async fn bracket_protects_the_whole_entry_when_it_fills_while_resting() {
     let server = hip3_server(json!({"resting": {"oid": OID}})).await;
     Mock::given(method("POST"))
         .and(path("/exchange"))
-        .and(body_partial_json(json!({"action": {"grouping": "positionTpsl"}})))
+        .and(body_partial_json(
+            json!({"action": {"grouping": "positionTpsl"}}),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "status": "ok",
             "response": {
@@ -626,7 +628,15 @@ async fn cancel_all_for_a_coin_the_dex_does_not_list_fails_instead_of_cancelling
     let assert = command_against(
         &env,
         &server,
-        &["orders", "cancel-all", "--coin", "NOPE", "--dex", "xyz", "--yes"],
+        &[
+            "orders",
+            "cancel-all",
+            "--coin",
+            "NOPE",
+            "--dex",
+            "xyz",
+            "--yes",
+        ],
     )
     .assert()
     .code(13);
@@ -660,7 +670,15 @@ async fn cancel_all_names_the_dex_in_its_canonical_spelling() {
     let assert = command_against(
         &env,
         &server,
-        &["orders", "cancel-all", "--coin", "TOKEN", "--dex", "XYZ", "--yes"],
+        &[
+            "orders",
+            "cancel-all",
+            "--coin",
+            "TOKEN",
+            "--dex",
+            "XYZ",
+            "--yes",
+        ],
     )
     .assert()
     .success();
@@ -668,4 +686,211 @@ async fn cancel_all_names_the_dex_in_its_canonical_spelling() {
     assert_eq!(json_stdout(&assert)[0]["cancelled_orders"], 1);
     let open = info_requests(&server, "frontendOpenOrders").await;
     assert!(open.iter().all(|body| body["dex"] == "xyz"), "{open:?}");
+}
+
+/// An account that does not pool margin across dexes, with nothing on `xyz`:
+/// every order there needs a helper transfer first.
+async fn mount_unfunded_dex_account(server: &MockServer) {
+    mount_priority_info(server, json!({"type": "userAbstraction"}), json!("default")).await;
+    mount_priority_info(
+        server,
+        json!({"type": "clearinghouseState", "dex": "xyz"}),
+        json!({
+            "marginSummary": {
+                "accountValue": "0", "totalNtlPos": "0",
+                "totalRawUsd": "0", "totalMarginUsed": "0"
+            },
+            "crossMarginSummary": {
+                "accountValue": "0", "totalNtlPos": "0",
+                "totalRawUsd": "0", "totalMarginUsed": "0"
+            },
+            "crossMaintenanceMarginUsed": "0",
+            "withdrawable": "0",
+            "assetPositions": [],
+            "time": 1_700_000_000_000_u64
+        }),
+    )
+    .await;
+}
+
+fn helper_transfer(amount: &str) -> Value {
+    json!({
+        "action": "send_asset",
+        "source": "perp",
+        "dest": "dex:xyz",
+        "token": "USDC",
+        "amount": amount,
+    })
+}
+
+#[tokio::test]
+async fn create_dry_run_previews_the_hip3_helper_transfer() {
+    let env = IsolatedHome::new();
+    let server = hip3_server(json!({"resting": {"oid": OID}})).await;
+    mount_unfunded_dex_account(&server).await;
+
+    let assert = command_against(
+        &env,
+        &server,
+        &[
+            "--dry-run",
+            "orders",
+            "create",
+            "--coin",
+            "xyz:TOKEN",
+            "--side",
+            "buy",
+            "--price",
+            "1.2",
+            "--size",
+            "10",
+        ],
+    )
+    .assert()
+    .success();
+
+    // 10 x 1.2 = 12 of notional at 10x leverage with a 20% buffer is 1.44.
+    assert_eq!(
+        json_stdout(&assert)["args"]["side_effects"],
+        json!([helper_transfer("1.44")])
+    );
+}
+
+#[tokio::test]
+async fn scale_dry_run_previews_one_helper_transfer_for_the_whole_ladder() {
+    let env = IsolatedHome::new();
+    let server = hip3_server(json!({"resting": {"oid": OID}})).await;
+    mount_unfunded_dex_account(&server).await;
+
+    let assert = command_against(
+        &env,
+        &server,
+        &[
+            "--dry-run",
+            "orders",
+            "scale",
+            "--coin",
+            "xyz:TOKEN",
+            "--side",
+            "buy",
+            "--start-price",
+            "1.2",
+            "--end-price",
+            "1.1",
+            "--total-size",
+            "20",
+            "--orders",
+            "2",
+        ],
+    )
+    .assert()
+    .success();
+
+    // 10 x 1.2 + 10 x 1.1 = 23 of notional: 23 / 10 x 1.2 = 2.76.
+    assert_eq!(
+        json_stdout(&assert)["args"]["side_effects"],
+        json!([helper_transfer("2.76")])
+    );
+}
+
+#[tokio::test]
+async fn a_unified_account_needs_no_helper_transfer() {
+    let env = IsolatedHome::new();
+    let server = hip3_server(json!({"resting": {"oid": OID}})).await;
+
+    let assert = command_against(
+        &env,
+        &server,
+        &[
+            "--dry-run",
+            "orders",
+            "scale",
+            "--coin",
+            "xyz:TOKEN",
+            "--side",
+            "buy",
+            "--start-price",
+            "1.2",
+            "--end-price",
+            "1.1",
+            "--total-size",
+            "20",
+            "--orders",
+            "2",
+        ],
+    )
+    .assert()
+    .success();
+
+    assert!(json_stdout(&assert)["args"].get("side_effects").is_none());
+}
+
+#[tokio::test]
+async fn scale_funds_the_hip3_dex_before_it_places_the_ladder() {
+    let env = IsolatedHome::new();
+    let server = hip3_server(json!({"resting": {"oid": OID}})).await;
+    mount_unfunded_dex_account(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/exchange"))
+        .and(body_partial_json(json!({"action": {"type": "sendAsset"}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "ok",
+            "response": {"type": "default"}
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/exchange"))
+        .and(body_partial_json(json!({"action": {"type": "order"}})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": "ok",
+            "response": {
+                "type": "order",
+                "data": {"statuses": [{"resting": {"oid": 1}}, {"resting": {"oid": 2}}]}
+            }
+        })))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    command_against(
+        &env,
+        &server,
+        &[
+            "orders",
+            "scale",
+            "--coin",
+            "xyz:TOKEN",
+            "--side",
+            "buy",
+            "--start-price",
+            "1.2",
+            "--end-price",
+            "1.1",
+            "--total-size",
+            "20",
+            "--orders",
+            "2",
+            "--yes",
+        ],
+    )
+    .assert()
+    .success();
+
+    let actions: Vec<Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path() == "/exchange")
+        .map(|request| serde_json::from_slice::<Value>(&request.body).unwrap()["action"].clone())
+        .collect();
+    let types: Vec<&str> = actions
+        .iter()
+        .map(|action| action["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(types, ["sendAsset", "order"], "{actions:?}");
+    assert_eq!(actions[0]["amount"], "2.76");
+    assert_eq!(actions[1]["orders"].as_array().unwrap().len(), 2);
 }

@@ -923,3 +923,38 @@ pub struct BracketArgs {
     #[arg(short = 'y', long)]
     pub yes: bool,
 }
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_duration_is_a_positive_whole_number_of_seconds_or_more() {
+        for (input, expected) in [
+            ("30", 30),
+            ("30s", 30),
+            ("5m", 300),
+            ("2h", 7_200),
+            ("1d", 86_400),
+        ] {
+            assert_eq!(
+                parse_relative_duration(input),
+                Ok(Duration::from_secs(expected)),
+                "{input}"
+            );
+        }
+        // Zero and sub-second values cannot reach a command: a zero timeout or a
+        // sub-second requote interval is refused here, not defended against later.
+        for input in ["0", "0s", "100ms", "1.5s", "", "s"] {
+            assert!(parse_relative_duration(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn the_tracking_timeout_default_text_is_the_default_timeout() {
+        assert_eq!(
+            parse_relative_duration(DEFAULT_TRACKING_TIMEOUT_TEXT),
+            Ok(DEFAULT_TRACKING_TIMEOUT)
+        );
+    }
+}
