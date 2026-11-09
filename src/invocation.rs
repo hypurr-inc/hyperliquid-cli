@@ -327,6 +327,15 @@ impl Invocation {
         Ok(self.preview_signer()?.ok())
     }
 
+    /// How the signer a dry run previews with would sign
+    /// ([`SelectedSigner::agent_form`]): `None` when none resolves or it signs
+    /// the user-signed form. A command that signs both forms marks the agent
+    /// one in its preview with this, as its live run does with its resolved
+    /// signer.
+    pub(crate) fn dry_run_agent_form(&self) -> Result<Option<AgentForm>, CliError> {
+        Ok(self.dry_run_signer()?.and_then(SelectedSigner::agent_form))
+    }
+
     /// The signer a live run signs with, checked before any prompt or network
     /// lookup: it must fit the command ([`Self::ensure_signer_fits`]) and, for a
     /// command that signs, hold a key. A dry run signs nothing, so it needs only

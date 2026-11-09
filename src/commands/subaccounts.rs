@@ -9,12 +9,13 @@ use crate::command_spec::{CommandSpec, GroupSpec, InputKind, YES, arg};
 use crate::commands::common::direction::TransferDirection;
 use crate::commands::common::rows::{ListRow, Row, Rows};
 use crate::commands::common::subaccount_list;
-use crate::commands::common::support::print_dry_run;
+use crate::commands::common::support::{SUBMITTED, print_dry_run, require_token};
 use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::invocation::Invocation;
+use crate::network::ChainExt;
 use crate::quantity;
 use crate::signing::SelectedSigner;
 
@@ -93,7 +94,7 @@ struct SubaccountActionConfirmation {
     network: String,
     signer: String,
     acting_as: String,
-    reversibility: String,
+    reversibility: ActionReversibility,
     subaccount: Option<String>,
     name: Option<String>,
     direction: Option<String>,
@@ -113,10 +114,10 @@ impl SubaccountActionConfirmation {
         Self {
             action: action.to_string(),
             status: status.to_string(),
-            network: chain.to_string(),
+            network: chain.label().to_string(),
             signer: signer.address().to_string(),
             acting_as: signer.query_address().to_string(),
-            reversibility: kind.reversibility().as_str().to_string(),
+            reversibility: kind.reversibility(),
             subaccount: None,
             name: None,
             direction: None,
@@ -150,7 +151,7 @@ impl Row for SubaccountActionConfirmation {
             self.network.clone(),
             self.signer.clone(),
             self.acting_as.clone(),
-            self.reversibility.clone(),
+            self.reversibility.as_str().to_string(),
             self.subaccount.clone().unwrap_or_default(),
             self.name.clone().unwrap_or_default(),
             self.direction.clone().unwrap_or_default(),
@@ -232,17 +233,13 @@ fn validated_name(args: &CreateArgs) -> Result<&str, CliError> {
 /// not empty.
 fn validated_token(args: &SpotTransferArgs) -> Result<&str, CliError> {
     quantity::require_positive(args.amount, "amount")?;
-    let token = args.token.trim();
-    if token.is_empty() {
-        return Err(CliError::Configuration("token cannot be empty".to_string()));
-    }
-    Ok(token)
+    require_token(&args.token)
 }
 
 fn create_dry_run_value(chain: Chain, action: &CreateSubaccountAction) -> serde_json::Value {
     serde_json::json!({
         "name": action.name,
-        "network": chain.to_string(),
+        "network": chain.label(),
         "reversibility": SubaccountActionKind::Create.reversibility(),
     })
 }
@@ -260,7 +257,7 @@ fn transfer_dry_run_value(
         "is_deposit": action.is_deposit,
         "usd": action.usd,
         "asset": USDC_NAME,
-        "network": chain.to_string(),
+        "network": chain.label(),
         "reversibility": SubaccountActionKind::TransferUsdc.reversibility(),
     })
 }
@@ -278,7 +275,7 @@ fn spot_transfer_dry_run_value(
         "direction": args.direction.to_string(),
         "is_deposit": action.is_deposit,
         "asset": action.token,
-        "network": chain.to_string(),
+        "network": chain.label(),
         "reversibility": SubaccountActionKind::TransferSpot.reversibility(),
     })
 }
@@ -304,7 +301,7 @@ async fn create(
             name: Some(action.name),
             ..SubaccountActionConfirmation::new(
                 "create",
-                "submitted",
+                SUBMITTED,
                 remote.chain(),
                 signer,
                 SubaccountActionKind::Create,

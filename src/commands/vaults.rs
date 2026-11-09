@@ -13,12 +13,13 @@ use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::direction::TransferDirection;
 use crate::commands::common::position::PositionRow;
 use crate::commands::common::rows::{One, Row, or_missing};
-use crate::commands::common::support::print_dry_run;
+use crate::commands::common::support::{SUBMITTED, print_dry_run};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::network::ChainExt;
 use crate::output::{self, TableData};
 use crate::quantity;
 use crate::wire::{AddressRole, InfoRequest, address};
@@ -278,7 +279,7 @@ struct VaultTransferConfirmation {
     network: String,
     signer: String,
     acting_as: String,
-    reversibility: String,
+    reversibility: ActionReversibility,
     vault_address: String,
     #[serde(with = "rust_decimal::serde::str")]
     amount: Decimal,
@@ -375,7 +376,7 @@ impl Row for VaultTransferConfirmation {
             self.network.clone(),
             self.signer.clone(),
             self.acting_as.clone(),
-            self.reversibility.clone(),
+            self.reversibility.as_str().to_string(),
             self.vault_address.clone(),
             self.amount.to_string(),
             self.asset.clone(),
@@ -448,7 +449,7 @@ fn transfer_dry_run_value(
 ) -> serde_json::Value {
     serde_json::json!({
         "action": direction.as_str(),
-        "network": chain.to_string(),
+        "network": chain.label(),
         "vault": vault.to_string(),
         "amount": args.amount.to_string(),
         "asset": USDC_NAME,
@@ -516,11 +517,11 @@ async fn run_transfer(
 
     inv.print(&One::new(VaultTransferConfirmation {
         action: direction.as_str().to_string(),
-        status: "submitted".to_string(),
-        network: remote.chain().to_string(),
+        status: SUBMITTED.to_string(),
+        network: remote.chain().label().to_string(),
         signer: signer.address().to_string(),
         acting_as: signer.query_address().to_string(),
-        reversibility: TRANSFER_REVERSIBILITY.as_str().to_string(),
+        reversibility: TRANSFER_REVERSIBILITY,
         vault_address: args.vault.clone(),
         amount: args.amount,
         asset: USDC_NAME.to_string(),

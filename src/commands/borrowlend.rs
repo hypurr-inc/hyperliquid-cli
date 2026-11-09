@@ -9,13 +9,14 @@ use crate::command_spec::{CommandSpec, GroupSpec, InputKind, NoArgs, arg};
 use crate::commands::common::borrow_lend_state::{RawBorrowLendUserState, fetch_user_state};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, style_column};
 use crate::commands::common::selector::{OptionalAddressArgs, USER_SELECTOR};
-use crate::commands::common::support::print_dry_run;
+use crate::commands::common::support::{SUBMITTED, print_dry_run};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::exchange_reply;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::network::ChainExt;
 use crate::output::{self, TableData};
 use crate::quantity::{self, Scale, ScaleError};
 use crate::signing::SelectedSigner;
@@ -148,7 +149,7 @@ struct BorrowLendActionRow {
     max: bool,
     network: String,
     signer: String,
-    reversibility: String,
+    reversibility: ActionReversibility,
 }
 impl Row for ReserveRow {
     const HEADERS: &'static [&'static str] = &[
@@ -234,7 +235,7 @@ impl Row for BorrowLendActionRow {
             self.max.to_string(),
             self.network.clone(),
             self.signer.clone(),
-            self.reversibility.clone(),
+            self.reversibility.as_str().to_string(),
         ]
     }
 }
@@ -303,7 +304,7 @@ fn action_preview(
         args.amount.map(|amount| amount.to_string()).into(),
     );
     preview.insert("max".into(), args.max.into());
-    preview.insert("network".into(), chain.to_string().into());
+    preview.insert("network".into(), chain.label().into());
     preview.insert("wei".into(), wei.into());
     preview.insert("reversibility".into(), serde_json::json!(REVERSIBILITY));
     if let Some(encoding) = operation.core_writer_encoding() {
@@ -349,7 +350,7 @@ async fn action(
     .await?;
 
     inv.print(&One::new(BorrowLendActionRow {
-        status: "submitted".to_string(),
+        status: SUBMITTED.to_string(),
         action: "borrowlend".to_string(),
         operation: operation.as_str().to_string(),
         acting_as: signer.query_address().to_string(),
@@ -357,9 +358,9 @@ async fn action(
         token_index: token.index,
         amount: exchange_action.amount,
         max: args.max,
-        network: remote.chain().to_string(),
+        network: remote.chain().label().to_string(),
         signer: signer.address().to_string(),
-        reversibility: REVERSIBILITY.as_str().to_string(),
+        reversibility: REVERSIBILITY,
     }));
     Ok(())
 }

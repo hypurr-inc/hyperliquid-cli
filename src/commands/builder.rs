@@ -8,13 +8,14 @@ use crate::builder_fee::{MaxFeeRate, max_builder_fee, percent_from_tenths_bps};
 use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, GroupSpec, InputKind, YES_FOR_LIVE_EXECUTION, arg};
 use crate::commands::common::rows::{ListRow, One, Row, Rows};
-use crate::commands::common::support::print_dry_run;
+use crate::commands::common::support::{SUBMITTED, print_dry_run};
 use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::exchange::builder_approval::{self, ApproveBuilderFee};
+use crate::exchange::user_signed;
 use crate::invocation::Invocation;
-use crate::signable::UserSigned;
+use crate::network::ChainExt;
 use crate::signing::SelectedSigner;
 use crate::wire::{AddressRole, InfoRequest, address};
 
@@ -113,7 +114,7 @@ struct BuilderApproveRow {
     max_fee_rate: String,
     max_fee_tenths_bps: u64,
     network: String,
-    reversibility: String,
+    reversibility: ActionReversibility,
 }
 
 impl Row for BuilderApproveRow {
@@ -139,7 +140,7 @@ impl Row for BuilderApproveRow {
             self.max_fee_rate.clone(),
             self.max_fee_tenths_bps.to_string(),
             self.network.clone(),
-            self.reversibility.clone(),
+            self.reversibility.as_str().to_string(),
         ]
     }
 }
@@ -178,22 +179,25 @@ fn approve_dry_run_value(
     signer: Option<&SelectedSigner>,
     request: &ApproveRequest,
 ) -> serde_json::Value {
-    let max_fee_rate = request.max_fee_rate.percent();
+    let mut action = user_signed::preview(
+        &builder_approval::approval(
+            chain.label().to_string(),
+            request.builder,
+            &request.max_fee_rate,
+            0,
+        ),
+        chain,
+    );
+    action["builder"] = request.builder.to_string().into();
     serde_json::json!({
-        "network": chain.to_string(),
+        "network": chain.label(),
         "signer": signer.map(|signer| signer.address().to_string()),
         "query_address": signer.map(|signer| signer.query_address().to_string()),
         "builder": request.builder.to_string(),
-        "max_fee_rate": max_fee_rate,
+        "max_fee_rate": request.max_fee_rate.percent(),
         "max_fee_tenths_bps": request.max_fee_rate.tenths_bps(),
         "reversibility": APPROVE_REVERSIBILITY,
-        "action": {
-            "type": ApproveBuilderFee::ACTION_TYPE,
-            "hyperliquidChain": chain.to_string(),
-            "signatureChainId": chain.arbitrum_id().to_string(),
-            "builder": request.builder.to_string(),
-            "maxFeeRate": max_fee_rate,
-        }
+        "action": action
     })
 }
 
@@ -221,15 +225,15 @@ async fn approve(
     builder_approval::submit(remote.api(), signer, request.builder, &request.max_fee_rate).await?;
 
     inv.print(&One::new(BuilderApproveRow {
-        status: "submitted".to_string(),
+        status: SUBMITTED.to_string(),
         action: "approve-builder-fee".to_string(),
         signer: signer.address().to_string(),
         query_address: signer.query_address().to_string(),
         builder: request.builder.to_string(),
         max_fee_rate: request.max_fee_rate.percent().to_string(),
         max_fee_tenths_bps: request.max_fee_rate.tenths_bps(),
-        network: remote.chain().to_string(),
-        reversibility: APPROVE_REVERSIBILITY.as_str().to_string(),
+        network: remote.chain().label().to_string(),
+        reversibility: APPROVE_REVERSIBILITY,
     }));
     Ok(())
 }

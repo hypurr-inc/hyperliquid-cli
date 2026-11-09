@@ -9,7 +9,7 @@ use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, GroupSpec, InputKind, NoArgs, YES, YES_FLAG, arg};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing, style_column};
 use crate::commands::common::selector::{OptionalAddressArgs, USER_SELECTOR};
-use crate::commands::common::support::print_dry_run;
+use crate::commands::common::support::{SUBMITTED, print_dry_run};
 use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
@@ -17,6 +17,7 @@ use crate::exchange::actions;
 use crate::exchange::user_signed;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::network::ChainExt;
 use crate::output::{self, JsonValueOutput};
 use crate::quantity::{self, Scale};
 use crate::signable::{Signs, UserSigned};
@@ -385,7 +386,7 @@ struct ActionRow {
     network: String,
     signer: String,
     acting_as: String,
-    reversibility: String,
+    reversibility: ActionReversibility,
     #[serde(with = "rust_decimal::serde::str")]
     amount: Decimal,
     asset: String,
@@ -414,7 +415,7 @@ impl Row for ActionRow {
             self.network.clone(),
             self.signer.clone(),
             self.acting_as.clone(),
-            self.reversibility.clone(),
+            self.reversibility.as_str().to_string(),
             self.amount.to_string(),
             self.asset.clone(),
             self.validator.clone().unwrap_or_default(),
@@ -433,7 +434,7 @@ struct LinkStakingRow {
     user: String,
     is_finalize: bool,
     network: String,
-    reversibility: String,
+    reversibility: ActionReversibility,
     warning: String,
 }
 
@@ -461,7 +462,7 @@ impl Row for LinkStakingRow {
             self.user.clone(),
             self.is_finalize.to_string(),
             self.network.clone(),
-            self.reversibility.clone(),
+            self.reversibility.as_str().to_string(),
             self.warning.clone(),
         ]
     }
@@ -523,11 +524,22 @@ async fn claim_rewards(inv: &Invocation, signer: &SelectedSigner) -> Result<(), 
 }
 
 fn link_dry_run_value(chain: Chain, user: Address, kind: StakingActionKind) -> serde_json::Value {
+    let mut action = user_signed::preview(
+        &LinkStakingUser {
+            hyperliquidChain: chain.label().to_string(),
+            user,
+            isFinalize: kind.is_finalize(),
+            nonce: 0,
+        },
+        chain,
+    );
+    action["user"] = user.to_string().into();
+    action["nonce"] = "current_timestamp_ms".into();
     serde_json::json!({
         "phase": kind.link_phase(),
         "user": user.to_string(),
         "is_finalize": kind.is_finalize(),
-        "network": chain.to_string(),
+        "network": chain.label(),
         "reversibility": kind.reversibility(),
         "warning": STAKING_LINK_WARNING,
         "verified_shape": {
@@ -535,14 +547,7 @@ fn link_dry_run_value(chain: Chain, user: Address, kind: StakingActionKind) -> s
             "signature_type": "HyperliquidTransaction:LinkStakingUser",
             "eip712_fields": ["hyperliquidChain", "user", "isFinalize", "nonce"]
         },
-        "action": {
-            "type": LinkStakingUser::ACTION_TYPE,
-            "signatureChainId": chain.arbitrum_id().to_string(),
-            "hyperliquidChain": chain.to_string(),
-            "user": user.to_string(),
-            "isFinalize": kind.is_finalize(),
-            "nonce": "current_timestamp_ms"
-        }
+        "action": action
     })
 }
 
@@ -555,7 +560,7 @@ fn delegate_dry_run_value(
         "validator": args.validator,
         "amount": args.amount.to_string(),
         "asset": ASSET,
-        "network": chain.to_string(),
+        "network": chain.label(),
         "reversibility": action_kind.reversibility(),
     })
 }
@@ -568,7 +573,7 @@ fn amount_dry_run_value(
     let mut value = serde_json::json!({
         "amount": args.amount.to_string(),
         "asset": ASSET,
-        "network": chain.to_string(),
+        "network": chain.label(),
         "reversibility": action_kind.reversibility(),
     });
     if let Some(note) = action_kind.note() {
@@ -580,7 +585,7 @@ fn amount_dry_run_value(
 fn claim_rewards_dry_run_value(chain: Chain) -> serde_json::Value {
     serde_json::json!({
         "asset": ASSET,
-        "network": chain.to_string(),
+        "network": chain.label(),
         "reversibility": StakingActionKind::ClaimRewards.reversibility(),
     })
 }
@@ -615,15 +620,15 @@ async fn link_staking_user(
     .await?;
 
     inv.print(&One::new(LinkStakingRow {
-        status: "submitted".to_string(),
+        status: SUBMITTED.to_string(),
         action: "staking-link".to_string(),
         phase: kind.link_phase().to_string(),
         acting_as: signer.query_address().to_string(),
         signer: signer.address().to_string(),
         user: user.to_string(),
         is_finalize: kind.is_finalize(),
-        network: remote.chain().to_string(),
-        reversibility: kind.reversibility().as_str().to_string(),
+        network: remote.chain().label().to_string(),
+        reversibility: kind.reversibility(),
         warning: STAKING_LINK_WARNING.to_string(),
     }));
     Ok(())
@@ -639,11 +644,11 @@ fn print_action_confirmation(
 ) {
     inv.print(&One::new(ActionRow {
         action: kind.receipt_action().to_string(),
-        status: "submitted".to_string(),
-        network: chain.to_string(),
+        status: SUBMITTED.to_string(),
+        network: chain.label().to_string(),
         signer: signer.address().to_string(),
         acting_as: signer.query_address().to_string(),
-        reversibility: kind.reversibility().as_str().to_string(),
+        reversibility: kind.reversibility(),
         amount,
         asset: ASSET.to_string(),
         validator,
@@ -819,10 +824,7 @@ async fn run_deposit(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::
     let agent_action = StakingL1Action::CDeposit2 { wei };
     if inv.dry_run() {
         let mut preview = amount_dry_run_value(inv.remote()?.chain(), args, kind);
-        if inv
-            .dry_run_signer()?
-            .is_some_and(|signer| signer.agent_form().is_some())
-        {
+        if inv.dry_run_agent_form()?.is_some() {
             preview["action_type"] = agent_action.type_tag();
         }
         return print_dry_run(inv, kind.would_execute(), preview);
@@ -1165,7 +1167,7 @@ mod tests {
             user: "0xc".to_string(),
             is_finalize: false,
             network: "Testnet".to_string(),
-            reversibility: "irreversible".to_string(),
+            reversibility: ActionReversibility::Irreversible,
             warning: "careful".to_string(),
         };
         let plain = row.cells();

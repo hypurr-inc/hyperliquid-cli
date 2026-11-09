@@ -6,6 +6,18 @@ use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::signing::SelectedSigner;
 
+/// The `status` of a receipt for an action the exchange accepted.
+pub(crate) const SUBMITTED: &str = "submitted";
+
+/// The token symbol a command was given, trimmed; it must not be empty.
+pub(crate) fn require_token(token: &str) -> Result<&str, CliError> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(CliError::Configuration("token cannot be empty".to_string()));
+    }
+    Ok(token)
+}
+
 /// A signing command's preview also names the signer, once resolved here and
 /// without prompting. A signer that cannot be resolved prints as `null` with a
 /// `signer_warning`; one that resolves but doesn't fit the command fails the

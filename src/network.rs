@@ -132,9 +132,41 @@ pub fn is_loopback_url(url: &reqwest::Url) -> bool {
             .is_ok_and(|address| address.is_loopback())
 }
 
+/// How the exchange names a [`Chain`]: the `hyperliquidChain` of a signed
+/// document, and the `network` that receipts and previews of funds commands
+/// print beside it (`Mainnet`, not the lowercase [`Network::name`]).
+pub trait ChainExt {
+    fn label(self) -> &'static str;
+    /// The `signatureChainId` of a user-signed document.
+    fn signature_chain_id(self) -> &'static str;
+}
+
+impl ChainExt for Chain {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Mainnet => "Mainnet",
+            Self::Testnet => "Testnet",
+        }
+    }
+
+    fn signature_chain_id(self) -> &'static str {
+        self.arbitrum_id()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chain_is_named_as_the_exchange_names_it() {
+        for chain in [Chain::Mainnet, Chain::Testnet] {
+            assert_eq!(chain.label(), chain.to_string());
+            assert_eq!(chain.signature_chain_id(), chain.arbitrum_id());
+        }
+        assert_eq!(Chain::Mainnet.signature_chain_id(), "0xa4b1");
+        assert_eq!(Chain::Testnet.signature_chain_id(), "0x66eee");
+    }
 
     #[test]
     fn loopback_urls_are_localhost_and_loopback_addresses_only() {
