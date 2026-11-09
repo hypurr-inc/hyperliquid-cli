@@ -66,7 +66,7 @@ impl TableData for SchemaOutput {
 }
 
 pub fn show(inv: &Invocation, command_path: &[String]) -> Result<(), anyhow::Error> {
-    inv.print_untimed(&schema_query(command_path)?);
+    inv.print_untimed(&schema_query(super::registry(), command_path)?);
     Ok(())
 }
 
@@ -83,8 +83,11 @@ fn schema_entry(contract: &CommandContract) -> Value {
     })
 }
 
-pub fn schema_query(command_path: &[String]) -> Result<SchemaOutput, anyhow::Error> {
-    let contracts = CommandRegistry::get().commands();
+pub fn schema_query(
+    registry: &CommandRegistry,
+    command_path: &[String],
+) -> Result<SchemaOutput, anyhow::Error> {
+    let contracts = registry.commands();
 
     let output = if command_path.is_empty() {
         SchemaOutput::many(contracts.iter())
@@ -159,14 +162,13 @@ hyperliquid --format json --select command,description schema orders",
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::registry;
 
     #[test]
     fn the_table_rows_come_from_the_contracts_the_json_entries_are_built_from() {
         let path = ["orders".to_string(), "create".to_string()];
-        let output = schema_query(&path).unwrap();
-        let contract = CommandRegistry::get()
-            .find_path(&["orders", "create"])
-            .unwrap();
+        let output = schema_query(registry(), &path).unwrap();
+        let contract = registry().find_path(&["orders", "create"]).unwrap();
         assert_eq!(
             output.rows(),
             vec![vec![
@@ -180,8 +182,8 @@ mod tests {
         assert_eq!(entry["command"], contract.command.as_str());
         assert!(entry["json_schema"].is_object());
 
-        let all = schema_query(&[]).unwrap();
-        assert_eq!(all.rows().len(), CommandRegistry::get().commands().len());
+        let all = schema_query(registry(), &[]).unwrap();
+        assert_eq!(all.rows().len(), registry().commands().len());
         assert_eq!(
             all.to_json_value().as_array().unwrap().len(),
             all.rows().len()

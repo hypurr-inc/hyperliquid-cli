@@ -19,9 +19,9 @@ use crate::wire::{AddressRole, InfoRequest, address};
 /// come from here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeeCap {
-    /// What a builder may be approved for, and what a spot order may pay: 1%.
+    /// What a builder may be approved for, and what a spot order may pay.
     Approval,
-    /// What a perpetual order may pay a builder: 0.1%.
+    /// What a perpetual order may pay a builder.
     PerpOrder,
 }
 

@@ -19,7 +19,7 @@ use crate::env::{self, EnvFlag, EnvSource};
 use crate::errors::CliError;
 use crate::output::sink;
 
-const DEFAULT_DEADLINE: Duration = clock::SECOND.of(30);
+pub(crate) const DEFAULT_DEADLINE: Duration = clock::SECOND.of(30);
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -84,9 +84,9 @@ impl JsonRpcResponse {
 
 /// What the operator configured for this server, read once at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct McpSettings {
-    allow_unsafe: bool,
-    deadline: Duration,
+pub(crate) struct McpSettings {
+    pub(crate) allow_unsafe: bool,
+    pub(crate) deadline: Duration,
 }
 
 impl McpSettings {
@@ -127,7 +127,10 @@ fn write_response(out: &mut impl Write, response: &JsonRpcResponse) -> Result<bo
     }
 }
 
-pub fn run_stdio_server(source: &EnvSource) -> Result<(), anyhow::Error> {
+pub fn run_stdio_server(
+    source: &EnvSource,
+    registry: &CommandRegistry,
+) -> Result<(), anyhow::Error> {
     let settings = McpSettings::from_env(source)?;
     let exe = std::env::current_exe()?;
     let stdin = std::io::stdin();
@@ -141,7 +144,7 @@ pub fn run_stdio_server(source: &EnvSource) -> Result<(), anyhow::Error> {
         }
 
         let response = match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(request) => handle(&request, &settings, &exe),
+            Ok(request) => handle(&request, registry, &settings, &exe),
             Err(err) => Some(JsonRpcResponse::error(
                 None,
                 -32700,
@@ -161,6 +164,7 @@ pub fn run_stdio_server(source: &EnvSource) -> Result<(), anyhow::Error> {
 /// The reply to one request, `None` for a notification.
 fn handle(
     request: &JsonRpcRequest,
+    registry: &CommandRegistry,
     settings: &McpSettings,
     exe: &std::path::Path,
 ) -> Option<JsonRpcResponse> {
@@ -183,7 +187,7 @@ fn handle(
         "notifications/initialized" | "initialized" => return None,
         "ping" => JsonRpcResponse::result(id, json!({})),
         "tools/list" => {
-            let tools = exposed(settings)
+            let tools = exposed(registry, settings)
                 .map(|cmd| {
                     json!({
                         "name": cmd.mcp_tool_name(),
@@ -194,7 +198,7 @@ fn handle(
                 .collect::<Vec<_>>();
             JsonRpcResponse::result(id, json!({ "tools": tools }))
         }
-        "tools/call" => call_tool(id, &request.params, settings, exe),
+        "tools/call" => call_tool(id, &request.params, registry, settings, exe),
         other => JsonRpcResponse::error(id, -32601, format!("Method not found: {other}")),
     })
 }
@@ -202,13 +206,14 @@ fn handle(
 fn call_tool(
     id: Option<Value>,
     params: &Value,
+    registry: &CommandRegistry,
     settings: &McpSettings,
     exe: &std::path::Path,
 ) -> JsonRpcResponse {
     let tool_name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args_obj = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    let Some(cmd) = exposed(settings).find(|cmd| cmd.mcp_tool_name() == tool_name) else {
+    let Some(cmd) = exposed(registry, settings).find(|cmd| cmd.mcp_tool_name() == tool_name) else {
         return JsonRpcResponse::error(id, -32602, format!("Unknown tool: {tool_name}"));
     };
     let cli_args = match command_args(cmd, &args_obj) {
@@ -231,15 +236,18 @@ fn call_tool(
 
 /// The commands this server offers. Discovery and invocation both read this,
 /// so they cannot disagree.
-fn exposed(settings: &McpSettings) -> impl Iterator<Item = &'static CommandContract> {
+pub(crate) fn exposed<'a>(
+    registry: &'a CommandRegistry,
+    settings: &McpSettings,
+) -> impl Iterator<Item = &'a CommandContract> {
     let allow_unsafe = settings.allow_unsafe;
-    CommandRegistry::get()
+    registry
         .commands()
         .iter()
         .filter(move |cmd| cmd.spec.exposed_to_mcp(allow_unsafe))
 }
 
-fn command_args(cmd: &CommandContract, args: &Value) -> Result<Vec<String>, String> {
+pub(crate) fn command_args(cmd: &CommandContract, args: &Value) -> Result<Vec<String>, String> {
     let map = args.as_object().ok_or("arguments must be an object")?;
     for key in map.keys() {
         if key == YES_ARG {
@@ -359,118 +367,6 @@ fn execute(
 mod tests {
     use super::*;
 
-    fn contract(path: &[&str]) -> &'static CommandContract {
-        CommandRegistry::get().find_path(path).unwrap()
-    }
-
-    #[test]
-    fn positional_and_repeated_arguments_follow_contract() {
-        let args = command_args(
-            contract(&["schema"]),
-            &json!({"command_path":["orders","create"]}),
-        )
-        .unwrap();
-        assert_eq!(args, ["--format", "json", "schema", "orders", "create"]);
-        let cmd = CommandRegistry::get()
-            .commands()
-            .iter()
-            .find(|cmd| {
-                cmd.inputs
-                    .iter()
-                    .any(|input| input.id == "coin" && input.positional_index.is_some())
-            })
-            .unwrap();
-        let args = command_args(cmd, &json!({"coin":"BTC"})).unwrap();
-        assert_eq!(args.last().unwrap(), "BTC");
-        assert!(!args.iter().any(|s| s == "--coin"));
-    }
-
-    #[test]
-    fn json_options_and_confirmation_boundary() {
-        let cmd = contract(&["report-incident"]);
-        let args = command_args(cmd, &json!({"context":{"a":true}})).unwrap();
-        assert!(args.iter().any(|s| s == "--context={\"a\":true}"));
-        let args = command_args(cmd, &json!({"context":false})).unwrap();
-        assert!(args.iter().any(|s| s == "--context=false"));
-        let err = command_args(contract(&["wallet", "export"]), &json!({"yes":true})).unwrap_err();
-        assert!(err.contains("confirmation bypass"), "{err}");
-        assert!(command_args(cmd, &json!({"unknown":true})).is_err());
-        assert!(command_args(cmd, &json!([])).is_err());
-    }
-
-    fn exposed_to(cmd: &CommandContract, allow_unsafe: bool) -> bool {
-        cmd.spec.exposed_to_mcp(allow_unsafe)
-    }
-
-    #[test]
-    fn default_exposure_is_public_reads_only() {
-        for cmd in CommandRegistry::get().commands() {
-            if exposed_to(cmd, false) {
-                assert!(!cmd.spec.changes_state(), "{}", cmd.command_key());
-                assert!(!cmd.dangerous, "{}", cmd.command_key());
-            }
-        }
-        assert!(exposed_to(contract(&["mids"]), false));
-        for path in [
-            &["orders", "create"][..],
-            &["wallet", "show"],
-            &["positions", "list"],
-        ] {
-            assert!(!exposed_to(contract(path), false), "{path:?}");
-            assert!(exposed_to(contract(path), true), "{path:?}");
-        }
-        let mcp = contract(&["mcp"]);
-        assert!(!exposed_to(mcp, false) && !exposed_to(mcp, true));
-    }
-
-    #[test]
-    fn tool_names_are_unique_across_every_command_that_can_be_offered() {
-        let mut seen = std::collections::BTreeMap::new();
-        for cmd in CommandRegistry::get()
-            .commands()
-            .iter()
-            .filter(|cmd| exposed_to(cmd, true))
-        {
-            let previous = seen.insert(cmd.mcp_tool_name(), cmd.command_key());
-            assert!(
-                previous.is_none(),
-                "`{}` and `{}` are both the tool {}",
-                previous.unwrap_or_default(),
-                cmd.command_key(),
-                cmd.mcp_tool_name()
-            );
-        }
-        assert_eq!(
-            contract(&["report-incident"]).mcp_tool_name(),
-            "report_incident"
-        );
-        assert_eq!(
-            contract(&["orders", "create"]).mcp_tool_name(),
-            "orders_create"
-        );
-    }
-
-    #[test]
-    fn the_tool_list_offers_exactly_what_a_call_accepts() {
-        for allow_unsafe in [false, true] {
-            let settings = McpSettings {
-                allow_unsafe,
-                deadline: DEFAULT_DEADLINE,
-            };
-            for cmd in exposed(&settings) {
-                assert!(exposed_to(cmd, allow_unsafe), "{}", cmd.command_key());
-            }
-            assert_eq!(
-                exposed(&settings).count(),
-                CommandRegistry::get()
-                    .commands()
-                    .iter()
-                    .filter(|cmd| exposed_to(cmd, allow_unsafe))
-                    .count()
-            );
-        }
-    }
-
     fn settings_from(pairs: &[(&'static str, &'static str)]) -> Result<McpSettings, CliError> {
         McpSettings::from_env(&EnvSource::fixed(pairs.iter().copied()))
     }
@@ -481,7 +377,7 @@ mod tests {
             settings_from(&[]).unwrap(),
             McpSettings {
                 allow_unsafe: false,
-                deadline: Duration::from_secs(30),
+                deadline: DEFAULT_DEADLINE,
             }
         );
     }

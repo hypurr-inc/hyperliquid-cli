@@ -10,10 +10,8 @@ const APP_DIR: &str = "hyperliquid";
 
 pub const DEFAULT_VAULT_DIR: &str = ".hyperliquid";
 
-/// Config directory, overridden by `HYPERLIQUID_CONFIG_DIR` when nonempty:
-/// - macOS: `~/Library/Application Support/hyperliquid`
-/// - Linux: `~/.config/hyperliquid`
-/// - Windows: `C:\Users\<user>\AppData\Roaming\hyperliquid`
+/// Config directory: `HYPERLIQUID_CONFIG_DIR` when nonempty, else the
+/// platform's config directory.
 #[must_use]
 pub fn config_dir(env: &EnvSource) -> Option<PathBuf> {
     directory_override(env, env::CONFIG_DIR)
@@ -82,4 +80,19 @@ pub fn bankr_cli_config(env: &EnvSource) -> Option<PathBuf> {
 #[must_use]
 pub fn home_dir(env: &EnvSource) -> Option<PathBuf> {
     directory_override(env, env::HOME_DIR).or_else(dirs::home_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_vault_default_is_spelled_in_the_env_help_as_it_is_resolved() {
+        let vault_help = env::TABLE
+            .iter()
+            .find(|var| var.name == env::OWS_VAULT_PATH)
+            .unwrap()
+            .help;
+        assert!(vault_help.contains(&format!("~/{DEFAULT_VAULT_DIR}")));
+    }
 }

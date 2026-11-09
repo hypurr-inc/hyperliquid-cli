@@ -720,26 +720,49 @@ mod tests {
     }
 
     #[test]
-    fn the_requested_format_wins_over_the_environment_facts() {
-        let (terminal, _) = quiet();
-        let source = EnvSource::fixed([(env::FORMAT, "json"), (env::AGENT, "1")]);
-        let mode =
-            Mode::resolve(Some(OutputFormat::Table), false, false, terminal, &source).unwrap();
-        assert_eq!(mode.format, OutputFormat::Table);
+    fn the_format_is_the_flag_then_the_environment_then_what_the_surroundings_suggest() {
+        let on_a_terminal = Terminal {
+            stdin: true,
+            stdout: true,
+            stderr: true,
+        };
+        let none = EnvSource::fixed::<&str, &str>([]);
+        let agent = EnvSource::fixed([(env::AGENT, "1")]);
+        let json_and_agent = EnvSource::fixed([(env::FORMAT, "json"), (env::AGENT, "1")]);
+        let table = EnvSource::fixed([(env::FORMAT, "table")]);
+        let cases = [
+            (
+                Some(OutputFormat::Table),
+                &json_and_agent,
+                on_a_terminal,
+                OutputFormat::Table,
+            ),
+            (
+                Some(OutputFormat::Pretty),
+                &table,
+                on_a_terminal,
+                OutputFormat::Pretty,
+            ),
+            (None, &table, on_a_terminal, OutputFormat::Table),
+            (None, &none, on_a_terminal, OutputFormat::default()),
+            (None, &agent, on_a_terminal, OutputFormat::Json),
+            (None, &none, Terminal::default(), OutputFormat::Json),
+        ];
+        for (requested, source, terminal, expected) in cases {
+            let mode = Mode::resolve(requested, false, false, terminal, source).unwrap();
+            assert_eq!(mode.format, expected, "{requested:?} {terminal:?}");
+        }
     }
 
     #[test]
-    fn an_unreadable_format_variable_is_reported_as_json() {
+    fn an_unreadable_variable_is_reported_in_the_requested_format_or_json() {
         let (terminal, _) = quiet();
-        let source = EnvSource::fixed([(env::FORMAT, "yaml"), (env::AGENT, "banana")]);
-        let (err, format) = Mode::resolve(None, false, false, terminal, &source).unwrap_err();
+        let unreadable_format = EnvSource::fixed([(env::FORMAT, "yaml"), (env::AGENT, "banana")]);
+        let (err, format) =
+            Mode::resolve(None, false, false, terminal, &unreadable_format).unwrap_err();
         assert!(err.to_string().contains(env::FORMAT), "{err}");
         assert_eq!(format, OutputFormat::Json);
-    }
 
-    #[test]
-    fn an_unreadable_mode_variable_is_reported_in_the_resolved_format() {
-        let (terminal, _) = quiet();
         for name in [env::AGENT, env::NO_UPDATE_CHECK] {
             let source = EnvSource::fixed([(name, "banana")]);
             let (err, format) =
@@ -748,36 +771,6 @@ mod tests {
             assert!(err.to_string().contains(name), "{err}");
             assert_eq!(format, OutputFormat::Table);
         }
-    }
-
-    #[test]
-    fn the_format_comes_from_the_environment_after_the_command_line() {
-        let (terminal, _) = quiet();
-        let source = EnvSource::fixed([(env::FORMAT, "table")]);
-        let mode = Mode::resolve(None, false, false, terminal, &source).unwrap();
-        assert_eq!(mode.format, OutputFormat::Table);
-        let mode =
-            Mode::resolve(Some(OutputFormat::Pretty), false, false, terminal, &source).unwrap();
-        assert_eq!(mode.format, OutputFormat::Pretty);
-    }
-
-    #[test]
-    fn an_agent_or_a_piped_stdout_defaults_to_json_and_a_terminal_does_not() {
-        let on_a_terminal = Terminal {
-            stdin: true,
-            stdout: true,
-            stderr: true,
-        };
-        let none = EnvSource::fixed::<&str, &str>([]);
-        let agent = EnvSource::fixed([(env::AGENT, "1")]);
-        let format = |terminal, source: &EnvSource| {
-            Mode::resolve(None, false, false, terminal, source)
-                .unwrap()
-                .format
-        };
-        assert_eq!(format(on_a_terminal, &none), OutputFormat::default());
-        assert_eq!(format(on_a_terminal, &agent), OutputFormat::Json);
-        assert_eq!(format(Terminal::default(), &none), OutputFormat::Json);
     }
 
     #[test]

@@ -53,9 +53,9 @@ impl Serialize for Rejected {
 }
 
 /// The error for a rejected status. Every class [`Rejection::into_error`]
-/// names keeps its own error and exit code (a rate limit 11, rejected
-/// credentials 10, a recognised refusal 13 with its own reason); any other
-/// rejection reads as `lead` followed by the exchange's text and exits 13.
+/// names keeps its own error (a rate limit, rejected credentials, a recognised
+/// refusal with its own reason); any other rejection reads as `lead` followed
+/// by the exchange's text.
 pub(super) fn rejection_error(lead: impl fmt::Display, rejected: &Rejected) -> CliError {
     rejected.classify().into_error_after(lead)
 }

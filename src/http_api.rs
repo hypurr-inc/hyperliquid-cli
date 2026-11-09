@@ -34,7 +34,7 @@ pub use sdk::Sdk;
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-/// The mainnet vault list is a ~14 MB file: allow for a slow link.
+/// The mainnet vault list is a large file: allow for a slow link.
 const STATS_TIMEOUT: Duration = Duration::from_secs(60);
 /// The public host of the exchange's stats datasets (`/<Network>/<dataset>`).
 const STATS_BASE_URL: &str = "https://stats-data.hyperliquid.xyz";
@@ -749,7 +749,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn info_read_gives_up_after_two_retries() {
+    async fn info_read_gives_up_after_two_retries_and_tells_the_observer_once() {
+        static NOTICES: AtomicUsize = AtomicUsize::new(0);
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/info"))
@@ -758,34 +759,17 @@ mod tests {
             .await;
 
         let err = client_for(&server.uri())
+            .on_retry(|| {
+                NOTICES.fetch_add(1, Ordering::SeqCst);
+            })
             .info::<serde_json::Value>(&json!({}), "testing")
             .await
             .expect_err("persistent 503 fails");
 
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        assert_eq!(NOTICES.load(Ordering::SeqCst), 1);
         assert_eq!(err.exit_code(), 12);
         assert!(matches!(err, CliError::ApiStatus { status: 503, .. }));
-    }
-
-    #[tokio::test]
-    async fn the_retry_observer_hears_of_a_retrying_read_once() {
-        static NOTICES: AtomicUsize = AtomicUsize::new(0);
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/info"))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&server)
-            .await;
-
-        let _ = client_for(&server.uri())
-            .on_retry(|| {
-                NOTICES.fetch_add(1, Ordering::SeqCst);
-            })
-            .info::<serde_json::Value>(&json!({}), "testing")
-            .await;
-
-        assert_eq!(server.received_requests().await.unwrap().len(), 3);
-        assert_eq!(NOTICES.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -433,25 +433,13 @@ impl Invocation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli_command::CliCommand;
-    use crate::command_spec::NoArgs;
     use crate::config::{BankrLogin, Config, ConfigFile};
     use crate::env::{self, EnvSource};
     use crate::output::JsonRenderOptions;
     use crate::signable::Signs;
     use tempfile::TempDir;
 
-    struct Probe;
-
-    impl CliCommand for Probe {
-        type Args = NoArgs;
-
-        const SPEC: CommandSpec = CommandSpec::read(&["probe", "run"], "system", "Probe", "Probe.");
-
-        async fn run(_inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
-            Ok(())
-        }
-    }
+    static PROBE: CommandSpec = CommandSpec::read(&["probe", "run"], "system", "Probe", "Probe.");
 
     fn invocation_over(
         settings: Settings,
@@ -469,7 +457,7 @@ mod tests {
 
     fn invocation(flags: InvocationFlags) -> Invocation {
         let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
-        invocation_over(settings, flags, &Probe::SPEC)
+        invocation_over(settings, flags, &PROBE)
     }
 
     #[test]
@@ -479,7 +467,7 @@ mod tests {
             EnvSource::fixed([(env::DATA_DIR, data.path().to_str().unwrap())]),
             None,
         );
-        let inv = invocation_over(settings, InvocationFlags::default(), &Probe::SPEC);
+        let inv = invocation_over(settings, InvocationFlags::default(), &PROBE);
         let nonce = inv.remote().unwrap().api().nonces().next();
         let mark = std::fs::read_to_string(data.path().join("nonce-high-water")).unwrap();
         assert_eq!(mark.trim().parse::<u64>().unwrap(), nonce);
@@ -538,7 +526,7 @@ mod tests {
             assert!(inv.requires_approval(false).unwrap(), "testnet={testnet}");
             assert!(!inv.requires_approval(true).unwrap(), "testnet={testnet}");
         }
-        let silent = on_network(&Probe::SPEC, false);
+        let silent = on_network(&PROBE, false);
         assert!(!silent.requires_approval(false).unwrap());
     }
 
@@ -581,7 +569,7 @@ mod tests {
             EnvSource::fixed([(env::NETWORK, "testnet")]),
             Some(ConfigFile::at(path)),
         );
-        let inv = invocation_over(settings, InvocationFlags::default(), &Probe::SPEC);
+        let inv = invocation_over(settings, InvocationFlags::default(), &PROBE);
 
         assert!(inv.remote().is_ok(), "a public read needs no signer");
         assert!(

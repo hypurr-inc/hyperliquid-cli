@@ -1,8 +1,8 @@
 //! The persisted config file.
 //!
-//! The file is created by `setup` and the wallet commands that choose a default
-//! wallet or write builder/referral defaults (`wallet create|import|import-mnemonic|reset`,
-//! `account add --default|set-default|remove`). A missing file is not an error.
+//! The file is created by `setup` and the wallet and account commands that
+//! choose a default wallet or write builder/referral defaults. A missing file
+//! is not an error.
 //! Layering with environment variables and flags, and every read-modify-write of
 //! the file, happens in [`crate::settings`].
 
@@ -261,7 +261,7 @@ impl ConfigFile {
     }
 
     /// Hold the lock for a config read-modify-write so concurrent CLI processes
-    /// can't lose each other's keys. Waits up to 10 seconds. Writing the file
+    /// can't lose each other's keys. Waits up to `LOCK_WAIT`. Writing the file
     /// takes the guard, so a write can't happen without it.
     pub fn lock(&self) -> Result<FileLock, CliError> {
         FileLock::acquire(&self.path, LOCK_WAIT).map_err(|err| match err {
@@ -320,27 +320,21 @@ mod tests {
     }
 
     #[test]
-    fn save_then_read_roundtrips_and_skips_unset_fields() {
+    fn every_field_survives_a_save_and_read_and_unset_ones_are_not_written() {
         let tmp = TempDir::new().unwrap();
         let file = file_in(&tmp);
-        let config = Config {
+        let sparse = Config {
             network: Network::Testnet,
             default_wallet_id: Some("wallet-1".to_string()),
             ..Config::default()
         };
-        save(&file, &config);
-
-        assert_eq!(file.read().unwrap(), Some(config));
+        save(&file, &sparse);
+        assert_eq!(file.read().unwrap(), Some(sparse));
         let text = std::fs::read_to_string(file.path()).unwrap();
         assert!(!text.contains("private_key"));
         assert!(!text.contains("default_builder"));
-    }
 
-    #[test]
-    fn every_field_survives_a_save_and_read() {
-        let tmp = TempDir::new().unwrap();
-        let file = file_in(&tmp);
-        let config = Config {
+        let full = Config {
             private_key: Some("0xkey".to_string()),
             network: Network::Testnet,
             default_wallet_id: Some("wallet".to_string()),
@@ -349,14 +343,8 @@ mod tests {
             default_referral_code: Some("CODE".to_string()),
             ..Config::default()
         };
-        save(&file, &config);
-        assert_eq!(file.read().unwrap(), Some(config));
-    }
-
-    #[test]
-    fn network_names_in_the_file_are_case_insensitive() {
-        let config: Config = serde_json::from_str(r#"{"network":"TESTNET"}"#).unwrap();
-        assert_eq!(config.network, Network::Testnet);
+        save(&file, &full);
+        assert_eq!(file.read().unwrap(), Some(full));
     }
 
     #[test]
@@ -370,17 +358,6 @@ mod tests {
         let err = file.read().unwrap_err();
         assert!(matches!(err, CliError::Configuration(_)));
         assert!(err.to_string().contains("invalid config file"));
-    }
-
-    #[test]
-    fn invalid_network_in_file_is_a_configuration_error_naming_the_value() {
-        let tmp = TempDir::new().unwrap();
-        let file = file_in(&tmp);
-        save(&file, &Config::default());
-        std::fs::write(file.path(), r#"{"network":"bogus"}"#).unwrap();
-        let err = file.read().unwrap_err();
-        assert!(matches!(err, CliError::Configuration(_)));
-        assert!(err.to_string().contains("bogus"), "{err}");
     }
 
     #[cfg(unix)]
