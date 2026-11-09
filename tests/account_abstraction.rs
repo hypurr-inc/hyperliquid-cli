@@ -164,8 +164,9 @@ fn master_only_actions_refuse_a_stored_api_wallet_even_under_dry_run() {
         );
     }
 
-    let master_only: [&[&str]; 3] = [
-        &["account", "abstraction", "set", "--mode", "disabled"],
+    // `account abstraction set` is not here: an API wallet signs it as
+    // `agentSetAbstraction` (tests/agent_signed_actions.rs).
+    let master_only: [&[&str]; 2] = [
         &[
             "builder",
             "approve",

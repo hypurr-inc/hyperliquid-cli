@@ -1,16 +1,16 @@
 use hypersdk::Address;
-use hypersdk::hypercore::HttpClient;
-use hypersdk::hypercore::types::BasicOrder;
+use hypersdk::hypercore::types::{BasicOrder, OrderStatus};
 use serde::{Deserialize, Serialize};
 
 use super::args::StatusArgs;
 use super::cloid::parse_lookup_cloid;
-use super::rendering::OrderListOutput;
+use super::rendering::{OrderListOutput, OrderListRow};
 use crate::assets::AssetResolver;
 use crate::errors::{CliError, from_sdk};
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::JsonValueOutput;
+use crate::wire::InfoRequest;
 
 pub async fn open(
     inv: &Invocation,
@@ -18,25 +18,52 @@ pub async fn open(
     user: Address,
     dex: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    inv.print(&open_snapshot(inv.remote()?.api().sdk(), resolver, user, dex).await?);
+    inv.print(&open_orders_output(inv.remote()?.api(), resolver, user, dex).await?);
     Ok(())
 }
 
-/// Fetch authenticated user's open orders without printing them.
-pub async fn open_snapshot(
-    client: &HttpClient,
+/// An open order as `frontendOpenOrders` lists it: the SDK's order plus the
+/// child TP/SL orders it drops.
+#[derive(Debug, Deserialize)]
+struct FrontendOrder {
+    #[serde(flatten)]
+    order: BasicOrder,
+    #[serde(default)]
+    children: Vec<FrontendOrder>,
+}
+
+impl FrontendOrder {
+    fn into_row(self, resolver: &AssetResolver) -> OrderListRow {
+        let children = self
+            .children
+            .into_iter()
+            .map(|child| child.into_row(resolver))
+            .collect();
+        display_row(resolver, self.order).with_children(children)
+    }
+}
+
+/// Fetch an account's open orders, trigger fields and TP/SL children
+/// included, without printing them. `account orders` and `orders open` list
+/// the same rows.
+pub async fn open_orders_output(
+    api: &ApiClient,
     resolver: &AssetResolver,
     user: Address,
     dex: Option<&str>,
 ) -> Result<OrderListOutput, anyhow::Error> {
-    let orders = client
-        .open_orders(user, dex.map(str::to_string))
-        .await
-        .map_err(from_sdk)?
-        .into_iter()
-        .map(|order| normalize_order_display_coin(resolver, order));
-
-    Ok(OrderListOutput::new(orders, "No open orders."))
+    let request =
+        InfoRequest::user("frontendOpenOrders", user).field_if("dex", dex.map(str::to_string));
+    let orders = api
+        .info::<Vec<FrontendOrder>>(&request, "loading open orders")
+        .await?;
+    Ok(OrderListOutput::from_rows(
+        orders
+            .into_iter()
+            .map(|order| order.into_row(resolver))
+            .collect(),
+        "No open orders.",
+    ))
 }
 
 pub async fn status(
@@ -85,13 +112,24 @@ pub async fn history(
     resolver: &AssetResolver,
     user: Address,
 ) -> Result<(), anyhow::Error> {
-    let orders = historical_orders(inv.remote()?.api(), user)
+    let rows = historical_orders(inv.remote()?.api(), user)
         .await?
         .into_iter()
-        .map(|order| normalize_order_display_coin(resolver, order));
+        .map(|entry| {
+            let row = display_row(resolver, entry.order);
+            match entry.status {
+                Some((status, time)) => row.with_status(status, time),
+                None => row,
+            }
+        })
+        .collect();
 
-    inv.print(&OrderListOutput::new(orders, "No historical orders."));
+    inv.print(&OrderListOutput::from_rows(rows, "No historical orders."));
     Ok(())
+}
+
+fn display_row(resolver: &AssetResolver, order: BasicOrder) -> OrderListRow {
+    OrderListRow::from(order).with_display_coin(&|coin| resolver.display_coin(coin))
 }
 
 #[derive(Debug, Serialize)]
@@ -102,24 +140,56 @@ struct HistoricalOrdersRequest {
     user: Address,
 }
 
+/// An order from `historicalOrders` with its status and the time it took it.
+/// A bare order list, which has no status, reads with `None`.
+struct HistoricalOrder {
+    order: BasicOrder,
+    status: Option<(String, u64)>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum HistoricalOrderItem {
-    Wrapped { order: BasicOrder },
+    Wrapped {
+        order: BasicOrder,
+        status: String,
+        #[serde(rename = "statusTimestamp")]
+        status_timestamp: u64,
+    },
     Plain(BasicOrder),
 }
 
 impl HistoricalOrderItem {
-    fn into_order(self) -> BasicOrder {
+    fn into_order(self) -> HistoricalOrder {
         match self {
-            Self::Wrapped { order, .. } | Self::Plain(order) => order,
+            Self::Wrapped {
+                order,
+                status,
+                status_timestamp,
+            } => HistoricalOrder {
+                order,
+                status: Some((status, status_timestamp)),
+            },
+            Self::Plain(order) => HistoricalOrder {
+                order,
+                status: None,
+            },
         }
     }
 }
 
-async fn historical_orders(api: &ApiClient, user: Address) -> Result<Vec<BasicOrder>, CliError> {
+async fn historical_orders(
+    api: &ApiClient,
+    user: Address,
+) -> Result<Vec<HistoricalOrder>, CliError> {
     match api.sdk().historical_orders(user).await {
-        Ok(orders) => Ok(orders.into_iter().map(|update| update.order).collect()),
+        Ok(updates) => Ok(updates
+            .into_iter()
+            .map(|update| HistoricalOrder {
+                order: update.order,
+                status: Some((status_label(update.status), update.status_timestamp)),
+            })
+            .collect()),
         Err(err) if should_fallback_to_raw_historical_orders(&err) => {
             historical_orders_raw(api, user).await
         }
@@ -127,9 +197,12 @@ async fn historical_orders(api: &ApiClient, user: Address) -> Result<Vec<BasicOr
     }
 }
 
-fn normalize_order_display_coin(resolver: &AssetResolver, mut order: BasicOrder) -> BasicOrder {
-    order.coin = resolver.display_coin(&order.coin);
-    order
+/// The status as the exchange spells it (`marginCanceled`), not the SDK's `Display`.
+fn status_label(status: OrderStatus) -> String {
+    match serde_json::to_value(status) {
+        Ok(serde_json::Value::String(label)) => label,
+        _ => status.to_string(),
+    }
 }
 
 /// hypersdk decodes `historicalOrders` as `OrderUpdate<BasicOrder>`; when the
@@ -146,7 +219,7 @@ fn should_fallback_to_raw_historical_orders(err: &anyhow::Error) -> bool {
 async fn historical_orders_raw(
     api: &ApiClient,
     user: Address,
-) -> Result<Vec<BasicOrder>, CliError> {
+) -> Result<Vec<HistoricalOrder>, CliError> {
     let request = HistoricalOrdersRequest {
         request_type: "historicalOrders",
         user,

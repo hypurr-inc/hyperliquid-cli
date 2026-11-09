@@ -16,6 +16,14 @@ pub(super) const DEFAULT_TRACKING_TIMEOUT: Duration = Duration::from_secs(300);
 /// [`DEFAULT_TRACKING_TIMEOUT`] as a clap default value.
 const DEFAULT_TRACKING_TIMEOUT_TEXT: &str = "300s";
 
+/// The largest order write priority rate, in 1/100,000,000 of notional: 100%.
+pub(super) const MAX_PRIORITY_RATE: u32 = 100_000_000;
+
+/// `--priority-rate`: a whole rate from 1 to [`MAX_PRIORITY_RATE`].
+fn priority_rate_parser() -> clap::builder::RangedI64ValueParser<u32> {
+    clap::value_parser!(u32).range(1..=i64::from(MAX_PRIORITY_RATE))
+}
+
 pub(super) const DEFAULT_MARKET_ORDER_SLIPPAGE_BPS: u16 = 500;
 pub(super) const MIN_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1;
 pub(super) const MAX_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1_000;
@@ -102,6 +110,18 @@ pub struct CreateArgs {
     #[arg(long, requires = "builder")]
     pub builder_fee_rate: Option<String>,
 
+    /// Sub-builder that receives part of the builder fee, as `ADDRESS:SHARE` with SHARE a percent of the fee such as `25%`. Repeat up to 5 times; shares sum to at most 100%.
+    #[arg(long = "sub-builder", requires = "builder")]
+    pub sub_builder: Vec<String>,
+
+    /// Order write priority: pay a tip of N / 100,000,000 of the filled (IOC) or resting (ALO) notional for faster handling. 80000 is 8 bps. Limit orders that are all IOC, or all ALO and not reduce-only, on non-outcome markets only.
+    #[arg(
+        long,
+        value_parser = priority_rate_parser(),
+        conflicts_with_all = ["grouping", "take_profit", "stop_loss"]
+    )]
+    pub priority_rate: Option<u32>,
+
     /// Client order ID (0x-prefixed 16-byte hex value)
     #[arg(long)]
     pub cloid: Option<String>,
@@ -154,6 +174,10 @@ pub struct ScaleArgs {
     #[arg(long)]
     pub on_behalf_of: Option<String>,
 
+    /// Order write priority: pay a tip of N / 100,000,000 of the filled (IOC) or resting (ALO) notional for faster handling. 80000 is 8 bps. Requires --tif ioc, or --tif alo without --reduce-only.
+    #[arg(long, value_parser = priority_rate_parser())]
+    pub priority_rate: Option<u32>,
+
     /// Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.
     #[arg(long, value_enum)]
     pub margin_mode: Option<MarginModeArg>,
@@ -169,6 +193,30 @@ pub struct BatchCreateArgs {
     /// JSON file containing an array of order legs
     #[arg(long)]
     pub orders_file: PathBuf,
+
+    /// Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
+    /// Order write priority: pay a tip of N / 100,000,000 of the filled (IOC) or resting (ALO) notional for faster handling. 80000 is 8 bps. Every leg must be IOC, or every leg ALO and not reduce-only.
+    #[arg(long, value_parser = priority_rate_parser())]
+    pub priority_rate: Option<u32>,
+
+    /// Skip the mainnet confirmation prompt for deliberate automation
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+/// Arguments for `orders batch-modify`.
+#[derive(Args, Debug, Clone)]
+pub struct BatchModifyArgs {
+    /// JSON file containing an array of modifications, each naming an order by `order_id` or `cloid` and the `price`, `trigger_price` or `size` to replace
+    #[arg(long)]
+    pub orders_file: PathBuf,
+
+    /// Place each replacement even if its cancel fails. When off, every replacement must be a non-trigger ALO order or a non-executable GTC order, so set this to modify trigger orders
+    #[arg(long)]
+    pub always_place: bool,
 
     /// Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id
     #[arg(long)]
@@ -811,6 +859,10 @@ pub struct BuySellArgs {
     pub builder: Option<String>,
     #[arg(long, requires = "builder")]
     pub builder_fee_rate: Option<String>,
+    #[arg(long = "sub-builder", requires = "builder")]
+    pub sub_builder: Vec<String>,
+    #[arg(long, value_parser = priority_rate_parser())]
+    pub priority_rate: Option<u32>,
     #[arg(long)]
     pub cloid: Option<String>,
     #[arg(short = 'y', long)]
@@ -843,6 +895,8 @@ impl BuySellArgs {
             margin_mode: self.margin_mode,
             builder: self.builder,
             builder_fee_rate: self.builder_fee_rate,
+            priority_rate: self.priority_rate,
+            sub_builder: self.sub_builder,
             cloid: self.cloid,
             yes: self.yes,
         }

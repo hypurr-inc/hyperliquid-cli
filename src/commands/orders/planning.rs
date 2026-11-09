@@ -289,23 +289,27 @@ fn order_builder_fee(
     side: OrderSide,
 ) -> Result<Option<OrderBuilderFee>, CliError> {
     let spot_buy = matches!(market, Market::Spot(_)) && side == OrderSide::Buy;
-    let (address, fee) = match request {
+    let (address, fee, sub_builders) = match request {
         BuilderRequest::None => return Ok(None),
-        BuilderRequest::Explicit { address, fee } => {
+        BuilderRequest::Explicit {
+            address,
+            fee,
+            sub_builders,
+        } => {
             if spot_buy {
                 return Err(CliError::Unsupported(
                     "spot buy orders do not support builder fees; Hyperliquid builder codes apply to spot sells and both sides of perpetual orders"
                         .to_string(),
                 ));
             }
-            (*address, *fee)
+            (*address, *fee, sub_builders.clone())
         }
         BuilderRequest::Default => {
             if spot_buy {
                 return Ok(None);
             }
             match builder_fee::resolve_default_builder_fee(settings)? {
-                Some(default) => default,
+                Some((address, fee)) => (address, fee, Vec::new()),
                 None => return Ok(None),
             }
         }
@@ -321,6 +325,7 @@ fn order_builder_fee(
         // recover a random nonexistent signer on exchange validation.
         b: address.to_string().to_ascii_lowercase(),
         f: fee,
+        s: sub_builders,
     }))
 }
 
@@ -458,6 +463,7 @@ async fn plan_order(
         warning,
         builder,
         margin_mode: spec.margin_mode,
+        priority_rate: spec.priority_rate,
     })
 }
 
@@ -503,6 +509,7 @@ pub(super) async fn prepare_scale_batch(
             .map(|spec| {
                 spec.reduce_only(args.reduce_only)
                     .with_margin_mode(args.margin_mode)
+                    .with_priority_rate(args.priority_rate)
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -533,6 +540,7 @@ pub(super) async fn prepare_batch_create_orders(
     resolver: &AssetResolver,
     settings: &Settings,
     orders: Vec<BatchCreateOrder>,
+    priority_rate: Option<u32>,
 ) -> Result<PreparedOrderBatch, CliError> {
     let specs = orders
         .into_iter()
@@ -547,10 +555,17 @@ pub(super) async fn prepare_batch_create_orders(
                 order.tif.unwrap_or(TifArg::Gtc),
             )?
             .reduce_only(order.reduce_only)
-            .with_cloid(cloid))
+            .with_cloid(cloid)
+            .with_priority_rate(priority_rate))
         })
         .collect::<Result<Vec<_>, CliError>>()?;
     prepare_order_batch(client, resolver, settings, specs).await
+}
+
+/// The grouping an order action with no TP/SL carries: none, or the order
+/// write priority `rate` when one is paid.
+pub(super) fn priority_grouping(rate: Option<u32>) -> OrderGrouping {
+    rate.map_or(OrderGrouping::Na, OrderGrouping::PriorityRate)
 }
 
 async fn prepare_order_batch(
@@ -570,9 +585,21 @@ async fn prepare_order_batch(
         }
         legs.push(prepare_order_in(client, &markets[&key], settings, spec).await?);
     }
+    // Every leg of one batch shares the rate; it is one action's grouping.
+    let priority_rate = specs.first().and_then(|spec| spec.priority_rate);
+    if priority_rate.is_some() {
+        // Each leg is IOC or ALO already; the exchange wants them all the same.
+        let all = |tif: TifArg| legs.iter().all(|leg| leg.tif == Some(tif));
+        if !all(TifArg::Ioc) && !all(TifArg::Alo) {
+            return Err(CliError::Unsupported(
+                "--priority-rate needs every order in the batch to be IOC, or every order to be ALO; Hyperliquid refuses a batch that mixes them"
+                    .to_string(),
+            ));
+        }
+    }
     let batch = BatchOrder {
         orders: legs.iter().map(|leg| leg.request.clone()).collect(),
-        grouping: OrderGrouping::Na,
+        grouping: priority_grouping(priority_rate),
         builder: None,
     };
     Ok(PreparedOrderBatch { batch, legs })
@@ -1122,13 +1149,13 @@ fn prepared_order_dry_run_args(
         "take_profit": args.take_profit.map(|value| value.to_string()),
         "stop_loss": args.stop_loss.map(|value| value.to_string()),
         "grouping": args.grouping.map(|grouping| TpslGroupingArg::from(grouping).to_string()),
-        "builder": prepared.builder.as_ref().map(|builder| serde_json::json!({
-            "b": builder.b.to_string(),
-            "f": builder.f,
-        })),
+        "builder": prepared.builder.as_ref().map(|builder| serde_json::json!(builder)),
         "builder_address": args.builder.clone(),
         "builder_fee_rate": args.builder_fee_rate.clone(),
     });
+    if let Some(rate) = prepared.priority_rate {
+        insert_priority_rate(&mut value, rate);
+    }
     match &prepared.market {
         Market::Outcome(outcome) => {
             let notation = outcome.parse()?;
@@ -1188,11 +1215,28 @@ fn order_batch_dry_run_args(prepared: &PreparedOrderBatch) -> serde_json::Value 
             })
         })
         .collect::<Vec<_>>();
-    serde_json::json!({
+    let mut preview = serde_json::json!({
         "grouping": "na",
         "order_count": prepared.legs.len(),
         "orders": legs,
-    })
+    });
+    if let OrderGrouping::PriorityRate(rate) = prepared.batch.grouping {
+        insert_priority_rate(&mut preview, rate);
+    }
+    preview
+}
+
+/// Name the order write priority a preview would send: the grouping is the
+/// rate, and the wire form is `{ "p": rate }`.
+fn insert_priority_rate(preview: &mut serde_json::Value, rate: u32) {
+    if let Some(object) = preview.as_object_mut() {
+        object.insert("grouping".to_string(), "priority-rate".into());
+        object.insert(
+            "grouping_wire".to_string(),
+            serde_json::json!({ "p": rate }),
+        );
+        object.insert("priority_rate".to_string(), rate.into());
+    }
 }
 
 fn tpsl_to_str(tpsl: TpSl) -> &'static str {

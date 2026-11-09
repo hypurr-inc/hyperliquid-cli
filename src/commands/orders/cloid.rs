@@ -37,9 +37,17 @@ pub(super) fn parse_cloid(input: &str) -> Result<Cloid, CliError> {
         ));
     }
 
-    input.parse::<Cloid>().map_err(|err| {
+    let cloid = input.parse::<Cloid>().map_err(|err| {
         CliError::Configuration(format!("CLOID must be a valid 16-byte hex value: {err}"))
-    })
+    })?;
+    // The exchange has no zero cloid: the SDK leaves it off the wire and every
+    // read returns an order with none, so the id could never find the order.
+    if cloid == Cloid::default() {
+        return Err(CliError::Configuration(
+            "CLOID 0x00000000000000000000000000000000 means 'no cloid' to the exchange; omit --cloid or use a non-zero id".to_string(),
+        ));
+    }
+    Ok(cloid)
 }
 
 /// A CLOID given to a command that looks an order up: a short or unprefixed
@@ -99,6 +107,13 @@ mod tests {
             parse_cloid("0x00000000000000000000000000000001").unwrap(),
             cloid("0x00000000000000000000000000000001")
         );
+    }
+
+    #[test]
+    fn an_order_cloid_of_all_zeros_is_refused_because_it_means_no_cloid() {
+        let err = parse_cloid("0x00000000000000000000000000000000").unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("means 'no cloid'"), "{err}");
     }
 
     #[test]

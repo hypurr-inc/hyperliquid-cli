@@ -297,7 +297,7 @@ async fn api_wallet_list_uses_selected_master_address_for_agent_lookup() {
 }
 
 #[test]
-fn api_wallet_revoke_requires_name_in_cli_and_schema() {
+fn api_wallet_revoke_requires_name_or_unnamed_in_cli_and_schema() {
     let env = IsolatedHome::new();
 
     env.command()
@@ -308,6 +308,12 @@ fn api_wallet_revoke_requires_name_in_cli_and_schema() {
         .code(2)
         .stderr(predicate::str::contains("--name"));
 
+    env.command()
+        .args(["api-wallet", "revoke", "--name", "bot", "--unnamed"])
+        .assert()
+        .failure()
+        .code(2);
+
     let output = env
         .command()
         .args(["--format", "json", "schema", "api-wallet", "revoke"])
@@ -317,9 +323,54 @@ fn api_wallet_revoke_requires_name_in_cli_and_schema() {
         .stdout
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["args"][0]["required"], true);
-    let required = json["json_schema"]["required"].as_array().unwrap();
-    assert!(required.iter().any(|value| value.as_str() == Some("name")));
+    assert_eq!(
+        json["json_schema"]["oneOf"],
+        serde_json::json!([{"required": ["name"]}, {"required": ["unnamed"]}])
+    );
+}
+
+#[tokio::test]
+async fn api_wallet_revoke_unnamed_replaces_the_unnamed_agent_with_a_throwaway() {
+    let env = IsolatedHome::new();
+    let server = mock_api_wallet_server().await;
+
+    env.command_with_server(&server)
+        .args([
+            "--format",
+            "json",
+            "--private-key",
+            VALID_PRIVATE_KEY,
+            "api-wallet",
+            "revoke",
+            "--unnamed",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("private_key").not())
+        .stdout(predicate::str::contains("Unnamed API wallet replaced"));
+
+    let requests = server.received_requests().await.unwrap();
+    let exchange = requests
+        .iter()
+        .find(|request| request.url.path() == "/exchange")
+        .expect("expected revoke replacement exchange request");
+    let body: Value = serde_json::from_slice(&exchange.body).unwrap();
+    assert_eq!(body["action"]["type"], "approveAgent");
+    // An unnamed approval is what deregisters the previous unnamed agent; a
+    // name would register a named one instead.
+    assert!(
+        body["action"]["agentName"]
+            .as_str()
+            .is_none_or(str::is_empty),
+        "{}",
+        body["action"]
+    );
+    let replacement = body["action"]["agentAddress"].as_str().unwrap();
+    assert_ne!(
+        replacement.to_ascii_lowercase(),
+        expected_address(VALID_PRIVATE_KEY).to_ascii_lowercase(),
+        "the replacement agent must be a throwaway key, not the master"
+    );
 }
 
 #[tokio::test]

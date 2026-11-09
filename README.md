@@ -256,6 +256,7 @@ Canonical top-level aliases accepted by the CLI:
 | `--results-only` | Strip common JSON envelopes and return only data. |
 | `--max-results <N>` | Limit top-level list/map results client-side. |
 | `--dry-run` | Validate and preview mutating commands without side effects. |
+| `--expires-after <DURATION>` | Give signed L1 actions an `expiresAfter` of now plus the duration (for example `30s`, `5m`); the exchange rejects the request after that. Exit `13` for user-signed actions such as transfers and for commands that sign nothing. |
 | `--payload-json <JSON>` / `--payload-file <PATH\|->` | Provide raw JSON payload context for mutating dry-runs. |
 | `--no-update-check` | Disable release update checks for this invocation. |
 | `--non-interactive` | Never prompt. Commands fail with the missing input named. `CI`, `HYPERLIQUID_AGENT`, JSON output, and `--payload-file -` also disable prompts. |
@@ -276,10 +277,17 @@ Canonical top-level aliases accepted by the CLI:
 | `spot list` | List spot markets. |
 | `spot get <PAIR>` | Show one spot pair, for example `PURR/USDC`, with its mark, mid and previous-day price and 24-hour volume. |
 | `spot token <TOKEN>` | Show a spot token's supply, prices, deployer and genesis by name or `0x` token id. |
-| `outcomes list [--limit <N>]` | List active outcome market sides from `outcomeMeta`. |
+| `outcomes list [--limit <N>] [--oldest-first]` | List active outcome market sides from `outcomeMeta`, newest outcome first, with template names resolved, `quote_token`, `venue`, `deployer_fee_scale`, the `question` the outcome belongs to (`question_role` `named` or `fallback`) and per-row `warnings`. |
 | `outcomes get #<ENCODING>` / `outcomes get +<ENCODING>` | Show outcome side metadata and derived asset ID. |
+| `outcomes questions [--limit <N>] [--oldest-first]` | List questions: `named_outcomes`, the `fallback_outcome` and `settled_named_outcomes` of each. |
+| `outcomes settled <OUTCOME>` | Show how a settled outcome resolved: `settle_fraction`, per-side payouts, deployer details and its question. Settlement pays out automatically; there is nothing to claim. |
+| `outcomes templates` | List the `outcomeTemplates` outcomes named `template:<id>` are built from. |
+| `outcomes split --outcome <ID> --amount <N> [--yes]` | Split quote tokens into shares of both sides of an outcome (`userOutcome` L1 action). Mainnet prompts unless `--yes`. |
+| `outcomes merge --outcome <ID> (--amount <N> \| --max) [--yes]` | Merge both sides of an outcome back into quote tokens. |
+| `outcomes merge-question --question <ID> (--amount <N> \| --max) [--yes]` | Merge Yes shares of every outcome of a question into quote tokens. |
+| `outcomes negate --question <ID> --outcome <ID> --amount <N> [--yes]` | Convert No shares of a question outcome into Yes shares of every other outcome of the question. |
 | `search <QUERY> [--type perp\|hip3\|spot\|outcome\|all]` | Search perps, HIP-3, spot, and outcomes in one list. Alias of `asset search`. |
-| `book <COIN> [-w] [--max-ticks <TICKS>]` | Show L2 order book snapshot or watch updates. |
+| `book <COIN> [--n-sig-figs <2-5>] [--mantissa <1\|2\|5>] [-w] [--max-ticks <TICKS>]` | Show L2 order book snapshot or watch updates. `--n-sig-figs` aggregates price levels; `--mantissa` needs `--n-sig-figs 5`. |
 | `mids [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | Show all mid prices. |
 | `candles <COIN> [--interval <INTERVAL>] [--limit <N>] [-w] [--max-ticks <TICKS>]` | Show candle history. |
 | `spread <COIN>` | Show bid, ask, and spread. |
@@ -317,7 +325,10 @@ Canonical top-level aliases accepted by the CLI:
 | `account twap-history [ADDRESS_OR_WALLET]` | Query user TWAP order history. |
 | `account twap-fills [ADDRESS_OR_WALLET] [--start <TIME>] [--end <TIME>] [--aggregate-by-time]` | Query user TWAP slice fills. |
 | `account abstraction [ADDRESS]` | Read account abstraction mode for an address, or the selected account when `ADDRESS` is omitted. |
-| `account abstraction set --mode disabled\|unified-account\|portfolio-margin` | Set account abstraction for the configured signer; prompts unless `-y`. |
+| `account invalidate-nonce --nonce <MS>` | Send a `noop` that burns a nonce, so a signed request still in flight with it is rejected. Sign with the same wallet as that request; an unknown-outcome error prints the nonce. Moves no funds, no prompt. |
+| `account reserve-weight --weight <N> [--destination <ADDRESS>] [-y]` | Reserve extra rate-limit capacity at 0.0005 USDC per request from the perps balance, for the signer or another existing address; prompts unless `-y`. |
+| `account abstraction set --mode disabled\|unified-account\|portfolio-margin [--user <SUBACCOUNT>]` | Set account abstraction for the configured signer or one of its subaccounts; prompts unless `-y`. An API wallet sets its master account's mode with `agentSetAbstraction` and may not name another account. |
+| `account evm-big-blocks (--enable\|--disable)` | Route the account's HyperEVM transactions to big blocks or back to small blocks (`evmUserModify`). |
 | `subaccount list [ADDRESS_OR_WALLET]` | Query public subaccounts for a master address. |
 | `subaccount create --name <NAME>` | Create a subaccount signed by the master account. |
 | `account add [PRIVATE_KEY] [--alias <ALIAS>] [--type <TYPE>] [--default]` / `account ls` / `account set-default [SELECTOR]` / `account remove [SELECTOR] [-y]` | Manage stored wallets. |
@@ -326,7 +337,7 @@ Canonical top-level aliases accepted by the CLI:
 | `api-wallet list [ACCOUNT]` | List API wallets approved by a master account. |
 | `api-wallet revoke --name <NAME>` | Replace a named API wallet with a short-lived throwaway agent. |
 
-API wallets can sign trading actions for the approving master account, but they cannot withdraw. Use the master or subaccount address for info queries. When `api-wallet create` generates a local agent keypair, it prints the private key once before submitting `approveAgent` for that address; store that key securely because the CLI does not automatically recover it later.
+API wallets can sign trading actions for the approving master account, but they cannot withdraw. Use the master or subaccount address for info queries; a bare key that is an API wallet is refused by reads that would use its own, empty account, and the error names the master to pass instead. The user-signed actions (`transfer send|spot-send|withdraw|spot-to-perp|perp-to-spot`, `staking delegate|undelegate|withdraw|link`, `api-wallet approve|revoke`, `builder approve`) are refused up front for a stored API wallet with exit `13`. Three actions have an agent-signed form that a stored API wallet uses: `staking deposit` (`cDeposit2`), `transfer send-asset` to the account it leaves (`agentSendAsset`) and `account abstraction set` for its master (`agentSetAbstraction`). When `api-wallet create` generates a local agent keypair, it prints the private key once before submitting `approveAgent` for that address; store that key securely because the CLI does not automatically recover it later.
 
 Signer and acting-account flags intentionally share the same selector grammar where it is safe: raw `0x` address, stored wallet/account alias, or stored wallet/account id. Their roles differ. Global `--account` / `--wallet` selects the key that signs the action; per-command `--on-behalf-of` selects the protocol account, subaccount, or vault supplied as Hyperliquid `vaultAddress` for that action.
 
@@ -337,7 +348,7 @@ Signer and acting-account flags intentionally share the same selector grammar wh
 | `orders open [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | List open orders. |
 | `orders history` | List order history. |
 | `orders status --user <ADDRESS> (--oid <OID>\|--cloid <CLOID>)` | Query public order status. |
-| `orders create --coin <COIN> --side buy\|sell [--type limit\|market\|stop-loss\|take-profit\|stop-limit\|take-limit] [--price <PX>] [--trigger-price <PX>] [--size <SIZE>\|--amount <USDC>] [--dex <DEX>] [--reduce-only] [--on-behalf-of <ACCOUNT_SELECTOR>] [--cloid <CLOID>] [-y]` | Create limit, market, stop-loss, take-profit, stop-limit, or take-limit orders. `--on-behalf-of` is an acting-account selector used as `vaultAddress`. |
+| `orders create --coin <COIN> --side buy\|sell [--type limit\|market\|stop-loss\|take-profit\|stop-limit\|take-limit] [--price <PX>] [--trigger-price <PX>] [--size <SIZE>\|--amount <USDC>] [--dex <DEX>] [--reduce-only] [--on-behalf-of <ACCOUNT_SELECTOR>] [--builder <ADDRESS> --builder-fee-rate <PERCENT> [--sub-builder <ADDRESS:SHARE>]...] [--priority-rate <N>] [--cloid <CLOID>] [-y]` | Create limit, market, stop-loss, take-profit, stop-limit, or take-limit orders. `--on-behalf-of` is an acting-account selector used as `vaultAddress`. A builder fee is checked against the account's `maxBuilderFee` first and fails with exit `13` and the `builder approve` command when it is not approved. `--sub-builder` (up to 5, shares as a percent of the builder fee summing to at most 100%) splits the builder fee. `--priority-rate` pays an order write priority (N/100,000,000 of notional, 80000 = 8 bps) for IOC or non-reduce-only ALO limit orders; it cannot combine with TP/SL grouping. `buy`, `sell`, `orders scale` and `orders batch-create` take `--priority-rate` too. |
 | `orders scale --coin <COIN> --side buy\|sell --start-price <PX> --end-price <PX> --total-size <SIZE> --orders <N>` | Create an evenly spaced batch of limit orders. |
 | `orders batch-create --orders-file <PATH>` | Create a batch of limit orders from JSON. |
 | `orders create --coin <COIN> --side buy\|sell [--take-profit <PX>] [--stop-loss <PX>] [--grouping normal-tpsl] ...` | Create a parent order with fixed-size TP/SL children. |
@@ -352,17 +363,19 @@ Signer and acting-account flags intentionally share the same selector grammar wh
 | `orders cancel (ORDER_ID\|--cloid <CLOID>) [--on-behalf-of <ACCOUNT_SELECTOR>]` | Cancel by order ID or client order ID. `--on-behalf-of` manages an order for the acting subaccount/vault. |
 | `orders cancel-all [--coin <COIN>] [--dex <DEX>] [--on-behalf-of <ACCOUNT_SELECTOR>] [-y]` | Cancel all open orders, optionally filtered by coin or DEX. |
 | `orders modify (ORDER_ID\|--cloid <CLOID>) [--price <PRICE>] [--trigger-price <PRICE>] [--size <SIZE>] [--always-place] [--on-behalf-of <ACCOUNT_SELECTOR>]` | Modify an existing order. Without `--always-place` the replacement must be a non-trigger ALO order or a non-executable GTC order; add it to modify trigger orders or to place the replacement even if the cancel fails. |
+| `orders batch-modify --orders-file <PATH> [--always-place] [--on-behalf-of <ACCOUNT_SELECTOR>] [-y]` | Modify several existing orders in one `batchModify` request. The file is a JSON array (or an object with an `orders` array) of `{"order_id" or "cloid", "price", "trigger_price", "size"}`; each order keeps its type, side and cloid, and `--always-place` is needed for trigger orders. Mainnet prompts unless `--yes` is supplied. |
 | `orders twap-create --coin <COIN> --side buy\|sell --size <SIZE> --duration <SECONDS> [--dex <DEX>] [--margin-mode cross\|isolated] [--on-behalf-of <ACCOUNT_SELECTOR>] [-y]` | Create a TWAP order. |
 | `orders twap-cancel <TWAP_ID> --coin <COIN> [--dex <DEX>] [--on-behalf-of <ACCOUNT_SELECTOR>]` | Cancel a TWAP order. |
 | `orders schedule-cancel (--in <DURATION>\|--clear) [--on-behalf-of <ACCOUNT_SELECTOR>] [-y]` | Configure or clear a dead man's switch. Mainnet set and clear flows prompt unless `--yes` is supplied. |
 | `positions list [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | List open positions. `--dex` reads a HIP-3 DEX's account. |
 | `positions update-leverage --coin <COIN> --leverage <N> [--isolated] [--on-behalf-of <ACCOUNT_SELECTOR>]` | Set the leverage and margin mode (cross, or isolated with `--isolated`) for a market. Isolated-only markets refuse cross with exit `13`. |
 | `positions update-margin --coin <COIN> --amount <AMOUNT> [--on-behalf-of <ACCOUNT_SELECTOR>]` | Add (positive) or remove (negative) isolated margin on an open isolated position. Removal is refused on `strict_isolated` markets. |
-| `transfer spot-to-perp --amount <USDC> [-y]` | Move USDC from spot to perp. |
-| `transfer perp-to-spot --amount <USDC> [-y]` | Move USDC from perp to spot. |
+| `positions top-up-margin --coin <COIN> --leverage <N> [--on-behalf-of <ACCOUNT_SELECTOR>]` | Add isolated margin to an open isolated position until it reaches a target leverage (`topUpIsolatedOnlyMargin`). |
+| `transfer spot-to-perp --amount <USDC> [--subaccount <ACCOUNT_SELECTOR>] [-y]` | Move USDC from spot to perp, for the signer or one of its subaccounts. |
+| `transfer perp-to-spot --amount <USDC> [--subaccount <ACCOUNT_SELECTOR>] [-y]` | Move USDC from perp to spot, for the signer or one of its subaccounts. |
 | `transfer send --to <ADDRESS> --amount <USDC> [-y]` | Send USDC to another address. |
 | `transfer spot-send --to <ADDRESS> --token <TOKEN> --amount <AMOUNT> [-y]` | Send a spot token to another address. |
-| `transfer send-asset --to <ADDRESS> --source perp\|spot\|dex:<DEX> --dest perp\|spot\|dex:<DEX> --token <TOKEN> --amount <AMOUNT> [--from-subaccount <ADDRESS>] [-y]` | Send an asset between accounts, spot, perp, or DEX contexts. |
+| `transfer send-asset --to <ADDRESS> --source perp\|spot\|dex:<DEX> --dest perp\|spot\|dex:<DEX> --token <TOKEN> --amount <AMOUNT> [--from-subaccount <ADDRESS>] [-y]` | Send an asset between accounts, spot, perp, or DEX contexts. An API wallet signs `agentSendAsset`, which only sends to the account the funds leave. |
 | `transfer withdraw --to <ADDRESS> --amount <USDC> [-y]` | Withdraw USDC to Arbitrum. |
 | `subaccount transfer --subaccount <ACCOUNT_SELECTOR> --amount <USDC> --direction deposit\|withdraw [-y]` | Move USDC to or from a subaccount. The subaccount field is an acting-account selector, not a generic transfer recipient. |
 | `subaccount spot-transfer --subaccount <ACCOUNT_SELECTOR> --token <TOKEN> --amount <AMOUNT> --direction deposit\|withdraw [-y]` | Move a spot token to or from a subaccount. The subaccount field is an acting-account selector, not a generic transfer recipient. |
@@ -414,15 +427,16 @@ Outcome market notation (`#N` spot coin and `+N` token name) is available for di
 | `vault list [--kind protocol\|user\|normal\|child\|parent] [--user <ADDRESS>] [--limit <N>] [--sort tvl\|apr\|age\|name]` / `vault search <QUERY> [--user <ADDRESS>] [--limit <N>] [--sort tvl\|apr\|age\|name]` / `vault get <ADDRESS> [--user <ADDRESS>]` / `vault positions <ADDRESS>` | Discover and query vault state. The list comes from the exchange's public stats dataset (`stats-data.hyperliquid.xyz`), because `/info` `vaultSummaries` answers nothing. `vault list|search --user` adds that user's deposit to each vault; `vault get` reports `followers_returned` (the API lists at most 100 followers, `followers_truncated` marks a larger vault) and, with `--user`, that user's `follower_state`. |
 | `vault deposit --vault <ADDRESS> --amount <AMOUNT>` / `vault withdraw --vault <ADDRESS> --amount <AMOUNT>` | Submit vault transfers. |
 | `borrowlend rates` / `borrowlend get <TOKEN>` / `borrowlend user [ADDRESS]` | Query borrow/lend markets. |
-| `borrowlend supply <TOKEN> --amount <AMOUNT>` / `borrowlend withdraw <TOKEN> (--amount <AMOUNT>\|--max)` | Submit verified wallet-signed exchange `borrowLend` supply/withdraw actions; use `--dry-run` to inspect the action first. |
+| `borrowlend supply <TOKEN> --amount <AMOUNT>` / `borrowlend withdraw <TOKEN> (--amount <AMOUNT>\|--max)` / `borrowlend repay <TOKEN> (--amount <AMOUNT>\|--max)` / `borrowlend borrow <TOKEN> --amount <AMOUNT>` | Submit verified wallet-signed exchange `borrowLend` actions; use `--dry-run` to inspect the action first. Manual `borrow` is refused for portfolio-margin accounts, which borrow automatically. |
 | `builder max-fee --user <ADDRESS> --builder <ADDRESS>` | Query a user's approved max builder fee. |
 | `builder approved --user <ADDRESS>` | List all builders approved by a user with fee caps. |
 | `builder approve --builder <ADDRESS> --max-fee-rate <PERCENT> [-y]` | Approve or revoke a builder fee cap for the configured master signer. |
-| `prio status` / `prio bid --max <HYPE> --ip <IP> [--slot <N>]` | Query or bid in the gossip priority auction. |
+| `prio status` / `prio bid --max <HYPE> --ip <IP> [--slot <0-2>]` | Query or bid in the gossip priority auction (three independent slots; 0 is highest priority). |
 | `referral register <CODE>` / `referral set [CODE]` / `referral status` | Register your own referral code, set a referrer, or inspect referral state. |
 | `feedback (--scenario-json <JSON>\|--scenario-file <PATH\|->) [--contact <CONTACT>] [--tags <TAG>] [--url <URL>]` | Send structured CLI feedback as a scenario JSON object to the configured feedback endpoint; include `agent_address`, `signer_address`, or `wallet_address` in the scenario for rate-limit attribution, and use `--url` to override defaults. |
 | `schema [COMMAND...]` | Show machine-readable command schemas for agents. |
-| `subscribe trades --asset <ASSET>` / `subscribe orderbook --asset <ASSET>` / `subscribe candles --asset <ASSET> [--interval <INTERVAL>]` / `subscribe all-mids` / `subscribe order-updates` / `subscribe fills` `[--max-events <N>] [--idle-timeout-ms <MS>]` | Stream WebSocket events. |
+| `subscribe trades --asset <ASSET>` / `subscribe orderbook --asset <ASSET> [--n-sig-figs <2-5>] [--mantissa <1\|2\|5>]` / `subscribe bbo --asset <ASSET>` / `subscribe candles --asset <ASSET> [--interval <INTERVAL>]` / `subscribe active-asset-ctx --asset <ASSET>` / `subscribe all-mids [--dex <NAME>]` `[--max-events <N>] [--idle-timeout-ms <MS>]` | Stream public market WebSocket events. |
+| `subscribe order-updates` / `subscribe fills` / `subscribe user-events` / `subscribe user-fundings` / `subscribe twap-slice-fills` / `subscribe notifications` / `subscribe spot-state` / `subscribe twap-states [--dex <NAME>...]` / `subscribe clearinghouse-state [--dex <NAME>...]` / `subscribe open-orders [--dex <NAME>...]` / `subscribe active-asset-data --asset <ASSET>` `[--user <ADDRESS\|WALLET>] [--max-events <N>] [--idle-timeout-ms <MS>]` | Stream one account's WebSocket events. `--user` defaults to the selected signer; `--dex` repeats (one subscription each, at most 1000 per command). `fills`, `user-fundings` and `twap-slice-fills` take `--skip-snapshot` to drop the `isSnapshot:true` history message the exchange sends first (it is then not counted by `--max-events`). |
 | `watch risk [--user <ADDRESS>] [--max-events <N>] [--idle-timeout-ms <MS>]` | Read-only liquidation and risk alerts. Never places orders. Agent mode requires a bound. |
 | `update` | Update this binary from the latest GitHub release on Linux/macOS. Windows users should rerun `install.sh` to install the latest `.zip` release. Use global `--dry-run` to preview. |
 

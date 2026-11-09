@@ -82,13 +82,21 @@
       "agent_action": "Use an OWS wallet with a Hyperliquid or EVM account."
     },
     {
+      "exit_code": 10,
+      "category": "auth",
+      "reason": "signer_not_registered",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "The signature recovered to an address the exchange doesn't know as a user or API wallet (the address is in the remote message). Likely causes: the API wallet was never approved, expired or was pruned (approving a new unnamed API wallet replaces the old one), or the wrong key signed. Check `hyperliquid api-wallet list`; the master account approves a wallet with `hyperliquid api-wallet approve`. If the named address is not your signer's, the signed payload differs from what the exchange hashed."
+    },
+    {
       "exit_code": 11,
       "category": "rate_limited",
       "reason": "rate_limited",
       "retry": "sometimes",
       "retry_when": "reads only; a rate-limited mutation is never marked retryable",
       "stdout": "envelope",
-      "agent_action": "Back off for `retry_after` seconds when present; prefer streaming over REST polling."
+      "agent_action": "Back off for `retry_after` seconds when present; prefer streaming over REST polling. The address-based limit (`Too many cumulative requests`) only grows with trading volume or the `reserveRequestWeight` action; meanwhile the address may send one request every 10 seconds. `hyperliquid account rate-limit` shows its usage."
     },
     {
       "exit_code": 12,
@@ -130,6 +138,86 @@
       "retry": "unknown",
       "stdout": "envelope",
       "agent_action": "Correct the asset, DEX, address, or value the message names."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "order_below_minimum_value",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Raise the size or price until the order's notional value is at least $10 (spot: 10 units of the quote token)."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "reduce_only_violation",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "A reduce-only order may only shrink an existing position on the same market. Check the side and size in `hyperliquid positions list`, or drop --reduce-only."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "post_only_would_cross",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "A post-only (--tif alo) order may not match on entry. Price it behind the best bid or ask (`hyperliquid book`), or use --tif gtc."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "ioc_no_match",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "An IOC order found nothing to match and was canceled. Move the limit price across the book (`hyperliquid book`) or reduce the size."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "bad_price",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Round the price to the market's tick: at most 5 significant figures and at most (6 for perps, 8 for spot) minus szDecimals decimal places; integer prices are always allowed."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "price_out_of_band",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "The price is too far from the oracle or reference price. Price closer to the current mark (`hyperliquid book`, `hyperliquid perps get`)."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "zero_size",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "The size is zero after rounding to the market's size decimals. Use a larger --size."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "open_interest_cap",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "The market is at or growing toward its open-interest cap, so orders that increase open interest are refused. Reduce or close a position, trade another market, or retry later."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "invalid_trigger_price",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "The TP/SL trigger price is not valid for this order against the current market (for example a trigger on the wrong side of the mark price). Check the trigger price and side."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "no_market_liquidity",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "The book has nothing to fill a market order against. Place a limit order, or retry when the book has depth (`hyperliquid book`)."
     },
     {
       "exit_code": 13,

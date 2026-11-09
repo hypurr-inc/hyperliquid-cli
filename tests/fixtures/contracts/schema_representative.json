@@ -260,6 +260,32 @@
         {
           "arg_type": "string",
           "default": null,
+          "description": "Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Up to 5; shares sum to at most 100%. Requires --builder.",
+          "enum_values": [],
+          "id": "sub_builder",
+          "input_kind": "protocol_object_address",
+          "long": "sub-builder",
+          "multiple": true,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps; max 100000000). Requires a limit order with --tif ioc, or --tif alo without --reduce-only; cannot combine with --grouping, --take-profit or --stop-loss.",
+          "enum_values": [],
+          "id": "priority_rate",
+          "input_kind": null,
+          "long": "priority-rate",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
           "description": "0x-prefixed 16-byte client order id.",
           "enum_values": [],
           "id": "cloid",
@@ -375,6 +401,10 @@
             "input_kind": "price",
             "type": "string"
           },
+          "priority_rate": {
+            "description": "Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps; max 100000000). Requires a limit order with --tif ioc, or --tif alo without --reduce-only; cannot combine with --grouping, --take-profit or --stop-loss.",
+            "type": "number"
+          },
           "reduce_only": {
             "description": "Only reduce an existing perpetual position; spot markets are not supported.",
             "input_kind": "boolean",
@@ -397,6 +427,14 @@
             "description": "Stop-loss trigger price for a normal-tpsl child order.",
             "input_kind": "price",
             "type": "string"
+          },
+          "sub_builder": {
+            "description": "Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Up to 5; shares sum to at most 100%. Requires --builder.",
+            "input_kind": "protocol_object_address",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
           },
           "take_profit": {
             "description": "Take-profit trigger price for a normal-tpsl child order.",
@@ -862,7 +900,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw accepts --max.",
+          "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw and repay accept --max.",
           "enum_values": [],
           "id": "max",
           "input_kind": null,
@@ -898,7 +936,7 @@
             "type": "string"
           },
           "max": {
-            "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw accepts --max.",
+            "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw and repay accept --max.",
             "type": "string"
           },
           "token": {
@@ -948,6 +986,19 @@
       "aliases": [],
       "args": [
         {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "input_kind": null,
+          "long": "dex",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
           "arg_type": "integer",
           "default": null,
           "description": "Stop after this many matching events.",
@@ -993,6 +1044,10 @@
       "json_schema": {
         "additionalProperties": false,
         "properties": {
+          "dex": {
+            "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+            "type": "string"
+          },
           "idle_timeout_ms": {
             "description": "Stop if no matching events arrive within this many milliseconds.",
             "type": "number"

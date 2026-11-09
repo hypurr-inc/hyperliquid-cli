@@ -44,6 +44,9 @@ impl ErrorEnvelope {
         if let Some(suggestion) = err.suggestion() {
             data.insert("suggestion".into(), suggestion.into());
         }
+        if let Some(hint) = err.hint() {
+            data.insert("hint".into(), hint.into());
+        }
         if let CliError::ApiStatus { status, remote, .. } = err {
             data.insert("http_status".into(), (*status).into());
             if let Some(remote) = remote {
@@ -254,6 +257,51 @@ mod tests {
             "[untrusted remote data] maintenance"
         );
         assert_eq!(value["exit_code"], 12);
+    }
+
+    #[test]
+    fn envelope_exchange_refusal_carries_reason_and_hint_in_data() {
+        let err = crate::errors::from_exchange_rejection(
+            "Order must have minimum value of $10.",
+            "order rejected",
+        );
+        let value = envelope_value(&err);
+        assert_eq!(value["exit_code"], 13);
+        assert_eq!(value["category"], "unsupported");
+        assert_eq!(value["reason"], "order_below_minimum_value");
+        assert_eq!(
+            value["data"]["hint"],
+            "Raise the size or price until the order's notional value is at least $10 (spot: 10 units of the quote token)."
+        );
+        assert_eq!(
+            value["error"],
+            "Unsupported input: order rejected: [untrusted remote data] Order must have minimum value of $10."
+        );
+    }
+
+    #[test]
+    fn envelope_address_rate_limit_waits_ten_seconds_and_is_not_retryable() {
+        let err = crate::errors::from_exchange_rejection(
+            "Too many cumulative requests sent (2 > 1) for cumulative volume traded $5.",
+            "order rejected",
+        );
+        let value = envelope_value(&err);
+        assert_eq!(value["exit_code"], 11);
+        assert_eq!(value["reason"], "rate_limited");
+        assert_eq!(value["retry_after"], 10);
+        assert!(value.get("retryable").is_none());
+        assert!(
+            value["data"]["hint"]
+                .as_str()
+                .unwrap()
+                .contains("hyperliquid account rate-limit")
+        );
+    }
+
+    #[test]
+    fn envelope_without_a_specific_answer_has_no_hint() {
+        let value = envelope_value(&CliError::rate_limited());
+        assert!(value.get("data").is_none());
     }
 
     fn usage_parts() -> UsageParts {

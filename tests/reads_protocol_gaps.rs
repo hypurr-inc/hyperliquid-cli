@@ -1019,3 +1019,28 @@ async fn spot_get_matches_a_pair_to_its_context_by_the_at_index_key() {
     assert_eq!(pair["mark_price"], "73.724");
     assert_eq!(pair["day_notional_volume"], "5.5");
 }
+
+#[tokio::test]
+async fn account_orders_lists_trigger_fields_and_children_like_orders_open() {
+    let server = ExchangeFixture::start().await;
+    let mut trigger = support::fixture_basic_order("BTC", 11);
+    trigger["isTrigger"] = json!(true);
+    trigger["triggerPx"] = json!("48000.0");
+    trigger["triggerCondition"] = json!("Price below 48000");
+    trigger["isPositionTpsl"] = json!(true);
+    trigger["orderType"] = json!("Stop Market");
+    trigger["children"] = json!([]);
+    server
+        .mount_info(
+            json!({"type": "frontendOpenOrders", "user": USER}),
+            json!([trigger]),
+        )
+        .await;
+
+    let rows = json_of(&server, &["account", "orders", USER]);
+
+    assert_eq!(rows[0]["is_trigger"], true);
+    assert_eq!(rows[0]["trigger_price"], "48000.0");
+    assert_eq!(rows[0]["trigger_condition"], "Price below 48000");
+    assert_eq!(rows[0]["is_position_tpsl"], true);
+}

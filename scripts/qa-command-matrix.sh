@@ -461,6 +461,9 @@ run_case 0 "spread" "${BASE[@]}" spread "$HL_QA_COIN"
 run_case 0 "funding" "${BASE[@]}" funding "$HL_QA_COIN"
 run_case 0 "outcomes list" "${BASE[@]}" outcomes list --limit 5
 run_case "0,13" "outcomes get" "${BASE[@]}" outcomes get +100
+run_case 0 "outcomes questions" "${BASE[@]}" outcomes questions --limit 5
+run_case 0 "outcomes templates" "${BASE[@]}" outcomes templates
+run_case "0,13" "outcomes settled" "${BASE[@]}" outcomes settled 1
 
 run_case 0 "wallet show" "${BASE[@]}" wallet show
 run_case 0 "wallet address" "${BASE[@]}" wallet address
