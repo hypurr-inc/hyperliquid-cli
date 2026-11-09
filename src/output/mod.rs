@@ -26,6 +26,8 @@ use std::fmt;
 use std::io::Write;
 use tabwriter::TabWriter;
 
+use crate::response_sanitization::is_format_char;
+
 mod session;
 
 pub use session::Session;
@@ -94,23 +96,7 @@ impl JsonRenderOptions {
     /// Project one JSON document.
     #[must_use]
     pub fn apply(&self, value: serde_json::Value) -> serde_json::Value {
-        let value = if self.results_only {
-            strip_results_envelope(value)
-        } else {
-            value
-        };
-
-        let value = if let Some(max_results) = self.max_results {
-            limit_json_results(value, max_results)
-        } else {
-            value
-        };
-
-        if let Some(fields) = self.selected_fields.as_deref() {
-            project_selected_fields(value, fields)
-        } else {
-            value
-        }
+        self.project(value, limit_json_results, project_selected_fields)
     }
 
     /// Project one JSONL stream envelope.
@@ -121,21 +107,34 @@ impl JsonRenderOptions {
     /// the envelope itself.
     #[must_use]
     pub fn apply_stream(&self, value: serde_json::Value) -> serde_json::Value {
+        self.project(
+            value,
+            limit_json_stream_results,
+            project_stream_selected_fields,
+        )
+    }
+
+    /// The shared pipeline: `--results-only`, then `--max-results`, then
+    /// `--select`. A document and a stream envelope differ only in how the
+    /// last two steps treat nesting.
+    fn project(
+        &self,
+        value: serde_json::Value,
+        limit: fn(serde_json::Value, usize) -> serde_json::Value,
+        select: fn(serde_json::Value, &[String]) -> serde_json::Value,
+    ) -> serde_json::Value {
         let value = if self.results_only {
             strip_results_envelope(value)
         } else {
             value
         };
-        let value = if let Some(max_results) = self.max_results {
-            limit_json_stream_results(value, max_results)
-        } else {
-            value
+        let value = match self.max_results {
+            Some(max_results) => limit(value, max_results),
+            None => value,
         };
-
-        if let Some(fields) = self.selected_fields.as_deref() {
-            project_stream_selected_fields(value, fields)
-        } else {
-            value
+        match self.selected_fields.as_deref() {
+            Some(fields) => select(value, fields),
+            None => value,
         }
     }
 }
@@ -300,32 +299,33 @@ fn project_object_fields(
     projected
 }
 
+/// `--select` shorthands: each canonical field name, then the keys that can
+/// supply it, most specific first. The first key present answers.
+const FIELD_ALIASES: &[(&str, &[&str])] = &[
+    ("coin", &["coin", "name", "asset"]),
+    (
+        "price",
+        &[
+            "price",
+            "limit_price",
+            "limit_px",
+            "limitPx",
+            "mid",
+            "mark_price",
+            "oracle_price",
+        ],
+    ),
+    ("size", &["size", "sz", "amount"]),
+];
+
 fn alias_value_for_field<'a>(
     object: &'a serde_json::Map<String, serde_json::Value>,
     field: &str,
 ) -> Option<(&'static str, &'a serde_json::Value)> {
-    match field {
-        "coin" => object
-            .get("coin")
-            .or_else(|| object.get("name"))
-            .or_else(|| object.get("asset"))
-            .map(|value| ("coin", value)),
-        "price" => object
-            .get("price")
-            .or_else(|| object.get("limit_price"))
-            .or_else(|| object.get("limit_px"))
-            .or_else(|| object.get("limitPx"))
-            .or_else(|| object.get("mid"))
-            .or_else(|| object.get("mark_price"))
-            .or_else(|| object.get("oracle_price"))
-            .map(|value| ("price", value)),
-        "size" => object
-            .get("size")
-            .or_else(|| object.get("sz"))
-            .or_else(|| object.get("amount"))
-            .map(|value| ("size", value)),
-        _ => None,
-    }
+    let (canonical, keys) = FIELD_ALIASES.iter().find(|(name, _)| *name == field)?;
+    keys.iter()
+        .find_map(|key| object.get(*key))
+        .map(|value| (*canonical, value))
 }
 
 // ── Table data trait ────────────────────────────────────────────────────
@@ -362,6 +362,18 @@ pub trait TableData {
     fn empty_message(&self) -> Option<&str> {
         None
     }
+}
+
+/// The JSON document of a type that derives `Serialize`, for
+/// [`TableData::to_json_value`] implementations whose JSON is the type itself.
+///
+/// Serializing a derived row type fails only when its shape can't be JSON, such
+/// as a map with non-string keys. That is a bug in the type, the same for every
+/// run, so it panics (the panic hook reports it as a bug) instead of printing
+/// `{}` as though the command had returned nothing.
+#[must_use]
+pub fn serialize_row<T: serde::Serialize + ?Sized>(row: &T) -> Value {
+    serde_json::to_value(row).expect("a TableData type must serialize to JSON")
 }
 
 /// Generic output wrapper for raw JSON info endpoints.
@@ -530,20 +542,10 @@ fn to_snake_case(input: &str) -> String {
 // ── Cell sanitization ───────────────────────────────────────────────────
 
 /// Characters that render as nothing or reorder text without being C0/C1
-/// controls: soft hyphen, bidi marks and overrides, zero-width characters,
-/// line and paragraph separators, BOM, and interlinear annotation marks.
+/// controls: every Unicode format character plus the line and paragraph
+/// separators.
 fn is_invisible_format_char(ch: char) -> bool {
-    matches!(
-        u32::from(ch),
-        0x00AD
-            | 0x061C
-            | 0x180E
-            | 0x200B..=0x200F
-            | 0x2028..=0x202E
-            | 0x2060..=0x206F
-            | 0xFEFF
-            | 0xFFF9..=0xFFFB
-    )
+    is_format_char(ch) || matches!(ch, '\u{2028}' | '\u{2029}')
 }
 
 /// Length of a style sequence this module's color helpers emit at the start of `text`.
@@ -601,6 +603,49 @@ struct Rendered {
     notices: Vec<String>,
 }
 
+/// What both human formats share before they draw anything: sanitized headers,
+/// rows clipped to `--max-results`, and the stderr notices.
+struct Prepared {
+    headers: Vec<String>,
+    rows: Vec<Vec<String>>,
+    notices: Vec<String>,
+}
+
+impl Prepared {
+    fn new(data: &dyn TableData, rows: Vec<Vec<String>>, max_results: Option<usize>) -> Self {
+        let headers = data
+            .headers()
+            .into_iter()
+            .map(|header| sanitize_cell(header, false))
+            .collect();
+        let total = rows.len();
+        let rows: Vec<Vec<String>> = match max_results {
+            Some(max) => rows.into_iter().take(max).collect(),
+            None => rows,
+        };
+        let notices = row_notices(data, total, rows.len());
+        Self {
+            headers,
+            rows,
+            notices,
+        }
+    }
+
+    /// Draw with `draw(headers, rows)`. An empty result prints nothing on a
+    /// terminal (its sentence goes to stderr) and only the real header on a pipe.
+    fn render(self, tty: bool, draw: impl FnOnce(&[String], &[Vec<String>]) -> String) -> Rendered {
+        let text = if tty && self.rows.is_empty() {
+            String::new()
+        } else {
+            draw(&self.headers, &self.rows)
+        };
+        Rendered {
+            text,
+            notices: self.notices,
+        }
+    }
+}
+
 /// Notices for human formats: the empty-state sentence, or how many rows
 /// `--max-results` clipped.
 fn row_notices(data: &dyn TableData, total: usize, shown: usize) -> Vec<String> {
@@ -617,127 +662,85 @@ fn row_notices(data: &dyn TableData, total: usize, shown: usize) -> Vec<String> 
     Vec::new()
 }
 
-fn limit_rows(rows: Vec<Vec<String>>, max_results: Option<usize>) -> (usize, Vec<Vec<String>>) {
-    let total = rows.len();
-    let rows = match max_results {
-        Some(max) => rows.into_iter().take(max).collect(),
-        None => rows,
-    };
-    (total, rows)
-}
-
 fn render_pretty_inner(data: &dyn TableData, max_results: Option<usize>, tty: bool) -> Rendered {
     let keep_styles = colors::stdout_enabled();
-    let headers = data
-        .headers()
-        .into_iter()
-        .map(|header| sanitize_cell(header, false))
-        .collect::<Vec<_>>();
-    let (total, rows) = limit_rows(data.pretty_rows(), max_results);
-    let notices = row_notices(data, total, rows.len());
-
-    // An empty result prints nothing on a terminal and only the real header on a pipe.
-    if rows.is_empty() && tty {
-        return Rendered {
-            text: String::new(),
-            notices,
-        };
-    }
-
-    let mut tw = TabWriter::new(Vec::new());
-    let header_line = headers
-        .iter()
-        .map(|header| colors::cyan(header))
-        .collect::<Vec<_>>()
-        .join("\t");
-    writeln!(tw, "{header_line}").unwrap();
-
-    if !rows.is_empty() {
-        let sep_line = headers
+    Prepared::new(data, data.pretty_rows(), max_results).render(tty, |headers, rows| {
+        let mut tw = TabWriter::new(Vec::new());
+        let header_line = headers
             .iter()
-            .map(|_| "─".repeat(12))
+            .map(|header| colors::cyan(header))
             .collect::<Vec<_>>()
             .join("\t");
-        writeln!(tw, "{sep_line}").unwrap();
-    }
+        writeln!(tw, "{header_line}").unwrap();
 
-    for row in &rows {
-        let line = row
-            .iter()
-            .map(|cell| sanitize_cell(cell, keep_styles))
-            .collect::<Vec<_>>()
-            .join("\t");
-        writeln!(tw, "{line}").unwrap();
-    }
+        if !rows.is_empty() {
+            let sep_line = headers
+                .iter()
+                .map(|_| "─".repeat(12))
+                .collect::<Vec<_>>()
+                .join("\t");
+            writeln!(tw, "{sep_line}").unwrap();
+        }
 
-    tw.flush().unwrap();
-    let output = String::from_utf8_lossy(&tw.into_inner().unwrap()).to_string();
+        for row in rows {
+            let line = row
+                .iter()
+                .map(|cell| sanitize_cell(cell, keep_styles))
+                .collect::<Vec<_>>()
+                .join("\t");
+            writeln!(tw, "{line}").unwrap();
+        }
 
-    Rendered {
-        text: output.trim_end().to_string(),
-        notices,
-    }
+        tw.flush().unwrap();
+        let output = String::from_utf8_lossy(&tw.into_inner().unwrap()).to_string();
+        output.trim_end().to_string()
+    })
 }
 
 fn render_table_inner(data: &dyn TableData, max_results: Option<usize>, tty: bool) -> Rendered {
-    let headers = data
-        .headers()
-        .into_iter()
-        .map(|header| sanitize_cell(header, false))
-        .collect::<Vec<_>>();
-    let (total, rows) = limit_rows(data.rows(), max_results);
-    let notices = row_notices(data, total, rows.len());
-    let rows = rows
-        .iter()
-        .map(|row| {
-            row.iter()
-                .map(|cell| sanitize_cell(cell, false))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+    Prepared::new(data, data.rows(), max_results).render(tty, |headers, rows| {
+        let rows = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| sanitize_cell(cell, false))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
 
-    if !tty {
-        let mut lines = Vec::with_capacity(rows.len() + 1);
-        lines.push(headers.join("\t"));
-        lines.extend(rows.iter().map(|row| row.join("\t")));
-        return Rendered {
-            text: lines.join("\n"),
-            notices,
-        };
-    }
+        if !tty {
+            let mut lines = Vec::with_capacity(rows.len() + 1);
+            lines.push(headers.join("\t"));
+            lines.extend(rows.iter().map(|row| row.join("\t")));
+            return lines.join("\n");
+        }
 
-    if rows.is_empty() {
-        return Rendered {
-            text: String::new(),
-            notices,
-        };
-    }
+        use tabled::builder::Builder;
+        use tabled::settings::Style;
 
-    use tabled::builder::Builder;
-    use tabled::settings::Style;
-
-    let mut builder = Builder::default();
-    builder.push_record(headers);
-    for row in rows {
-        builder.push_record(row);
-    }
-    let table = builder.build().with(Style::rounded()).to_string();
-
-    Rendered {
-        text: table.trim_end().to_string(),
-        notices,
-    }
+        let mut builder = Builder::default();
+        builder.push_record(headers.iter().cloned());
+        for row in rows {
+            builder.push_record(row);
+        }
+        builder
+            .build()
+            .with(Style::rounded())
+            .to_string()
+            .trim_end()
+            .to_string()
+    })
 }
 
-/// Serialize JSON for stdout: indented with 2 spaces on a terminal, compact
-/// single-line otherwise.
-fn json_string(value: &Value, tty: bool) -> String {
-    let rendered = if tty {
-        serde_json::to_string_pretty(value)
+/// The one JSON serializer for stdout: indented with 2 spaces when `pretty`
+/// (a terminal), compact single-line otherwise (a pipe or NDJSON stream).
+/// A [`Value`] always serializes, so there is no failure to handle.
+fn json_text(value: &Value, pretty: bool) -> String {
+    if pretty {
+        format!("{value:#}")
     } else {
-        serde_json::to_string(value)
-    };
-    rendered.unwrap_or_else(|_| "[]".to_string())
+        value.to_string()
+    }
 }
 
 fn render_outcome(
@@ -750,7 +753,7 @@ fn render_outcome(
         OutputFormat::Pretty => render_pretty_inner(data, options.max_results(), tty),
         OutputFormat::Table => render_table_inner(data, options.max_results(), tty),
         OutputFormat::Json => Rendered {
-            text: json_string(&options.apply(data.to_json_value()), tty),
+            text: json_text(&options.apply(data.to_json_value()), tty),
             notices: Vec::new(),
         },
     }
@@ -1402,5 +1405,72 @@ mod tests {
         let json = render(&data, OutputFormat::Json);
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cells_hide_every_format_character_the_sanitizer_hides() {
+        // Arabic number sign and a tag character are `Cf` but were outside the
+        // table cells used before it was shared with the error sanitizer.
+        assert_eq!(
+            sanitize_cell("a\u{0600}b\u{E0041}c", false),
+            "a\\u{600}b\\u{e0041}c"
+        );
+        assert_eq!(
+            sanitize_cell("a\u{2028}b\u{2029}c", false),
+            "a\\u{2028}b\\u{2029}c"
+        );
+        assert_eq!(sanitize_cell("a\u{202E}b", false), "a\\u{202e}b");
+    }
+
+    #[test]
+    fn json_text_is_pretty_on_a_terminal_and_compact_otherwise() {
+        let value = serde_json::json!({"a": [1, 2], "b": "x"});
+        assert_eq!(json_text(&value, false), r#"{"a":[1,2],"b":"x"}"#);
+        assert_eq!(
+            json_text(&value, true),
+            serde_json::to_string_pretty(&value).unwrap()
+        );
+    }
+
+    #[test]
+    fn serialize_row_is_the_derived_json() {
+        #[derive(serde::Serialize)]
+        struct Row {
+            coin: &'static str,
+            size: u32,
+        }
+        assert_eq!(
+            serialize_row(&Row {
+                coin: "BTC",
+                size: 2
+            }),
+            serde_json::json!({"coin": "BTC", "size": 2})
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "must serialize to JSON")]
+    fn serialize_row_fails_loudly_instead_of_printing_an_empty_document() {
+        let unserializable =
+            std::collections::HashMap::from([((1, 2), "tuple keys are not JSON object keys")]);
+        let _ = serialize_row(&unserializable);
+    }
+
+    #[test]
+    fn empty_result_is_silent_on_a_terminal_and_header_only_on_a_pipe() {
+        let empty = TestData {
+            headers: vec!["Coin".to_string()],
+            rows: Vec::new(),
+            json: serde_json::json!([]),
+        };
+        for format in [OutputFormat::Pretty, OutputFormat::Table] {
+            let on_terminal = render_outcome(&empty, format, &JsonRenderOptions::default(), true);
+            assert_eq!(on_terminal.text, "", "{format}");
+            assert_eq!(on_terminal.notices, ["No results."], "{format}");
+
+            let on_pipe = render_outcome(&empty, format, &JsonRenderOptions::default(), false);
+            assert_eq!(on_pipe.text, "Coin", "{format}");
+            assert_eq!(on_pipe.notices, ["No results."], "{format}");
+        }
     }
 }

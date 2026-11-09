@@ -62,12 +62,7 @@ pub fn yellow(text: &str) -> String {
 
 /// Styling helpers for text written to stderr (notices, warnings, prompts, errors).
 pub mod stderr {
-    use super::{GRAY, RED, YELLOW, stderr_enabled, styled};
-
-    #[must_use]
-    pub fn red(text: &str) -> String {
-        styled(stderr_enabled(), RED, text)
-    }
+    use super::{GRAY, YELLOW, stderr_enabled, styled};
 
     #[must_use]
     pub fn gray(text: &str) -> String {
@@ -89,20 +84,39 @@ pub fn init(no_color_flag: bool) {
 }
 
 fn resolve(no_color_flag: bool) -> (bool, bool) {
-    if no_color_flag || std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
+    let no_color_env = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+    let dumb = std::env::var("TERM").is_ok_and(|term| term == "dumb");
+    decide(
+        no_color_flag || no_color_env,
+        terminal::env_flag("FORCE_COLOR"),
+        dumb,
+        (
+            terminal::stdout_is_terminal(),
+            terminal::stderr_is_terminal(),
+        ),
+    )
+}
+
+/// The `(stdout, stderr)` color decision. `disabled` (`--no-color` or
+/// `NO_COLOR`) beats `force`; a set `FORCE_COLOR` beats terminal detection and
+/// follows the convention for ecosystem variables: any value but an explicit
+/// off one (`0`, `false`, `no`, `off`) forces color, so `FORCE_COLOR=2` works.
+fn decide(
+    disabled: bool,
+    force: terminal::EnvFlag,
+    dumb_terminal: bool,
+    is_terminal: (bool, bool),
+) -> (bool, bool) {
+    if disabled {
         return (false, false);
     }
-    if let Ok(value) = std::env::var("FORCE_COLOR") {
-        let value = value.trim().to_ascii_lowercase();
-        if !value.is_empty() {
-            let on = value != "0" && value != "false";
-            return (on, on);
-        }
+    if force != terminal::EnvFlag::Unset {
+        let on = force.on_unless_off();
+        return (on, on);
     }
-    let dumb = std::env::var("TERM").is_ok_and(|term| term == "dumb");
     (
-        !dumb && terminal::stdout_is_terminal(),
-        !dumb && terminal::stderr_is_terminal(),
+        !dumb_terminal && is_terminal.0,
+        !dumb_terminal && is_terminal.1,
     )
 }
 
@@ -160,7 +174,7 @@ mod tests {
         assert_eq!(red("x"), "x");
         assert_eq!(gray("x"), "x");
         assert_eq!(yellow("x"), "x");
-        assert_eq!(stderr::red("x"), "x");
+        assert_eq!(stderr::gray("x"), "x");
         assert_eq!(stderr::yellow("x"), "x");
     }
 
@@ -169,12 +183,39 @@ mod tests {
         with_streams_for_test(true, false, || {
             assert_eq!(cyan("x"), paint(CYAN, "x"));
             assert_eq!(green("x"), paint(GREEN, "x"));
-            assert_eq!(stderr::red("x"), "x");
+            assert_eq!(stderr::gray("x"), "x");
         });
         with_streams_for_test(false, true, || {
             assert_eq!(cyan("x"), "x");
-            assert_eq!(stderr::red("x"), paint(RED, "x"));
+            assert_eq!(stderr::gray("x"), paint(GRAY, "x"));
             assert_eq!(stderr::yellow("x"), paint(YELLOW, "x"));
         });
+    }
+
+    #[test]
+    fn force_color_follows_the_shared_flag_parser() {
+        let ttys = (false, false);
+        for on in ["1", "true", "YES", "on", "2", "3"] {
+            let force = terminal::parse_flag(on);
+            assert_eq!(decide(false, force, false, ttys), (true, true), "{on}");
+        }
+        for off in ["0", "false", "no", "OFF"] {
+            let force = terminal::parse_flag(off);
+            assert_eq!(
+                decide(false, force, false, (true, true)),
+                (false, false),
+                "{off}"
+            );
+        }
+    }
+
+    #[test]
+    fn disabling_beats_forcing_and_terminals_decide_the_rest() {
+        let force = terminal::parse_flag("1");
+        assert_eq!(decide(true, force, false, (true, true)), (false, false));
+
+        let unset = terminal::parse_flag("");
+        assert_eq!(decide(false, unset, false, (true, false)), (true, false));
+        assert_eq!(decide(false, unset, true, (true, true)), (false, false));
     }
 }

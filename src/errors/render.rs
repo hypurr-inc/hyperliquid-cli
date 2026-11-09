@@ -1,14 +1,7 @@
 //! Human error output and process exit.
 
-use super::{CliError, ErrorEnvelope};
+use super::{CliError, ErrorEnvelope, StdoutDocument, last_error};
 use crate::output::colors;
-
-static COMMAND_PATH: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-
-/// Record the command path resolved by clap for error diagnostics.
-pub fn set_command_path(path: &[String]) {
-    let _ = COMMAND_PATH.set(path.to_vec());
-}
 
 /// Where an error goes: the JSON envelope on stdout, or a human block on stderr.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,8 +15,7 @@ pub enum ErrorOutput {
 /// Rich output starts with a red `✗`; plain output starts with `Error:`.
 /// Detail lines are indented two spaces. A recovery block follows after a blank
 /// line: the instruction, each command indented four spaces, then any note.
-#[must_use]
-pub fn render_human_error(err: &CliError, rich: bool) -> String {
+fn render_human_error(err: &CliError, rich: bool) -> String {
     let headline = err.to_string();
     let mut out = if rich {
         format!("{} {headline}", colors::paint(colors::RED, "✗"))
@@ -48,41 +40,26 @@ pub fn render_human_error(err: &CliError, rich: bool) -> String {
     out
 }
 
-/// Print the error envelope to **stdout**.
-///
-/// [`CliError::PartialResults`] prints nothing: the command that raised it
-/// already wrote its own single JSON document with per-item results.
-pub fn print_json_error(err: &CliError) {
-    record_error_to_disk(err);
-    if matches!(err, CliError::PartialResults(_)) {
-        return;
-    }
-    println!("{}", ErrorEnvelope::from_cli_error(err).to_json());
-}
-
-fn record_error_to_disk(err: &CliError) {
-    if let Some(path) = crate::paths::last_error_file() {
-        let mut envelope = ErrorEnvelope::from_cli_error(err);
-        if let Some(cmd) = COMMAND_PATH.get().and_then(|path| {
-            crate::command_registry::CommandRegistry::get().find_matching_path(path)
-        }) {
-            envelope.data.insert("command".into(), cmd.into());
-        }
-        if let Ok(json_str) = serde_json::to_string_pretty(&envelope) {
-            let _ = crate::private_fs::write_atomic(&path, json_str.as_bytes());
-        }
+/// Print the error envelope to **stdout**, unless the command owns that
+/// document ([`StdoutDocument::CommandResult`]): it already wrote its own
+/// single JSON document carrying the envelope keys.
+fn print_json_error(err: &CliError) {
+    match err.stdout_document() {
+        StdoutDocument::Envelope => println!("{}", ErrorEnvelope::from_cli_error(err).to_json()),
+        StdoutDocument::CommandResult => {}
     }
 }
 
 /// Print the human error block to **stderr** (`✗ ...` when stderr supports
 /// styling, `Error: ...` otherwise).
-pub fn print_human_error(err: &CliError) {
-    record_error_to_disk(err);
+fn print_human_error(err: &CliError) {
     eprintln!("{}", render_human_error(err, colors::stderr_enabled()));
 }
 
-/// Terminate the process with the correct exit code after printing the error.
+/// Record the error for `report-incident`, print it, and terminate the process
+/// with its exit code.
 pub fn exit_with_error(err: CliError, output: ErrorOutput) -> ! {
+    last_error::record(&err);
     match output {
         ErrorOutput::Json => print_json_error(&err),
         ErrorOutput::Human => print_human_error(&err),

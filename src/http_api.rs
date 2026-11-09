@@ -33,8 +33,15 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_RETRY_BACKOFF: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(750)];
 /// Longest `Retry-After` the CLI will wait out. A longer ask is reported, not waited.
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
-/// Upper bound on the total time spent sleeping between read attempts.
+/// Upper bound on the total time spent sleeping between read attempts. It
+/// admits one capped `Retry-After` wait; a second one would pass the bound, so
+/// the read stops retrying and reports the failure.
 const RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(6);
+
+const _: () = {
+    assert!(RETRY_TOTAL_BUDGET.as_millis() >= RETRY_AFTER_CAP.as_millis());
+    assert!(RETRY_TOTAL_BUDGET.as_millis() < 2 * RETRY_AFTER_CAP.as_millis());
+};
 
 /// Whether a failed API call was a read (safe to resend) or a mutation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,7 +112,7 @@ pub struct ApiClient {
     label: String,
     has_override: bool,
     sdk: HttpClient,
-    http: OnceLock<reqwest::Client>,
+    http: OnceLock<Result<reqwest::Client, String>>,
     timeout: Duration,
     announce_retries: bool,
 }
@@ -131,7 +138,7 @@ impl ApiClient {
         let has_override = api_override.is_some();
         let (base_url, label) = match &api_override {
             Some(url) => (url.clone(), url.to_string()),
-            None => (network.api_url(), network.api_base_url().to_string()),
+            None => (network.api_url(), network.api_base_url()),
         };
         Self {
             chain: network.chain(),
@@ -254,14 +261,15 @@ impl ApiClient {
     }
 
     fn http(&self) -> Result<&reqwest::Client, CliError> {
-        if let Some(client) = self.http.get() {
-            return Ok(client);
-        }
-        let client = reqwest::Client::builder()
-            .tcp_nodelay(true)
-            .build()
-            .map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
-        Ok(self.http.get_or_init(|| client))
+        self.http
+            .get_or_init(|| {
+                reqwest::Client::builder()
+                    .tcp_nodelay(true)
+                    .build()
+                    .map_err(|err| err.to_string())
+            })
+            .as_ref()
+            .map_err(|message| CliError::Internal(anyhow::anyhow!("{message}")))
     }
 
     /// Send one request. `disposition` decides how a failure after the send is mapped.

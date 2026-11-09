@@ -3,15 +3,15 @@
 use std::time::Duration;
 
 use futures::StreamExt;
-use hypersdk::hypercore::{self, Chain, Incoming, Subscription, WebSocket, ws::Event};
+use hypersdk::hypercore::{Chain, Incoming, Subscription, WebSocket, ws::Event};
 
 use crate::errors::CliError;
+use crate::network::Network;
 
+/// A WebSocket for `chain`'s public endpoint, for callers that hold a [`Chain`]
+/// rather than a [`Network`]. The API endpoint override does not apply.
 pub fn websocket_for_chain(chain: Chain) -> WebSocket {
-    match chain {
-        Chain::Mainnet => hypercore::mainnet_ws(),
-        Chain::Testnet => hypercore::testnet_ws(),
-    }
+    Network::from(chain).websocket()
 }
 
 /// What a one-shot WebSocket read is waiting for, as phrased in its errors.

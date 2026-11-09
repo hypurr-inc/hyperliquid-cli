@@ -2,13 +2,17 @@
 //!
 //! One value carries the resolved format, the JSON projection flags, the
 //! terminal facts, and the start instant that the "Completed in" footer
-//! measures from. Nothing here is process-global, so renderers called from tests
-//! or from a second session never see each other's options.
+//! measures from. Renderers called from tests or from a second session never
+//! see each other's format, projection or terminal facts. Styling is the one
+//! exception: [`colors`] resolves `--no-color`, `NO_COLOR` and `FORCE_COLOR`
+//! once per process, so `colors::init` must run before the first render.
 
 use std::time::{Duration, Instant};
 
 use super::terminal::OutputEnv;
-use super::{JsonRenderOptions, OutputFormat, Rendered, TableData, colors, format, render_outcome};
+use super::{
+    JsonRenderOptions, OutputFormat, Rendered, TableData, colors, format, json_text, render_outcome,
+};
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -51,15 +55,6 @@ impl Session {
         self.env
     }
 
-    /// The same session printing in `format`, for output that is always one format.
-    #[must_use]
-    pub fn with_format(&self, format: OutputFormat) -> Self {
-        Self {
-            format,
-            ..self.clone()
-        }
-    }
-
     /// `data` as it would print to stdout in this session's format.
     #[must_use]
     pub fn render(&self, data: &dyn TableData) -> String {
@@ -74,7 +69,7 @@ impl Session {
 
     /// `data` as one compact JSON line with this session's projection, for NDJSON streams.
     pub fn render_json_line(&self, data: &dyn TableData) -> Result<String, serde_json::Error> {
-        serde_json::to_string(&self.json.apply(data.to_json_value()))
+        Ok(json_text(&self.json.apply(data.to_json_value()), false))
     }
 
     /// Print the answer to stdout (empty-state and truncation notices to stderr),

@@ -37,25 +37,16 @@ pub fn warning(text: &str) -> String {
 /// prompt.
 pub fn read_line(mode: &Mode, label: &str, input: &str) -> Result<String, CliError> {
     ensure_can_prompt(mode, input)?;
-    let mut stderr = io::stderr().lock();
-    write!(stderr, "{label}")
-        .and_then(|()| stderr.flush())
-        .map_err(io_error)?;
-    drop(stderr);
-
-    let mut line = String::new();
-    let read = io::stdin().lock().read_line(&mut line).map_err(io_error)?;
-    if read == 0 {
+    write_label(label)?;
+    let Some(line) = read_stdin_line()? else {
         eprintln!();
-        return Err(CliError::MissingInput(format!(
-            "Can't continue without {input}. Stdin ended before an answer was given."
-        )));
-    }
+        return Err(stdin_ended(input, "an answer"));
+    };
     if !terminal::stdin_is_terminal() {
         // Piped answers aren't echoed, so end the prompt line ourselves.
         eprintln!();
     }
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    Ok(line)
 }
 
 /// Print `preview` when it is non-empty, then ask `question`.
@@ -92,7 +83,7 @@ pub fn ensure_can_prompt(mode: &Mode, input: &str) -> Result<(), CliError> {
 }
 
 /// `y` or `yes`, case-insensitive, surrounding whitespace ignored.
-pub fn is_yes(input: &str) -> bool {
+fn is_yes(input: &str) -> bool {
     matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
@@ -124,17 +115,15 @@ pub fn read_secret(mode: &Mode, label: &str, input: &str) -> Result<String, CliE
         if mode.can_prompt() {
             write_label(label)?;
         }
-        let mut line = String::new();
-        let read = io::stdin().lock().read_line(&mut line).map_err(io_error)?;
-        if read == 0 {
-            if mode.can_prompt() {
-                eprintln!();
+        match read_stdin_line()? {
+            Some(line) => line,
+            None => {
+                if mode.can_prompt() {
+                    eprintln!();
+                }
+                return Err(stdin_ended(input, "a value"));
             }
-            return Err(CliError::MissingInput(format!(
-                "Can't continue without {input}. Stdin ended before a value was given."
-            )));
         }
-        line.trim_end_matches(['\r', '\n']).to_string()
     };
     if value.trim().is_empty() {
         return Err(CliError::MissingInput(format!(
@@ -154,6 +143,20 @@ fn write_label(label: &str) -> Result<(), CliError> {
 fn io_error(err: io::Error) -> CliError {
     CliError::Internal(anyhow::anyhow!(
         "couldn't use the terminal for a prompt: {err}"
+    ))
+}
+
+/// One line from stdin without its line ending, or `None` at end of input.
+fn read_stdin_line() -> Result<Option<String>, CliError> {
+    let mut line = String::new();
+    let read = io::stdin().lock().read_line(&mut line).map_err(io_error)?;
+    Ok((read > 0).then(|| line.trim_end_matches(['\r', '\n']).to_string()))
+}
+
+/// End of input is missing input: an empty stdin never supplies `input`.
+fn stdin_ended(input: &str, given: &str) -> CliError {
+    CliError::MissingInput(format!(
+        "Can't continue without {input}. Stdin ended before {given} was given."
     ))
 }
 
