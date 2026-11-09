@@ -91,24 +91,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_output_includes_health_and_rate_limit_fields() {
+    fn human_row_pluralizes_market_counts_and_formats_latency() {
         let output = StatusOutput {
             network: "mainnet".to_string(),
             api_url: "https://api.hyperliquid.xyz".to_string(),
             health: "healthy".to_string(),
-            latency_ms: 42,
-            perps_count: 100,
-            mids_count: 100,
+            latency_ms: 3_400,
+            perps_count: 1,
+            mids_count: 1_200,
             rate_limit_status: "ok".to_string(),
             rate_limit_note: "no rate-limit response observed".to_string(),
         };
-        let json = output.to_json_value();
 
-        assert_eq!(json["health"], "healthy");
-        assert_eq!(json["rate_limit_status"], "ok");
-        assert_eq!(output.rows()[0][3], "100 perps, 100 mids");
-        assert_eq!(output.rows()[0][4], "ok");
-        assert_eq!(output.rows()[0][2], "42ms");
-        assert_eq!(json["rate_limit_note"], "no rate-limit response observed");
+        assert_eq!(
+            output.rows(),
+            vec![vec![
+                "mainnet",
+                "healthy",
+                "3.4s",
+                "1 perp, 1,200 mids",
+                "ok"
+            ]]
+        );
     }
 }

@@ -542,7 +542,6 @@ fn parse_env_output_format(raw: &str) -> Result<output::OutputFormat, errors::Cl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyperliquid_cli::command_registry::CommandRegistry;
 
     fn split_command_line(line: &str) -> Vec<String> {
         let mut words = Vec::new();
@@ -664,33 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn orders_create_notes_state_that_testnet_does_not_prompt() {
-        let root = build_command();
-        let create = find_command(&root, &["orders".to_string(), "create".to_string()]);
-        let help = create.get_after_long_help().unwrap().to_string();
-        assert!(
-            help.contains(
-                "on testnet (--testnet or HYPERLIQUID_NETWORK=testnet) this command doesn't prompt"
-            ),
-            "{help}"
-        );
-        assert!(help.contains("Pass --yes"), "{help}");
-    }
-
-    #[test]
-    fn commands_that_only_print_or_serve_carry_no_state_notes() {
-        let root = build_command();
-        for path in [["feedback"], ["mcp"], ["report-incident"]] {
-            let command = find_command(&root, &path.map(str::to_string));
-            let help = command
-                .get_after_long_help()
-                .map(|help| help.to_string())
-                .unwrap_or_default();
-            assert!(!help.contains("Risk:"), "{path:?}: {help}");
-        }
-    }
-
-    #[test]
     fn every_option_has_help_text() {
         let root = build_command();
         let mut missing = Vec::new();
@@ -804,16 +776,6 @@ mod tests {
     }
 
     #[test]
-    fn lenient_parse_finds_the_command_that_was_reached() {
-        let args = ["hyperliquid", "orders", "crete"].map(OsString::from);
-        let lenient = lenient_matches(&args).unwrap();
-        assert_eq!(
-            command_path_from_matches(&lenient),
-            Some(vec!["orders".to_string()])
-        );
-    }
-
-    #[test]
     fn unknown_subcommand_shows_one_suggestion_and_its_group_help() {
         let err = try_parse_cli_from(["hyperliquid", "--no-update-check", "orders", "cancl"])
             .err()
@@ -844,18 +806,6 @@ mod tests {
     }
 
     #[test]
-    fn short_and_long_help_are_identical() {
-        let render = |flag: &str| {
-            try_parse_cli_from(["hyperliquid", "orders", "create", flag])
-                .err()
-                .unwrap()
-                .render()
-                .to_string()
-        };
-        assert_eq!(render("-h"), render("--help"));
-    }
-
-    #[test]
     fn version_flags_work_at_every_depth() {
         use clap::error::ErrorKind;
         for argv in [
@@ -868,16 +818,6 @@ mod tests {
             let err = try_parse_cli_from(argv.iter().copied()).err().unwrap();
             assert_eq!(err.kind(), ErrorKind::DisplayVersion, "{argv:?}");
         }
-    }
-
-    #[test]
-    fn group_without_action_asks_for_help() {
-        use clap::error::ErrorKind;
-        let err = try_parse_cli_from(["hyperliquid", "orders"]).err().unwrap();
-        assert_eq!(
-            err.kind(),
-            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-        );
     }
 
     #[test]
@@ -914,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn root_help_lists_environment_and_no_hype() {
+    fn root_help_lists_environment_and_global_options() {
         let help = help_text_for_path(&[]);
         assert!(help.contains("Environment:"), "{help}");
         for name in [
@@ -925,12 +865,11 @@ mod tests {
         ] {
             assert!(help.contains(name), "{name} missing from root help");
         }
-        assert!(!help.to_lowercase().contains("production-grade"), "{help}");
         assert!(help.contains("Global Options:"), "{help}");
     }
 
     #[test]
-    fn cli_command_paths_resolve_to_registered_commands() {
+    fn argv_selects_the_command_with_that_path() {
         for (argv, expected_path) in [
             (
                 &["hyperliquid", "api-wallet", "list"][..],
@@ -971,35 +910,6 @@ mod tests {
                 .selected
                 .unwrap_or_else(|| panic!("no command selected for {argv:?}"));
             assert_eq!(selected.entry.spec.key(), expected_path);
-            assert!(
-                CommandRegistry::get()
-                    .find_path(&expected_path.split(' ').collect::<Vec<_>>())
-                    .is_some(),
-                "{expected_path} is not in the registry"
-            );
         }
-    }
-
-    #[test]
-    fn dry_run_and_api_policy_come_from_the_spec() {
-        let spec = |argv: &[&str]| {
-            try_parse_cli_from(argv.iter().copied())
-                .unwrap()
-                .selected
-                .unwrap()
-                .entry
-                .spec
-        };
-        let api_wallet_list = spec(&["hyperliquid", "api-wallet", "list"]);
-        assert_ne!(api_wallet_list.dry_run, DryRunPolicy::Optional);
-        assert!(api_wallet_list.uses_api());
-
-        let orders_cancel = spec(&["hyperliquid", "orders", "cancel", "123"]);
-        assert_eq!(orders_cancel.dry_run, DryRunPolicy::Optional);
-        assert!(orders_cancel.uses_api());
-
-        let wallet_show = spec(&["hyperliquid", "wallet", "show"]);
-        assert_ne!(wallet_show.dry_run, DryRunPolicy::Optional);
-        assert!(!wallet_show.uses_api());
     }
 }

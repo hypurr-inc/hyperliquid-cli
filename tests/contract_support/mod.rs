@@ -18,12 +18,6 @@ pub fn fixture_path(name: &str) -> PathBuf {
     repo_root().join("tests/fixtures/contracts").join(name)
 }
 
-pub fn read_fixture(name: &str) -> String {
-    let path = fixture_path(name);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed to read contract fixture {}: {err}", path.display()))
-}
-
 pub fn assert_json_fixture(name: &str, actual: &Value) {
     let pretty = format!("{}\n", serde_json::to_string_pretty(actual).unwrap());
     let path = fixture_path(name);

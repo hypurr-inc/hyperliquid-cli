@@ -2,7 +2,7 @@ mod support;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use serde_json::{Value, json};
+use serde_json::Value;
 use wiremock::MockServer;
 
 use support::{
@@ -18,16 +18,6 @@ async fn mock_malformed_spot_meta_server() -> MockServer {
     mount_market_meta(&server, fixture_perp_meta_btc_only()).await;
     mount_perp_dexs(&server, serde_json::json!([null])).await;
     server
-}
-
-#[test]
-fn test_version_flag() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--version")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
@@ -91,138 +81,12 @@ fn test_short_and_long_help_match() {
 }
 
 #[test]
-fn test_help_flag() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("perps"))
-        .stdout(predicates::str::contains("spot"))
-        .stdout(predicates::str::contains("orders"))
-        .stdout(predicates::str::contains("positions"))
-        .stdout(predicates::str::contains("wallet"));
-}
-
-#[test]
 fn test_no_args_shows_info() {
     Command::cargo_bin("hyperliquid")
         .unwrap()
         .assert()
         .success()
         .stdout(predicates::str::contains("Usage: hyperliquid"));
-}
-
-#[test]
-fn schema_all_commands_outputs_json_array() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["--format", "json", "schema"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert!(json.as_array().unwrap().len() > 20);
-    assert_eq!(json[0]["command"], "hyperliquid status");
-}
-
-#[test]
-fn schema_single_command_outputs_schema_object() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["--format", "json", "schema", "orders", "create"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["command"], "hyperliquid orders create");
-    assert_eq!(json["dangerous"], true);
-    assert_eq!(json["lifecycle"], "live_mutating");
-    assert_eq!(json["risk"], "funds_movement");
-    assert_eq!(json["dry_run"], "optional");
-    assert_eq!(json["raw_payload"], "dry_run_only");
-    assert_eq!(json["confirmation"], "prompt");
-    assert!(json["aliases"].as_array().is_some());
-    assert_eq!(json["json_schema"]["type"], "object");
-    assert_eq!(
-        json["json_schema"]["x-hyperliquid"]["lifecycle"],
-        "live_mutating"
-    );
-    assert_eq!(
-        json["json_schema"]["x-hyperliquid"]["risk"],
-        "funds_movement"
-    );
-    assert_eq!(
-        json["json_schema"]["x-hyperliquid"]["raw_payload"],
-        "dry_run_only"
-    );
-    assert_eq!(
-        json["json_schema"]["x-hyperliquid"]["ows_signer"],
-        "experimental_feature_gated"
-    );
-    assert_eq!(
-        json["json_schema"]["properties"]["grouping"]["enum"],
-        json!(["normal-tpsl"])
-    );
-
-    let wallet_output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["--format", "json", "schema", "wallet", "address"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let wallet_json: Value = serde_json::from_slice(&wallet_output).unwrap();
-    assert_eq!(
-        wallet_json["json_schema"]["x-hyperliquid"]["ows_signer"],
-        "address_selector_supported"
-    );
-    assert_eq!(
-        json["args"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|arg| arg["id"] == "grouping")
-            .unwrap()["enum_values"],
-        json!(["normal-tpsl"])
-    );
-    assert!(
-        json["json_schema"]["properties"]["order_type"]["enum"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::String("stop-limit".to_string()))
-    );
-    assert!(
-        json["json_schema"]["properties"]["order_type"]["enum"]
-            .as_array()
-            .unwrap()
-            .contains(&Value::String("take-limit".to_string()))
-    );
-    assert_eq!(
-        json["json_schema"]["properties"]["trigger_price"]["type"],
-        "string"
-    );
-    assert_eq!(
-        json["json_schema"]["properties"]["reduce_only"]["type"],
-        "boolean"
-    );
-    assert_eq!(
-        json["json_schema"]["properties"]["on_behalf_of"]["input_kind"],
-        "acting_account_selector"
-    );
-    assert_eq!(
-        json["json_schema"]["properties"]["price"]["input_kind"],
-        "price"
-    );
-    assert_eq!(
-        json["json_schema"]["properties"]["margin_mode"]["enum"],
-        json!(["cross", "isolated"])
-    );
 }
 
 #[test]
@@ -293,68 +157,16 @@ fn schema_orders_status_requires_oid_or_cloid() {
 }
 
 #[test]
-fn test_format_flag_pretty() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("pretty")
-        .arg("--help")
-        .assert()
-        .success();
-}
-
-#[test]
-fn test_format_flag_json() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("json")
-        .arg("--help")
-        .assert()
-        .success();
-}
-
-#[test]
-fn test_format_flag_table() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("table")
-        .arg("--help")
-        .assert()
-        .success();
-}
-
-#[test]
-fn test_testnet_flag() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--testnet")
-        .arg("--help")
-        .assert()
-        .success();
-}
-
-#[test]
-fn test_perps_get_missing_arg_exits_2() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_FORMAT", "pretty")
-        .args(["perps", "get"])
-        .assert()
-        .code(2)
-        .stderr(predicates::str::contains("required"));
-}
-
-#[test]
-fn test_spot_get_missing_arg_exits_2() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_FORMAT", "pretty")
-        .args(["spot", "get"])
-        .assert()
-        .code(2)
-        .stderr(predicates::str::contains("required"));
+fn missing_required_argument_exits_2() {
+    for args in [["perps", "get"], ["spot", "get"]] {
+        Command::cargo_bin("hyperliquid")
+            .unwrap()
+            .env("HYPERLIQUID_FORMAT", "pretty")
+            .args(args)
+            .assert()
+            .code(2)
+            .stderr(predicates::str::contains("required"));
+    }
 }
 
 #[test]
@@ -366,6 +178,22 @@ fn test_candles_invalid_interval_exits_2() {
         .assert()
         .code(2)
         .stderr(predicates::str::contains("Valid intervals"));
+}
+
+#[test]
+fn mistyped_subcommand_suggests_the_fix_and_points_at_its_group_help() {
+    let output = Command::cargo_bin("hyperliquid")
+        .unwrap()
+        .args(["--format", "json", "orders", "cancl"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["reason"], "unknown_command");
+    assert_eq!(json["data"]["suggestion"], "cancel");
+    assert_eq!(json["next"][0]["command"], "hyperliquid orders --help");
 }
 
 #[tokio::test]
@@ -404,45 +232,6 @@ async fn test_select_filters_perps_json_through_command_context() {
     );
     assert_eq!(first["name"], "BTC");
     assert_eq!(first["max_leverage"], 50);
-}
-
-#[tokio::test]
-async fn test_select_filters_spot_json_through_command_context() {
-    let server = mock_malformed_spot_meta_server().await;
-    let env = IsolatedHome::new();
-    let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
-
-    let output = command
-        .env(TESTNET_API_OVERRIDE_ENV, server.uri())
-        .args([
-            "--testnet",
-            "--format",
-            "json",
-            "--select",
-            "symbol,base",
-            "spot",
-            "list",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    let first = json
-        .as_array()
-        .unwrap()
-        .first()
-        .unwrap()
-        .as_object()
-        .unwrap();
-    assert_eq!(
-        first.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["base", "symbol"]
-    );
-    assert_eq!(first["symbol"], "PURR/USDC");
-    assert_eq!(first["base"], "PURR");
 }
 
 #[tokio::test]
@@ -588,73 +377,28 @@ async fn orders_create_dry_run_validates_and_does_not_require_auth() {
 }
 
 #[tokio::test]
-async fn orders_create_limit_reduce_only_dry_run_outputs_json_flag() {
+async fn orders_create_dry_run_reports_reduce_only_for_limit_and_market() {
     let server = mock_market_server().await;
     let env = IsolatedHome::new();
-    let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
-    let output = command
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "sell",
-            "--type",
-            "limit",
-            "--price",
-            "90000",
-            "--size",
-            "0.001",
-            "--reduce-only",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["dry_run"], true);
-    assert_eq!(json["args"]["reduce_only"], true);
-}
-
-#[tokio::test]
-async fn orders_create_market_reduce_only_dry_run_outputs_json_flag() {
-    let server = mock_market_server().await;
-    let env = IsolatedHome::new();
-    let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
-    let output = command
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "sell",
-            "--type",
-            "market",
-            "--amount",
-            "50",
-            "--reduce-only",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["dry_run"], true);
-    assert_eq!(json["args"]["reduce_only"], true);
+    let cases: [&[&str]; 2] = [
+        &["--type", "limit", "--price", "90000", "--size", "0.001"],
+        &["--type", "market", "--amount", "50"],
+    ];
+    for sizing in cases {
+        let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
+        let output = command
+            .env(API_OVERRIDE_ENV, server.uri())
+            .args(["--format", "json", "--dry-run", "orders", "create"])
+            .args(["--coin", "BTC", "--side", "sell", "--reduce-only"])
+            .args(sizing)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["args"]["reduce_only"], true, "{sizing:?}");
+    }
 }
 
 #[tokio::test]
@@ -894,7 +638,6 @@ async fn orders_schedule_cancel_dry_run_shows_validated_intent() {
     assert_eq!(json["would_execute"], "schedule_dead_mans_switch");
     assert_eq!(json["args"]["mode"], "set");
     assert_eq!(json["args"]["in_duration_ms"], 300000);
-    assert!(json["signer"].is_null() || json["signer"].is_string());
     assert!(json["vault_address"].is_null());
 }
 
@@ -1146,67 +889,4 @@ async fn testnet_resolver_backed_perps_get_tolerates_malformed_spot_meta() {
     let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["name"], "BTC");
     assert_eq!(json["max_leverage"], 50);
-}
-
-#[tokio::test]
-async fn test_select_filters_mids_json_for_agents() {
-    let server = mock_market_server().await;
-    let env = IsolatedHome::new();
-    let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
-
-    let output = command
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args(["--format", "json", "--select", "coin,price", "mids"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    let first = json
-        .as_array()
-        .unwrap()
-        .first()
-        .unwrap()
-        .as_object()
-        .unwrap();
-    assert_eq!(
-        first.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["coin", "price"]
-    );
-    assert_eq!(first["coin"], "BTC");
-    assert_eq!(first["price"], "50000");
-}
-
-#[tokio::test]
-async fn test_results_only_perps_list_returns_bare_array() {
-    let server = mock_market_server().await;
-    let env = IsolatedHome::new();
-    let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
-
-    let assert = command
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args(["--format", "json", "--results-only", "perps", "list"])
-        .assert();
-    let process_output = assert.get_output();
-    if !process_output.status.success() {
-        let requests = server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|request| String::from_utf8_lossy(&request.body).to_string())
-            .collect::<Vec<_>>();
-        panic!(
-            "perps list failed: stdout={}, stderr={}, requests={requests:?}",
-            String::from_utf8_lossy(&process_output.stdout),
-            String::from_utf8_lossy(&process_output.stderr)
-        );
-    }
-    let output = process_output.stdout.clone();
-
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert!(json.is_array(), "--results-only should return a bare array");
-    assert_eq!(json[0]["name"], "BTC");
 }

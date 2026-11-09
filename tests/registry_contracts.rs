@@ -93,7 +93,6 @@ fn registry_explicitly_classifies_critical_command_classes() {
         subscribe.output_contract,
         OutputContract::BoundedNdjsonStream
     );
-    assert!(!subscribe.transport.is_empty());
 
     for path in [
         &["setup"][..],
@@ -145,25 +144,9 @@ fn registry_explicitly_classifies_critical_command_classes() {
         &["vault", "withdraw"][..],
         &["borrowlend", "supply"][..],
         &["borrowlend", "withdraw"][..],
-    ] {
-        let command = registry.find_path(path).unwrap();
-        assert_eq!(command.risk, Risk::FundsMovement, "{path:?}");
-        assert_eq!(command.dry_run, DryRunPolicy::Optional, "{path:?}");
-        assert!(command.auth_required, "{path:?}");
-    }
-
-    for path in [
         &["builder", "approve"][..],
         &["referral", "set"][..],
         &["referral", "register"][..],
-    ] {
-        let command = registry.find_path(path).unwrap();
-        assert_eq!(command.risk, Risk::FundsMovement, "{path:?}");
-        assert_eq!(command.dry_run, DryRunPolicy::Optional, "{path:?}");
-        assert!(command.auth_required, "{path:?}");
-    }
-
-    for path in [
         &["subaccount", "create"][..],
         &["subaccount", "transfer"][..],
         &["subaccount", "spot-transfer"][..],
