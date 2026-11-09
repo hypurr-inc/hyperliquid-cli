@@ -1,5 +1,3 @@
-//! `update`: replace this binary with the latest release.
-
 use crate::invocation::Invocation;
 
 use crate::command_spec::{CliCommand, CommandSpec, DryRunPolicy, Lifecycle, NoArgs, Risk};

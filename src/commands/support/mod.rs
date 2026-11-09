@@ -1,6 +1,3 @@
-//! Helpers every command's `run` shares: the dry-run preview, address parsing,
-//! GitHub issue link helpers, and acting-account lookup.
-
 use hypersdk::Address;
 
 use crate::dry_run::{DryRunEnvelope, DryRunSigning};
@@ -46,7 +43,6 @@ pub(crate) async fn canonical_dex(
     }
 }
 
-/// URL encode a UTF-8 string for query parameters.
 pub fn urlencoding(input: &str) -> String {
     let mut out = String::new();
     for b in input.bytes() {
@@ -63,7 +59,6 @@ pub fn urlencoding(input: &str) -> String {
     out
 }
 
-/// Open a URL in the platform default web browser.
 pub fn open_in_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
     {

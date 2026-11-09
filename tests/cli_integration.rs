@@ -1,8 +1,3 @@
-// Integration tests for hyperliquid-cli.
-//
-// Uses `assert_cmd` to spawn the real binary and verify CLI behavior.
-// Run with: cargo test --test cli_integration
-
 mod support;
 
 use assert_cmd::Command;

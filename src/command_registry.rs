@@ -153,7 +153,6 @@ pub struct CommandRegistry {
 }
 
 impl CommandRegistry {
-    /// The registry of every registered command, built once.
     pub fn get() -> &'static Self {
         static REGISTRY: LazyLock<CommandRegistry> = LazyLock::new(CommandRegistry::build);
         &REGISTRY
@@ -232,7 +231,6 @@ pub struct Policy {
     pub stream_bounds: Option<StreamBoundsSchema>,
 }
 
-/// The arg that answers the confirmation prompt, when the command has one.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfirmationBypass {
     pub supported: bool,
@@ -369,7 +367,6 @@ impl CommandContract {
         self.policy.confirmation_bypass.arg
     }
 
-    /// Input for an arg id.
     pub fn input(&self, id: &str) -> Option<&InputContract> {
         self.inputs.iter().find(|input| input.id == id)
     }

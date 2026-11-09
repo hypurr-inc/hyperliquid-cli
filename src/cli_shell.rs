@@ -92,8 +92,6 @@ fn command_path_from_matches(matches: &ArgMatches) -> Option<Vec<String>> {
     (!path.is_empty()).then_some(path)
 }
 
-// ── Command tree ────────────────────────────────────────────────────────
-
 /// The clap command tree: the global options, `-v`, and the registered commands
 /// with help text filled from each command's spec and notes on every command
 /// that changes state.
@@ -125,7 +123,6 @@ fn build_command() -> clap::Command {
         .subcommands(tree.get_subcommands().cloned())
 }
 
-/// Decorate the command at `path` below `command`.
 fn decorate_at(command: clap::Command, path: &[&str], spec: &CommandSpec) -> clap::Command {
     match path.split_first() {
         Some((first, rest)) => command.mut_subcommand(*first, |sub| decorate_at(sub, rest, spec)),
@@ -195,8 +192,6 @@ fn command_notes(spec: &CommandSpec, has_yes: bool) -> Option<String> {
     Some(lines.join("\n"))
 }
 
-// ── Help, usage errors, and exit paths ──────────────────────────────────
-
 fn styled_text(styled: &clap::builder::StyledStr, color: bool) -> String {
     if color {
         styled.ansi().to_string()
@@ -244,7 +239,6 @@ fn help_text_for_path(path: &[String]) -> String {
     styled_text(&target.render_long_help(), output::colors::stdout_enabled())
 }
 
-/// Print the long help for `path` (the root when empty) on stdout.
 pub(super) fn print_help_to_stdout(path: &[String]) -> Result<(), anyhow::Error> {
     write_stdout(&help_text_for_path(path))
         .map_err(|err| anyhow::anyhow!("failed to write help to stdout: {err}"))
@@ -436,9 +430,6 @@ fn exit_after_stdout_with_code(text: &str, code: i32) -> ! {
     std::process::exit(code)
 }
 
-// ── Panics ──────────────────────────────────────────────────────────────
-
-/// A panic from `println!`/`eprintln!` on a closed pipe.
 fn is_broken_pipe_panic(message: &str) -> bool {
     message.contains("Broken pipe")
         && (message.contains("failed printing to stdout")
@@ -475,9 +466,6 @@ pub(super) fn install_panic_hook() {
     }));
 }
 
-// ── Output format resolution ────────────────────────────────────────────
-
-/// `HYPERLIQUID_FORMAT`, when set to a non-empty value.
 fn env_output_format(source: &EnvSource) -> Option<Result<output::OutputFormat, errors::CliError>> {
     let raw = source.get(env::FORMAT)?;
     if raw.trim().is_empty() {
@@ -556,7 +544,6 @@ mod tests {
     use super::*;
     use hyperliquid_cli::command_registry::CommandRegistry;
 
-    /// Split an example line into words, honoring single and double quotes.
     fn split_command_line(line: &str) -> Vec<String> {
         let mut words = Vec::new();
         let mut current = String::new();

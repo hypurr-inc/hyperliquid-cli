@@ -29,7 +29,6 @@ pub struct InvocationFlags {
     pub testnet: bool,
     pub dry_run: bool,
     pub non_interactive: bool,
-    /// `--payload-json`.
     pub payload_json: Option<String>,
     /// `--payload-file`: a path, or `-` for stdin.
     pub payload_file: Option<String>,
@@ -43,7 +42,6 @@ impl InvocationFlags {
         self.payload_file.as_deref() == Some("-")
     }
 
-    /// Whether a raw payload was supplied at all.
     #[must_use]
     pub fn has_payload(&self) -> bool {
         self.payload_json.is_some() || self.payload_file.is_some()
@@ -88,7 +86,6 @@ impl Remote {
         self.network.chain()
     }
 
-    /// The one HTTP edge to the Hyperliquid API.
     #[must_use]
     pub fn api(&self) -> &ApiClient {
         &self.api
@@ -129,15 +126,11 @@ impl Invocation {
         }
     }
 
-    /// The run's environment and config file, the one `Settings` of the process.
     #[must_use]
     pub fn settings(&self) -> &Settings {
         &self.settings
     }
 
-    // ── The command ─────────────────────────────────────────────────────
-
-    /// The spec of the command this run executes.
     #[must_use]
     pub fn command(&self) -> &'static CommandSpec {
         self.command
@@ -149,8 +142,6 @@ impl Invocation {
     pub fn command_key(&self) -> String {
         self.command.key()
     }
-
-    // ── Output ──────────────────────────────────────────────────────────
 
     #[must_use]
     pub fn session(&self) -> &Session {
@@ -170,12 +161,9 @@ impl Invocation {
         }
     }
 
-    /// Print the answer without the timing footer.
     pub fn print_untimed(&self, data: &dyn TableData) {
         self.session.print(data);
     }
-
-    // ── Prompting, dry run and payload ──────────────────────────────────
 
     #[must_use]
     pub fn mode(&self) -> &Mode {
@@ -208,8 +196,6 @@ impl Invocation {
         }
         Ok(())
     }
-
-    // ── Network, signer and assets ──────────────────────────────────────
 
     /// The network facts, resolved on first use. A failed resolution is not cached.
     pub fn remote(&self) -> Result<&Remote, CliError> {

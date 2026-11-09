@@ -1,5 +1,3 @@
-//! `report-incident`: report an error or issue directly to GitHub.
-
 use clap::Args;
 
 use super::issue_report::{IssueReport, environment_lines};
