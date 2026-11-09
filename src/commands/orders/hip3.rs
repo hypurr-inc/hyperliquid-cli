@@ -5,12 +5,13 @@ use std::collections::BTreeMap;
 use hypersdk::{Address, Decimal};
 use serde_json::json;
 
-use super::args::BPS_DENOMINATOR;
 use super::prepared::PreparedOrder;
+use super::vocab::BPS_DENOMINATOR;
 use crate::account_mode::fetch_abstraction;
 use crate::exchange::send_asset::{self, AssetMove, AssetVenue};
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::quantity::wire_text;
 use crate::signing::SelectedSigner;
 
 /// The leverage an order is assumed to run at when sizing its margin.
@@ -26,17 +27,13 @@ pub(super) struct Hip3MarginPlan {
 }
 
 impl Hip3MarginPlan {
-    fn dest(&self) -> String {
-        format!("dex:{}", self.dest_dex)
-    }
-
     pub(super) fn to_json(&self) -> serde_json::Value {
         json!({
             "action": "send_asset",
-            "source": "perp",
-            "dest": self.dest(),
+            "source": AssetVenue::perp().display,
+            "dest": AssetVenue::dex(&self.dest_dex).display,
             "token": self.token,
-            "amount": self.amount.normalize().to_string(),
+            "amount": wire_text(self.amount),
         })
     }
 }
@@ -152,7 +149,7 @@ mod tests {
     use super::*;
     use crate::assets::test_support::{hip3_perp, perp};
     use crate::assets::{Market, PerpAsset};
-    use crate::commands::orders::args::{CreateOrderType, OrderSide};
+    use crate::commands::orders::vocab::{CreateOrderType, OrderSide};
 
     fn order(perp: PerpAsset, price: i64, size: i64) -> PreparedOrder {
         PreparedOrder {

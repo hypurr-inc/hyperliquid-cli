@@ -19,6 +19,27 @@ pub const CREATE_TWAP_COMMAND: &str = "hyperliquid orders twap-create";
 
 pub const TRAILING_STOP_COMMAND: &str = "hyperliquid orders trailing-stop";
 
+// The runnable examples an order command's errors show for the flags it was
+// missing: each a complete command, so the registry test can resolve it.
+
+pub const BRACKET_MARKET_DRY_RUN: &str = "hyperliquid --format json --dry-run orders bracket --coin ETH --side buy --size 0.1 --take-profit +10% --stop-loss -5%";
+
+pub const BRACKET_LIMIT_DRY_RUN: &str = "hyperliquid --format json --dry-run orders bracket --coin ETH --side buy --entry limit --price 3000 --size 0.1 --take-profit +10% --stop-loss -5%";
+
+pub const BRACKET_LIVE: &str = "hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take-profit +10% --stop-loss -5%";
+
+pub const CHASE_DRY_RUN: &str = "hyperliquid --format json --dry-run orders chase --coin ETH --side buy --size 0.5 --timeout 60s";
+
+pub const CHASE_LIVE: &str =
+    "hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeout 60s";
+
+pub const BUY_DRY_RUN: &str = "hyperliquid --format json --dry-run buy --coin BTC --size 0.001";
+
+pub const TPSL_DRY_RUN: &str =
+    "hyperliquid --format json --dry-run orders tpsl --coin ETH --take-profit +10% --stop-loss -5%";
+
+pub const TRAILING_STOP_DRY_RUN: &str = "hyperliquid --format json --dry-run orders trailing-stop --coin BTC --side sell --size 0.01 --retracement-pct 5 --reduce-only";
+
 pub const ACCOUNT_FILLS_COMMAND: &str = "hyperliquid account fills";
 
 /// Per-account request budget, which the server reports.

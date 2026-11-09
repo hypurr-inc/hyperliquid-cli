@@ -22,6 +22,7 @@ use crate::hints::{
 };
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::quantity::require_positive_if_set;
 
 async fn lookup_order(
     client: &ApiClient,
@@ -269,7 +270,7 @@ pub(super) fn validate_modify_args(args: &ModifyArgs) -> Result<OrderIdentifier,
     let identifier = OrderIdentifier::for_modify(args.order_id, args.cloid.as_deref())?;
     super::validation::positive_price(args.price, "price")?;
     super::validation::positive_price(args.trigger_price, "trigger-price")?;
-    super::validation::positive_quantity(args.size, "size")?;
+    require_positive_if_set(args.size, "size")?;
     if args.price.is_none() && args.trigger_price.is_none() && args.size.is_none() {
         return Err(CliError::Configuration(
             "orders modify requires --price, --trigger-price, or --size".to_string(),

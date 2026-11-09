@@ -109,6 +109,7 @@ pub struct Invocation {
     mode: Mode,
     flags: InvocationFlags,
     command: &'static CommandSpec,
+    confirmed: bool,
     payload: OnceLock<Option<serde_json::Value>>,
     markets: MarketCache,
     remote: OnceLock<Remote>,
@@ -129,6 +130,7 @@ impl Invocation {
             mode,
             flags,
             command,
+            confirmed: false,
             payload: OnceLock::new(),
             markets: MarketCache::new(),
             remote: OnceLock::new(),
@@ -150,6 +152,20 @@ impl Invocation {
     #[must_use]
     pub fn command_key(&self) -> String {
         self.command.key()
+    }
+
+    /// This run with the `--yes` its command line carried, as the pipeline
+    /// read it from the matched command.
+    #[must_use]
+    pub fn with_confirmed(mut self, confirmed: bool) -> Self {
+        self.confirmed = confirmed;
+        self
+    }
+
+    /// Whether `--yes` was passed; `false` for a command with no such option.
+    #[must_use]
+    pub fn confirmed(&self) -> bool {
+        self.confirmed
     }
 
     /// Whether this run must be approved before it acts: the command prompts on

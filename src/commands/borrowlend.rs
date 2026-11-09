@@ -622,7 +622,7 @@ impl CliCommand for BorrowlendGet {
             Err(BorrowLendInfoError::Cli(err)) => return Err(err.into()),
         };
 
-        inv.print(&Rows::one(row));
+        inv.print(&Rows::list_of_one(row));
         Ok(())
     }
 }

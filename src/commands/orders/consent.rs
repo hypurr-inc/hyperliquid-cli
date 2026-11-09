@@ -48,47 +48,16 @@ impl Consent<'_> {
 
     /// The error a decline fails with.
     pub(super) fn declined(&self) -> CliError {
-        match self {
-            Self::Order(_) => ConsentKind::Order,
-            Self::Tpsl(_) => ConsentKind::Tpsl,
-            Self::Scale(_) => ConsentKind::ScaleOrders,
-            Self::BatchCreate(_) => ConsentKind::BatchOrders,
-            Self::Twap(_) => ConsentKind::Twap,
-            Self::ScheduleCancel(_) => ConsentKind::ScheduleCancel,
-            Self::TrailingStop(_) => ConsentKind::TrailingStop,
-            Self::ModifyOrders { .. } => ConsentKind::ModifyOrders,
-            Self::CancelAll { .. } => ConsentKind::CancelAll,
-        }
-        .declined()
-    }
-}
-
-/// It names the error a decline fails with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ConsentKind {
-    Order,
-    Tpsl,
-    ScaleOrders,
-    BatchOrders,
-    Twap,
-    ScheduleCancel,
-    TrailingStop,
-    ModifyOrders,
-    CancelAll,
-}
-
-impl ConsentKind {
-    fn declined(self) -> CliError {
         let (label, cancelled) = match self {
-            Self::Order => ("order", "order placement"),
-            Self::Tpsl => ("TP/SL", "order placement"),
-            Self::ScaleOrders => ("scale order", "order placement"),
-            Self::BatchOrders => ("batch order", "order placement"),
-            Self::Twap => ("TWAP", "TWAP creation"),
-            Self::ScheduleCancel => ("schedule-cancel", "action"),
-            Self::TrailingStop => ("trailing stop", "trailing stop placement"),
-            Self::ModifyOrders => ("batch modify", "order modification"),
-            Self::CancelAll => return policy::declined("cancel-all aborted"),
+            Self::Order(_) => ("order", "order placement"),
+            Self::Tpsl(_) => ("TP/SL", "order placement"),
+            Self::Scale(_) => ("scale order", "order placement"),
+            Self::BatchCreate(_) => ("batch order", "order placement"),
+            Self::Twap(_) => ("TWAP", "TWAP creation"),
+            Self::ScheduleCancel(_) => ("schedule-cancel", "action"),
+            Self::TrailingStop(_) => ("trailing stop", "trailing stop placement"),
+            Self::ModifyOrders { .. } => ("batch modify", "order modification"),
+            Self::CancelAll { .. } => return policy::declined("cancel-all aborted"),
         };
         policy::declined(format!(
             "Mainnet {label} confirmation required; {cancelled} cancelled. Rerun with {YES_FLAG} for deliberate automation."
@@ -364,51 +333,147 @@ fn ask_confirmation(
 
 #[cfg(test)]
 mod tests {
+    use hypersdk::hypercore::types::{
+        Action, OrderGrouping, OrderRequest, OrderTypePlacement, TimeInForce, TwapOrderParams,
+    };
+
     use super::*;
+    use crate::assets::test_support::perp;
+    use crate::assets::{Market, PerpAsset};
+    use crate::commands::orders::args::TrailingStopArgs;
+    use crate::commands::orders::planning::prepare_trailing_stop_plan;
+    use crate::commands::orders::prepared::order_batch;
+    use crate::commands::orders::vocab::{CreateOrderType, OrderSide, TpslGroupingArg};
+    use crate::margin::MarginPlan;
+
+    fn order() -> PreparedOrder {
+        let perp = perp("BTC", 0);
+        PreparedOrder {
+            request: OrderRequest {
+                asset: perp.index,
+                is_buy: true,
+                limit_px: Decimal::from(10),
+                sz: Decimal::ONE,
+                reduce_only: false,
+                order_type: OrderTypePlacement::Limit {
+                    tif: TimeInForce::Gtc,
+                },
+                cloid: Default::default(),
+            },
+            coin: perp.display_name(),
+            margin: None,
+            market: Market::Perp(perp),
+            side: OrderSide::Buy,
+            order_type: CreateOrderType::Limit,
+            tif: None,
+            trigger_price: None,
+            amount: None,
+            warning: None,
+            builder: None,
+            priority_rate: None,
+        }
+    }
+
+    fn twap(perp: PerpAsset) -> TwapCreatePlan {
+        TwapCreatePlan {
+            action: Action::TwapOrder {
+                twap: TwapOrderParams {
+                    a: perp.index,
+                    b: true,
+                    s: Decimal::ONE,
+                    r: false,
+                    m: 5,
+                    t: false,
+                },
+            },
+            coin: perp.display_name(),
+            side: "buy".to_string(),
+            size: Decimal::ONE,
+            duration_seconds: 300,
+            duration_minutes: 5,
+            randomize: false,
+            margin: MarginPlan::for_market(&perp, None).unwrap(),
+            perp,
+        }
+    }
 
     #[test]
     fn a_declined_approval_names_what_was_cancelled() {
-        for (kind, message) in [
+        let order = order();
+        let tpsl = PreparedTpslBatch {
+            batch: order_batch(Vec::new(), OrderGrouping::Na),
+            grouping: TpslGroupingArg::NormalTpsl,
+            legs: Vec::new(),
+        };
+        let batch = PreparedOrderBatch {
+            batch: order_batch(Vec::new(), OrderGrouping::Na),
+            legs: Vec::new(),
+        };
+        let twap = twap(perp("BTC", 0));
+        let schedule = ScheduleCancelPlan::Clear;
+        let trailing = prepare_trailing_stop_plan(
+            &perp("BTC", 0),
+            &TrailingStopArgs {
+                coin: "BTC".to_string(),
+                dex: None,
+                side: OrderSide::Sell,
+                size: Decimal::ONE,
+                retracement_pct: Some(Decimal::from(5)),
+                retracement_px: None,
+                activation_price: None,
+                reduce_only: false,
+                on_behalf_of: None,
+                yes: false,
+            },
+        )
+        .unwrap();
+        for (consent, message) in [
             (
-                ConsentKind::Order,
+                Consent::Order(&order),
                 "Mainnet order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::Tpsl,
+                Consent::Tpsl(&tpsl),
                 "Mainnet TP/SL confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::ScaleOrders,
+                Consent::Scale(&batch),
                 "Mainnet scale order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::BatchOrders,
+                Consent::BatchCreate(&batch),
                 "Mainnet batch order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::Twap,
+                Consent::Twap(&twap),
                 "Mainnet TWAP confirmation required; TWAP creation cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::ScheduleCancel,
+                Consent::ScheduleCancel(&schedule),
                 "Mainnet schedule-cancel confirmation required; action cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::TrailingStop,
+                Consent::TrailingStop(&trailing),
                 "Mainnet trailing stop confirmation required; trailing stop placement cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::ModifyOrders,
+                Consent::ModifyOrders { count: 2 },
                 "Mainnet batch modify confirmation required; order modification cancelled. Rerun with --yes for deliberate automation.",
             ),
-            (ConsentKind::CancelAll, "cancel-all aborted"),
+            (
+                Consent::CancelAll {
+                    coin: None,
+                    count: 2,
+                },
+                "cancel-all aborted",
+            ),
         ] {
-            let err = kind.declined();
-            assert_eq!(err.exit_code(), 2, "{kind:?}");
+            let err = consent.declined();
+            assert_eq!(err.exit_code(), 2, "{message}");
             assert_eq!(
                 err.to_string(),
                 format!("Configuration error: {message}"),
-                "{kind:?}"
+                "{message}"
             );
         }
     }

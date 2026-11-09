@@ -5,6 +5,7 @@ use serde::Serialize;
 use super::consent::{Consent, ConsentTarget};
 use super::exchange::{Answer, Wording};
 use crate::builder_fee::BuilderFee;
+use crate::commands::common::support::acting_account;
 use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::http_api::ApiClient;
@@ -25,8 +26,7 @@ pub(super) struct OrderSubmissionContext<'a> {
 
 impl<'a> OrderSubmissionContext<'a> {
     pub(super) fn account(self) -> Address {
-        self.vault_address
-            .unwrap_or_else(|| self.signer.query_address())
+        acting_account(self.vault_address, self.signer)
     }
 
     /// Sign and send `action` for the account this context acts for; the

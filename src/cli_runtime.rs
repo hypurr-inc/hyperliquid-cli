@@ -40,7 +40,9 @@ pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyho
     if inv.flags().has_payload() {
         validate_raw_payload_supported(spec)?;
     }
-    validate_prompt_policy(&inv, &selected)?;
+    let confirmation = Confirmation::from_matches(&selected.matches)?;
+    let inv = inv.with_confirmed(confirmation.given);
+    validate_prompt_policy(&inv, &selected, confirmation)?;
     if inv.dry_run() && spec.dry_run != DryRunPolicy::Optional {
         return Err(CliError::Unsupported(spec.dry_run_refusal.map_or_else(
             || "--dry-run is only supported for mutating commands with preview support".to_string(),
@@ -115,7 +117,11 @@ impl Confirmation {
     }
 }
 
-fn validate_prompt_policy(inv: &Invocation, selected: &Selected) -> Result<(), CliError> {
+fn validate_prompt_policy(
+    inv: &Invocation,
+    selected: &Selected,
+    confirmation: Confirmation,
+) -> Result<(), CliError> {
     let spec = selected.entry.spec;
     let matches = &selected.matches;
     let mode = inv.mode();
@@ -125,7 +131,6 @@ fn validate_prompt_policy(inv: &Invocation, selected: &Selected) -> Result<(), C
                 .to_string(),
         ));
     }
-    let confirmation = Confirmation::from_matches(matches)?;
     // Whether a testnet run is exempt depends on the resolved network, not on
     // which flag or variable selected it, so it is asked last.
     if inv.dry_run()

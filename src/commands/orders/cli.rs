@@ -3,8 +3,8 @@ use hypersdk::hypercore::Subscription;
 
 use super::args::{
     BatchCreateArgs, BatchModifyArgs, BracketArgs, BuySellArgs, CancelAllArgs, CancelArgs,
-    ChaseArgs, CreateArgs, ModifyArgs, OrderSide, OutcomeOrderArgs, ScaleArgs, ScheduleCancelArgs,
-    StatusArgs, TpslArgs, TrailingStopArgs, TwapCancelArgs, TwapCreateArgs,
+    ChaseArgs, CreateArgs, ModifyArgs, OutcomeOrderArgs, ScaleArgs, ScheduleCancelArgs, StatusArgs,
+    TpslArgs, TrailingStopArgs, TwapCancelArgs, TwapCreateArgs,
 };
 use super::bracket::{bracket, bracket_dry_run_plan, validate_bracket_args};
 use super::chase::{chase, chase_dry_run_plan, chase_timeout};
@@ -13,11 +13,14 @@ use super::existing::{
     validate_modify_args,
 };
 use super::planning::{
-    OrderEcho, batch_create_dry_run_plan, create_dry_run_plan, prepare_batch_create_orders,
-    prepare_create_order, prepare_scale_batch, prepare_schedule_cancel_plan,
-    prepare_trailing_stop_plan, prepare_twap_cancel_plan, prepare_twap_create_plan, resolve_perp,
-    scale_dry_run_plan, schedule_cancel_dry_run_plan, tpsl_dry_run_plan, twap_cancel_dry_run_plan,
-    twap_create_dry_run_plan, validate_trailing_stop_args,
+    prepare_batch_create_orders, prepare_create_order, prepare_scale_batch,
+    prepare_schedule_cancel_plan, prepare_trailing_stop_plan, prepare_twap_cancel_plan,
+    prepare_twap_create_plan, resolve_perp, validate_trailing_stop_args,
+};
+use super::preview::{
+    OrderEcho, batch_create_dry_run_plan, create_dry_run_plan, scale_dry_run_plan,
+    schedule_cancel_dry_run_plan, tpsl_dry_run_plan, twap_cancel_dry_run_plan,
+    twap_create_dry_run_plan,
 };
 use super::queries::{history, open, status};
 use super::run::OrderRun;
@@ -27,6 +30,7 @@ use super::validation::{
     OrderSpec, ScaleLadder, TpslSpec, read_validated_batch_create_orders,
     read_validated_batch_modify_orders, validate_batch_create_args,
 };
+use super::vocab::OrderSide;
 use super::{
     batch_modify, cancel, cancel_all, create, modify, place_batch, schedule_cancel, tpsl,
     twap_cancel, twap_create,
@@ -35,7 +39,8 @@ use crate::assets::DexArg;
 use crate::cli_command::CliCommand;
 use crate::clock;
 use crate::command_spec::{
-    ArgSpec, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk, YES_FOR_AUTOMATION, arg,
+    ArgSpec, CommandSpec, GroupSpec, InputKind, NoArgs, ON_BEHALF_OF, ON_BEHALF_OF_DESCRIBED,
+    OwsSupport, Risk, YES_FOR_AUTOMATION, arg,
 };
 use crate::commands::common::order_list::open_orders_output;
 use crate::errors::CliError;
@@ -64,14 +69,6 @@ macro_rules! prompts_unless_yes {
 // What each order command says about the flags they share. A flag is described
 // here once, so every command that takes it gets the same input hardening.
 
-/// `--on-behalf-of`, hardened; a command adds [`ON_BEHALF_OF_DESCRIBED`] when
-/// the schema should say more than the clap help.
-const ON_BEHALF_OF: ArgSpec = arg("on_behalf_of")
-    .kind(InputKind::ActingAccountSelector)
-    .resource_id("on-behalf-of selector");
-const ON_BEHALF_OF_DESCRIBED: ArgSpec = ON_BEHALF_OF.describe(
-    "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
-);
 const YES: ArgSpec = crate::command_spec::YES.describe(
     "Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt.",
 );
@@ -318,7 +315,7 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
 
     async fn run(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error> {
         let spec = OrderSpec::from_create(args)?;
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         let client = inv.remote()?.api();
         let resolver = inv.asset_resolver().await?;
         let submission = prepare_create_order(client, &resolver, inv.settings(), &spec).await?;
@@ -383,7 +380,7 @@ impl CliCommand for OrdersScale {
 
     async fn run(inv: &Invocation, args: &ScaleArgs) -> Result<(), anyhow::Error> {
         let ladder = ScaleLadder::from_args(args)?;
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         let client = inv.remote()?.api();
         let resolver = inv.asset_resolver().await?;
         let prepared =
@@ -438,7 +435,7 @@ impl CliCommand for OrdersBatchCreate {
     async fn run(inv: &Invocation, args: &BatchCreateArgs) -> Result<(), anyhow::Error> {
         validate_batch_create_args(args)?;
         let orders = read_validated_batch_create_orders(args)?;
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         let client = inv.remote()?.api();
         let resolver = inv.asset_resolver().await?;
         let prepared = prepare_batch_create_orders(
@@ -496,7 +493,7 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
 
     async fn run(inv: &Invocation, args: &TpslArgs) -> Result<(), anyhow::Error> {
         let spec = TpslSpec::from_flags(args)?;
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         let client = inv.remote()?.api();
         let resolver = inv.asset_resolver().await?;
         let perp = resolve_perp(client, &resolver, spec.dex.as_deref(), &spec.coin).await?;
@@ -548,7 +545,7 @@ hyperliquid --format json orders trailing-stop --coin ETH --side sell --size 0.5
 
     async fn run(inv: &Invocation, args: &TrailingStopArgs) -> Result<(), anyhow::Error> {
         validate_trailing_stop_args(args)?;
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         let client = inv.remote()?.api();
         let resolver = inv.asset_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
@@ -585,7 +582,7 @@ impl CliCommand for OrdersCancel {
     ]);
 
     async fn run(inv: &Invocation, args: &CancelArgs) -> Result<(), anyhow::Error> {
-        let run = OrderRun::unprompted(inv, args.on_behalf_of.as_deref())?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
             return run.preview(cancel_dry_run_plan(args)?);
         }
@@ -618,7 +615,7 @@ impl CliCommand for OrdersCancelAll {
     ]);
 
     async fn run(inv: &Invocation, args: &CancelAllArgs) -> Result<(), anyhow::Error> {
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         let resolver = inv.asset_resolver().await?;
         if inv.dry_run() {
             let client = inv.remote()?.api();
@@ -661,7 +658,7 @@ impl CliCommand for OrdersModify {
 
     async fn run(inv: &Invocation, args: &ModifyArgs) -> Result<(), anyhow::Error> {
         let identifier = validate_modify_args(args)?;
-        let run = OrderRun::unprompted(inv, args.on_behalf_of.as_deref())?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
             return run.preview(modify_dry_run_plan(args));
         }
@@ -708,7 +705,7 @@ hyperliquid --format json orders batch-modify --orders-file modifications.json -
 
     async fn run(inv: &Invocation, args: &BatchModifyArgs) -> Result<(), anyhow::Error> {
         let orders = read_validated_batch_modify_orders(args)?;
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
             return run.preview(batch_modify_dry_run_plan(&orders, args));
         }
@@ -753,7 +750,7 @@ impl CliCommand for OrdersTwapCreate {
     ]);
 
     async fn run(inv: &Invocation, args: &TwapCreateArgs) -> Result<(), anyhow::Error> {
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         let client = inv.remote()?.api();
         let resolver = inv.asset_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
@@ -791,7 +788,7 @@ impl CliCommand for OrdersTwapCancel {
     ]);
 
     async fn run(inv: &Invocation, args: &TwapCancelArgs) -> Result<(), anyhow::Error> {
-        let run = OrderRun::unprompted(inv, args.on_behalf_of.as_deref())?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         let client = inv.remote()?.api();
         let resolver = inv.asset_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
@@ -831,7 +828,7 @@ impl CliCommand for OrdersScheduleCancel {
 
     async fn run(inv: &Invocation, args: &ScheduleCancelArgs) -> Result<(), anyhow::Error> {
         let plan = prepare_schedule_cancel_plan(args)?;
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
             return run.preview(schedule_cancel_dry_run_plan(&plan, clock::now_utc()));
         }
@@ -876,7 +873,7 @@ hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeou
 
     async fn run(inv: &Invocation, args: &ChaseArgs) -> Result<(), anyhow::Error> {
         let timeout = chase_timeout(inv, args)?;
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         let client = inv.remote()?.api();
         let resolver = inv.asset_resolver().await?;
         if inv.dry_run() {
@@ -927,7 +924,7 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
 
     async fn run(inv: &Invocation, args: &BracketArgs) -> Result<(), anyhow::Error> {
         validate_bracket_args(args)?;
-        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref())?;
         let client = inv.remote()?.api();
         let resolver = inv.asset_resolver().await?;
         if inv.dry_run() {
@@ -1144,59 +1141,6 @@ mod tests {
             Buy::SPEC.arg("coin").and_then(|arg| arg.check),
             Some(Check::AssetInput("coin"))
         ));
-    }
-
-    /// The command words of each `impl CliCommand` block in the production half
-    /// of this file (before its tests, which quote what they scan for) whose
-    /// source contains `wanted`, read from the block's `SPEC` path.
-    fn commands_whose_source_contains(wanted: &str) -> Vec<Vec<String>> {
-        let source = include_str!("cli.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("source before the tests");
-        source
-            .split("impl CliCommand for ")
-            .skip(1)
-            .filter(|block| block.contains(wanted))
-            .map(|block| {
-                let after_spec = &block[block.find("const SPEC").expect("a SPEC")..];
-                let path = &after_spec[after_spec.find("&[").expect("a path") + 2..];
-                path[..path.find(']').expect("a closed path")]
-                    .split('"')
-                    .skip(1)
-                    .step_by(2)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .collect()
-    }
-
-    /// `OrderRun::unprompted` hands a command a run that never asks, so the
-    /// command must not prompt: its spec has no `.prompt()`. Without this a
-    /// command that gained one would run on mainnet unconfirmed.
-    #[test]
-    fn commands_run_unprompted_only_when_their_spec_never_prompts() {
-        let unprompted = commands_whose_source_contains("OrderRun::unprompted(");
-        assert_eq!(
-            unprompted,
-            [
-                vec!["orders", "cancel"],
-                vec!["orders", "modify"],
-                vec!["orders", "twap-cancel"]
-            ],
-            "the scan finds the commands that never ask"
-        );
-        for path in unprompted {
-            let spec = order_specs()
-                .into_iter()
-                .find(|spec| spec.path == path.as_slice())
-                .unwrap_or_else(|| panic!("no spec for {path:?}"));
-            assert_ne!(
-                spec.confirmation,
-                crate::command_spec::ConfirmationPolicy::Prompt,
-                "{path:?} prompts, so its run needs `--yes` wired through `OrderRun::new`"
-            );
-        }
     }
 
     fn flag_ids<A: Args>() -> Vec<String> {

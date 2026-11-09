@@ -7,16 +7,18 @@ use serde_json::json;
 
 use crate::assets::{AssetResolver, Market};
 use crate::errors::CliError;
+use crate::hints::{CHASE_DRY_RUN, CHASE_LIVE};
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
 use crate::quantity::not_positive;
 use crate::settings::Settings;
 
-use super::args::{BPS_DENOMINATOR, ChaseArgs, DEFAULT_TRACKING_TIMEOUT, OrderSide, TifArg};
+use super::args::{ChaseArgs, DEFAULT_TRACKING_TIMEOUT};
 use super::cloid::generated_cloid;
 use super::context::OrderSubmissionContext;
 use super::exchange::{Placement, Wording, rejection_error};
+use super::limits::MIN_NOTIONAL_USDC;
 use super::live_order::{CloidAsset, LiveOrder, elapsed_ms};
 use super::planning::{market_dex, market_mid_price, prepare_order_in, resolve_perp_market};
 use super::preview::OrderDryRunPlan;
@@ -24,16 +26,7 @@ use super::rendering::single_status;
 use super::status::Status;
 use super::submit::{Ungated, submit_orders};
 use super::validation::OrderSpec;
-
-/// Chase stops when the unfilled remainder is worth less than the exchange's
-/// minimum order value.
-const MIN_NOTIONAL_USDC: i64 = 10;
-
-const EXAMPLE: &str = "orders chase --coin ETH --side buy --size 0.5 --timeout 60s";
-
-fn dry_run_example() -> String {
-    format!("hyperliquid --format json --dry-run {EXAMPLE}")
-}
+use super::vocab::{BPS_DENOMINATOR, OrderSide, TifArg};
 
 /// The dry run and every live requote plan it through here, so the preview shows the
 /// price and size that are sent.
@@ -117,8 +110,7 @@ pub(super) async fn chase(
     args: &ChaseArgs,
     timeout: Duration,
 ) -> Result<(), anyhow::Error> {
-    context
-        .refuse_unattended_without_yes("chase", &format!("hyperliquid --format json {EXAMPLE}"))?;
+    context.refuse_unattended_without_yes("chase", CHASE_LIVE)?;
 
     let started = Instant::now();
     let client = context.api;
@@ -228,9 +220,8 @@ pub(super) fn chase_timeout(inv: &Invocation, args: &ChaseArgs) -> Result<Durati
 fn validate_chase_args(args: &ChaseArgs) -> Result<(), CliError> {
     if args.size <= Decimal::ZERO {
         return Err(CliError::Configuration(format!(
-            "{}.\n  {}",
-            not_positive("orders chase --size"),
-            dry_run_example()
+            "{}.\n  {CHASE_DRY_RUN}",
+            not_positive("orders chase --size")
         )));
     }
     Ok(())
@@ -240,8 +231,7 @@ fn effective_timeout(args: &ChaseArgs, require_explicit: bool) -> Result<Duratio
     match args.timeout {
         Some(timeout) => Ok(timeout),
         None if require_explicit => Err(CliError::Configuration(format!(
-            "orders chase requires --timeout in agent mode.\n  {}",
-            dry_run_example()
+            "orders chase requires --timeout in agent mode.\n  {CHASE_DRY_RUN}"
         ))),
         None => Ok(DEFAULT_TRACKING_TIMEOUT),
     }
@@ -366,7 +356,7 @@ mod tests {
         let unwatched = effective_timeout(&sample_args(None), true).unwrap_err();
         assert_eq!(unwatched.exit_code(), 2);
         assert!(unwatched.to_string().contains("requires --timeout"));
-        assert!(unwatched.to_string().contains(&dry_run_example()));
+        assert!(unwatched.to_string().contains(CHASE_DRY_RUN));
     }
 
     #[test]

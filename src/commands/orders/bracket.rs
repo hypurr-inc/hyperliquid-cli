@@ -6,26 +6,30 @@ use serde_json::json;
 
 use crate::assets::{AssetResolver, Market, PerpAsset};
 use crate::errors::{CliError, NextCommand, partial_results_fields};
-use crate::hints::{CHECK_LIVE_COMMAND, cancel_order_command, protect_position_command};
+use crate::hints::{
+    BRACKET_LIMIT_DRY_RUN, BRACKET_LIVE, BRACKET_MARKET_DRY_RUN, CHECK_LIVE_COMMAND,
+    cancel_order_command, protect_position_command,
+};
 use crate::http_api::ApiClient;
 use crate::margin::MarginPlan;
 use crate::output::TableData;
 use crate::settings::Settings;
 
-use super::args::{BracketArgs, CreateOrderType, TifArg};
+use super::args::BracketArgs;
 use super::cloid::{cloid_text, generated_cloid};
 use super::context::OrderSubmissionContext;
 use super::exchange::{Placement, Wording, rejection_error};
 use super::live_order::{CloidAsset, LiveOrder, elapsed_ms};
 use super::planning::{
-    OrderEcho, create_dry_run_preview, market_dex, prepare_order_in, resolve_perp_market,
-    resolve_trigger_prices, tpsl_dry_run_plan, validate_tpsl_price_ordering,
+    market_dex, prepare_order_in, resolve_perp_market, resolve_trigger_prices,
+    validate_tpsl_price_ordering,
 };
 use super::prepared::CreateOrderSubmission;
-use super::preview::OrderDryRunPlan;
+use super::preview::{OrderDryRunPlan, OrderEcho, create_dry_run_preview, tpsl_dry_run_plan};
 use super::rendering::partial_results_error;
 use super::status::Status;
 use super::validation::{BuilderRequest, MarketSizing, OrderSpec, TpslSpec};
+use super::vocab::{CreateOrderType, TifArg};
 use super::{place_prepared_single, protect_position};
 
 const ENTRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -47,11 +51,10 @@ impl BracketEntry {
                 match (args.size, args.amount) {
                     (Some(size), None) => Ok(Self::Market(MarketSizing::Size(size))),
                     (None, Some(amount)) => Ok(Self::Market(MarketSizing::Amount(amount))),
-                    (None, None) => Err(CliError::Configuration(
+                    (None, None) => Err(CliError::Configuration(format!(
                         "orders bracket requires --size or --amount for market entry.\n  \
-                         hyperliquid --format json --dry-run orders bracket --coin ETH --side buy --size 0.1 --take-profit +10% --stop-loss -5%"
-                            .to_string(),
-                    )),
+                         {BRACKET_MARKET_DRY_RUN}"
+                    ))),
                     (Some(_), Some(_)) => Err(CliError::Configuration(
                         "orders bracket accepts --size or --amount, not both".to_string(),
                     )),
@@ -65,11 +68,10 @@ impl BracketEntry {
                 }
                 match (args.price, args.size) {
                     (Some(price), Some(size)) => Ok(Self::Limit { price, size }),
-                    _ => Err(CliError::Configuration(
+                    _ => Err(CliError::Configuration(format!(
                         "orders bracket --entry limit requires --price and --size.\n  \
-                         hyperliquid --format json --dry-run orders bracket --coin ETH --side buy --entry limit --price 3000 --size 0.1 --take-profit +10% --stop-loss -5%"
-                            .to_string(),
-                    )),
+                         {BRACKET_LIMIT_DRY_RUN}"
+                    ))),
                 }
             }
             other => Err(CliError::Configuration(format!(
@@ -124,19 +126,13 @@ pub(super) async fn bracket_dry_run_plan(
     .await?;
     let entry = prepare_order_in(client, &Market::Perp(perp.clone()), settings, &spec).await?;
     let entry_margin = entry.margin;
-    let echo = OrderEcho {
-        coin: &args.coin,
-        dex: args.dex.as_deref(),
-        side: args.side,
-        order_type: args.entry,
-        cloid: None,
-        max_slippage_bps: args.max_slippage_bps,
-        take_profit: None,
-        stop_loss: None,
-        grouping: None,
-        builder_address: None,
-        builder_fee_rate: None,
-    };
+    let echo = OrderEcho::new(
+        &args.coin,
+        args.dex.as_deref(),
+        args.side,
+        args.entry,
+        args.max_slippage_bps,
+    );
     let entry = create_dry_run_preview(
         &CreateOrderSubmission::Single(entry),
         &echo,
@@ -216,10 +212,7 @@ pub(super) async fn bracket(
     args: &BracketArgs,
 ) -> Result<(), anyhow::Error> {
     let entry = BracketEntry::from_args(args)?;
-    context.refuse_unattended_without_yes(
-        "place a bracket",
-        "hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take-profit +10% --stop-loss -5%",
-    )?;
+    context.refuse_unattended_without_yes("place a bracket", BRACKET_LIVE)?;
 
     let started = Instant::now();
     let client = context.api;
@@ -514,8 +507,9 @@ mod tests {
     use rust_decimal::Decimal;
 
     use super::*;
-    use crate::commands::orders::args::{OrderSide, TriggerPriceSpec};
+    use crate::commands::orders::args::TriggerPriceSpec;
     use crate::commands::orders::validation::ClosingSize;
+    use crate::commands::orders::vocab::OrderSide;
 
     fn sample_args() -> BracketArgs {
         BracketArgs {

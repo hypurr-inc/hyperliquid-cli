@@ -77,9 +77,9 @@ impl<T> Rows<T> {
         Self { rows }
     }
 
-    /// A list of exactly `row`: a JSON array of one object, unlike [`One`].
+    /// A list of exactly `row`: a JSON array of one object, where [`One`] is the object itself.
     #[must_use]
-    pub fn one(row: T) -> Self {
+    pub fn list_of_one(row: T) -> Self {
         Self { rows: vec![row] }
     }
 }

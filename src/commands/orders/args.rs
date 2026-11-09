@@ -1,13 +1,14 @@
-use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use hypersdk::Decimal;
-use hypersdk::hypercore::types::{OrderGrouping, TimeInForce, TpSl};
-use serde::{Deserialize, Serialize};
 
+use super::vocab::{
+    CreateOrderType, DEFAULT_MARKET_ORDER_SLIPPAGE_BPS, MAX_MARKET_ORDER_SLIPPAGE_BPS,
+    MIN_MARKET_ORDER_SLIPPAGE_BPS, OrderSide, TifArg, TpslGroupingArg,
+};
 use crate::assets::DexArg;
 use crate::clock::parse_lifetime;
 use crate::errors::CliError;
@@ -24,12 +25,6 @@ const MAX_PRIORITY_RATE: u32 = 100_000_000;
 fn priority_rate_parser() -> clap::builder::RangedI64ValueParser<u32> {
     clap::value_parser!(u32).range(1..=i64::from(MAX_PRIORITY_RATE))
 }
-
-pub(super) const DEFAULT_MARKET_ORDER_SLIPPAGE_BPS: u16 = 500;
-pub(super) const MIN_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1;
-pub(super) const MAX_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1_000;
-
-pub(super) const BPS_DENOMINATOR: i64 = 10_000;
 
 /// Arguments for `orders create`.
 #[derive(Args, Debug, Clone)]
@@ -449,113 +444,6 @@ pub struct StatusArgs {
     pub cloid: Option<String>,
 }
 
-/// Buy/sell order side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OrderSide {
-    Buy,
-    Sell,
-}
-
-impl OrderSide {
-    pub(super) fn is_buy(self) -> bool {
-        matches!(self, Self::Buy)
-    }
-
-    pub(super) fn opposite(self) -> Self {
-        match self {
-            Self::Buy => Self::Sell,
-            Self::Sell => Self::Buy,
-        }
-    }
-}
-
-impl fmt::Display for OrderSide {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Buy => write!(f, "buy"),
-            Self::Sell => write!(f, "sell"),
-        }
-    }
-}
-
-/// Supported `orders create --type` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CreateOrderType {
-    Limit,
-    Market,
-    StopLoss,
-    TakeProfit,
-    StopLimit,
-    TakeLimit,
-}
-
-impl fmt::Display for CreateOrderType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Limit => write!(f, "limit"),
-            Self::Market => write!(f, "market"),
-            Self::StopLoss => write!(f, "stop-loss"),
-            Self::TakeProfit => write!(f, "take-profit"),
-            Self::StopLimit => write!(f, "stop-limit"),
-            Self::TakeLimit => write!(f, "take-limit"),
-        }
-    }
-}
-
-impl CreateOrderType {
-    pub(super) fn is_trigger(self) -> bool {
-        matches!(
-            self,
-            Self::StopLoss | Self::TakeProfit | Self::StopLimit | Self::TakeLimit
-        )
-    }
-
-    pub(super) fn market_trigger(tpsl: TpSl) -> Self {
-        match tpsl {
-            TpSl::Tp => Self::TakeProfit,
-            TpSl::Sl => Self::StopLoss,
-        }
-    }
-
-    pub(super) fn limit_trigger(tpsl: TpSl) -> Self {
-        match tpsl {
-            TpSl::Tp => Self::TakeLimit,
-            TpSl::Sl => Self::StopLimit,
-        }
-    }
-}
-
-/// CLI-facing TIF values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TifArg {
-    Gtc,
-    Alo,
-    Ioc,
-}
-
-impl From<TifArg> for TimeInForce {
-    fn from(value: TifArg) -> Self {
-        match value {
-            TifArg::Gtc => Self::Gtc,
-            TifArg::Alo => Self::Alo,
-            TifArg::Ioc => Self::Ioc,
-        }
-    }
-}
-
-impl fmt::Display for TifArg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Gtc => write!(f, "gtc"),
-            Self::Alo => write!(f, "alo"),
-            Self::Ioc => write!(f, "ioc"),
-        }
-    }
-}
-
 /// CLI-facing `orders create` TP/SL grouping values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CreateTpslGroupingArg {
@@ -565,14 +453,6 @@ pub enum CreateTpslGroupingArg {
 /// CLI-facing `orders tpsl` TP/SL grouping values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum PositionTpslGroupingArg {
-    PositionTpsl,
-}
-
-/// How an order batch groups its TP/SL legs. The two CLI enums above are the
-/// values each command accepts; this is the one place that names a grouping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TpslGroupingArg {
-    NormalTpsl,
     PositionTpsl,
 }
 
@@ -588,32 +468,6 @@ impl From<PositionTpslGroupingArg> for TpslGroupingArg {
     fn from(value: PositionTpslGroupingArg) -> Self {
         match value {
             PositionTpslGroupingArg::PositionTpsl => Self::PositionTpsl,
-        }
-    }
-}
-
-impl From<TpslGroupingArg> for OrderGrouping {
-    fn from(value: TpslGroupingArg) -> Self {
-        match value {
-            TpslGroupingArg::NormalTpsl => Self::NormalTpsl,
-            TpslGroupingArg::PositionTpsl => Self::PositionTpsl,
-        }
-    }
-}
-
-impl TpslGroupingArg {
-    /// The grouping as it goes on the wire, spelled by the SDK's own
-    /// serialization so the previews cannot drift from what is sent.
-    pub(super) fn wire_value(self) -> serde_json::Value {
-        serde_json::json!(OrderGrouping::from(self))
-    }
-}
-
-impl fmt::Display for TpslGroupingArg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NormalTpsl => write!(f, "normal-tpsl"),
-            Self::PositionTpsl => write!(f, "position-tpsl"),
         }
     }
 }
