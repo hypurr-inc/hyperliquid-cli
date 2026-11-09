@@ -7,6 +7,7 @@ pub mod asset;
 pub mod borrowlend;
 pub mod builder;
 pub mod feedback;
+pub(crate) mod issue_report;
 pub mod mcp;
 pub mod meta;
 pub mod orderbook;
