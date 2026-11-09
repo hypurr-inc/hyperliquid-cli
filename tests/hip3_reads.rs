@@ -49,6 +49,29 @@ async fn mount_resolver_metadata(server: &MockServer) {
         .await;
 }
 
+/// A read that names a dex: any request body with a `dex` key.
+struct DexScopedRead;
+
+impl wiremock::Match for DexScopedRead {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        serde_json::from_slice::<Value>(&request.body)
+            .is_ok_and(|body| body.get("dex").is_some())
+    }
+}
+
+/// Fails `server.verify()` when any dex-scoped read arrives. An unknown dex
+/// must be refused after the dex list is read and before anything is read from it.
+async fn forbid_dex_scoped_reads(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(DexScopedRead)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .with_priority(1)
+        .expect(0)
+        .mount(server)
+        .await;
+}
+
 #[tokio::test]
 async fn mids_scopes_all_mids_to_a_dex() {
     let env = IsolatedHome::new();
@@ -362,6 +385,7 @@ async fn unknown_dex_fails_before_reading() {
     let server = MockServer::start().await;
     mount_override_healthcheck(&server).await;
     mount_resolver_metadata(&server).await;
+    forbid_dex_scoped_reads(&server).await;
 
     env.command_with_server(&server)
         .args(["--format", "json", "mids", "--dex", "nope"])
@@ -414,6 +438,7 @@ async fn unknown_dex_fails_before_a_watch_starts() {
     let server = MockServer::start().await;
     mount_override_healthcheck(&server).await;
     mount_resolver_metadata(&server).await;
+    forbid_dex_scoped_reads(&server).await;
 
     env.command_with_server(&server)
         .args([
