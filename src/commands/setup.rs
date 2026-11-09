@@ -7,8 +7,9 @@
 use clap::Args;
 use serde::Serialize;
 
+use crate::builder_fee::{self, MaxFeeRate};
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, Lifecycle, OwsSupport, Risk, arg};
-use crate::commands::{builder, referral, wallet};
+use crate::commands::{builder, wallet};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
@@ -18,9 +19,11 @@ use crate::network::Network;
 use crate::output::{OutputFormat, TableData};
 use crate::ows::vault::Vault;
 use crate::prompt;
+use crate::referral_code;
 use crate::settings::{Settings, env};
 use crate::signing::SelectedSigner;
 use crate::wallet_store::{ConfigEdit, NewWallet, WalletName, WalletStore};
+use crate::wire::{self, AddressRole};
 use ows_lib::types::WalletInfo;
 
 #[derive(Args, Debug, Clone)]
@@ -153,14 +156,14 @@ pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error
     let api = inv.api_client_for(network)?;
     let connection = verify_connection(&api).await?;
     eprintln!("{connection}");
-    let builder_suggestion = builder::suggested_default_builder(settings)?;
+    let builder_suggestion = builder_fee::suggested_default_builder(settings)?;
     let builder_defaults = if args.yes {
         builder_suggestion.clone()
     } else {
         prompt_builder_defaults(mode, settings)?
     };
     let referral_suggestion =
-        referral::suggested_default_referral_code(settings, network.is_testnet())?;
+        referral_code::suggested_default_referral_code(settings, network.is_testnet())?;
     let referral_code = if args.yes {
         referral_suggestion.clone()
     } else {
@@ -349,7 +352,7 @@ fn prompt_builder_defaults(
     mode: &Mode,
     settings: &Settings,
 ) -> Result<Option<(String, String)>, anyhow::Error> {
-    let suggestion = builder::suggested_default_builder(settings)?;
+    let suggestion = builder_fee::suggested_default_builder(settings)?;
     if let Some((address, fee)) = suggestion.as_ref() {
         eprintln!(
             "Default builder fee setup (optional; press Enter to use the suggested default, or type 'none' to skip):"
@@ -376,7 +379,7 @@ fn prompt_builder_defaults(
     } else {
         address
     };
-    let parsed = builder::parse_builder_address(address)?;
+    let parsed = wire::address(address, AddressRole::Builder)?;
 
     let fee_prompt = suggestion
         .as_ref()
@@ -396,7 +399,7 @@ fn prompt_builder_defaults(
     } else {
         fee.to_string()
     };
-    builder::validate_max_fee_rate(&fee)?;
+    MaxFeeRate::parse(&fee)?;
     Ok(Some((parsed.to_string(), fee)))
 }
 
@@ -433,14 +436,16 @@ async fn maybe_approve_default_builder(
         return Ok("not approved".to_string());
     }
 
-    let builder_address = builder::parse_builder_address(builder_text)?;
-    builder::validate_max_fee_rate(fee)?;
+    let builder_address = wire::address(builder_text, AddressRole::Builder)?;
+    let max_fee_rate = MaxFeeRate::parse(fee)?;
     let signer = SelectedSigner::vault_wallet(vault, wallet)?;
-    let approval = builder::submit_approval(api, &signer, builder_address, fee).await;
+    let approval = builder::submit_approval(api, &signer, builder_address, &max_fee_rate).await;
     match approval {
-        Ok(max_fee_tenths_bps) => {
-            let message =
-                format!("approved {builder_address} at {fee} ({max_fee_tenths_bps} tenths bps)");
+        Ok(()) => {
+            let message = format!(
+                "approved {builder_address} at {fee} ({} tenths bps)",
+                max_fee_rate.tenths_bps()
+            );
             eprintln!("Builder approval submitted: {message}");
             Ok(message)
         }
@@ -485,7 +490,8 @@ fn prompt_referral_default(
     settings: &Settings,
     network: Network,
 ) -> Result<Option<String>, anyhow::Error> {
-    let suggestion = referral::suggested_default_referral_code(settings, network.is_testnet())?;
+    let suggestion =
+        referral_code::suggested_default_referral_code(settings, network.is_testnet())?;
     if let Some(code) = suggestion.as_ref() {
         eprintln!(
             "Default referral setup (optional; press Enter to use the suggested default, or type 'none' to skip):"
@@ -512,7 +518,7 @@ fn prompt_referral_default(
     } else {
         code.to_string()
     };
-    referral::validate_referral_code(&code)?;
+    referral_code::validate_referral_code(&code)?;
     Ok(Some(code))
 }
 

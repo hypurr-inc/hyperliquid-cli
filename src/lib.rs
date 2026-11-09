@@ -5,6 +5,7 @@
 pub mod assets;
 pub mod auth;
 pub mod bankr;
+pub mod builder_fee;
 pub mod clock;
 pub mod command_registry;
 pub mod command_spec;
@@ -25,6 +26,7 @@ pub mod paths;
 pub mod private_fs;
 pub mod prompt;
 pub mod quantity;
+pub mod referral_code;
 pub mod report;
 pub mod resolvers;
 pub mod response_sanitization;

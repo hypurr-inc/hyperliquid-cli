@@ -17,7 +17,6 @@ use crate::command_spec::{
     Risk, arg,
 };
 use crate::commands::support::print_dry_run;
-use crate::commands::{builder, referral};
 use crate::config::{BankrLogin, Config, nonblank};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
@@ -28,6 +27,7 @@ use crate::prompt;
 use crate::settings::{KeySource, Settings, env};
 use crate::signing::SelectedSigner;
 use crate::wallet_store::{ConfigEdit, NewWallet, StoredWallet, WalletName, WalletStore};
+use crate::{builder_fee, referral_code};
 use output::{
     BankrReceipt, Receipt, print_bankr_receipt, print_declined, print_receipt, print_status,
     print_wallet_address, shell_arg,
@@ -76,7 +76,7 @@ fn no_stored_accounts_error() -> CliError {
 fn apply_setup_defaults(config: &mut Config, settings: &Settings) -> Vec<String> {
     let mut skipped = Vec::new();
     if !config.has_builder_default() {
-        match builder::suggested_default_builder(settings) {
+        match builder_fee::suggested_default_builder(settings) {
             Ok(Some((address, fee))) => {
                 config.default_builder_address = Some(address);
                 config.default_builder_fee_rate = Some(fee);
@@ -86,7 +86,8 @@ fn apply_setup_defaults(config: &mut Config, settings: &Settings) -> Vec<String>
         }
     }
     if !config.has_referral_default() {
-        match referral::suggested_default_referral_code(settings, config.network.is_testnet()) {
+        match referral_code::suggested_default_referral_code(settings, config.network.is_testnet())
+        {
             Ok(Some(code)) => config.default_referral_code = Some(code),
             Ok(None) => {}
             Err(err) => skipped.push(format!("! Not saving a default referral code: {err}")),

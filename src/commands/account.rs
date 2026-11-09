@@ -6,17 +6,20 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::{ClearinghouseState, Fill, SubAccount, UserVaultEquity};
 use serde::Serialize;
 
-use crate::command_spec::{ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
+use crate::assets::canonical_dex;
+use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
+use crate::commands::abstraction::fetch_abstraction;
+use crate::commands::confirm;
 use crate::commands::orders::OrderListOutput;
 use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
+use crate::commands::rows::{ListRow, One, Row, Rows, or_missing, style_column};
+use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
-use crate::commands::support::{canonical_dex, print_dry_run};
+use crate::commands::support::print_dry_run;
 use crate::commands::user_signed::{self, UserSigned};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
-use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::mode::Mode;
 use crate::output::{JsonValueOutput, TableData};
 use crate::signing::{SelectedSigner, Signs};
 use crate::wire::InfoRequest;
@@ -33,28 +36,6 @@ sol! {
 
 impl UserSigned for UserSetAbstraction {
     const ACTION_TYPE: &'static str = "userSetAbstraction";
-}
-
-/// The account selector every public read command takes first, as the schema
-/// describes it. Reads that need an address mark it `.schema_required()`.
-pub const USER_SELECTOR: ArgSpec = arg("address")
-    .kind(InputKind::PublicUserSelector)
-    .describe("Ethereum address, wallet name, or wallet id.")
-    .resource_id("account selector");
-
-/// An optional account selector: an address, wallet name or wallet id.
-#[derive(Args, Debug, Clone)]
-pub struct OptionalAddressArgs {
-    /// Ethereum address, wallet name, or wallet id.
-    /// Defaults to the selected/default signer when omitted.
-    pub address: Option<String>,
-}
-
-impl OptionalAddressArgs {
-    /// The address this selector names, or the selected signer's.
-    pub fn resolve(&self, inv: &Invocation) -> Result<Address, anyhow::Error> {
-        inv.resolve_user(self.address.as_deref())
-    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -144,18 +125,6 @@ impl AbstractionModeArg {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct AbstractionRow {
-    pub user: String,
-    pub raw_mode: String,
-    pub normalized_mode: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AbstractionOutput {
-    pub row: AbstractionRow,
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct AbstractionSetRow {
     status: String,
@@ -165,10 +134,6 @@ struct AbstractionSetRow {
     mode: String,
     protocol_mode: String,
     network: String,
-}
-
-struct AbstractionSetOutput {
-    row: AbstractionSetRow,
 }
 
 pub fn parse_time_millis(raw: &str) -> Result<u64, String> {
@@ -192,48 +157,25 @@ pub fn parse_time_millis(raw: &str) -> Result<u64, String> {
     Ok(millis as u64)
 }
 
-impl TableData for AbstractionOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec!["User", "Mode", "Raw Mode"]
-    }
+impl Row for AbstractionSetRow {
+    const HEADERS: &'static [&'static str] =
+        &["Status", "Action", "Signer", "User", "Mode", "Network"];
 
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.row.user.clone(),
-            self.row.normalized_mode.clone(),
-            self.row.raw_mode.clone(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
-    }
-}
-
-impl TableData for AbstractionSetOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec!["Status", "Action", "Signer", "User", "Mode", "Network"]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.row.status.clone(),
-            self.row.action.clone(),
-            self.row.signer.clone(),
-            self.row.user.clone(),
-            self.row.mode.clone(),
-            self.row.network.clone(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.status.clone(),
+            self.action.clone(),
+            self.signer.clone(),
+            self.user.clone(),
+            self.mode.clone(),
+            self.network.clone(),
+        ]
     }
 }
 
 pub(crate) async fn subaccounts(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     // The exchange answers `null` for an account without subaccounts.
-    let subaccounts = inv
+    let subaccounts: Vec<SubaccountRow> = inv
         .remote()?
         .api()
         .info::<Option<Vec<SubAccount>>>(
@@ -245,25 +187,8 @@ pub(crate) async fn subaccounts(inv: &Invocation, user: Address) -> Result<(), a
         .into_iter()
         .map(SubaccountRow::from)
         .collect();
-    inv.print(&SubaccountsOutput::new(subaccounts));
+    inv.print(&Rows::new(subaccounts));
     Ok(())
-}
-
-pub async fn fetch_abstraction(
-    api: &ApiClient,
-    user: Address,
-) -> Result<AbstractionRow, anyhow::Error> {
-    let raw_mode = api
-        .info::<String>(
-            &InfoRequest::user("userAbstraction", user),
-            "loading user abstraction",
-        )
-        .await?;
-    Ok(AbstractionRow {
-        user: user.to_string(),
-        normalized_mode: normalize_abstraction_mode(&raw_mode).to_string(),
-        raw_mode,
-    })
 }
 
 fn abstraction_set_dry_run_value(
@@ -293,9 +218,17 @@ async fn set_abstraction(
     args: &SetAbstractionArgs,
 ) -> Result<(), anyhow::Error> {
     let user = signer.address();
-    if !args.yes {
-        confirm_account_mode_change(inv.mode(), args.mode, user)?;
-    }
+    let question = format!(
+        "Set account abstraction for {user} to {}?",
+        args.mode.cli_value()
+    );
+    confirm::unless_yes(
+        args.yes,
+        inv.mode(),
+        "",
+        &question,
+        "account abstraction update aborted",
+    )?;
     let remote = inv.remote()?;
     let protocol_mode = args.mode.protocol_value();
     user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| {
@@ -308,47 +241,16 @@ async fn set_abstraction(
     })
     .await?;
 
-    inv.print(&AbstractionSetOutput {
-        row: AbstractionSetRow {
-            status: "submitted".to_string(),
-            action: "set-abstraction".to_string(),
-            signer: user.to_string(),
-            user: user.to_string(),
-            mode: args.mode.cli_value().to_string(),
-            protocol_mode: protocol_mode.to_string(),
-            network: remote.chain().to_string(),
-        },
-    });
+    inv.print(&One::new(AbstractionSetRow {
+        status: "submitted".to_string(),
+        action: "set-abstraction".to_string(),
+        signer: user.to_string(),
+        user: user.to_string(),
+        mode: args.mode.cli_value().to_string(),
+        protocol_mode: protocol_mode.to_string(),
+        network: remote.chain().to_string(),
+    }));
     Ok(())
-}
-
-fn normalize_abstraction_mode(raw: &str) -> &'static str {
-    match raw {
-        "unifiedAccount" => "unified-account",
-        "portfolioMargin" => "portfolio-margin",
-        "disabled" => "disabled",
-        "default" => "default",
-        "dexAbstraction" => "dex-abstraction",
-        _ => "unknown",
-    }
-}
-
-fn confirm_account_mode_change(
-    prompt_mode: &Mode,
-    mode: AbstractionModeArg,
-    user: Address,
-) -> Result<(), CliError> {
-    let question = format!(
-        "Set account abstraction for {user} to {}?",
-        mode.cli_value()
-    );
-    crate::prompt::consent(
-        prompt_mode,
-        "--yes",
-        "",
-        &question,
-        "account abstraction update aborted",
-    )
 }
 
 fn validate_optional_time_range(start: Option<u64>, end: Option<u64>) -> Result<(), CliError> {
@@ -418,84 +320,50 @@ impl From<Fill> for FillRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FillsOutput {
-    fills: Vec<FillRow>,
-}
+pub type FillsOutput = Rows<FillRow>;
 
-impl FillsOutput {
-    #[must_use]
-    pub fn new(fills: Vec<FillRow>) -> Self {
-        Self { fills }
-    }
-}
+impl Row for FillRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Coin",
+        "Side",
+        "Price",
+        "Size",
+        "Direction",
+        "Closed PnL",
+        "Fee",
+        "Fee Token",
+        "OID",
+        "Time",
+        "Liquidity",
+    ];
 
-impl TableData for FillsOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Coin",
-            "Side",
-            "Price",
-            "Size",
-            "Direction",
-            "Closed PnL",
-            "Fee",
-            "Fee Token",
-            "OID",
-            "Time",
-            "Liquidity",
+            self.coin.clone(),
+            self.side.clone(),
+            self.price.to_string(),
+            self.size.to_string(),
+            self.direction.clone(),
+            self.closed_pnl.to_string(),
+            self.fee.to_string(),
+            self.fee_token.clone(),
+            self.oid.to_string(),
+            self.time.to_string(),
+            self.liquidity.clone(),
         ]
     }
 
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.fills
-            .iter()
-            .map(|fill| {
-                vec![
-                    fill.coin.clone(),
-                    fill.side.clone(),
-                    fill.price.to_string(),
-                    fill.size.to_string(),
-                    fill.direction.clone(),
-                    fill.closed_pnl.to_string(),
-                    fill.fee.to_string(),
-                    fill.fee_token.clone(),
-                    fill.oid.to_string(),
-                    fill.time.to_string(),
-                    fill.liquidity.clone(),
-                ]
-            })
-            .collect()
+    fn pretty_cells(&self) -> Vec<String> {
+        let mut cells = self.cells();
+        style_column::<Self>(&mut cells, "Closed PnL", |_| {
+            format_pretty_pnl(self.closed_pnl)
+        });
+        cells
     }
+}
 
-    fn pretty_rows(&self) -> Vec<Vec<String>> {
-        self.fills
-            .iter()
-            .map(|fill| {
-                vec![
-                    fill.coin.clone(),
-                    fill.side.clone(),
-                    fill.price.to_string(),
-                    fill.size.to_string(),
-                    fill.direction.clone(),
-                    format_pretty_pnl(fill.closed_pnl),
-                    fill.fee.to_string(),
-                    fill.fee_token.clone(),
-                    fill.oid.to_string(),
-                    fill.time.to_string(),
-                    fill.liquidity.clone(),
-                ]
-            })
-            .collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No fills.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.fills).unwrap_or_else(|_| serde_json::json!([]))
-    }
+impl ListRow for FillRow {
+    const EMPTY: &'static str = "No fills.";
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -520,8 +388,12 @@ pub struct PortfolioSummaryRow {
     pub time: u64,
 }
 
-impl From<&ClearinghouseState> for PortfolioSummaryRow {
-    fn from(state: &ClearinghouseState) -> Self {
+impl PortfolioSummaryRow {
+    fn new(
+        state: &ClearinghouseState,
+        spot_balances_count: usize,
+        vault_equities_count: usize,
+    ) -> Self {
         Self {
             account_value: state.margin_summary.account_value,
             total_notional_position: state.margin_summary.total_ntl_pos,
@@ -531,8 +403,8 @@ impl From<&ClearinghouseState> for PortfolioSummaryRow {
             withdrawable: state.withdrawable,
             margin_utilization_pct: state.margin_summary.margin_utilization(),
             positions_count: state.asset_positions.len(),
-            spot_balances_count: 0,
-            vault_equities_count: 0,
+            spot_balances_count,
+            vault_equities_count,
             time: state.time,
         }
     }
@@ -629,7 +501,7 @@ impl PortfolioOutput {
         spot_balances: Vec<BalanceRow>,
         vault_equities: Vec<UserVaultEquity>,
     ) -> Self {
-        let mut summary = PortfolioSummaryRow::from(&state);
+        let summary = PortfolioSummaryRow::new(&state, spot_balances.len(), vault_equities.len());
         let positions = state
             .asset_positions
             .into_iter()
@@ -640,9 +512,6 @@ impl PortfolioOutput {
             .into_iter()
             .map(VaultEquityRow::from)
             .collect::<Vec<_>>();
-        summary.positions_count = positions.len();
-        summary.spot_balances_count = spot_balances.len();
-        summary.vault_equities_count = vault_equities.len();
 
         Self {
             summary,
@@ -707,14 +576,7 @@ impl PortfolioOutput {
                 "Spot Balance".to_string(),
                 balance.coin.clone(),
                 balance.total.to_string(),
-                format!(
-                    "hold={} token={}",
-                    balance.hold,
-                    balance
-                        .token
-                        .map(|token| token.to_string())
-                        .unwrap_or_else(|| "n/a".to_string())
-                ),
+                format!("hold={} token={}", balance.hold, or_missing(balance.token)),
             ]
         }));
         rows.extend(self.vault_equities.iter().map(|equity| {
@@ -783,55 +645,32 @@ impl From<SubAccount> for SubaccountRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SubaccountsOutput {
-    subaccounts: Vec<SubaccountRow>,
-}
+impl Row for SubaccountRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Name",
+        "Address",
+        "Master",
+        "Account Value",
+        "Withdrawable",
+        "Positions",
+        "Spot Balances",
+    ];
 
-impl SubaccountsOutput {
-    #[must_use]
-    pub fn new(subaccounts: Vec<SubaccountRow>) -> Self {
-        Self { subaccounts }
-    }
-}
-
-impl TableData for SubaccountsOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Name",
-            "Address",
-            "Master",
-            "Account Value",
-            "Withdrawable",
-            "Positions",
-            "Spot Balances",
+            self.name.clone(),
+            self.address.clone(),
+            self.master.clone(),
+            self.account_value.to_string(),
+            self.withdrawable.to_string(),
+            self.positions_count.to_string(),
+            self.spot_balances_count.to_string(),
         ]
     }
+}
 
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.subaccounts
-            .iter()
-            .map(|subaccount| {
-                vec![
-                    subaccount.name.clone(),
-                    subaccount.address.clone(),
-                    subaccount.master.clone(),
-                    subaccount.account_value.to_string(),
-                    subaccount.withdrawable.to_string(),
-                    subaccount.positions_count.to_string(),
-                    subaccount.spot_balances_count.to_string(),
-                ]
-            })
-            .collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No subaccounts.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.subaccounts).unwrap_or_else(|_| serde_json::json!([]))
-    }
+impl ListRow for SubaccountRow {
+    const EMPTY: &'static str = "No subaccounts.";
 }
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["account"], "Read account data and manage OWS wallets")
@@ -1225,7 +1064,7 @@ impl CliCommand for AccountAbstraction {
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
         let user = args.resolve(inv)?;
         let row = fetch_abstraction(inv.remote()?.api(), user).await?;
-        inv.print(&AbstractionOutput { row });
+        inv.print(&One::new(row));
         Ok(())
     }
 }

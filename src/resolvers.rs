@@ -3,25 +3,10 @@
 
 use hypersdk::Address;
 
-use crate::errors::CliError;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HexAddressError {
     Format,
     Zero,
-}
-
-impl HexAddressError {
-    /// The refusal as an error of the caller's `class` (`CliError::Unsupported`,
-    /// `CliError::Configuration`, ...). `noun` names what was parsed ("builder
-    /// address", "address") and `raw` is what the user typed.
-    #[must_use]
-    pub fn refusal(self, class: fn(String) -> CliError, noun: &str, raw: &str) -> CliError {
-        class(match self {
-            Self::Format => format!("Invalid {noun}: {raw}"),
-            Self::Zero => format!("{noun} must not be the zero address"),
-        })
-    }
 }
 
 /// Parse `value` as a 40-hex-digit address whose `0x` prefix is optional, the
@@ -106,17 +91,5 @@ mod tests {
             parse_hex_address("0x0000000000000000000000000000000000000000", true),
             Err(HexAddressError::Zero)
         );
-    }
-
-    #[test]
-    fn a_refusal_takes_the_callers_error_class_and_noun() {
-        let format = HexAddressError::Format.refusal(CliError::Unsupported, "address", "nope");
-        assert!(matches!(&format, CliError::Unsupported(text) if text == "Invalid address: nope"));
-        let zero =
-            HexAddressError::Zero.refusal(CliError::Configuration, "validator address", "0x0");
-        assert!(matches!(
-            &zero,
-            CliError::Configuration(text) if text == "validator address must not be the zero address"
-        ));
     }
 }

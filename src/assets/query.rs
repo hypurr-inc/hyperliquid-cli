@@ -55,6 +55,15 @@ pub fn qualify_dex_asset(dex: Option<&str>, coin: &str) -> String {
     }
 }
 
+/// A HIP-3 market name without its `dex:` prefix. Names the exchange lists
+/// carry the prefix; the CLI shows and matches the bare token.
+#[must_use]
+pub(crate) fn strip_dex_prefix<'a>(name: &'a str, dex: &str) -> &'a str {
+    name.strip_prefix(dex)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .unwrap_or(name)
+}
+
 pub(crate) fn eq_asset_name(left: &str, right: &str) -> bool {
     normalize_asset_name(left) == normalize_asset_name(right)
 }
@@ -74,6 +83,14 @@ mod tests {
         assert_eq!(qualify_dex_asset(None, "BTC"), "BTC");
         assert_eq!(qualify_dex_asset(Some(""), "BTC"), "BTC");
         assert_eq!(qualify_dex_asset(Some(" xyz "), "GOLD"), "xyz:GOLD");
+    }
+
+    #[test]
+    fn dex_prefix_is_stripped_only_when_it_is_that_dexs() {
+        assert_eq!(strip_dex_prefix("xyz:XYZ100", "xyz"), "XYZ100");
+        assert_eq!(strip_dex_prefix("abc:XYZ100", "xyz"), "abc:XYZ100");
+        assert_eq!(strip_dex_prefix("xyzXYZ100", "xyz"), "xyzXYZ100");
+        assert_eq!(strip_dex_prefix("XYZ100", "xyz"), "XYZ100");
     }
 
     #[test]

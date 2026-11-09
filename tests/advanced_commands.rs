@@ -587,7 +587,7 @@ async fn prio_bid_with_explicit_parameters_submits_signed_bid() {
     assert_eq!(body["action"]["type"], "gossipPriorityBid");
     assert_eq!(body["action"]["slotId"], 0);
     assert_eq!(body["action"]["ip"], "203.0.113.10");
-    assert_eq!(body["action"]["maxGas"], 10_000_000_000_000_001_u64);
+    assert_eq!(body["action"]["maxGas"], 1_000_001_u64);
 }
 
 #[tokio::test]
@@ -604,7 +604,7 @@ async fn prio_bid_cap_below_current_gas_does_not_exit_zero_or_submit() {
             "--slot",
             "0",
             "--max",
-            "0.000000000000000001",
+            "0.00000001",
             "--ip",
             "203.0.113.10",
             "--testnet",
@@ -659,6 +659,66 @@ async fn prio_bid_compares_decimal_current_gas_after_converting_to_wei() {
         exchange_requests, 0,
         "decimal current gas must be compared as wei before bidding"
     );
+}
+
+/// The bid cap is counted in HyperCore wei (10^8 per HYPE) whatever the spot
+/// token list says: this server has no `spotMeta` at all, so a bid that needed
+/// the token's decimals would fail, and one that fell back to HyperEVM's 10^18
+/// would send a cap 10^10 times too large.
+#[tokio::test]
+async fn prio_bid_counts_the_cap_in_hypercore_wei_without_a_token_lookup() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"BTC": "1"})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
+            serde_json::json!({"type": "gossipPriorityAuctionStatus"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            [null, null, null, null, null],
+            [{"startTimeSeconds": 1710000000, "durationSeconds": 180, "startGas": "100", "endGas": "10"}]
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/exchange"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "ok",
+            "response": {"type": "default"}
+        })))
+        .mount(&server)
+        .await;
+
+    IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "--format",
+            "json",
+            "prio",
+            "bid",
+            "--max",
+            "1.5",
+            "--ip",
+            "203.0.113.10",
+            "--testnet",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.received_requests().await.unwrap();
+    let exchange_request = requests
+        .iter()
+        .find(|request| request.url.path() == "/exchange")
+        .expect("expected /exchange request");
+    let body: Value = serde_json::from_slice(&exchange_request.body).unwrap();
+    assert_eq!(body["action"]["maxGas"], 150_000_000_u64);
 }
 
 #[tokio::test]

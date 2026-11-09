@@ -255,7 +255,7 @@ impl TableData for UpdateResult {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        crate::output::serialize_row(self)
     }
 }
 

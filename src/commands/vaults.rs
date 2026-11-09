@@ -9,15 +9,16 @@ use serde_json::Value;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::actions;
 use crate::commands::positions::PositionRow;
+use crate::commands::rows::{One, Row, or_missing};
 use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::output::TableData;
+use crate::output::{self, TableData};
 use crate::quantity::{self, Scale};
-use crate::wire::{InfoRequest, config_address};
+use crate::wire::{AddressRole, InfoRequest, address};
 
 const TRANSFER_REVERSIBILITY: ActionReversibility = ActionReversibility::PartiallyReversible;
 
@@ -131,7 +132,7 @@ pub struct VaultPositionsOutput {
 impl TableData for VaultPositionsOutput {
     fn headers(&self) -> Vec<&str> {
         std::iter::once("Vault")
-            .chain(PositionRow::HEADERS)
+            .chain(PositionRow::HEADERS.iter().copied())
             .collect()
     }
 
@@ -201,10 +202,6 @@ struct VaultDetailsRow {
     portfolio_periods: Vec<String>,
 }
 
-pub struct VaultDetailsOutput {
-    row: VaultDetailsRow,
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct VaultSummaryRow {
     vault_address: String,
@@ -238,39 +235,29 @@ struct VaultTransferConfirmation {
     asset: String,
 }
 
-struct VaultTransferOutput {
-    row: VaultTransferConfirmation,
-}
+impl Row for VaultDetailsRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Name",
+        "Vault",
+        "TVL",
+        "APR",
+        "Strategy",
+        "Leader",
+        "Followers",
+        "Allow Deposits",
+    ];
 
-impl TableData for VaultDetailsOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Name",
-            "Vault",
-            "TVL",
-            "APR",
-            "Strategy",
-            "Leader",
-            "Followers",
-            "Allow Deposits",
+            self.name.clone(),
+            self.vault_address.clone(),
+            self.tvl.to_string(),
+            self.apr.to_string(),
+            self.description.clone(),
+            self.leader.clone(),
+            self.followers.to_string(),
+            self.allow_deposits.to_string(),
         ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.row.name.clone(),
-            self.row.vault_address.clone(),
-            self.row.tvl.to_string(),
-            self.row.apr.to_string(),
-            self.row.description.clone(),
-            self.row.leader.clone(),
-            self.row.followers.to_string(),
-            self.row.allow_deposits.to_string(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
     }
 }
 
@@ -294,15 +281,11 @@ impl TableData for VaultSummaryOutput {
                     row.leader.clone(),
                     row.apr.to_string(),
                     row.tvl.to_string(),
-                    row.age_days.map(|age| age.to_string()).unwrap_or_default(),
+                    or_missing(row.age_days),
                     row.kind.clone(),
                 ];
                 if show_user_deposit {
-                    columns.push(
-                        row.user_deposit
-                            .map(|deposit| deposit.to_string())
-                            .unwrap_or_default(),
-                    );
+                    columns.push(or_missing(row.user_deposit));
                 }
                 columns
             })
@@ -314,48 +297,42 @@ impl TableData for VaultSummaryOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
-impl TableData for VaultTransferOutput {
-    fn headers(&self) -> Vec<&str> {
+impl Row for VaultTransferConfirmation {
+    const HEADERS: &'static [&'static str] = &[
+        "Action",
+        "Status",
+        "Network",
+        "Signer",
+        "Acting As",
+        "Reversibility",
+        "Vault",
+        "Amount",
+        "Asset",
+    ];
+
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Action",
-            "Status",
-            "Network",
-            "Signer",
-            "Acting As",
-            "Reversibility",
-            "Vault",
-            "Amount",
-            "Asset",
+            self.action.clone(),
+            self.status.clone(),
+            self.network.clone(),
+            self.signer.clone(),
+            self.acting_as.clone(),
+            self.reversibility.clone(),
+            self.vault_address.clone(),
+            self.amount.to_string(),
+            self.asset.clone(),
         ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.row.action.clone(),
-            self.row.status.clone(),
-            self.row.network.clone(),
-            self.row.signer.clone(),
-            self.row.acting_as.clone(),
-            self.row.reversibility.clone(),
-            self.row.vault_address.clone(),
-            self.row.amount.to_string(),
-            self.row.asset.clone(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
     }
 }
 
 async fn get(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
     let vault = parse_address(address)?;
     let row = raw_vault_details_row(inv.remote()?.api(), vault).await?;
-    inv.print(&VaultDetailsOutput { row });
+    inv.print(&One::new(row));
     Ok(())
 }
 
@@ -482,19 +459,17 @@ async fn run_transfer(
     )
     .await?;
 
-    inv.print(&VaultTransferOutput {
-        row: VaultTransferConfirmation {
-            action: action_kind.action_name().to_string(),
-            status: "submitted".to_string(),
-            network: remote.chain().to_string(),
-            signer: signer.address().to_string(),
-            acting_as: signer.query_address().to_string(),
-            reversibility: TRANSFER_REVERSIBILITY.as_str().to_string(),
-            vault_address: args.vault.clone(),
-            amount: args.amount,
-            asset: "USDC".to_string(),
-        },
-    });
+    inv.print(&One::new(VaultTransferConfirmation {
+        action: action_kind.action_name().to_string(),
+        status: "submitted".to_string(),
+        network: remote.chain().to_string(),
+        signer: signer.address().to_string(),
+        acting_as: signer.query_address().to_string(),
+        reversibility: TRANSFER_REVERSIBILITY.as_str().to_string(),
+        vault_address: args.vault.clone(),
+        amount: args.amount,
+        asset: "USDC".to_string(),
+    }));
     Ok(())
 }
 
@@ -534,7 +509,7 @@ fn parse_optional_user(raw: Option<&str>) -> Result<Option<Address>, CliError> {
 }
 
 fn parse_address(input: &str) -> Result<Address, CliError> {
-    config_address(input, None, true)
+    address(input, AddressRole::Explicit(None))
 }
 
 fn validate_usdc_amount(amount: Decimal) -> Result<u64, CliError> {
@@ -594,11 +569,16 @@ impl RawVaultSummary {
             vault_address: self.vault_address,
             name: self.name,
             leader: self.leader,
-            apr: optional_decimal_field(&self.apr).unwrap_or(Decimal::ZERO),
+            apr: optional_decimal_field(&self.apr, "apr")?.unwrap_or(Decimal::ZERO),
             tvl: decimal_field(&self.tvl, "tvl")?,
             age_days: self.create_time_millis.map(age_days_from_millis),
             kind,
-            user_deposit: self.user_deposit.as_ref().and_then(optional_decimal_field),
+            user_deposit: self
+                .user_deposit
+                .as_ref()
+                .map(|deposit| optional_decimal_field(deposit, "userDeposit"))
+                .transpose()?
+                .flatten(),
         })
     }
 }
@@ -627,13 +607,13 @@ fn sort_vault_rows(rows: &mut [VaultSummaryRow], sort: VaultSortArg) {
     }
 }
 
-fn optional_decimal_field(value: &Value) -> Option<Decimal> {
+/// A decimal that may be absent: `null` and the empty string are absent. Any
+/// other value must decode, or the whole response fails.
+fn optional_decimal_field(value: &Value, field: &'static str) -> Result<Option<Decimal>, CliError> {
     match value {
-        Value::Null => None,
-        Value::String(text) if text.is_empty() => None,
-        Value::String(text) => parse_decimal_text(text).ok(),
-        Value::Number(number) => parse_decimal_text(&number.to_string()).ok(),
-        _ => None,
+        Value::Null => Ok(None),
+        Value::String(text) if text.is_empty() => Ok(None),
+        other => decimal_field(other, field).map(Some),
     }
 }
 
@@ -645,7 +625,7 @@ fn age_days_from_millis(create_time_millis: i64) -> i64 {
 impl RawVaultDetails {
     fn into_row(self, requested_vault: Address) -> Result<VaultDetailsRow, CliError> {
         let max_distributable = decimal_field(&self.max_distributable, "maxDistributable")?;
-        let (portfolio_periods, tvl) = raw_portfolio_summary(&self.portfolio);
+        let (portfolio_periods, tvl) = raw_portfolio_summary(&self.portfolio)?;
         Ok(VaultDetailsRow {
             name: self.name,
             vault_address: self
@@ -689,11 +669,11 @@ fn parse_decimal_text(raw: &str) -> Result<Decimal, rust_decimal::Error> {
         .or_else(|_| Decimal::from_scientific(raw))
 }
 
-fn raw_portfolio_summary(portfolio: &Value) -> (Vec<String>, Option<Decimal>) {
+fn raw_portfolio_summary(portfolio: &Value) -> Result<(Vec<String>, Option<Decimal>), CliError> {
     let mut periods = Vec::new();
     let mut latest_tvl = None;
     let Some(entries) = portfolio.as_array() else {
-        return (periods, latest_tvl);
+        return Ok((periods, latest_tvl));
     };
 
     for entry in entries {
@@ -719,12 +699,10 @@ fn raw_portfolio_summary(portfolio: &Value) -> (Vec<String>, Option<Decimal>) {
         else {
             continue;
         };
-        if let Ok(decimal) = decimal_field(value, "accountValueHistory") {
-            latest_tvl = Some(decimal);
-        }
+        latest_tvl = Some(decimal_field(value, "accountValueHistory")?);
     }
 
-    (periods, latest_tvl)
+    Ok((periods, latest_tvl))
 }
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["vault"], "Query and fund vaults")
