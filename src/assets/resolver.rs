@@ -349,6 +349,22 @@ mod tests {
     }
 
     #[test]
+    fn typo_tolerance_grows_with_input_length() {
+        assert!(suggestions("BTCC", ["BTXX"]).is_empty());
+        assert_eq!(suggestions("NOTACOIN", ["NOTAXXIN"]), vec!["NOTAXXIN"]);
+        assert!(suggestions("NOTACOIN", ["NOTXXXIN"]).is_empty());
+
+        let long = "A".repeat(40);
+        let three_typos = format!("{}BBB", "A".repeat(37));
+        let four_typos = format!("{}BBBB", "A".repeat(36));
+        assert_eq!(
+            suggestions(&long, [three_typos.as_str()]),
+            vec![three_typos.clone()]
+        );
+        assert!(suggestions(&long, [four_typos.as_str()]).is_empty());
+    }
+
+    #[test]
     fn suggestion_ties_prefer_earlier_candidate() {
         assert_eq!(suggestions("BTX", ["BTC", "BTT"]), vec!["BTC"]);
     }
