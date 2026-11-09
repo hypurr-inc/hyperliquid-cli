@@ -6007,7 +6007,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "Show vault details. followers_returned counts the followers the API listed (at most 100, so followers_truncated marks a larger vault); user adds that user's stake as follower_state.",
+      "description": "Show vault details. followers_returned counts the followers the API listed (at most 100; followers_truncated is true when the API returned that limit, so the list may be incomplete); user adds that user's stake as follower_state.",
       "dry_run": "not_supported",
       "group": "vault",
       "lifecycle": "read_only",
