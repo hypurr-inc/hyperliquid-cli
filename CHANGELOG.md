@@ -73,6 +73,11 @@
 - A one-shot WebSocket read that times out (the `book` snapshot and funding context) reports the reason `timeout` (exit `12` as before) instead of `network_error`, like a silent `subscribe`.
 - `update` reports a failed release request as `Couldn't reach <host>. <cause>.` (refused, timed out, DNS, TLS) like API calls do, instead of the raw HTTP client text.
 - `subaccount create`, `transfer` and `spot-transfer` receipts no longer carry the `vault_address` key (always `null`: those actions are not sent for a vault) or its table column.
+- `perps list`, `perps get` and `spot list`, `spot get` show `tick_size_at_price_1` from the same price grid orders are truncated to. A market whose `szDecimals` exceeds the price's decimal budget (6 for perps, 8 for spot) shows `1` (whole-number prices) instead of `null`.
+- `watch risk` no longer spends signing nonces: alert timestamps are the wall clock, so a watcher does not write the shared nonce high-water file on every alert. Without `--user` it reads the account an API wallet signs for (and refuses a bare API wallet key with the master named, like `positions list`) instead of the agent's own empty account.
+- `outcomes split|merge|merge-question|negate` name unreadable `outcomeMeta` entries on stderr, as `outcomes list` already did, instead of skipping them silently.
+- Outcome descriptions (`key:value|key:value`) are read by one parser for names and for `asset search`/`asset decode`: keys and values are trimmed, an empty value counts as absent and the first occurrence of a key wins. Template names used to keep surrounding spaces and empty values, and `asset` read the last duplicate.
+- `meta` and `perps dexs` read each dex's `meta` with the same decoder as the rest of the CLI: a dex market without `szDecimals` is a decode error (`decode failed while loading HIP-3 perpetual metadata`), where the exchange always sends it.
 
 ## 0.18.0 - 2026-11-09
 

@@ -8,14 +8,15 @@ use hypersdk::hypercore::{
 };
 use serde::Serialize;
 
-use crate::assets::canonical_dex;
-use crate::assets::{AssetResolver, Market};
+use crate::assets::{AssetResolver, Market, canonical_dex};
 use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, StreamBound, arg};
+use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
 use crate::output::TableData;
+use crate::output::format::epoch_ms_to_iso;
 use crate::stream::SnapshotWatchArgs;
 use crate::ws::{Awaited, BookAggregationArgs, first_matching_message};
 
@@ -56,6 +57,16 @@ pub struct BookLevelRow {
 }
 
 impl BookLevelRow {
+    fn cells(&self, side: &str) -> Vec<String> {
+        vec![
+            side.to_string(),
+            self.price.to_string(),
+            self.size.to_string(),
+            self.depth.to_string(),
+            self.orders.to_string(),
+        ]
+    }
+
     fn from_levels(levels: &[BookLevel]) -> Vec<Self> {
         let mut depth = Decimal::ZERO;
         levels
@@ -100,24 +111,8 @@ impl TableData for BookSnapshot {
     fn rows(&self) -> Vec<Vec<String>> {
         self.bids
             .iter()
-            .map(|level| {
-                vec![
-                    "Bid".to_string(),
-                    level.price.to_string(),
-                    level.size.to_string(),
-                    level.depth.to_string(),
-                    level.orders.to_string(),
-                ]
-            })
-            .chain(self.asks.iter().map(|level| {
-                vec![
-                    "Ask".to_string(),
-                    level.price.to_string(),
-                    level.size.to_string(),
-                    level.depth.to_string(),
-                    level.orders.to_string(),
-                ]
-            }))
+            .map(|level| level.cells("Bid"))
+            .chain(self.asks.iter().map(|level| level.cells("Ask")))
             .collect()
     }
 
@@ -162,60 +157,39 @@ impl From<Candle> for CandleRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CandlesOutput {
-    candles: Vec<CandleRow>,
-}
+impl Row for CandleRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Timestamp",
+        "Coin",
+        "Interval",
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "Trades",
+    ];
 
-impl CandlesOutput {
-    #[must_use]
-    pub fn new(candles: Vec<CandleRow>) -> Self {
-        Self { candles }
-    }
-}
-
-impl TableData for CandlesOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Timestamp",
-            "Coin",
-            "Interval",
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume",
-            "Trades",
+            epoch_ms_to_iso(self.timestamp),
+            self.coin.clone(),
+            self.interval.clone(),
+            self.open.to_string(),
+            self.high.to_string(),
+            self.low.to_string(),
+            self.close.to_string(),
+            self.volume.to_string(),
+            self.num_trades.to_string(),
         ]
     }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.candles
-            .iter()
-            .map(|candle| {
-                vec![
-                    crate::output::format::epoch_ms_to_iso(candle.timestamp),
-                    candle.coin.clone(),
-                    candle.interval.clone(),
-                    candle.open.to_string(),
-                    candle.high.to_string(),
-                    candle.low.to_string(),
-                    candle.close.to_string(),
-                    candle.volume.to_string(),
-                    candle.num_trades.to_string(),
-                ]
-            })
-            .collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No candles.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        crate::output::serialize_row(&self.candles)
-    }
 }
+
+impl ListRow for CandleRow {
+    const EMPTY: &'static str = "No candles.";
+}
+
+pub type CandlesOutput = Rows<CandleRow>;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SpreadRow {
@@ -230,23 +204,17 @@ pub struct SpreadRow {
     pub spread_pct: Decimal,
 }
 
-impl TableData for SpreadRow {
-    fn headers(&self) -> Vec<&str> {
-        vec!["Coin", "Bid", "Ask", "Spread", "Spread %"]
-    }
+impl Row for SpreadRow {
+    const HEADERS: &'static [&'static str] = &["Coin", "Bid", "Ask", "Spread", "Spread %"];
 
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
+    fn cells(&self) -> Vec<String> {
+        vec![
             self.coin.clone(),
             self.bid.to_string(),
             self.ask.to_string(),
             self.spread.to_string(),
             self.spread_pct.to_string(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        crate::output::serialize_row(self)
+        ]
     }
 }
 
@@ -266,35 +234,27 @@ pub struct FundingRow {
     pub last_funding_time: Option<u64>,
 }
 
-impl TableData for FundingRow {
-    fn headers(&self) -> Vec<&str> {
+impl Row for FundingRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Coin",
+        "Current Funding",
+        "Predicted Funding",
+        "Premium",
+        "Mark",
+        "Oracle",
+        "Last Funding Time",
+    ];
+
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Coin",
-            "Current Funding",
-            "Predicted Funding",
-            "Premium",
-            "Mark",
-            "Oracle",
-            "Last Funding Time",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
             self.coin.clone(),
-            format_optional_decimal(self.current_funding_rate),
+            or_missing(self.current_funding_rate),
             self.predicted_funding_rate.to_string(),
-            format_optional_decimal(self.premium),
-            format_optional_decimal(self.mark_price),
-            format_optional_decimal(self.oracle_price),
-            self.last_funding_time
-                .map(crate::output::format::epoch_ms_to_iso)
-                .unwrap_or_else(|| "n/a".to_string()),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        crate::output::serialize_row(self)
+            or_missing(self.premium),
+            or_missing(self.mark_price),
+            or_missing(self.oracle_price),
+            or_missing(self.last_funding_time.map(epoch_ms_to_iso)),
+        ]
     }
 }
 
@@ -439,7 +399,7 @@ async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let resolver = inv.asset_resolver().await?;
     let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
     let book = fetch_l2_book(remote.chain(), &coin, BookAggregationArgs::default()).await?;
-    inv.print(&spread_row_from_book(&coin, &book)?);
+    inv.print(&One::new(spread_row_from_book(&coin, &book)?));
     Ok(())
 }
 
@@ -461,11 +421,11 @@ async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
         .max_by_key(|rate| rate.time);
 
     let active_ctx = fetch_active_asset_ctx(remote.chain(), &coin).await?;
-    inv.print(&FundingRow::from_history_and_context(
+    inv.print(&One::new(FundingRow::from_history_and_context(
         &coin,
         latest_history,
         active_ctx,
-    ));
+    )));
     Ok(())
 }
 
@@ -612,12 +572,6 @@ async fn fetch_active_asset_ctx(chain: Chain, coin: &str) -> Result<AssetContext
         },
     )
     .await
-}
-
-fn format_optional_decimal(value: Option<Decimal>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "n/a".to_string())
 }
 
 #[derive(Args, Debug, Clone)]
@@ -987,10 +941,11 @@ mod tests {
             oracle_price: Some(dec("99")),
             last_funding_time: Some(123),
         };
-        let complete_row = complete.rows().remove(0);
+        let complete_output = One::new(complete.clone());
+        let complete_row = complete_output.rows().remove(0);
         assert_eq!(complete_row[1], "0.0001");
         assert_eq!(complete_row[6], "1970-01-01T00:00:00.123Z");
-        assert_eq!(complete.to_json_value()["last_funding_time"], 123);
+        assert_eq!(complete_output.to_json_value()["last_funding_time"], 123);
 
         let sparse = FundingRow {
             current_funding_rate: None,
@@ -1000,6 +955,7 @@ mod tests {
             last_funding_time: None,
             ..complete
         };
+        let sparse = One::new(sparse);
         let sparse_row = sparse.rows().remove(0);
         assert_eq!(sparse_row[1], "n/a");
         assert_eq!(sparse_row[6], "n/a");

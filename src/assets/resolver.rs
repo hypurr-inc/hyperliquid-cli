@@ -5,6 +5,7 @@ use crate::errors::CliError;
 use crate::http_api::ApiClient;
 
 use super::asset_id;
+use super::dexes::PerpDexList;
 use super::market::{Market, OutcomeAsset, PerpAsset, SpotAsset};
 use super::metadata::{AssetMetadata, load_hip3_market, perp_asset_from_market};
 use super::query::{AssetQuery, eq_asset_name, normalize_asset_name, parse_asset_query};
@@ -251,10 +252,17 @@ async fn fetch_hip3_perp(
     let AssetQuery::Hip3 { dex, token } = parse_asset_query(input) else {
         return Err(missed);
     };
-    match load_hip3_market(client, &dex, &token).await {
-        Ok(Some((canonical_dex, market))) => {
-            perp_asset_from_market(market, Some(canonical_dex)).map_err(AssetError::Load)
+    let loaded = async {
+        let dexes = PerpDexList::load_sdk(client).await?;
+        let dex = dexes.canonical(&dex)?;
+        match load_hip3_market(client, dex, &token).await? {
+            Some(market) => perp_asset_from_market(&market, Some(dex.name.clone())).map(Some),
+            None => Ok(None),
         }
+    }
+    .await;
+    match loaded {
+        Ok(Some(perp)) => Ok(perp),
         Ok(None) => Err(missed),
         Err(err) => Err(AssetError::Load(err)),
     }

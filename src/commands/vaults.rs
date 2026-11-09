@@ -6,6 +6,7 @@ use hypersdk::{Address, Decimal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::actions;
 use crate::commands::positions::PositionRow;
@@ -112,15 +113,54 @@ pub enum VaultKindArg {
 }
 
 impl VaultKindArg {
-    fn matches(self, kind: &str) -> bool {
+    fn matches(self, kind: &VaultKind) -> bool {
         match self {
             Self::All => true,
-            Self::Protocol => kind.eq_ignore_ascii_case("normal"),
-            Self::User => kind.eq_ignore_ascii_case("child") || kind.eq_ignore_ascii_case("parent"),
-            Self::Normal | Self::Child | Self::Parent => self
-                .to_possible_value()
-                .is_some_and(|value| value.get_name().eq_ignore_ascii_case(kind)),
+            Self::Protocol | Self::Normal => *kind == VaultKind::Normal,
+            Self::User => matches!(kind, VaultKind::Child | VaultKind::Parent),
+            Self::Child => *kind == VaultKind::Child,
+            Self::Parent => *kind == VaultKind::Parent,
         }
+    }
+}
+
+/// How a vault relates to others, as `vault list` reports it: the vault's
+/// `relationship.type`, or `closed`/`normal` for a vault that states none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VaultKind {
+    Normal,
+    Child,
+    Parent,
+    Closed,
+    /// A relationship type this CLI does not know, as the exchange spells it.
+    Other(String),
+}
+
+impl VaultKind {
+    fn parse(raw: &str) -> Self {
+        match raw.to_ascii_lowercase().as_str() {
+            "normal" => Self::Normal,
+            "child" => Self::Child,
+            "parent" => Self::Parent,
+            "closed" => Self::Closed,
+            _ => Self::Other(raw.to_string()),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Normal => "normal",
+            Self::Child => "child",
+            Self::Parent => "parent",
+            Self::Closed => "closed",
+            Self::Other(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for VaultKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -240,7 +280,7 @@ struct VaultSummaryRow {
     #[serde(with = "rust_decimal::serde::str")]
     tvl: Decimal,
     age_days: Option<i64>,
-    kind: String,
+    kind: VaultKind,
     #[serde(with = "rust_decimal::serde::str_option")]
     user_deposit: Option<Decimal>,
 }
@@ -314,7 +354,7 @@ impl TableData for VaultSummaryOutput {
                     row.apr.to_string(),
                     row.tvl.to_string(),
                     or_missing(row.age_days),
-                    row.kind.clone(),
+                    row.kind.as_str().to_string(),
                 ];
                 if show_user_deposit {
                     columns.push(or_missing(row.user_deposit));
@@ -652,8 +692,16 @@ impl RawVaultSummary {
             .relationship
             .get("type")
             .and_then(Value::as_str)
-            .unwrap_or(if self.is_closed { "closed" } else { "normal" })
-            .to_string();
+            .map_or_else(
+                || {
+                    if self.is_closed {
+                        VaultKind::Closed
+                    } else {
+                        VaultKind::Normal
+                    }
+                },
+                VaultKind::parse,
+            );
         Ok(VaultSummaryRow {
             vault_address: self.vault_address,
             name: self.name,
@@ -702,7 +750,7 @@ fn optional_decimal_field(value: &Value, field: &'static str) -> Result<Option<D
 }
 
 fn age_days_from_millis(create_time_millis: i64) -> i64 {
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = i64::try_from(clock::now_ms()).unwrap_or(i64::MAX);
     ((now - create_time_millis).max(0)) / 86_400_000
 }
 

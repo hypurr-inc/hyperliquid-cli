@@ -16,7 +16,7 @@ use hypersdk::hypercore::types::Action;
 use hypersdk::hypercore::types::api::UserOutcomeAction;
 use serde::Serialize;
 
-use crate::assets::{OutcomeCatalog, load_outcome_listing};
+use crate::assets::{Names, OutcomeCatalog};
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
 use crate::commands::actions;
 use crate::commands::confirm;
@@ -345,7 +345,7 @@ impl ListRow for OutcomeActionConfirmation {
 /// The shared run: check the ids, preview or sign and send, confirm on mainnet.
 async fn convert(inv: &Invocation, conversion: Conversion, yes: bool) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let catalog = load_outcome_listing(remote.api()).await?;
+    let catalog = OutcomeCatalog::load(remote.api(), Names::Raw).await?;
     let quotes = conversion.preflight(&catalog)?;
     let quote = quotes.iter().cloned().collect::<Vec<_>>().join("/");
     let quote_token = (!quote.is_empty()).then(|| quote.clone());

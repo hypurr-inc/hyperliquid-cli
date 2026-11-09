@@ -193,6 +193,63 @@ async fn perps_list_flags_delisted_markets_and_hides_none() {
 }
 
 #[tokio::test]
+async fn listed_ticks_are_the_ticks_orders_truncate_to() {
+    let server = ExchangeFixture::start().await;
+    // A size precision past the price's decimal budget (6 for perps, 8 for
+    // spot) leaves no decimals: such a market takes whole-number prices.
+    server
+        .override_info(
+            json!({"type": "meta"}),
+            fixture_perp_meta(vec![
+                fixture_perp("BTC", 5, 50),
+                fixture_perp("WIDE", 7, 10),
+            ]),
+        )
+        .await;
+    server
+        .override_info(
+            json!({"type": "spotMeta"}),
+            json!({
+                "universe": [{"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}],
+                "tokens": [
+                    {"name": "USDC", "index": 0, "tokenId": "0x00000000000000000000000000000000",
+                     "szDecimals": 6, "weiDecimals": 6, "evmContract": null},
+                    {"name": "PURR", "index": 1, "tokenId": "0x00000000000000000000000000000001",
+                     "szDecimals": 9, "weiDecimals": 9, "evmContract": null}
+                ]
+            }),
+        )
+        .await;
+
+    let perps = json_of(&server, &["perps", "list"]);
+    let spot = json_of(&server, &["spot", "list"]);
+
+    assert_eq!(perps[0]["tick_size_at_price_1"], "0.10");
+    assert_eq!(perps[1]["tick_size_at_price_1"], "1");
+    assert_eq!(spot[0]["tick_size_at_price_1"], "1");
+}
+
+#[tokio::test]
+async fn a_perp_that_is_not_listed_is_diagnosed_from_the_list_the_command_read() {
+    let server = ExchangeFixture::start().await;
+
+    let assert = run_args(&server, &["perps", "get", "NOPE"]).failure();
+
+    assert_eq!(assert.get_output().status.code(), Some(13));
+    assert_eq!(server.info_requests("meta").await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_spot_pair_that_is_not_listed_is_diagnosed_from_the_list_the_command_read() {
+    let server = ExchangeFixture::start().await;
+
+    let assert = run_args(&server, &["spot", "get", "NOPE/USDC"]).failure();
+
+    assert_eq!(assert.get_output().status.code(), Some(13));
+    assert_eq!(server.info_requests("spotMeta").await.len(), 1);
+}
+
+#[tokio::test]
 async fn hip3_markets_show_their_deployer_fee_scale() {
     let mut market = fixture_perp("xyz:XYZ100", 2, 10);
     market["deployerFeeScale"] = json!("0.5");

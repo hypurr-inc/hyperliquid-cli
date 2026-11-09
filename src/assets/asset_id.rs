@@ -59,15 +59,17 @@ pub fn spot_internal_id(asset_index: usize) -> usize {
     asset_index.saturating_sub(SPOT_OFFSET)
 }
 
-/// Info-endpoint coin key for a spot asset: `@N`.
+/// Info-endpoint coin key for a spot asset: `@N`. Callers ask
+/// [`SpotAsset::info_coin`](super::SpotAsset::info_coin), which knows the pair
+/// that is addressed by name instead.
 #[must_use]
-pub fn spot_coin_key(asset_index: usize) -> String {
+pub(crate) fn spot_coin_key(asset_index: usize) -> String {
     spot_internal_coin_key(spot_internal_id(asset_index))
 }
 
 /// Info-endpoint coin key for spot universe index `internal_id`: `@N`.
 #[must_use]
-pub fn spot_internal_coin_key(internal_id: usize) -> String {
+pub(crate) fn spot_internal_coin_key(internal_id: usize) -> String {
     format!("@{internal_id}")
 }
 

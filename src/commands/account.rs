@@ -148,6 +148,18 @@ pub(crate) fn validate_optional_time_range(
     Ok(())
 }
 
+/// A fills request over `start..end`, which the API aggregates by time on request.
+fn fills_window(
+    request: InfoRequest,
+    start: u64,
+    end: Option<u64>,
+    aggregate_by_time: bool,
+) -> InfoRequest {
+    request
+        .time_range(Some(start), end)
+        .field_if("aggregateByTime", aggregate_by_time.then_some(true))
+}
+
 async fn print_info_value(
     inv: &Invocation,
     request: InfoRequest,
@@ -785,9 +797,12 @@ impl CliCommand for AccountFills {
                     start,
                     args.all,
                     |from| {
-                        InfoRequest::user("userFillsByTime", user)
-                            .time_range(Some(from), args.end)
-                            .field_if("aggregateByTime", args.aggregate_by_time.then_some(true))
+                        fills_window(
+                            InfoRequest::user("userFillsByTime", user),
+                            from,
+                            args.end,
+                            args.aggregate_by_time,
+                        )
                     },
                     "loading user fills by time",
                 )
@@ -1199,9 +1214,12 @@ impl CliCommand for AccountTwapFills {
         validate_optional_time_range(args.start, args.end)?;
         match args.start {
             Some(start) => {
-                let request = InfoRequest::user("userTwapSliceFillsByTime", user)
-                    .time_range(Some(start), args.end)
-                    .field_if("aggregateByTime", args.aggregate_by_time.then_some(true));
+                let request = fills_window(
+                    InfoRequest::user("userTwapSliceFillsByTime", user),
+                    start,
+                    args.end,
+                    args.aggregate_by_time,
+                );
                 print_info_value(
                     inv,
                     request,

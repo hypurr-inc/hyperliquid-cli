@@ -13,12 +13,12 @@ use hypersdk::{Address, Decimal};
 use serde::Serialize;
 use serde_json::json;
 
+use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, StreamBound, arg};
 use crate::commands::abstraction::{
     AccountMode, DexCollateral, UnifiedRisk, fetch_abstraction, load_dex_collateral,
     unified_account_ratio,
 };
-use crate::commands::actions::nonce_now;
 use crate::commands::borrowlend::fetch_user_state;
 use crate::commands::positions::mark_price;
 use crate::commands::rows::{One, Row};
@@ -180,7 +180,7 @@ impl RiskAlert {
     ) -> Self {
         Self {
             kind,
-            time: nonce_now(),
+            time: clock::now_ms(),
             address: user.to_string(),
             rule: rule.to_string(),
             coin: coin.map(str::to_string),
@@ -519,7 +519,7 @@ fn position_open_times(fills: &[Fill]) -> HashMap<String, u64> {
 /// Instant approximating a position open time in ms since epoch.
 fn open_instant(open_times: &HashMap<String, u64>, coin: &str) -> Option<Instant> {
     let ms = *open_times.get(coin)?;
-    let now_ms = nonce_now();
+    let now_ms = clock::now_ms();
     if ms >= now_ms {
         return None;
     }
@@ -701,7 +701,7 @@ fn evaluate_state(
     }
 
     if enabled.contains(&RiskRule::StaleOrder) {
-        let now_ms = nonce_now();
+        let now_ms = clock::now_ms();
         for order in snapshot.open_orders {
             let age_ms = now_ms.saturating_sub(order.timestamp);
             if Duration::from_millis(age_ms) < STALE_ORDER_AGE {
@@ -812,7 +812,7 @@ hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000
         let user = if let Some(raw) = args.user.as_deref() {
             address(raw, AddressRole::Watched)?
         } else {
-            inv.resolve_signer()?.query_address()
+            inv.resolve_signer_account().await?
         };
         watch_risk(inv, user, args).await
     }

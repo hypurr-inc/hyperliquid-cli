@@ -131,6 +131,26 @@ async fn watch_risk_json_honors_results_only_as_a_harmless_flag() {
     assert_eq!(lines[0]["rule"], "position_lifecycle");
 }
 
+#[tokio::test]
+async fn watch_risk_does_not_spend_signing_nonces() {
+    let server = MockServer::start().await;
+    mount_account_state(&server, vec![], vec![], "9000", "0", 10).await;
+    mount_all_mids(&server, "50000", "3000").await;
+    let env = IsolatedHome::new();
+
+    env.command_with_server(&server)
+        .args(["--format", "json", "watch", "risk"])
+        .args(["--user", "0x0000000000000000000000000000000000000001"])
+        .args(["--only", "position_lifecycle", "--max-events", "1"])
+        .assert()
+        .success();
+
+    assert!(
+        !env.data_dir().join("nonce-high-water").exists(),
+        "an alert timestamp is the wall clock, not a nonce"
+    );
+}
+
 /// What `margin_usage` measures depends on the account abstraction: the perp
 /// margin summary only for accounts that keep their balances there.
 mod margin_basis {

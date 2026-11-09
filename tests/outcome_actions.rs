@@ -85,6 +85,32 @@ async fn split_sends_the_documented_action_and_reports_the_quote_token() {
 }
 
 #[tokio::test]
+async fn an_unreadable_outcome_meta_entry_is_named_on_stderr_and_the_rest_still_convert() {
+    let env = IsolatedHome::new();
+    let server = exchange().await;
+    let mut listed = meta();
+    listed["outcomes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"outcome": "not a number"}));
+    server
+        .override_info(json!({"type": "outcomeMeta"}), listed)
+        .await;
+
+    live(
+        &env,
+        &server,
+        &["split", "--outcome", "12", "--amount", "10.50"],
+    )
+    .assert()
+    .success()
+    .stderr(
+        predicate::str::contains("outcomeMeta outcome")
+            .and(predicate::str::contains("was not read")),
+    );
+}
+
+#[tokio::test]
 async fn merge_sends_an_amount_or_null_for_the_maximum() {
     let env = IsolatedHome::new();
     let server = exchange().await;

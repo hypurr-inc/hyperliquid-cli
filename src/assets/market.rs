@@ -1,8 +1,26 @@
-use hypersdk::hypercore::{MarginMode, PerpMarket};
+use hypersdk::hypercore::{MarginMode, PerpMarket, PriceTick};
 
 use crate::errors::CliError;
 
 use super::asset_id::{self, OutcomeNotation};
+
+/// A perp market's price grid: five significant figures and at most
+/// `6 - szDecimals` decimals.
+///
+/// The SDK treats a market whose `szDecimals` exceeds the decimal budget (6 for
+/// perps, 8 for spot) as invalid and has no tick for it, but such a market
+/// still takes whole-number prices. The budget is clamped here, once, so the
+/// tick a listing shows is the tick orders are truncated to.
+#[must_use]
+pub fn perp_price_tick(sz_decimals: i64) -> PriceTick {
+    PriceTick::for_perp(sz_decimals.min(6))
+}
+
+/// A spot market's price grid; see [`perp_price_tick`] (the budget is 8).
+#[must_use]
+pub fn spot_price_tick(sz_decimals: i64) -> PriceTick {
+    PriceTick::for_spot(sz_decimals.min(8))
+}
 
 /// Which margin modes a perpetual market accepts, from `meta`'s `marginMode`
 /// and its deprecated duplicate `onlyIsolated`.
