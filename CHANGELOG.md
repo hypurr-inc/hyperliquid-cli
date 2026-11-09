@@ -62,6 +62,12 @@
 - `staking link initiate|finalize` pretty output highlights the Warning column, not the Network column.
 - Responses that failed to decode no longer print as empty: `referral status` fails on a field of the wrong type, `vault list|get|search` on an unreadable apr/deposit/account-value, `meta` on a response without a `universe`, `outcomes list` on a side that cannot be encoded, and `watch risk` on a failed fill-history read at start. A HIP-3 dex whose metadata fails to load is reported (`asset search|decode` warn; resolving one of its markets exits `12` instead of `asset not found`), and a failed `perpDexs` listing fails the raw metadata load.
 - Missing table cells read `n/a` in `referral status`, `prio status`, `vault list` and `staking validators`; `transfer send-asset --dest dex:dex:x` keeps the name `dex:x`; subaccount transfer consent previews print the network as `Testnet`/`Mainnet`; the borrow/lend unknown-token error reads `spot token "X" not found`; over-precise USDC amounts for `subaccount transfer` and `positions update-margin` use the shared amount wording.
+- `orders tpsl`, `orders bracket` and the margin-mode check find an open HIP-3 position by its dex-qualified name (`xyz:XYZ100`, as the exchange reports it); before, they looked for the bare token and reported no position.
+- `CI` and `FORCE_COLOR` set to `0`, `false`, `no` or `off` are read as off instead of on.
+- Table and pretty output escape every Unicode format character (category Cf, such as bidi overrides and zero-width joiners) in untrusted cells, not only ASCII controls.
+- `candles` and `spread` accept spot pairs (`PURR/USDC`) like `book` does; before they exited `13` with `asset_not_found`.
+- `orders scale` rejects a ladder whose size is lost to lot rounding or whose prices collapse onto one tick, instead of placing fewer orders than asked.
+- `.claude/error-catalog.json` (`agents/error-catalog.json` links to it) is generated from the same table as the error envelope; entries carry `retry` instead of `retryable`.
 
 ## 0.17.0 - 2026-11-09
 

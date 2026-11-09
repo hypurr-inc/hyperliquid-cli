@@ -717,7 +717,12 @@ pub(super) async fn fetch_position(
         .map_err(from_sdk)?
         .asset_positions
         .into_iter()
-        .find(|position| position.position.coin.eq_ignore_ascii_case(&perp.name)))
+        .find(|position| {
+            position
+                .position
+                .coin
+                .eq_ignore_ascii_case(&perp.display_name())
+        }))
 }
 
 fn position_close_side_and_size(

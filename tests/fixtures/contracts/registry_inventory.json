@@ -770,7 +770,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "Search perps, HIP-3, spot, and outcome markets in one list. Each row includes a stable venue field. Retry: safe. Pipe --select coin into buy --dry-run.",
+      "description": "Search perps, HIP-3, spot, and outcome markets in one list. Each row includes a stable venue field. Retry: safe. Pipe --select cli_input into buy --dry-run.",
       "dry_run": "not_supported",
       "group": "market",
       "lifecycle": "read_only",

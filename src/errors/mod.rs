@@ -516,16 +516,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn agents_catalog_is_the_same_file() {
-        let agents =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agents/error-catalog.json");
-        assert_eq!(
-            std::fs::read_to_string(agents).unwrap(),
-            std::fs::read_to_string(catalog_path()).unwrap()
-        );
-    }
-
     /// The `## Error Handling` section of a skill file, up to the next heading.
     fn error_handling_section(skill: &str) -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(skill);

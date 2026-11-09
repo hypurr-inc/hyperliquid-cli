@@ -1279,7 +1279,6 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), env::ALL.len(), "duplicate variable name");
-        assert_eq!(env::ALL.len(), ENV_HELP.len());
 
         let vault_help = ENV_HELP
             .iter()

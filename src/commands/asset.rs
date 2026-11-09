@@ -898,15 +898,15 @@ impl CliCommand for Search {
         &["search"],
         "market",
         "Search markets across perps, HIP-3, spot, and outcomes",
-        "Search perps, HIP-3, spot, and outcome markets in one list. Each row includes a stable venue field. Retry: safe. Pipe --select coin into buy --dry-run.",
+        "Search perps, HIP-3, spot, and outcome markets in one list. Each row includes a stable venue field. Retry: safe. Pipe --select cli_input into buy --dry-run.",
     )
     .long_about("Search markets across perps, HIP-3, spot, and outcomes.\n\
 \n\
 Retry: safe.\n\
 \n\
 Examples:\n  \
-hyperliquid --format json search GOLD --select venue,coin\n  \
-hyperliquid --format json search ETH --type perp --select coin")
+hyperliquid --format json search GOLD --select venue,cli_input\n  \
+hyperliquid --format json search ETH --type perp --select cli_input")
     .args(&[
         arg("query").kind(InputKind::Identifier).describe("Search query, for example GOLD, BTC, PURR/USDC, or #10.").asset_input("asset search query"),
         arg("limit"),

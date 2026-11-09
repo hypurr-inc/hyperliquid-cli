@@ -200,7 +200,7 @@ Market overview:
 ```bash
 hyperliquid --format json status
 hyperliquid --format json mids
-hyperliquid --format json search GOLD --select venue,coin
+hyperliquid --format json search GOLD --select venue,cli_input
 hyperliquid --format json search ETH --type perp
 hyperliquid --format json perps list --max-results 20
 hyperliquid --format json spot list --max-results 20
@@ -296,7 +296,7 @@ HYPERLIQUID_AGENT=1 hyperliquid --format json --dry-run orders chase --coin ETH 
 ### Discover then preview
 
 ```bash
-hyperliquid --format json search ETH --type perp --select coin
+hyperliquid --format json search ETH --type perp --select cli_input
 hyperliquid --format json --dry-run buy --coin ETH --size 0.001
 ```
 

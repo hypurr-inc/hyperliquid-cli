@@ -546,7 +546,7 @@ async fn bracket_protects_the_whole_entry_when_it_fills_while_resting() {
             "assetPositions": [{
                 "type": "oneWay",
                 "position": {
-                    "coin": "TOKEN",
+                    "coin": "xyz:TOKEN",
                     "szi": "20",
                     "leverage": {"type": "cross", "value": 5},
                     "entryPx": "1.2",
