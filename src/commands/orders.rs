@@ -6,8 +6,8 @@ use chrono::Utc;
 use hypersdk::hypercore::types::{Action, OrderResponseStatus, ScheduleCancel};
 
 use crate::assets::{AssetResolver, PerpAsset};
+use crate::commands::common::rows::Rows;
 use crate::errors::CliError;
-use crate::exchange::actions;
 use crate::invocation::Invocation;
 use crate::margin::MarginPlan;
 use crate::output::{self, TableData};
@@ -37,20 +37,17 @@ mod trailing_stop;
 mod validation;
 
 use args::{CancelAllArgs, CancelArgs, ModifyArgs};
-use consent::{
-    ConsentKind, confirm_batch_modify, confirm_cancel_all, confirm_order, confirm_order_batch,
-    confirm_schedule_cancel, confirm_tpsl_batch, confirm_twap,
-};
+use consent::Consent;
 use context::OrderSubmissionContext;
 use exchange::{
-    Rejected, ScheduleCancelRawAction, decode_statuses, ensure_action_statuses_ok,
-    modification_result_oid, parse_twap_cancel_response, parse_twap_create_response, rejected_all,
+    Rejected, ScheduleCancelRawAction, Wording, ensure_action_statuses_ok, modification_result_oid,
+    rejected_all,
 };
 use existing::{
     ModifyOrderPlan, batch_modify_action, prepare_cancel_all_orders_plan,
     prepare_cancel_order_plan, prepare_modify_order_plan,
 };
-use identifier::{BatchModifyOrder, OrderIdentifier, same_order_error};
+use identifier::{BatchModifyOrder, OrderIdentifier, ensure_distinct};
 use planning::{
     ScheduleCancelPlan, ScheduledCancel, TwapCancelPlan, TwapCreatePlan,
     prepare_position_tpsl_batch,
@@ -62,7 +59,7 @@ use rendering::{
     TwapCreateConfirmation, pair_statuses, single_status,
 };
 use status::Status;
-use submit::{Cleared, Gate, PLACEMENT_FAILED, clear_to_send, submit_orders};
+use submit::{Gate, clear_to_send, submit_orders};
 use validation::TpslSpec;
 
 async fn create(
@@ -71,21 +68,17 @@ async fn create(
 ) -> Result<(), anyhow::Error> {
     match submission {
         CreateOrderSubmission::NormalTpsl(order) => {
-            let cleared = clear_to_send(
-                context,
-                Gate::for_order(ConsentKind::Tpsl, &order.parent),
-                |target| confirm_tpsl_batch(&order.batch, target),
-            )
-            .await?;
+            let cleared =
+                clear_to_send(context, Gate::tpsl_order(&order.parent, &order.batch)).await?;
             let statuses = submit_orders(
                 context,
                 &cleared,
                 order.batch.batch.clone(),
-                PLACEMENT_FAILED,
+                Wording::PLACEMENT,
             )
             .await?;
             let rows = tpsl_confirmation_rows(&order.batch, statuses)?;
-            report_tpsl_batch(Legs::new(rows), context.inv)
+            report_legs(Legs::new(rows), BatchVerb::PlaceTpsl, context.inv)
         }
         CreateOrderSubmission::Single(prepared) => {
             let status = place_prepared_single(context, &prepared).await?;
@@ -100,54 +93,31 @@ async fn place_prepared_single(
     context: OrderSubmissionContext<'_>,
     prepared: &PreparedOrder,
 ) -> Result<OrderResponseStatus, anyhow::Error> {
-    let cleared = clear_to_send(
-        context,
-        Gate::for_order(ConsentKind::Order, prepared),
-        |target| confirm_order(prepared, target),
-    )
-    .await?;
-    let statuses = submit_orders(context, &cleared, prepared.batch(), PLACEMENT_FAILED).await?;
+    let cleared = clear_to_send(context, Gate::order(prepared)).await?;
+    let statuses = submit_orders(context, &cleared, prepared.batch(), Wording::PLACEMENT).await?;
     Ok(single_status(statuses)?)
 }
 
-async fn scale(
+/// `orders scale` and `orders batch-create`: they differ only in the gate
+/// (`Gate::scale` or `Gate::batch_create`) that names what the person approves.
+async fn place_batch(
     context: OrderSubmissionContext<'_>,
-    prepared: PreparedOrderBatch,
-) -> Result<(), anyhow::Error> {
-    let cleared = clear_to_send(
-        context,
-        Gate::for_batch(ConsentKind::ScaleOrders, &prepared),
-        |target| confirm_order_batch("scale", &prepared, target),
-    )
-    .await?;
-    place_order_batch(context, &cleared, &prepared).await
-}
-
-async fn batch_create(
-    context: OrderSubmissionContext<'_>,
-    prepared: PreparedOrderBatch,
-) -> Result<(), anyhow::Error> {
-    let cleared = clear_to_send(
-        context,
-        Gate::for_batch(ConsentKind::BatchOrders, &prepared),
-        |target| confirm_order_batch("batch-create", &prepared, target),
-    )
-    .await?;
-    place_order_batch(context, &cleared, &prepared).await
-}
-
-async fn place_order_batch(
-    context: OrderSubmissionContext<'_>,
-    cleared: &Cleared<'_>,
     prepared: &PreparedOrderBatch,
+    gate: for<'a> fn(&'a PreparedOrderBatch) -> Gate<'a>,
 ) -> Result<(), anyhow::Error> {
-    let statuses =
-        submit_orders(context, cleared, prepared.batch.clone(), PLACEMENT_FAILED).await?;
+    let cleared = clear_to_send(context, gate(prepared)).await?;
+    let statuses = submit_orders(
+        context,
+        &cleared,
+        prepared.batch.clone(),
+        Wording::PLACEMENT,
+    )
+    .await?;
     let rows = pair_statuses(&prepared.legs, statuses)?
         .into_iter()
         .map(|(leg, status)| OrderConfirmation::from_leg_status(leg, status))
         .collect();
-    finish_order_batch(rows, context.inv)
+    report_legs(Legs::new(rows), BatchVerb::PlaceOrders, context.inv)
 }
 
 /// Prints nothing; returns each leg's result.
@@ -158,15 +128,15 @@ async fn place_position_tpsl(
 ) -> Result<Legs<TpslOrderConfirmation>, anyhow::Error> {
     let margin = MarginPlan::for_market(perp, spec.margin_mode)?;
     let prepared = prepare_position_tpsl_batch(context.api, perp, context.account(), spec).await?;
-    let cleared = clear_to_send(
+    let cleared = clear_to_send(context, Gate::position_tpsl(perp, margin, &prepared)).await?;
+
+    let statuses = submit_orders(
         context,
-        Gate::for_position(ConsentKind::Tpsl, perp, margin),
-        |target| confirm_tpsl_batch(&prepared, target),
+        &cleared,
+        prepared.batch.clone(),
+        Wording::PLACEMENT,
     )
     .await?;
-
-    let statuses =
-        submit_orders(context, &cleared, prepared.batch.clone(), PLACEMENT_FAILED).await?;
     Ok(Legs::new(tpsl_confirmation_rows(&prepared, statuses)?))
 }
 
@@ -176,7 +146,7 @@ async fn tpsl(
     spec: &TpslSpec,
 ) -> Result<(), anyhow::Error> {
     let legs = place_position_tpsl(context, perp, spec).await?;
-    report_tpsl_batch(legs, context.inv)
+    report_legs(legs, BatchVerb::PlaceTpsl, context.inv)
 }
 
 /// Prints nothing: a rejected leg is returned as the error for the caller to report.
@@ -235,17 +205,6 @@ fn report_legs<T: rendering::LegRow + 'static>(
     finish_with_failures(legs, verb, failures, inv)
 }
 
-fn finish_order_batch(rows: Vec<OrderConfirmation>, inv: &Invocation) -> Result<(), anyhow::Error> {
-    report_legs(Legs::new(rows), BatchVerb::PlaceOrders, inv)
-}
-
-fn report_tpsl_batch(
-    legs: Legs<TpslOrderConfirmation>,
-    inv: &Invocation,
-) -> Result<(), anyhow::Error> {
-    report_legs(legs, BatchVerb::PlaceTpsl, inv)
-}
-
 fn tpsl_confirmation_rows(
     prepared: &PreparedTpslBatch,
     statuses: Vec<OrderResponseStatus>,
@@ -264,28 +223,19 @@ async fn cancel(
     args: &CancelArgs,
 ) -> Result<(), anyhow::Error> {
     let plan = prepare_cancel_order_plan(context.api, resolver, context.account(), args).await?;
-    let response = actions::send_l1_action(
-        context.api,
-        context.signer,
-        plan.action,
-        context.vault_address,
-        "cancel failed",
-    )
-    .await?;
-    let statuses = decode_statuses(response, "cancel")?;
+    let statuses = context
+        .send(plan.action, Wording::CANCEL)
+        .await?
+        .statuses()?;
 
     ensure_action_statuses_ok(&statuses, "cancel order")?;
-    context.inv.print(&rendering_rows(CancelConfirmation {
+    context.inv.print(&Rows::one(CancelConfirmation {
         coin: plan.coin,
         status: Status::Cancelled,
         order_id: plan.order_id,
         cloid: plan.cloid,
     }));
     Ok(())
-}
-
-fn rendering_rows<T>(row: T) -> crate::commands::common::rows::Rows<T> {
-    crate::commands::common::rows::Rows::new(vec![row])
 }
 
 async fn cancel_all(
@@ -298,25 +248,24 @@ async fn cancel_all(
     let order_ids = plan.order_ids();
 
     let Some(action) = plan.action() else {
-        context.inv.print(&rendering_rows(CancelAllSummary {
+        context.inv.print(&Rows::one(CancelAllSummary {
             coin: plan.summary_coin,
             cancelled_orders: 0,
         }));
         return Ok(());
     };
-    context.consent(ConsentKind::CancelAll, None, |target| {
-        confirm_cancel_all(args.coin.as_deref(), order_ids.len(), target)
-    })?;
+    context.consent(
+        &Consent::CancelAll {
+            coin: args.coin.as_deref(),
+            count: order_ids.len(),
+        },
+        None,
+    )?;
 
-    let response = actions::send_l1_action(
-        context.api,
-        context.signer,
-        action,
-        context.vault_address,
-        "cancel-all failed",
-    )
-    .await?;
-    let statuses = decode_statuses(response, "cancel-all")?;
+    let statuses = context
+        .send(action, Wording::CANCEL_ALL)
+        .await?
+        .statuses()?;
     let rows: Vec<CancelLeg> = pair_statuses(&order_ids, statuses)?
         .into_iter()
         .map(|(order_id, status)| CancelLeg::from_status(*order_id, status))
@@ -327,7 +276,7 @@ async fn cancel_all(
         return finish_with_failures(legs, BatchVerb::CancelAll, failures, context.inv);
     }
 
-    context.inv.print(&rendering_rows(CancelAllSummary {
+    context.inv.print(&Rows::one(CancelAllSummary {
         coin: plan.summary_coin,
         cancelled_orders: order_ids.len(),
     }));
@@ -350,20 +299,12 @@ async fn modify(
     )
     .await?;
     let action = batch_modify_action(vec![plan.modify], args.always_place);
-    let response = actions::send_l1_action(
-        context.api,
-        context.signer,
-        action,
-        context.vault_address,
-        "modify failed",
-    )
-    .await?;
-    let statuses = decode_statuses(response, "modify")?;
+    let statuses = context.send(action, Wording::MODIFY).await?.statuses()?;
     ensure_action_statuses_ok(&statuses, "modify order")?;
     let mut confirmation = plan.confirmation;
     confirmation.order_id = modification_result_oid(&statuses).or(confirmation.order_id);
 
-    context.inv.print(&rendering_rows(confirmation));
+    context.inv.print(&Rows::one(confirmation));
     Ok(())
 }
 
@@ -398,34 +339,24 @@ async fn batch_modify(
         )
         .await
         .map_err(|error| for_modification(index, error))?;
-        // Two names for one order (an order id and its cloid) are only
-        // visible once both are looked up.
-        if let Some(earlier) = plans
-            .iter()
-            .position(|earlier| earlier.confirmation.order_id == plan.confirmation.order_id)
-        {
-            return Err(same_order_error(index, earlier).into());
-        }
+        ensure_distinct(
+            index,
+            plan.confirmation.order_id,
+            plans.iter().map(|earlier| earlier.confirmation.order_id),
+        )?;
         plans.push(plan);
     }
 
-    context.consent(ConsentKind::ModifyOrders, None, |target| {
-        confirm_batch_modify(plans.len(), target)
-    })?;
+    context.consent(&Consent::ModifyOrders { count: plans.len() }, None)?;
 
     let action = batch_modify_action(
         plans.iter().map(|plan| plan.modify.clone()).collect(),
         always_place,
     );
-    let response = actions::send_l1_action(
-        context.api,
-        context.signer,
-        action,
-        context.vault_address,
-        "batch modify failed",
-    )
-    .await?;
-    let statuses = decode_statuses(response, "batch modify")?;
+    let statuses = context
+        .send(action, Wording::BATCH_MODIFY)
+        .await?
+        .statuses()?;
     let rows = pair_statuses(&plans, statuses)?
         .into_iter()
         .map(|(plan, status)| ModifyLeg::from_status(plan.confirmation.clone(), status))
@@ -441,23 +372,17 @@ async fn twap_create(
     context: OrderSubmissionContext<'_>,
     plan: TwapCreatePlan,
 ) -> Result<(), anyhow::Error> {
-    clear_to_send(
-        context,
-        Gate::for_position(ConsentKind::Twap, &plan.perp, plan.margin),
-        |target| confirm_twap(&plan, target),
-    )
-    .await?;
-    let response = actions::send_raw_l1_json_action(
-        context.api,
-        context.signer,
-        &plan.action,
-        context.vault_address,
-        "twap-create rejected",
-    )
-    .await?;
-    let twap_id = parse_twap_create_response(response)?;
+    clear_to_send(context, Gate::twap(&plan)).await?;
+    // Both TWAP actions go out through `send_raw`: it posts the SDK action in
+    // the field order it serializes, as the hand-built one was posted, where
+    // `send` would post it through a JSON `Value`, which sorts the keys. The
+    // signed msgpack is the same either way.
+    let twap_id = context
+        .send_raw(&plan.action, Wording::TWAP_CREATE)
+        .await?
+        .twap_id()?;
 
-    context.inv.print(&rendering_rows(TwapCreateConfirmation {
+    context.inv.print(&Rows::one(TwapCreateConfirmation {
         coin: plan.coin,
         side: plan.side,
         size: plan.size,
@@ -473,17 +398,12 @@ async fn twap_cancel(
     context: OrderSubmissionContext<'_>,
     plan: TwapCancelPlan,
 ) -> Result<(), anyhow::Error> {
-    let response = actions::send_raw_l1_json_action(
-        context.api,
-        context.signer,
-        &plan.action,
-        context.vault_address,
-        "twap-cancel rejected",
-    )
-    .await?;
-    parse_twap_cancel_response(response)?;
+    context
+        .send_raw(&plan.action, Wording::TWAP_CANCEL)
+        .await?
+        .twap_cancelled()?;
 
-    context.inv.print(&rendering_rows(TwapCancelConfirmation {
+    context.inv.print(&Rows::one(TwapCancelConfirmation {
         coin: plan.coin,
         status: Status::Cancelled,
         twap_id: plan.twap_id,
@@ -495,47 +415,33 @@ async fn schedule_cancel(
     context: OrderSubmissionContext<'_>,
     plan: ScheduleCancelPlan,
 ) -> Result<(), anyhow::Error> {
-    context.consent(ConsentKind::ScheduleCancel, None, |target| {
-        confirm_schedule_cancel(&plan, target)
-    })?;
+    context.consent(&Consent::ScheduleCancel(&plan), None)?;
     // The trigger time counts from the moment of sending, not from the prompt.
     let scheduled = plan.scheduled(Utc::now());
     if let Some(scheduled) = &scheduled {
-        actions::send_l1_action(
-            context.api,
-            context.signer,
-            Action::ScheduleCancel(ScheduleCancel {
-                time: Some(scheduled.at_ms()),
-            }),
-            context.vault_address,
-            "schedule-cancel rejected",
-        )
-        .await?;
+        let action = Action::ScheduleCancel(ScheduleCancel {
+            time: Some(scheduled.at_ms()),
+        });
+        context.send(action, Wording::SCHEDULE_CANCEL).await?;
     } else {
-        actions::send_raw_l1_json_action(
-            context.api,
-            context.signer,
-            &ScheduleCancelRawAction {
-                action_type: "scheduleCancel",
-                time: None,
-            },
-            context.vault_address,
-            "schedule-cancel clear rejected",
-        )
-        .await?;
+        let action = ScheduleCancelRawAction {
+            action_type: "scheduleCancel",
+            time: None,
+        };
+        context
+            .send_raw(&action, Wording::SCHEDULE_CANCEL_CLEAR)
+            .await?;
     }
 
-    context
-        .inv
-        .print(&rendering_rows(ScheduleCancelConfirmation {
-            status: if scheduled.is_some() {
-                Status::Scheduled
-            } else {
-                Status::Cleared
-            },
-            scheduled_time: scheduled.as_ref().map(|value| value.at.to_rfc3339()),
-            scheduled_time_ms: scheduled.as_ref().map(ScheduledCancel::at_ms),
-            in_seconds: scheduled.as_ref().map(|value| value.in_seconds),
-        }));
+    context.inv.print(&Rows::one(ScheduleCancelConfirmation {
+        status: if scheduled.is_some() {
+            Status::Scheduled
+        } else {
+            Status::Cleared
+        },
+        scheduled_time: scheduled.as_ref().map(|value| value.at.to_rfc3339()),
+        scheduled_time_ms: scheduled.as_ref().map(ScheduledCancel::at_ms),
+        in_seconds: scheduled.as_ref().map(|value| value.in_seconds),
+    }));
     Ok(())
 }

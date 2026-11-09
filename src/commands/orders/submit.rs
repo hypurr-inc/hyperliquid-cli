@@ -10,15 +10,15 @@ use hypersdk::hypercore::types::{
 use serde::Serialize;
 
 use super::builder_check;
-use super::consent::{ConsentKind, ConsentTarget};
+use super::consent::Consent;
 use super::context::OrderSubmissionContext;
-use super::exchange::decode_statuses;
+use super::exchange::Wording;
 use super::hip3::{Hip3MarginPlan, execute_hip3_margin_transfers, plan_hip3_margin_transfers};
-use super::prepared::{PreparedOrder, PreparedOrderBatch};
+use super::planning::TwapCreatePlan;
+use super::prepared::{PreparedOrder, PreparedOrderBatch, PreparedTpslBatch};
 use crate::assets::PerpAsset;
 use crate::builder_fee::BuilderFee;
 use crate::errors::CliError;
-use crate::exchange::actions;
 use crate::hints;
 use crate::margin::{self, MarginPlan};
 use crate::prompt;
@@ -27,7 +27,7 @@ use crate::prompt;
 /// is safe: the margin mode holds, the builder is approved, the HIP-3 dexes are
 /// funded, the user approves.
 pub(super) struct Gate<'a> {
-    kind: ConsentKind,
+    consent: Consent<'a>,
     /// A perp whose margin mode for the account must match what the plan
     /// requires, if it requires one.
     margin: Option<(&'a PerpAsset, MarginPlan)>,
@@ -39,31 +39,62 @@ pub(super) struct Gate<'a> {
 }
 
 impl<'a> Gate<'a> {
-    pub(super) fn for_order(kind: ConsentKind, order: &'a PreparedOrder) -> Self {
+    /// One order: `orders create`, a bracket entry.
+    pub(super) fn order(order: &'a PreparedOrder) -> Self {
+        Self::funding(Consent::Order(order), order)
+    }
+
+    /// A parent order with grouped TP/SL children: the parent funds.
+    pub(super) fn tpsl_order(parent: &'a PreparedOrder, children: &'a PreparedTpslBatch) -> Self {
+        Self::funding(Consent::Tpsl(children), parent)
+    }
+
+    fn funding(consent: Consent<'a>, order: &'a PreparedOrder) -> Self {
         Self {
-            kind,
+            consent,
             margin: order.perp().zip(order.margin),
             funded: vec![order],
             builder: order.builder.as_ref(),
         }
     }
 
+    pub(super) fn scale(batch: &PreparedOrderBatch) -> Gate<'_> {
+        Gate::batch(Consent::Scale(batch), batch)
+    }
+
+    pub(super) fn batch_create(batch: &PreparedOrderBatch) -> Gate<'_> {
+        Gate::batch(Consent::BatchCreate(batch), batch)
+    }
+
     /// A batch never moves funds on its own: `funded` stays empty, so the
     /// helper transfer is never sent for scale or batch-create. Its margin
     /// check is the one [`PreparedOrderBatch::margin_check`] states.
-    pub(super) fn for_batch(kind: ConsentKind, batch: &'a PreparedOrderBatch) -> Self {
+    fn batch(consent: Consent<'a>, batch: &'a PreparedOrderBatch) -> Self {
         Self {
-            kind,
+            consent,
             margin: batch.margin_check().map(|(perp, margin)| (perp, *margin)),
             funded: Vec::new(),
             builder: None,
         }
     }
 
+    /// TP/SL orders on an existing position.
+    pub(super) fn position_tpsl(
+        perp: &'a PerpAsset,
+        margin: MarginPlan,
+        batch: &'a PreparedTpslBatch,
+    ) -> Self {
+        Self::position(Consent::Tpsl(batch), perp, margin)
+    }
+
+    pub(super) fn twap(plan: &'a TwapCreatePlan) -> Self {
+        Self::position(Consent::Twap(plan), &plan.perp, plan.margin)
+    }
+
     /// Orders that act on an existing position and need no margin of their own.
-    pub(super) fn for_position(kind: ConsentKind, perp: &'a PerpAsset, margin: MarginPlan) -> Self {
+    fn position(consent: Consent<'a>, perp: &'a PerpAsset, margin: MarginPlan) -> Self {
         Self {
-            kind,
+            consent,
             margin: Some((perp, margin)),
             funded: Vec::new(),
             builder: None,
@@ -104,7 +135,6 @@ impl Ungated {
 pub(super) async fn clear_to_send<'a>(
     context: OrderSubmissionContext<'_>,
     gate: Gate<'a>,
-    ask: impl FnOnce(&ConsentTarget<'_>) -> Result<bool, CliError>,
 ) -> Result<Cleared<'a>, anyhow::Error> {
     if let Some((perp, margin)) = gate.margin {
         verify_margin_mode(context, perp, &margin).await?;
@@ -117,10 +147,10 @@ pub(super) async fn clear_to_send<'a>(
     }
     let user = context.account();
     let helpers = plan_hip3_margin_transfers(context.api, user, &gate.funded).await?;
-    context.consent(gate.kind, gate.builder, |target| {
+    if context.requires_approval {
         warn_hip3_margin_helpers(&helpers)?;
-        ask(target)
-    })?;
+    }
+    context.consent(&gate.consent, gate.builder)?;
     execute_hip3_margin_transfers(context.inv, context.signer, user, &helpers).await?;
     Ok(Cleared {
         builder: gate.builder,
@@ -172,8 +202,6 @@ async fn verify_margin_mode(
     Ok(())
 }
 
-pub(super) const PLACEMENT_FAILED: &str = "order placement failed";
-
 /// The action a builder fee travels in: `{ type: "order", orders, grouping,
 /// builder: { b, f, s } }`.
 #[derive(Debug, Serialize)]
@@ -187,15 +215,15 @@ struct BuilderOrderAction {
 
 /// The builder fee in `cleared` goes in the raw action, because the SDK's
 /// `BatchOrder.builder` carries only `{ b, f }`, which cannot express sub-builders;
-/// without a builder fee the SDK action is sent. `label` names the placement in the
-/// error.
+/// without a builder fee the SDK action is sent. `wording` names the placement in
+/// the error.
 pub(super) async fn submit_orders(
     context: OrderSubmissionContext<'_>,
     cleared: &Cleared<'_>,
     batch: BatchOrder,
-    label: &'static str,
+    wording: Wording,
 ) -> Result<Vec<OrderResponseStatus>, CliError> {
-    let response = match cleared.builder {
+    let answer = match cleared.builder {
         Some(builder) => {
             let action = BuilderOrderAction {
                 action_type: "order",
@@ -203,25 +231,9 @@ pub(super) async fn submit_orders(
                 grouping: batch.grouping,
                 builder: builder.clone(),
             };
-            actions::send_raw_l1_json_action(
-                context.api,
-                context.signer,
-                &action,
-                context.vault_address,
-                label,
-            )
-            .await?
+            context.send_raw(&action, wording).await?
         }
-        None => {
-            actions::send_l1_action(
-                context.api,
-                context.signer,
-                Action::Order(batch),
-                context.vault_address,
-                label,
-            )
-            .await?
-        }
+        None => context.send(Action::Order(batch), wording).await?,
     };
-    decode_statuses(response, "order placement")
+    answer.statuses()
 }

@@ -13,7 +13,7 @@ use super::args::{
     TwapCreateArgs,
 };
 use super::cloid::parse_cloid;
-use super::identifier::{BatchModifyOrder, OrderIdentifier, same_order_error};
+use super::identifier::{BatchModifyOrder, OrderIdentifier, ensure_distinct};
 use crate::assets::{Market, PerpAsset, perp_price_tick, spot_price_tick};
 use crate::builder_fee::{MaxFeeRate, SubBuilder, parse_sub_builders};
 use crate::errors::CliError;
@@ -634,12 +634,13 @@ pub(super) fn read_validated_batch_modify_orders(
         ));
     }
     for (index, order) in orders.iter().enumerate() {
-        if let Some(earlier) = orders[..index]
-            .iter()
-            .position(|earlier| earlier.identifier.names_same_order_as(&order.identifier))
-        {
-            return Err(same_order_error(index, earlier));
-        }
+        ensure_distinct(
+            index,
+            order.identifier.to_status_identifier(),
+            orders[..index]
+                .iter()
+                .map(|earlier| earlier.identifier.to_status_identifier()),
+        )?;
     }
     Ok(orders)
 }
@@ -750,7 +751,7 @@ fn validate_tpsl_triggers(
 }
 
 /// Validate `orders twap-create` and return its duration in whole minutes.
-pub(super) fn validate_twap_create_args(args: &TwapCreateArgs) -> Result<u64, CliError> {
+pub(super) fn validate_twap_create_args(args: &TwapCreateArgs) -> Result<u32, CliError> {
     positive_quantity(Some(args.size), "size")?;
     if args.duration < 300 {
         return Err(CliError::Configuration(
@@ -764,12 +765,15 @@ pub(super) fn validate_twap_create_args(args: &TwapCreateArgs) -> Result<u64, Cl
                 .to_string(),
         ));
     }
-    if args.duration > 7 * 24 * 60 * 60 {
-        return Err(CliError::Configuration(
-            "TWAP duration cannot exceed 7 days (604800 seconds)".to_string(),
-        ));
-    }
-    Ok(args.duration / 60)
+    const MAX_MINUTES: u32 = 7 * 24 * 60;
+    u32::try_from(args.duration / 60)
+        .ok()
+        .filter(|minutes| *minutes <= MAX_MINUTES)
+        .ok_or_else(|| {
+            CliError::Configuration(
+                "TWAP duration cannot exceed 7 days (604800 seconds)".to_string(),
+            )
+        })
 }
 
 fn validate_create_order_type_flags(args: &CreateArgs) -> Result<(), CliError> {

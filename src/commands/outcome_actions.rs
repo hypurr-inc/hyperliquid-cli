@@ -396,14 +396,14 @@ async fn convert(inv: &Invocation, conversion: Conversion, yes: bool) -> Result<
     )
     .await?;
 
-    inv.print(&Rows::new(vec![OutcomeActionConfirmation {
+    inv.print(&Rows::one(OutcomeActionConfirmation {
         action: conversion.name().to_string(),
         status: "confirmed".to_string(),
         outcome: conversion.outcome(),
         question: conversion.question(),
         amount: conversion.amount_text(),
         quote_token,
-    }]));
+    }));
     Ok(())
 }
 

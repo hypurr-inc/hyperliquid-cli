@@ -1,6 +1,6 @@
-//! What the exchange said about orders: one reading of an order, cancel or
-//! modify status list, and the raw actions the exchange takes that the SDK
-//! has no type for.
+//! What the exchange said about orders: how each send is worded, one reading
+//! of an answer (order, cancel, modify, TWAP and trailing-stop statuses), and
+//! the one action the SDK cannot express.
 //!
 //! Placement rows, chase, and bracket all ask [`Placement`] what a status
 //! means. The wire decode stays here so a new waiting status is handled once.
@@ -9,12 +9,14 @@
 use std::fmt;
 
 use hypersdk::Decimal;
-use hypersdk::hypercore::types::OrderResponseStatus;
+use hypersdk::hypercore::types::api::{TwapCancelStatus, TwapOrderStatus};
+use hypersdk::hypercore::types::{OkResponse, OrderResponseStatus};
 use serde::{Serialize, Serializer};
 
 use super::status::Status;
 use crate::errors::{CliError, Rejection, classify_rejection};
 use crate::exchange_reply;
+use crate::hints;
 use crate::response_sanitization::labelled_untrusted_text;
 
 /// The exchange's own words for refusing an order or a cancel. Remote text, so
@@ -183,36 +185,157 @@ impl Placement {
     }
 }
 
-/// `what` names the action in the error when the exchange answers something else.
-pub(super) fn decode_statuses(
-    response: serde_json::Value,
-    what: &str,
-) -> Result<Vec<OrderResponseStatus>, CliError> {
-    let body = || labelled_untrusted_text(&response.to_string());
-    let Some(typed) =
-        exchange_reply::typed(&response).filter(|typed| matches!(typed.kind, "order" | "cancel"))
-    else {
-        return Err(CliError::Internal(anyhow::anyhow!(
-            "{what} response had unexpected type: {}",
-            body()
-        )));
-    };
-    let statuses = typed
-        .data
-        .and_then(|data| data.get("statuses"))
-        .cloned()
-        .ok_or_else(|| {
+/// How a send reads in errors: `rejected` names the action when the exchange
+/// refuses it ("cancel failed"), `reply` names it when the exchange answers
+/// something this CLI cannot read ("cancel response had unexpected type").
+/// Every send in `orders` is worded here, once.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Wording {
+    pub(super) rejected: &'static str,
+    reply: &'static str,
+}
+
+impl Wording {
+    const fn new(rejected: &'static str, reply: &'static str) -> Self {
+        Self { rejected, reply }
+    }
+
+    /// For an action whose answer nobody reads, so `reply` is never shown.
+    const fn unread(rejected: &'static str) -> Self {
+        Self::new(rejected, rejected)
+    }
+
+    pub(super) const PLACEMENT: Self = Self::new("order placement failed", "order placement");
+    pub(super) const CHASE_QUOTE: Self = Self::new("chase quote failed", "order placement");
+    pub(super) const CHASE_CANCEL: Self = Self::unread("chase cancel failed");
+    pub(super) const BRACKET_ENTRY_CANCEL: Self = Self::unread("bracket entry cancel failed");
+    pub(super) const CANCEL: Self = Self::new("cancel failed", "cancel");
+    pub(super) const CANCEL_ALL: Self = Self::new("cancel-all failed", "cancel-all");
+    pub(super) const MODIFY: Self = Self::new("modify failed", "modify");
+    pub(super) const BATCH_MODIFY: Self = Self::new("batch modify failed", "batch modify");
+    pub(super) const TWAP_CREATE: Self = Self::new("twap-create rejected", "twap-create");
+    pub(super) const TWAP_CANCEL: Self = Self::new("twap-cancel rejected", "twap-cancel");
+    pub(super) const TRAILING_STOP: Self = Self::unread("trailing stop rejected");
+    pub(super) const SCHEDULE_CANCEL: Self = Self::unread("schedule-cancel rejected");
+    pub(super) const SCHEDULE_CANCEL_CLEAR: Self = Self::unread("schedule-cancel clear rejected");
+}
+
+/// What the exchange answered `ok` to a send: the payload, read by the one
+/// accessor that matches the action sent. Each decodes through the SDK's
+/// [`OkResponse`] and keeps this CLI's own error for a reply of another shape.
+#[derive(Debug)]
+pub(super) struct Answer {
+    payload: serde_json::Value,
+    wording: Wording,
+}
+
+impl Answer {
+    pub(super) fn new(payload: serde_json::Value, wording: Wording) -> Self {
+        Self { payload, wording }
+    }
+
+    fn body(&self) -> String {
+        labelled_untrusted_text(&self.payload.to_string())
+    }
+
+    /// The statuses of an order, modify or cancel answer.
+    pub(super) fn statuses(self) -> Result<Vec<OrderResponseStatus>, CliError> {
+        let what = self.wording.reply;
+        let unexpected_type = || {
             CliError::Internal(anyhow::anyhow!(
-                "{what} response missing statuses: {}",
-                body()
+                "{what} response had unexpected type: {}",
+                self.body()
             ))
-        })?;
-    serde_json::from_value(statuses).map_err(|err| {
-        CliError::Internal(anyhow::anyhow!(
-            "{what} response decode failed: {err}; body={}",
-            body()
-        ))
-    })
+        };
+        match exchange_reply::ok_response(&self.payload) {
+            Ok(OkResponse::Order { statuses } | OkResponse::Cancel { statuses }) => Ok(statuses),
+            Ok(_) => Err(unexpected_type()),
+            Err(err) => {
+                let Some(typed) = exchange_reply::typed(&self.payload)
+                    .filter(|typed| matches!(typed.kind, "order" | "cancel"))
+                else {
+                    return Err(unexpected_type());
+                };
+                let Some(statuses) = typed.data.and_then(|data| data.get("statuses")) else {
+                    return Err(CliError::Internal(anyhow::anyhow!(
+                        "{what} response missing statuses: {}",
+                        self.body()
+                    )));
+                };
+                // The statuses' own decode error: the SDK enum wraps the same
+                // failure in other words, and this text is part of the contract.
+                let err = serde_json::from_value::<Vec<OrderResponseStatus>>(statuses.clone())
+                    .err()
+                    .unwrap_or(err);
+                Err(CliError::Internal(anyhow::anyhow!(
+                    "{what} response decode failed: {err}; body={}",
+                    self.body()
+                )))
+            }
+        }
+    }
+
+    /// The ID of the TWAP a `twapOrder` started.
+    pub(super) fn twap_id(self) -> Result<u64, CliError> {
+        match exchange_reply::ok_response(&self.payload) {
+            Ok(OkResponse::TwapOrder {
+                status: TwapOrderStatus::Running { twap_id },
+            }) => Ok(twap_id),
+            Ok(OkResponse::TwapOrder {
+                status: TwapOrderStatus::Error(text),
+            }) => Err(status_error("create TWAP", &text)),
+            _ => Err(CliError::Internal(anyhow::anyhow!(
+                "{} returned unexpected response: {}",
+                self.wording.reply,
+                self.payload
+            ))),
+        }
+    }
+
+    /// A `twapCancel` the exchange carried out.
+    pub(super) fn twap_cancelled(self) -> Result<(), CliError> {
+        match exchange_reply::ok_response(&self.payload) {
+            Ok(OkResponse::TwapCancel {
+                status: TwapCancelStatus::Success,
+            }) => Ok(()),
+            Ok(OkResponse::TwapCancel {
+                status: TwapCancelStatus::Error(text),
+            }) => Err(status_error("cancel TWAP", &text)),
+            _ => Err(match self.payload.pointer("/data/status") {
+                Some(status) => CliError::Internal(anyhow::anyhow!(
+                    "{} returned unexpected status: {status}",
+                    self.wording.reply
+                )),
+                None => CliError::Internal(anyhow::anyhow!(
+                    "{} returned unexpected response: {}",
+                    self.wording.reply,
+                    self.payload
+                )),
+            }),
+        }
+    }
+
+    /// The ID of the order a trailing stop placed. The SDK types only the
+    /// accepted answer; a refusal's `error` is read where the exchange puts
+    /// it, and any other answer leaves the outcome unknown.
+    pub(super) fn trailing_stop_oid(self) -> Result<u64, CliError> {
+        if let Ok(OkResponse::TrailingStop { oid }) = exchange_reply::ok_response(&self.payload) {
+            return Ok(oid);
+        }
+        if let Some(error) = self
+            .payload
+            .pointer("/data/error")
+            .or_else(|| self.payload.pointer("/data/status/error"))
+            .and_then(serde_json::Value::as_str)
+        {
+            return Err(status_error("place trailing stop", error));
+        }
+        Err(CliError::unknown_outcome(format!(
+            "The exchange answered ok without an order ID ({}). Check `{}` before placing another trailing stop",
+            self.body(),
+            hints::CHECK_LIVE_COMMAND
+        )))
+    }
 }
 
 /// Fail on the first rejected status, with the exchange text sanitized and
@@ -231,13 +354,9 @@ pub(super) fn modification_result_oid(statuses: &[OrderResponseStatus]) -> Optio
     statuses.iter().find_map(OrderResponseStatus::oid)
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub(super) enum TwapExchangeAction {
-    TwapOrder { twap: TwapOrderAction },
-    TwapCancel { a: usize, t: u64 },
-}
-
+/// The `scheduleCancel` that clears the switch. The SDK's `ScheduleCancel`
+/// serializes `time: null`, and the exchange takes the clear without the key,
+/// so this action omits it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ScheduleCancelRawAction {
@@ -245,56 +364,6 @@ pub(super) struct ScheduleCancelRawAction {
     pub(super) action_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) time: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct TwapOrderAction {
-    pub(super) a: usize,
-    pub(super) b: bool,
-    pub(super) s: String,
-    pub(super) r: bool,
-    pub(super) m: u64,
-    pub(super) t: bool,
-}
-
-pub(super) fn parse_twap_create_response(response: serde_json::Value) -> Result<u64, CliError> {
-    if let Some(error) = response
-        .pointer("/data/status/error")
-        .and_then(serde_json::Value::as_str)
-    {
-        return Err(status_error("create TWAP", error));
-    }
-
-    response
-        .pointer("/data/status/running/twapId")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| {
-            CliError::Internal(anyhow::anyhow!(
-                "twap-create returned unexpected response: {}",
-                response
-            ))
-        })
-}
-
-pub(super) fn parse_twap_cancel_response(response: serde_json::Value) -> Result<(), CliError> {
-    let status = response.pointer("/data/status").ok_or_else(|| {
-        CliError::Internal(anyhow::anyhow!(
-            "twap-cancel returned unexpected response: {}",
-            response
-        ))
-    })?;
-
-    if status.as_str() == Some("success") {
-        return Ok(());
-    }
-
-    if let Some(error) = status.get("error").and_then(serde_json::Value::as_str) {
-        return Err(status_error("cancel TWAP", error));
-    }
-
-    Err(CliError::Internal(anyhow::anyhow!(
-        "twap-cancel returned unexpected status: {status}"
-    )))
 }
 
 #[cfg(test)]
@@ -357,7 +426,9 @@ mod tests {
                 ]
             }
         });
-        let statuses = decode_statuses(response, "order placement").unwrap();
+        let statuses = Answer::new(response, Wording::PLACEMENT)
+            .statuses()
+            .unwrap();
         assert!(matches!(
             statuses.as_slice(),
             [
@@ -369,13 +440,14 @@ mod tests {
         ensure_action_statuses_ok(&statuses, "place order").unwrap();
         assert_eq!(modification_result_oid(&statuses), Some(12345));
 
-        let waiting_only = decode_statuses(
+        let waiting_only = Answer::new(
             serde_json::json!({
                 "type": "order",
                 "data": { "statuses": ["waitingForTrigger", "waitingForFill"] }
             }),
-            "order placement",
+            Wording::PLACEMENT,
         )
+        .statuses()
         .unwrap();
         ensure_action_statuses_ok(&waiting_only, "place order").unwrap();
         assert_eq!(modification_result_oid(&waiting_only), None);
@@ -383,36 +455,142 @@ mod tests {
 
     #[test]
     fn the_decoder_reads_cancel_responses_and_names_the_action_when_the_shape_is_wrong() {
-        let cancelled = decode_statuses(
+        let cancelled = Answer::new(
             serde_json::json!({"type": "cancel", "data": {"statuses": ["success"]}}),
-            "cancel",
+            Wording::CANCEL,
         )
+        .statuses()
         .unwrap();
         assert!(matches!(
             cancelled.as_slice(),
             [OrderResponseStatus::Success]
         ));
 
-        for (response, what, fragment) in [
+        // The whole text is the CLI's contract: the decode error is the one a
+        // direct read of the statuses gives, not the SDK enum's wrapper.
+        let statuses_error =
+            serde_json::from_value::<Vec<OrderResponseStatus>>(serde_json::json!([42]))
+                .unwrap_err();
+        for (response, wording, text) in [
             (
                 serde_json::json!({"type": "default"}),
-                "cancel",
-                "cancel response had unexpected type",
+                Wording::CANCEL,
+                "cancel response had unexpected type: ".to_string()
+                    + &labelled_untrusted_text(r#"{"type":"default"}"#),
+            ),
+            (
+                serde_json::json!({"type": "twapOrder", "data": {"status": {"error": "x"}}}),
+                Wording::CANCEL,
+                "cancel response had unexpected type: ".to_string()
+                    + &labelled_untrusted_text(
+                        r#"{"data":{"status":{"error":"x"}},"type":"twapOrder"}"#,
+                    ),
+            ),
+            (
+                serde_json::json!({"data": {"statuses": []}}),
+                Wording::CANCEL,
+                "cancel response had unexpected type: ".to_string()
+                    + &labelled_untrusted_text(r#"{"data":{"statuses":[]}}"#),
             ),
             (
                 serde_json::json!({"type": "order"}),
-                "modify",
-                "modify response missing statuses",
+                Wording::MODIFY,
+                "modify response missing statuses: ".to_string()
+                    + &labelled_untrusted_text(r#"{"type":"order"}"#),
+            ),
+            (
+                serde_json::json!({"type": "cancel", "data": {"other": 1}}),
+                Wording::CANCEL,
+                "cancel response missing statuses: ".to_string()
+                    + &labelled_untrusted_text(r#"{"data":{"other":1},"type":"cancel"}"#),
             ),
             (
                 serde_json::json!({"type": "order", "data": {"statuses": [42]}}),
-                "cancel-all",
-                "cancel-all response decode failed",
+                Wording::CANCEL_ALL,
+                format!(
+                    "cancel-all response decode failed: {statuses_error}; body={}",
+                    labelled_untrusted_text(r#"{"data":{"statuses":[42]},"type":"order"}"#)
+                ),
             ),
         ] {
-            let err = decode_statuses(response, what).unwrap_err();
-            assert!(err.to_string().contains(fragment), "{err}");
+            let err = Answer::new(response, wording).statuses().unwrap_err();
+            assert_eq!(err.to_string(), text);
         }
+    }
+
+    #[test]
+    fn a_twap_answer_is_its_id_or_the_exchange_text_and_anything_else_is_unexpected() {
+        let twap = |status: serde_json::Value| {
+            Answer::new(
+                serde_json::json!({"type": "twapOrder", "data": {"status": status}}),
+                Wording::TWAP_CREATE,
+            )
+        };
+        assert_eq!(
+            twap(serde_json::json!({"running": {"twapId": 77_738_308}}))
+                .twap_id()
+                .unwrap(),
+            77_738_308
+        );
+        let err = twap(serde_json::json!({"error": "Invalid TWAP duration"}))
+            .twap_id()
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert!(err.to_string().contains("Couldn't create TWAP"), "{err}");
+        assert!(err.to_string().contains("[untrusted remote data]"), "{err}");
+
+        let odd = Answer::new(serde_json::json!({"type": "default"}), Wording::TWAP_CREATE);
+        assert_eq!(
+            odd.twap_id().unwrap_err().to_string(),
+            r#"twap-create returned unexpected response: {"type":"default"}"#
+        );
+
+        let cancel = |status: serde_json::Value| {
+            Answer::new(
+                serde_json::json!({"type": "twapCancel", "data": {"status": status}}),
+                Wording::TWAP_CANCEL,
+            )
+        };
+        cancel(serde_json::json!("success"))
+            .twap_cancelled()
+            .unwrap();
+        let err = cancel(serde_json::json!({"error": "TWAP was never placed"}))
+            .twap_cancelled()
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert!(err.to_string().contains("Couldn't cancel TWAP"), "{err}");
+        assert_eq!(
+            cancel(serde_json::json!("weird"))
+                .twap_cancelled()
+                .unwrap_err()
+                .to_string(),
+            r#"twap-cancel returned unexpected status: "weird""#
+        );
+        assert_eq!(
+            Answer::new(serde_json::json!({"type": "default"}), Wording::TWAP_CANCEL)
+                .twap_cancelled()
+                .unwrap_err()
+                .to_string(),
+            r#"twap-cancel returned unexpected response: {"type":"default"}"#
+        );
+    }
+
+    #[test]
+    fn a_trailing_stop_answer_is_its_oid_or_labelled_rejection_or_an_unknown_outcome() {
+        let answer = |payload| Answer::new(payload, Wording::TRAILING_STOP);
+        let ok = serde_json::json!({"type": "trailingStop", "data": {"oid": 77738308}});
+        assert_eq!(answer(ok).trailing_stop_oid().unwrap(), 77_738_308);
+
+        let rejected = serde_json::json!({"type": "trailingStop", "data": {"error": "Bad stop"}});
+        let err = answer(rejected).trailing_stop_oid().unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert!(err.to_string().contains("[untrusted remote data]"), "{err}");
+
+        let odd = serde_json::json!({"type": "default"});
+        assert!(matches!(
+            answer(odd).trailing_stop_oid().unwrap_err(),
+            CliError::UnknownOutcome(_)
+        ));
     }
 
     #[test]

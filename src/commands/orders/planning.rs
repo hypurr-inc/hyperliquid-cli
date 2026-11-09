@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use chrono::Utc;
 use hypersdk::hypercore::Cloid;
 use hypersdk::hypercore::types::{
-    AssetPosition, OrderGrouping, OrderRequest, OrderTypePlacement, TimeInForce, TpSl,
-    TrailingStop, TrailingStopRetracement,
+    Action, AssetPosition, OrderGrouping, OrderRequest, OrderTypePlacement, TimeInForce, TpSl,
+    TrailingStop, TrailingStopRetracement, TwapOrderParams,
 };
 use hypersdk::{Address, Decimal};
 
@@ -19,7 +19,6 @@ use super::args::{
     TriggerPriceSpec, TwapCancelArgs, TwapCreateArgs,
 };
 use super::cloid::{cloid_from_wire, parse_cloid, wire_cloid};
-use super::exchange::{TwapExchangeAction, TwapOrderAction};
 use super::prepared::{
     CreateOrderSubmission, NormalTpslOrder, PreparedOrder, PreparedOrderBatch, PreparedTpslBatch,
     PreparedTpslLeg, QuoteAmount, TpslLegKind, order_batch, priority_grouping,
@@ -41,7 +40,7 @@ use crate::margin::{MarginModeArg, MarginPlan};
 use crate::settings::Settings;
 
 pub(super) struct TwapCreatePlan {
-    pub(super) action: TwapExchangeAction,
+    pub(super) action: Action,
     pub(super) perp: PerpAsset,
     pub(super) coin: String,
     pub(super) side: String,
@@ -55,7 +54,7 @@ pub(super) struct TwapCreatePlan {
 }
 
 pub(super) struct TwapCancelPlan {
-    pub(super) action: TwapExchangeAction,
+    pub(super) action: Action,
     pub(super) coin: String,
     pub(super) twap_id: u64,
 }
@@ -836,11 +835,11 @@ pub(super) fn prepare_twap_create_plan(
     let coin = perp.display_name();
     let size = MarketPrecision::of_perp(perp).size(args.size, &coin)?;
     Ok(TwapCreatePlan {
-        action: TwapExchangeAction::TwapOrder {
-            twap: TwapOrderAction {
+        action: Action::TwapOrder {
+            twap: TwapOrderParams {
                 a: perp.index,
                 b: args.side.is_buy(),
-                s: size.normalize().to_string(),
+                s: size.normalize(),
                 r: false,
                 m: minutes,
                 t: args.randomize,
@@ -851,7 +850,7 @@ pub(super) fn prepare_twap_create_plan(
         side: args.side.to_string(),
         size,
         duration_seconds: args.duration,
-        duration_minutes: minutes,
+        duration_minutes: u64::from(minutes),
         randomize: args.randomize,
         margin,
     })
@@ -859,7 +858,7 @@ pub(super) fn prepare_twap_create_plan(
 
 pub(super) fn prepare_twap_cancel_plan(perp: &PerpAsset, args: &TwapCancelArgs) -> TwapCancelPlan {
     TwapCancelPlan {
-        action: TwapExchangeAction::TwapCancel {
+        action: Action::TwapCancel {
             a: perp.index,
             t: args.twap_id,
         },

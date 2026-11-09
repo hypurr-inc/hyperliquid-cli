@@ -57,12 +57,12 @@ impl<'a> OrderRun<'a> {
     }
 
     /// A command that never asks (`cancel`, `modify`, `twap-cancel`): it has no
-    /// `--yes` to read.
+    /// `--yes` to read. That none of them prompts is pinned over the source by
+    /// `cli::tests::commands_run_unprompted_only_when_their_spec_never_prompts`.
     pub(super) fn unprompted(
         inv: &'a Invocation,
         on_behalf_of: Option<&str>,
     ) -> Result<Self, anyhow::Error> {
-        debug_assert!(!inv.requires_approval(false)?);
         Self::new(inv, on_behalf_of, false)
     }
 

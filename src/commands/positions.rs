@@ -334,7 +334,7 @@ impl CliCommand for PositionsUpdateLeverage {
         )
         .await?;
 
-        inv.print(&Rows::new(vec![PositionActionConfirmation {
+        inv.print(&Rows::one(PositionActionConfirmation {
             coin,
             action: "update-leverage".to_string(),
             status: "updated".to_string(),
@@ -342,7 +342,7 @@ impl CliCommand for PositionsUpdateLeverage {
             target_leverage: None,
             margin_mode: Some(mode.to_string()),
             amount: None,
-        }]));
+        }));
         Ok(())
     }
 }
@@ -416,7 +416,7 @@ impl CliCommand for PositionsUpdateMargin {
         )
         .await?;
 
-        inv.print(&Rows::new(vec![PositionActionConfirmation {
+        inv.print(&Rows::one(PositionActionConfirmation {
             coin,
             action: "update-margin".to_string(),
             status: "updated".to_string(),
@@ -424,7 +424,7 @@ impl CliCommand for PositionsUpdateMargin {
             target_leverage: None,
             margin_mode: None,
             amount: Some(args.amount),
-        }]));
+        }));
         Ok(())
     }
 }
@@ -493,7 +493,7 @@ impl CliCommand for PositionsTopUpMargin {
         )
         .await?;
 
-        inv.print(&Rows::new(vec![PositionActionConfirmation {
+        inv.print(&Rows::one(PositionActionConfirmation {
             coin,
             action: "top-up-margin".to_string(),
             status: "updated".to_string(),
@@ -501,7 +501,7 @@ impl CliCommand for PositionsTopUpMargin {
             target_leverage: Some(leverage),
             margin_mode: None,
             amount: None,
-        }]));
+        }));
         Ok(())
     }
 }
