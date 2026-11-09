@@ -13,6 +13,7 @@ pub mod commands;
 pub mod config;
 pub mod dry_run;
 pub mod errors;
+pub mod exchange_reply;
 pub mod http_api;
 pub mod input_hardening;
 pub mod invocation;

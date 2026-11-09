@@ -318,11 +318,29 @@ fn help_command(path: &[String]) -> String {
     }
 }
 
-fn is_help_or_version_token(arg: &OsString) -> bool {
-    matches!(
-        arg.to_str(),
-        Some("-h" | "--help" | "-v" | "-V" | "--version")
-    )
+/// The tokens that make clap print help or the version and stop, read from
+/// the arguments `command` defines for them rather than listed a second time.
+fn help_or_version_tokens(command: &clap::Command) -> Vec<String> {
+    use clap::ArgAction;
+
+    command
+        .get_arguments()
+        .filter(|arg| {
+            matches!(
+                arg.get_action(),
+                ArgAction::Help | ArgAction::HelpShort | ArgAction::HelpLong | ArgAction::Version
+            )
+        })
+        .flat_map(|arg| {
+            let longs = arg.get_long().map(|long| format!("--{long}"));
+            let shorts = arg
+                .get_short()
+                .into_iter()
+                .chain(arg.get_all_short_aliases().into_iter().flatten())
+                .map(|short| format!("-{short}"));
+            longs.into_iter().chain(shorts).collect::<Vec<_>>()
+        })
+        .collect()
 }
 
 /// Parse as much of the command line as possible, skipping what clap rejects.
@@ -331,12 +349,16 @@ fn is_help_or_version_token(arg: &OsString) -> bool {
 /// which global options were given, so errors can be rendered in the right
 /// format and point at the right help page.
 fn lenient_matches(raw_args: &[OsString]) -> Option<ArgMatches> {
+    let mut command = build_command().ignore_errors(true);
+    let help_or_version = help_or_version_tokens(&command);
     let mut args: Vec<OsString> = raw_args
         .iter()
-        .filter(|arg| !is_help_or_version_token(arg))
+        .filter(|arg| {
+            !arg.to_str()
+                .is_some_and(|arg| help_or_version.iter().any(|token| token == arg))
+        })
         .cloned()
         .collect();
-    let mut command = build_command().ignore_errors(true);
     loop {
         match command.try_get_matches_from_mut(&args) {
             Ok(matches) => return Some(matches),
@@ -430,12 +452,19 @@ fn prepare_usage_error(mut err: clap::Error, path: &[String]) -> clap::Error {
 /// was actually reached, and a pointer to its help.
 fn usage_error_text(err: clap::Error, path: &[String], color: bool) -> String {
     let err = prepare_usage_error(err, path);
-    let text = styled_text(&err.render(), color);
-    let body = match text.rfind("\n\nFor more information") {
-        Some(index) => &text[..index],
-        None => text.trim_end(),
-    };
+    let body = clap_message(&err, color);
     format!("{body}\n\nSee all options:\n    {}\n", help_command(path))
+}
+
+/// What clap reported, without its trailing "For more information" pointer:
+/// this shell ends every usage error with its own pointer to the right help
+/// page. The one place clap's rendered text is cut.
+fn clap_message(err: &clap::Error, color: bool) -> String {
+    let text = styled_text(&err.render(), color);
+    match text.rfind("\n\nFor more information") {
+        Some(index) => text[..index].to_string(),
+        None => text.trim_end().to_string(),
+    }
 }
 
 /// The same usage error for the JSON envelope, read from what clap reported:
@@ -460,11 +489,8 @@ fn usage_error_parts(err: clap::Error, path: &[String]) -> errors::UsageParts {
         Some(ContextValue::String(value)) => Some(value.clone()),
         _ => None,
     });
-    let text = styled_text(&err.render(), false);
-    let text = text.trim();
-    let message = text
-        .rfind("\n\nFor more information")
-        .map_or(text, |at| &text[..at]);
+    let message = clap_message(&err, false);
+    let message = message.trim();
     let message = message.strip_prefix("error: ").unwrap_or(message);
     errors::UsageParts {
         headline: message
@@ -1246,5 +1272,25 @@ mod tests {
                 .unwrap_or_else(|| panic!("no command selected for {argv:?}"));
             assert_eq!(selected.entry.spec.key(), expected_path);
         }
+    }
+
+    #[test]
+    fn the_help_and_version_tokens_are_the_flags_the_command_defines() {
+        let mut tokens = help_or_version_tokens(&build_command());
+        tokens.sort();
+        assert_eq!(tokens, ["--help", "--version", "-V", "-h", "-v"]);
+    }
+
+    #[test]
+    fn a_failed_parse_still_reads_the_command_around_a_help_flag() {
+        let raw: Vec<OsString> = ["hyperliquid", "orders", "create", "--help", "--nope"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let matches = lenient_matches(&raw).expect("leniently parsed");
+        assert_eq!(
+            command_path_from_matches(&matches).unwrap(),
+            ["orders", "create"]
+        );
     }
 }

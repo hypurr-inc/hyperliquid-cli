@@ -10,13 +10,26 @@ use std::sync::OnceLock;
 use super::terminal::{self, Terminal};
 use crate::settings::{EnvSource, env as settings_env};
 
-pub const CYAN: &str = "\x1b[36m";
-pub const GREEN: &str = "\x1b[32m";
-pub const RED: &str = "\x1b[31m";
-pub const GRAY: &str = "\x1b[90m";
-pub const YELLOW: &str = "\x1b[33m";
-pub const BOLD: &str = "\x1b[1m";
-pub const RESET: &str = "\x1b[0m";
+macro_rules! style_codes {
+    ($($name:ident = $code:literal),+ $(,)?) => {
+        $(pub const $name: &str = $code;)+
+
+        /// Every style sequence the helpers here can emit. Table sanitising
+        /// lets exactly these through, so a new style appears here by being
+        /// declared.
+        pub const ALL_STYLES: &[&str] = &[$($name),+];
+    };
+}
+
+style_codes! {
+    CYAN = "\x1b[36m",
+    GREEN = "\x1b[32m",
+    RED = "\x1b[31m",
+    GRAY = "\x1b[90m",
+    YELLOW = "\x1b[33m",
+    BOLD = "\x1b[1m",
+    RESET = "\x1b[0m",
+}
 
 /// Wrap `text` in `code` unconditionally. Styling decisions belong to the
 /// helpers below; tests use this to assert styled output deterministically.

@@ -1004,6 +1004,7 @@ impl CliCommand for WalletShow {
         "Show current wallet metadata.",
     )
     .risk(Risk::LocalSecret)
+    .network(crate::command_spec::NetworkUse::Optional)
     .ows(OwsSupport::AddressSelectorSupported)
     .auth();
 
@@ -1026,6 +1027,7 @@ impl CliCommand for WalletAddress {
         "Print the configured wallet address.",
     )
     .risk(Risk::LocalSecret)
+    .network(crate::command_spec::NetworkUse::Optional)
     .ows(OwsSupport::AddressSelectorSupported)
     .auth();
 

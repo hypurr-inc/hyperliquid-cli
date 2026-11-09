@@ -22,7 +22,7 @@ use crate::http_api::ApiClient;
 use crate::input_hardening::{FilePolicy, parse_json_text, read_json_file};
 use crate::mode::Mode;
 use crate::network::Network;
-use crate::output::{OutputFormat, Session, TableData};
+use crate::output::{Notice, OutputFormat, Session, TableData};
 use crate::settings::Settings;
 use crate::signing::SelectedSigner;
 use crate::wire::InfoRequest;
@@ -237,7 +237,7 @@ impl Invocation {
         let api = ApiClient::new(network, self.settings.api_base_url_override(network)?)
             .with_request_lifetime(self.flags.expires_after);
         Ok(if self.mode.person_on_stderr() {
-            api.on_retry(|| eprintln!("Retrying automatically…"))
+            api.on_retry(|| Notice::Retrying.eprint(false))
         } else {
             api
         })

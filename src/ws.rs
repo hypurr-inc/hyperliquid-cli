@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use clap::Args;
 use futures::StreamExt;
+use hypersdk::Address;
 use hypersdk::hypercore::{Chain, Incoming, Subscription, WebSocket, ws::Event};
 
 use crate::errors::CliError;
@@ -23,6 +24,41 @@ pub fn ensure_subscription_count(count: usize) -> Result<(), CliError> {
     Ok(())
 }
 
+/// The account a subscription is about. The match is exhaustive, so a
+/// subscription the SDK adds must say whether it counts toward the
+/// unique-user limit.
+fn subscribed_user(subscription: &Subscription) -> Option<Address> {
+    match subscription {
+        Subscription::OrderUpdates { user }
+        | Subscription::UserFills { user }
+        | Subscription::UserEvents { user }
+        | Subscription::UserTwapSliceFills { user }
+        | Subscription::UserTwapHistory { user }
+        | Subscription::ActiveAssetData { user, .. }
+        | Subscription::UserHistoricalOrders { user }
+        | Subscription::ClearinghouseState { user, .. }
+        | Subscription::AllDexsClearinghouseState { user }
+        | Subscription::OpenOrders { user, .. }
+        | Subscription::SpotState { user, .. }
+        | Subscription::Notification { user }
+        | Subscription::WebData3 { user }
+        | Subscription::TwapStates { user, .. }
+        | Subscription::UserFundings { user }
+        | Subscription::UserNonFundingLedgerUpdates { user } => Some(*user),
+        Subscription::Bbo { .. }
+        | Subscription::Trades { .. }
+        | Subscription::L2Book { .. }
+        | Subscription::Candle { .. }
+        | Subscription::AllMids { .. }
+        | Subscription::ActiveAssetCtx { .. }
+        | Subscription::AssetCtxs { .. }
+        | Subscription::SpotAssetCtxs
+        | Subscription::AllDexsAssetCtxs
+        | Subscription::FastAssetCtxs
+        | Subscription::OutcomeMetaUpdates => None,
+    }
+}
+
 /// Refuse a subscription set the exchange would reject, before any socket opens.
 ///
 /// The exchange limits (rate-limits page): 1000 subscriptions and 10 unique users
@@ -30,16 +66,7 @@ pub fn ensure_subscription_count(count: usize) -> Result<(), CliError> {
 /// connection, so the connection limits cannot be reached from here.
 pub fn ensure_within_limits(subscriptions: &[Subscription]) -> Result<(), CliError> {
     ensure_subscription_count(subscriptions.len())?;
-    let users: HashSet<String> = subscriptions
-        .iter()
-        .filter_map(|subscription| {
-            serde_json::to_value(subscription)
-                .ok()?
-                .get("user")?
-                .as_str()
-                .map(str::to_ascii_lowercase)
-        })
-        .collect();
+    let users: HashSet<Address> = subscriptions.iter().filter_map(subscribed_user).collect();
     if users.len() > MAX_SUBSCRIBED_USERS {
         return Err(CliError::Unsupported(format!(
             "{} distinct users requested, but Hyperliquid allows at most {MAX_SUBSCRIBED_USERS} unique users across user-specific WebSocket subscriptions per IP.",
@@ -118,6 +145,14 @@ pub fn closed_before(what: &str) -> CliError {
     CliError::Unavailable(format!("WebSocket closed before receiving {what}."))
 }
 
+/// The wait for `awaited` ran out of time.
+fn timed_out(awaited: &Awaited) -> CliError {
+    CliError::Timeout(format!(
+        "Timed out waiting for Hyperliquid {}. Check your network connection.",
+        awaited.timed_out
+    ))
+}
+
 /// Subscribe on a fresh socket and return the first message `pick` accepts.
 pub async fn first_matching_message<T>(
     chain: Chain,
@@ -141,12 +176,7 @@ pub async fn first_matching_message<T>(
         Err(closed_before(awaited.closed))
     })
     .await
-    .map_err(|_| {
-        CliError::Unavailable(format!(
-            "Timed out waiting for Hyperliquid {}. Check your network connection.",
-            awaited.timed_out
-        ))
-    })?
+    .map_err(|_| timed_out(awaited))?
 }
 
 #[cfg(test)]
@@ -244,5 +274,21 @@ mod tests {
             serde_json::to_value(BookAggregationArgs::default().subscription("BTC")).unwrap(),
             serde_json::json!({"type": "l2Book", "coin": "BTC"})
         );
+    }
+
+    #[test]
+    fn waiting_out_the_socket_is_a_timeout_like_a_silent_subscription() {
+        let awaited = Awaited {
+            closed: "a snapshot",
+            timed_out: "snapshot",
+        };
+        let error = timed_out(&awaited);
+        assert_eq!(error.reason(), "timeout");
+        assert_eq!(error.exit_code(), 12);
+        assert_eq!(
+            error.to_string(),
+            "Timed out waiting for Hyperliquid snapshot. Check your network connection."
+        );
+        assert_eq!(closed_before("a snapshot").reason(), "network_error");
     }
 }

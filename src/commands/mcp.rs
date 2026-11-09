@@ -11,7 +11,8 @@ impl CliCommand for Mcp {
         "system",
         "Run Model Context Protocol (MCP) stdio server",
         "Run the Model Context Protocol (MCP) server over standard input and output (stdio), exposing all Hyperliquid CLI commands as tools for AI agents.",
-    );
+    )
+    .hidden_from_mcp();
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         crate::mcp::run_stdio_server(inv.settings().env())

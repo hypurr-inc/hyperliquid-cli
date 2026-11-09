@@ -18,12 +18,10 @@ use hypersdk::hypercore::{Chain, Subscription, WebSocket, ws::Event as WsEvent};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::mode::{Mode, NON_INTERACTIVE_FLAG};
+use crate::output::notice::{JsonLinesReason, Notice};
 use crate::output::{self, OutputFormat, Session, TableData};
 use crate::settings::env;
-use crate::stream::{
-    CONNECTION_LOST_NOTICE, EXIT_SIGINT, JSON_LINES_DRIVEN_NOTICE, JSON_LINES_STDIN_NOTICE,
-    JSON_LINES_STDOUT_NOTICE, StreamBounds, StreamEnd, run_stream, write_stdout_line,
-};
+use crate::stream::{EXIT_SIGINT, StreamBounds, StreamEnd, run_stream, write_stdout_line};
 use crate::ws::websocket_for_chain;
 
 const WATCH_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -133,7 +131,11 @@ impl WatchOutput for StdoutWatchOutput {
             )
         )?;
         if connection_lost {
-            writeln!(stdout, "{}", output::colors::yellow(CONNECTION_LOST_NOTICE))?;
+            writeln!(
+                stdout,
+                "{}",
+                output::colors::yellow(&Notice::ConnectionLost.text())
+            )?;
         } else {
             writeln!(stdout)?;
         }
@@ -195,7 +197,7 @@ where
     // A human format that reaches the NDJSON path was asked for explicitly:
     // non-terminal stdout defaults to JSON before this point.
     if render_mode == SnapshotWatchRenderMode::Ndjson && format != OutputFormat::Json {
-        eprintln!("{}", json_lines_notice(mode));
+        Notice::JsonLines(json_lines_reason(mode)).eprint(false);
     }
 
     run_stream(async move {
@@ -305,13 +307,13 @@ fn snapshot_watch_render_mode(
 }
 
 /// Why a human format streams NDJSON instead of drawing the TUI.
-fn json_lines_notice(mode: &Mode) -> &'static str {
+fn json_lines_reason(mode: &Mode) -> JsonLinesReason {
     if !mode.terminal.stdout {
-        JSON_LINES_STDOUT_NOTICE
+        JsonLinesReason::StdoutNotTerminal
     } else if !mode.terminal.stdin {
-        JSON_LINES_STDIN_NOTICE
+        JsonLinesReason::StdinNotTerminal
     } else {
-        JSON_LINES_DRIVEN_NOTICE
+        JsonLinesReason::Driven
     }
 }
 
@@ -451,8 +453,8 @@ mod tests {
             assert!(message.contains("--format json"), "{name}: {message}");
             assert!(message.contains("is driving this run"), "{name}: {message}");
             assert_eq!(
-                json_lines_notice(&driven),
-                JSON_LINES_DRIVEN_NOTICE,
+                json_lines_reason(&driven),
+                JsonLinesReason::Driven,
                 "{name}"
             );
         }
@@ -461,12 +463,12 @@ mod tests {
     #[test]
     fn the_ndjson_notice_names_the_stream_that_is_not_a_terminal() {
         assert_eq!(
-            json_lines_notice(&mode(OutputFormat::Pretty, true, false)),
-            JSON_LINES_STDOUT_NOTICE
+            json_lines_reason(&mode(OutputFormat::Pretty, true, false)),
+            JsonLinesReason::StdoutNotTerminal
         );
         assert_eq!(
-            json_lines_notice(&mode(OutputFormat::Pretty, false, true)),
-            JSON_LINES_STDIN_NOTICE
+            json_lines_reason(&mode(OutputFormat::Pretty, false, true)),
+            JsonLinesReason::StdinNotTerminal
         );
     }
 
