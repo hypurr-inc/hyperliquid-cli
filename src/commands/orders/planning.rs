@@ -5,11 +5,36 @@
 
 use std::collections::HashMap;
 
+use chrono::Utc;
+use hypersdk::hypercore::types::{
+    Action, AssetPosition, BasicOrder, BatchCancel, BatchCancelCloid, BatchModify, BatchOrder,
+    Cancel, CancelByCloid, Modify, OrderGrouping, OrderRequest, OrderTypePlacement, Side,
+    TimeInForce, TpSl,
+};
+use hypersdk::hypercore::{Cloid, HttpClient};
+use hypersdk::{Address, Decimal};
+
+use super::rendering::ModifyConfirmation;
 use super::validation::{
     AttachedTpsl, BuilderRequest, MarketPrecision, MarketSizing, OrderKind, OrderSpec,
     validate_order_for_market, validate_twap_create_args,
 };
-use super::*;
+use super::{
+    BatchCreateArgs, BatchCreateOrder, CancelAllArgs, CancelArgs, CreateArgs, CreateOrderType,
+    MarginModeArg, ModifyArgs, OrderBuilderFee, OrderIdentifier, OrderSide, PreparedOrder,
+    PreparedOrderBatch, PreparedOrderLeg, PreparedTpslBatch, PreparedTpslLeg, ScaleArgs,
+    ScheduleCancelArgs, TifArg, TpslArgs, TpslGroupingArg, TpslLegKind, TriggerPriceSpec,
+    TwapCancelArgs, TwapCreateArgs, TwapExchangeAction, TwapOrderAction, cloid_from_wire,
+    filter_orders_by_coin, lookup_order, order_type_placement, parse_cloid, parse_lookup_cloid,
+    resolve_cancel_all_coin_filter, wire_cloid,
+};
+use crate::assets::asset_id::{parse_spot_coin_key, spot_asset_index, spot_coin_key};
+use crate::assets::{
+    AssetQuery, AssetResolver, Market, OutcomeAsset, PerpAsset, parse_asset_query,
+    qualify_dex_asset,
+};
+use crate::commands::builder;
+use crate::errors::{CliError, from_sdk};
 
 pub(super) struct OrderDryRunPlan {
     command: &'static str,
@@ -564,7 +589,10 @@ fn scale_prices(
         .collect())
 }
 
-pub(super) fn scale_sizes(total_size: Decimal, order_count: usize) -> Result<Vec<Decimal>, CliError> {
+pub(super) fn scale_sizes(
+    total_size: Decimal,
+    order_count: usize,
+) -> Result<Vec<Decimal>, CliError> {
     if order_count == 0 {
         return Err(CliError::Configuration(
             "orders scale requires --orders greater than zero".to_string(),
@@ -781,18 +809,18 @@ pub(super) async fn prepare_position_tpsl_batch(
 ) -> Result<PreparedTpslBatch, CliError> {
     let (close_side, size, entry) = match (args.side, args.size) {
         (Some(side), Some(size)) => {
-            let entry = if trigger_specs_need_entry(args.take_profit.as_ref(), args.stop_loss.as_ref())
-            {
-                let position = fetch_position(client, user, perp).await?.ok_or_else(|| {
-                    CliError::Unsupported(format!(
-                        "percent and entry TP/SL require an open {} position",
-                        perp.name
-                    ))
-                })?;
-                position.position.entry_px
-            } else {
-                None
-            };
+            let entry =
+                if trigger_specs_need_entry(args.take_profit.as_ref(), args.stop_loss.as_ref()) {
+                    let position = fetch_position(client, user, perp).await?.ok_or_else(|| {
+                        CliError::Unsupported(format!(
+                            "percent and entry TP/SL require an open {} position",
+                            perp.name
+                        ))
+                    })?;
+                    position.position.entry_px
+                } else {
+                    None
+                };
             (side, size, entry)
         }
         (None, None) => {
@@ -815,7 +843,12 @@ pub(super) async fn prepare_position_tpsl_batch(
     let (take_profit, stop_loss) = position_tpsl_triggers(perp, args, close_side, entry)?;
     let cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
     Ok(position_tpsl_batch(
-        perp, close_side, size, take_profit, stop_loss, cloid,
+        perp,
+        close_side,
+        size,
+        take_profit,
+        stop_loss,
+        cloid,
     ))
 }
 
@@ -1203,7 +1236,10 @@ pub(super) fn create_dry_run_plan(
     .acting_for(&args.on_behalf_of))
 }
 
-pub(super) fn scale_dry_run_plan(prepared: &PreparedOrderBatch, args: &ScaleArgs) -> OrderDryRunPlan {
+pub(super) fn scale_dry_run_plan(
+    prepared: &PreparedOrderBatch,
+    args: &ScaleArgs,
+) -> OrderDryRunPlan {
     let mut preview = order_batch_dry_run_args(prepared);
     insert_margin_mode(&mut preview, args.margin_mode);
     OrderDryRunPlan::new("orders scale", "submit_order_batch", preview)
@@ -1225,7 +1261,10 @@ pub(super) fn batch_create_dry_run_plan(
         .acting_for(&args.on_behalf_of)
 }
 
-pub(super) fn twap_create_dry_run_plan(plan: &TwapCreatePlan, args: &TwapCreateArgs) -> OrderDryRunPlan {
+pub(super) fn twap_create_dry_run_plan(
+    plan: &TwapCreatePlan,
+    args: &TwapCreateArgs,
+) -> OrderDryRunPlan {
     let mut preview = serde_json::json!({
         "coin": args.coin,
         "dex": args.dex,
@@ -1242,7 +1281,10 @@ pub(super) fn twap_create_dry_run_plan(plan: &TwapCreatePlan, args: &TwapCreateA
         .acting_for(&args.on_behalf_of)
 }
 
-pub(super) fn twap_cancel_dry_run_plan(plan: &TwapCancelPlan, args: &TwapCancelArgs) -> OrderDryRunPlan {
+pub(super) fn twap_cancel_dry_run_plan(
+    plan: &TwapCancelPlan,
+    args: &TwapCancelArgs,
+) -> OrderDryRunPlan {
     OrderDryRunPlan::new(
         "orders twap-cancel",
         "cancel_twap_order",
@@ -1447,7 +1489,10 @@ fn tpsl_to_str(tpsl: TpSl) -> &'static str {
 /// `orders tpsl` dry-run details: what the live command would send, without a
 /// signer or a position lookup. The legs come from the same
 /// [`position_tpsl_triggers`] and [`position_tpsl_batch`] the live order uses.
-pub(super) fn tpsl_dry_run_plan(perp: &PerpAsset, args: &TpslArgs) -> Result<OrderDryRunPlan, CliError> {
+pub(super) fn tpsl_dry_run_plan(
+    perp: &PerpAsset,
+    args: &TpslArgs,
+) -> Result<OrderDryRunPlan, CliError> {
     let (absolute_tp, absolute_sl) =
         absolute_trigger_prices(args.take_profit.as_ref(), args.stop_loss.as_ref());
     let (absolute_tp, absolute_sl) = truncate_triggers(perp, absolute_tp, absolute_sl)?;

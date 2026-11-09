@@ -2,37 +2,30 @@
 
 use std::fmt;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::time::Duration;
 
 use chrono::Utc;
-use clap::{Args, ValueEnum};
 use either::Either;
 use hypersdk::hypercore::types::{
-    Action, AssetPosition, BasicOrder, BatchCancel, BatchCancelCloid, BatchModify, BatchOrder,
-    Cancel, CancelByCloid, Modify, OrderGrouping, OrderRequest, OrderResponseStatus, OrderType,
-    OrderTypePlacement, ScheduleCancel, Side, TimeInForce, TpSl,
+    Action, BasicOrder, BatchOrder, OrderGrouping, OrderRequest, OrderResponseStatus, OrderType,
+    OrderTypePlacement, ScheduleCancel, TimeInForce, TpSl,
 };
-use hypersdk::hypercore::{Chain, Cloid, HttpClient, OidOrCloid, PriceTick};
+use hypersdk::hypercore::{Chain, Cloid, HttpClient, OidOrCloid};
 use hypersdk::{Address, Decimal};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::assets::asset_id::{
-    outcome_coin, parse_spot_coin_key, spot_asset_index, spot_coin_key, spot_internal_coin_key,
+    outcome_coin, parse_spot_coin_key, spot_coin_key, spot_internal_coin_key,
 };
 use crate::assets::{
-    AssetQuery, AssetResolver, Market, OutcomeAsset, PerpAsset, parse_asset_query,
-    qualify_dex_asset,
+    AssetQuery, AssetResolver, Market, PerpAsset, parse_asset_query, qualify_dex_asset,
 };
-use crate::commands::{actions, builder};
+use crate::commands::actions;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
-use crate::input_hardening::{FilePolicy, read_json_file};
 use crate::invocation::Invocation;
 use crate::mode::Mode;
-use crate::output::{self, OutputFormat, TableData};
+use crate::output::{self, TableData};
 use crate::prompt;
 use crate::response_sanitization::labelled_untrusted_text;
 use crate::signing::SelectedSigner;
@@ -69,10 +62,10 @@ use planning::{
 };
 use rendering::{
     CancelAllSummary, CancelAllSummaryOutput, CancelConfirmation, CancelConfirmationOutput,
-    CancelLeg, CancelLegsOutput, ModifyConfirmation, ModifyConfirmationOutput, OrderConfirmation,
-    OrderConfirmationOutput, OrderListRow, PartialBatchOutput, ScheduleCancelConfirmation,
-    ScheduleCancelOutput, TpslOrderConfirmation, TpslOrderConfirmationOutput,
-    TwapCancelConfirmation, TwapCancelOutput, TwapCreateConfirmation, TwapCreateOutput,
+    CancelLeg, CancelLegsOutput, ModifyConfirmationOutput, OrderConfirmation,
+    OrderConfirmationOutput, PartialBatchOutput, ScheduleCancelConfirmation, ScheduleCancelOutput,
+    TpslOrderConfirmation, TpslOrderConfirmationOutput, TwapCancelConfirmation, TwapCancelOutput,
+    TwapCreateConfirmation, TwapCreateOutput,
 };
 use validation::MarketPrecision;
 
@@ -489,13 +482,9 @@ async fn place_position_tpsl(
     verify_margin_mode(context, vault_address, Some(perp), args.margin_mode).await?;
     let user = context.account(vault_address);
     let prepared = prepare_position_tpsl_batch(context.api.sdk(), perp, user, args).await?;
-    context.consent(
-        vault_address,
-        None,
-        "TP/SL",
-        "order placement",
-        |target| confirm_mainnet_tpsl_batch(&prepared, target),
-    )?;
+    context.consent(vault_address, None, "TP/SL", "order placement", |target| {
+        confirm_mainnet_tpsl_batch(&prepared, target)
+    })?;
 
     let statuses = place_order_batch_raw(
         context.api,
@@ -806,13 +795,9 @@ async fn twap_create(
     vault_address: Option<Address>,
 ) -> Result<(), anyhow::Error> {
     verify_margin_mode(context, vault_address, Some(&plan.perp), plan.margin_mode).await?;
-    context.consent(
-        vault_address,
-        None,
-        "TWAP",
-        "TWAP creation",
-        |target| confirm_mainnet_twap(&plan, target),
-    )?;
+    context.consent(vault_address, None, "TWAP", "TWAP creation", |target| {
+        confirm_mainnet_twap(&plan, target)
+    })?;
     let response = actions::send_raw_l1_json_action(
         context.api,
         context.signer,
@@ -867,13 +852,9 @@ async fn schedule_cancel(
     plan: ScheduleCancelPlan,
     vault_address: Option<Address>,
 ) -> Result<(), anyhow::Error> {
-    context.consent(
-        vault_address,
-        None,
-        "schedule-cancel",
-        "action",
-        |target| confirm_mainnet_schedule_cancel(&plan, target),
-    )?;
+    context.consent(vault_address, None, "schedule-cancel", "action", |target| {
+        confirm_mainnet_schedule_cancel(&plan, target)
+    })?;
     // The trigger time counts from the moment of sending, not from the prompt.
     let scheduled = plan.scheduled(Utc::now());
     let nonce = actions::nonce_now();
@@ -1445,7 +1426,9 @@ fn ask_confirmation(
 
 #[cfg(test)]
 mod tests {
-    use super::planning::{position_tpsl_batch, prepare_normal_tpsl_batch, prepare_order, scale_sizes};
+    use super::planning::{
+        position_tpsl_batch, prepare_normal_tpsl_batch, prepare_order, scale_sizes,
+    };
     use super::validation::{
         OrderSpec, validate_order_for_market, validate_scale_args, validate_tpsl_args,
     };
@@ -1529,9 +1512,7 @@ mod tests {
 
     #[tokio::test]
     async fn limit_order_builds_hypersdk_request() {
-        let prepared = prepare(&base_args())
-            .await
-            .unwrap();
+        let prepared = prepare(&base_args()).await.unwrap();
 
         assert_eq!(prepared.request.asset, 0);
         assert!(prepared.request.is_buy);
@@ -1554,7 +1535,11 @@ mod tests {
         args.grouping = Some(CreateTpslGroupingArg::NormalTpsl);
 
         let parent = prepare(&args).await.unwrap();
-        let prepared = prepare_normal_tpsl_batch(&parent, &OrderSpec::from_create(&args).unwrap().tpsl.unwrap()).unwrap();
+        let prepared = prepare_normal_tpsl_batch(
+            &parent,
+            &OrderSpec::from_create(&args).unwrap().tpsl.unwrap(),
+        )
+        .unwrap();
         let json = serde_json::to_value(&prepared.batch).unwrap();
 
         assert_eq!(prepared.legs.len(), 3);
@@ -1598,7 +1583,11 @@ mod tests {
         assert!(parent.perp().is_some());
         assert!(parent.request.asset >= 10_000);
 
-        let prepared = prepare_normal_tpsl_batch(&parent, &OrderSpec::from_create(&args).unwrap().tpsl.unwrap()).unwrap();
+        let prepared = prepare_normal_tpsl_batch(
+            &parent,
+            &OrderSpec::from_create(&args).unwrap().tpsl.unwrap(),
+        )
+        .unwrap();
         let json = serde_json::to_value(&prepared.batch).unwrap();
 
         assert_eq!(prepared.legs.len(), 3);
@@ -1767,9 +1756,7 @@ mod tests {
         args.builder = Some("0x1111111111111111111111111111111111111111".to_string());
         args.builder_fee_rate = Some("0.01%".to_string());
 
-        let err = prepare(&args)
-            .await
-            .unwrap_err();
+        let err = prepare(&args).await.unwrap_err();
 
         assert_eq!(err.exit_code(), 13);
         assert!(err.to_string().contains("spot buy orders"));
@@ -1865,9 +1852,7 @@ mod tests {
         args.coin = "HYPE/USDC".to_string();
         args.reduce_only = true;
 
-        let err = prepare(&args)
-            .await
-            .unwrap_err();
+        let err = prepare(&args).await.unwrap_err();
 
         assert_eq!(err.exit_code(), 13);
         assert!(err.to_string().contains("--reduce-only"));
@@ -1881,9 +1866,7 @@ mod tests {
         args.order_type = CreateOrderType::StopLimit;
         args.trigger_price = Some(Decimal::from(48_000));
 
-        let err = prepare(&args)
-            .await
-            .unwrap_err();
+        let err = prepare(&args).await.unwrap_err();
 
         assert_eq!(err.exit_code(), 13);
         assert!(
@@ -1906,7 +1889,8 @@ mod tests {
             base_sz_decimals: 2,
         });
 
-        let err = validate_order_for_market(&OrderSpec::from_create(&args).unwrap(), &asset).unwrap_err();
+        let err =
+            validate_order_for_market(&OrderSpec::from_create(&args).unwrap(), &asset).unwrap_err();
 
         assert_eq!(err.exit_code(), 13);
         assert!(
@@ -2020,9 +2004,7 @@ mod tests {
     async fn rejects_negative_price_before_api_or_auth() {
         let mut args = base_args();
         args.price = Some(Decimal::from(-1));
-        let err = prepare(&args)
-            .await
-            .unwrap_err();
+        let err = prepare(&args).await.unwrap_err();
 
         assert_eq!(err.exit_code(), 2);
         assert!(err.to_string().contains("price must be positive"));

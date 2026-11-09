@@ -4,11 +4,23 @@
 //! fires a market order once the mark retraces from its best level by the
 //! configured percent or price distance. The trigger never moves back.
 
-use hypersdk::hypercore::types::{TrailingStop, TrailingStopRetracement};
+use std::io::{self, Write};
+use std::str::FromStr;
+
+use clap::Args;
+use hypersdk::hypercore::types::{Action, TrailingStop, TrailingStopRetracement};
+use hypersdk::{Address, Decimal};
+use serde::Serialize;
 
 use super::planning::OrderDryRunPlan;
+use super::rendering;
 use super::validation::MarketPrecision;
-use super::*;
+use super::{ConsentTarget, OrderSide, OrderSubmissionContext, ask_confirmation};
+use crate::assets::{AssetQuery, PerpAsset, parse_asset_query, qualify_dex_asset};
+use crate::commands::actions;
+use crate::errors::CliError;
+use crate::output::{OutputFormat, TableData};
+use crate::response_sanitization::labelled_untrusted_text;
 
 /// Arguments for `orders trailing-stop`.
 #[derive(Args, Debug, Clone)]
@@ -208,7 +220,11 @@ pub(crate) fn prepare_trailing_stop_plan(
 impl TrailingStopPlan {
     /// The `--dry-run` preview of this plan.
     pub(crate) fn dry_run_plan(&self, args: &TrailingStopArgs) -> OrderDryRunPlan {
-        OrderDryRunPlan::new("orders trailing-stop", "trailing_stop", self.dry_run_args(args))
+        OrderDryRunPlan::new(
+            "orders trailing-stop",
+            "trailing_stop",
+            self.dry_run_args(args),
+        )
     }
 }
 
@@ -389,7 +405,7 @@ impl TableData for TrailingStopOutput {
 mod tests {
     use super::*;
     use crate::assets::test_support::hip3_perp;
-    use crate::assets::{AssetMetadata, PerpAsset, SpotAsset};
+    use crate::assets::{AssetMetadata, AssetResolver, SpotAsset};
     use clap::Parser;
 
     #[derive(Parser)]
@@ -549,13 +565,7 @@ mod tests {
 
         args.coin = "testdex:HYPE".to_string();
         args.dex = None;
-        assert_eq!(
-            plan_for(&args)
-                .unwrap()
-                .action
-                .asset,
-            11_100
-        );
+        assert_eq!(plan_for(&args).unwrap().action.asset, 11_100);
     }
 
     #[test]

@@ -77,8 +77,7 @@ pub async fn bracket_dry_run_plan(
         &entry_args,
     )?;
     let perp = resolve_perp(client, resolver, args.dex.as_deref(), &args.coin).await?;
-    let protection =
-        tpsl_dry_run_plan(&perp, &protection_tpsl_args(args, args.size))?.into_args();
+    let protection = tpsl_dry_run_plan(&perp, &protection_tpsl_args(args, args.size))?.into_args();
     Ok(json!({
         "coin": args.coin,
         "dex": args.dex,

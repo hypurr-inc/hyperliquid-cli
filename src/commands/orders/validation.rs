@@ -1,7 +1,22 @@
+use std::path::Path;
+use std::time::Duration;
+
+use hypersdk::hypercore::types::{Side, TpSl};
+use hypersdk::hypercore::{Cloid, PriceTick};
+use hypersdk::{Address, Decimal};
 use rust_decimal::RoundingStrategy;
 
 use super::planning::order_identifier;
-use super::*;
+use super::{
+    BPS_DENOMINATOR, BatchCreateArgs, BatchCreateOrder, CreateArgs, CreateOrderType,
+    CreateTpslGroupingArg, MAX_BATCH_ORDER_COUNT, MAX_MARKET_ORDER_SLIPPAGE_BPS,
+    MIN_MARKET_ORDER_SLIPPAGE_BPS, MarginModeArg, ModifyArgs, OrderSide, ScaleArgs, TifArg,
+    TpslArgs, TriggerPriceSpec, TwapCreateArgs, parse_cloid,
+};
+use crate::assets::Market;
+use crate::commands::builder;
+use crate::errors::CliError;
+use crate::input_hardening::{FilePolicy, read_json_file};
 
 /// How the exchange constrains prices and sizes on one market.
 ///
@@ -82,7 +97,8 @@ impl MarketPrecision {
                 "price {price} for {coin} cannot be placed on this market's tick grid"
             ))
         })?;
-        let truncated = price.round_dp_with_strategy(tick.normalize().scale(), RoundingStrategy::ToZero);
+        let truncated =
+            price.round_dp_with_strategy(tick.normalize().scale(), RoundingStrategy::ToZero);
         if truncated <= Decimal::ZERO {
             return Err(CliError::Configuration(format!(
                 "price for {coin} is below the smallest valid tick; it truncates to zero"
@@ -383,10 +399,7 @@ fn attached_tpsl(args: &CreateArgs) -> Result<Option<AttachedTpsl>, CliError> {
 
 /// The one owner of what a non-perpetual market cannot do. Perpetual markets
 /// accept every order the flags can describe.
-pub(super) fn validate_order_for_market(
-    spec: &OrderSpec,
-    market: &Market,
-) -> Result<(), CliError> {
+pub(super) fn validate_order_for_market(spec: &OrderSpec, market: &Market) -> Result<(), CliError> {
     if matches!(market, Market::Perp(_)) {
         return Ok(());
     }
@@ -702,14 +715,14 @@ fn parse_batch_leg(
     match (coin, side, price, size) {
         (Some(coin), Some(side), Some(price), Some(size)) if leg.problems.is_empty() => {
             Ok(BatchCreateOrder {
-            coin,
-            dex,
-            side,
-            price,
-            size,
-            tif,
-            reduce_only,
-            cloid,
+                coin,
+                dex,
+                side,
+                price,
+                size,
+                tif,
+                reduce_only,
+                cloid,
             })
         }
         _ => Err(leg.problems),
