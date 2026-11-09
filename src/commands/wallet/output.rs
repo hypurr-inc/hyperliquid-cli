@@ -2,7 +2,6 @@ use serde::Serialize;
 
 use crate::invocation::Invocation;
 use crate::output::{OutputFormat, TableData};
-use crate::settings::Settings;
 use ows_lib::types::WalletInfo as VaultWalletInfo;
 
 use crate::ows::vault::{HyperliquidAccount, Vault};
@@ -209,18 +208,11 @@ pub(super) fn print_receipt(inv: &Invocation, receipt: Receipt) {
         alias: receipt.alias,
         source: receipt.source,
         is_default: receipt.is_default,
-        config_path: config_path(inv.settings()),
+        config_path: inv.settings().config_path_display(),
         vault_path: Vault::from_settings(inv.settings()).display_path(),
         config_keys_written: receipt.config_keys_written,
     };
     inv.print_untimed(&info);
-}
-
-fn config_path(settings: &Settings) -> String {
-    settings.config_file().map_or_else(
-        || "unavailable".to_string(),
-        |file| file.path().display().to_string(),
-    )
 }
 
 pub(super) fn print_wallet_address(inv: &Invocation, address: &str) {
@@ -311,7 +303,7 @@ pub(super) fn print_bankr_receipt(inv: &Invocation, receipt: BankrReceipt) {
         message: receipt.message,
         address: receipt.address,
         api_url: receipt.api_url,
-        config_path: config_path(inv.settings()),
+        config_path: inv.settings().config_path_display(),
         config_keys_written: receipt.config_keys_written,
     });
 }

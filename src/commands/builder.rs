@@ -9,7 +9,7 @@ use crate::builder_fee::{MaxFeeRate, percent_from_tenths_bps};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::confirm;
 use crate::commands::rows::{ListRow, One, Row, Rows};
-use crate::commands::support::{print_dry_run, require_master_signer};
+use crate::commands::support::print_dry_run;
 use crate::commands::user_signed::{self, UserSigned};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
@@ -339,6 +339,7 @@ impl CliCommand for BuilderApprove {
         "Approve, update, or revoke a max builder fee for the selected master signer. Use 0% to revoke.",
     )
     .signs(Signs::user_signed::<ApproveBuilderFee>())
+    .master_only("approveBuilderFee")
     .prompt()
     .args(&[
         arg("builder").kind(InputKind::ProtocolObjectAddress).resource_id("builder address"),
@@ -353,9 +354,6 @@ impl CliCommand for BuilderApprove {
     async fn run(inv: &Invocation, args: &ApproveArgs) -> Result<(), anyhow::Error> {
         let request = ApproveRequest::parse(args)?;
         let resolved = inv.resolve_signer();
-        if let Ok(signer) = &resolved {
-            require_master_signer(signer, "approveBuilderFee")?;
-        }
         if inv.dry_run() {
             let signer = resolved.ok();
             let preview_args = approve_dry_run_value(

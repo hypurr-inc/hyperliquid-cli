@@ -1352,3 +1352,65 @@ fn receipts_list_exactly_the_config_keys_the_command_changed() {
         );
     }
 }
+
+/// A wallet the vault does not hold is `wallet_not_found` (exit 10) for every
+/// command that names one, as for `--account`, not an internal error.
+#[test]
+fn naming_a_wallet_the_vault_lacks_exits_ten_for_every_wallet_command() {
+    let env = IsolatedHome::new();
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args(["wallet", "import", IMPORT_KEY])
+        .assert()
+        .success();
+
+    for args in [
+        &["wallet", "rename", "missing", "other"][..],
+        &["wallet", "export", "missing", "--yes"][..],
+        &["wallet", "delete", "missing", "--yes"][..],
+        &["account", "set-default", "missing"][..],
+        &["account", "remove", "missing", "--yes"][..],
+    ] {
+        env.account_command(TEST_ACCOUNT_PASSPHRASE)
+            .args(args)
+            .assert()
+            .code(10)
+            .stderr(predicate::str::contains("was not found"));
+    }
+}
+
+/// `account set-default` and `account remove` accept the wallet's address, as
+/// their help says, and `account set-default` stores the wallet's id.
+#[test]
+fn account_set_default_accepts_an_address_selector() {
+    let env = IsolatedHome::new();
+    let address = expected_address(IMPORT_KEY);
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args(["wallet", "import", IMPORT_KEY])
+        .assert()
+        .success();
+
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args(["account", "set-default", &address.to_lowercase()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Default account set"))
+        .stdout(predicate::str::contains(&address));
+}
+
+/// A blank `--alias` names no wallet, so the next free name is taken, exactly
+/// as for `account add`.
+#[test]
+fn import_mnemonic_with_a_blank_alias_takes_the_next_free_name() {
+    let env = IsolatedHome::new();
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args([
+            "wallet",
+            "import-mnemonic",
+            "test test test test test test test test test test test junk",
+            "--alias",
+            "   ",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("imported"));
+}

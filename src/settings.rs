@@ -15,7 +15,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 
-use crate::config::{BankrLogin, Config, ConfigFile};
+use crate::config::{BankrLogin, Config, ConfigFile, nonblank};
 use crate::errors::CliError;
 use crate::network::Network;
 use crate::private_fs::FileLock;
@@ -23,7 +23,7 @@ use crate::private_fs::FileLock;
 /// One row per environment variable, in the order the root help lists them. A
 /// row with empty help is read by the CLI but not advertised.
 macro_rules! env_vars {
-    ($($(#[$meta:meta])* $name:ident = $value:literal => $help:literal;)*) => {
+    ($($(#[$meta:meta])* $name:ident = $value:literal => $help:literal $(, build $build:ident)?;)*) => {
         pub mod env {
             $($(#[$meta])* pub const $name: &str = $value;)*
 
@@ -31,6 +31,15 @@ macro_rules! env_vars {
         }
 
         const ENV_HELP: &[(&str, &str)] = &[$(($value, $help)),*];
+
+        // `option_env!` needs the literal name, so the table is the one place
+        // that spells a variable both as a runtime and as a build-time name.
+        $($(
+            const $build: &str = match option_env!($value) {
+                Some(value) => value,
+                None => "",
+            };
+        )?)*
     };
 }
 
@@ -54,9 +63,9 @@ env_vars! {
     ACCOUNT_KEYCHAIN_DISABLED = "HYPERLIQUID_ACCOUNT_KEYCHAIN_DISABLED" => "Set to skip the OS keychain when unlocking pre-vault stored accounts.";
     /// Removed: it persisted raw account encryption keys. Setting it is an error.
     ACCOUNT_KEY_STORE_DIR = "HYPERLIQUID_ACCOUNT_KEY_STORE_DIR" => "";
-    DEFAULT_BUILDER_ADDRESS = "HYPERLIQUID_DEFAULT_BUILDER_ADDRESS" => "Default builder address for orders and setup suggestions.";
-    DEFAULT_BUILDER_FEE_RATE = "HYPERLIQUID_DEFAULT_BUILDER_FEE_RATE" => "Default builder fee rate, a percent string such as 0.001%.";
-    DEFAULT_REFERRAL_CODE = "HYPERLIQUID_DEFAULT_REFERRAL_CODE" => "Default referral code for `referral set` and setup.";
+    DEFAULT_BUILDER_ADDRESS = "HYPERLIQUID_DEFAULT_BUILDER_ADDRESS" => "Default builder address for orders and setup suggestions.", build BUILD_DEFAULT_BUILDER_ADDRESS;
+    DEFAULT_BUILDER_FEE_RATE = "HYPERLIQUID_DEFAULT_BUILDER_FEE_RATE" => "Default builder fee rate, a percent string such as 0.001%.", build BUILD_DEFAULT_BUILDER_FEE_RATE;
+    DEFAULT_REFERRAL_CODE = "HYPERLIQUID_DEFAULT_REFERRAL_CODE" => "Default referral code for `referral set` and setup.", build BUILD_DEFAULT_REFERRAL_CODE;
     NO_UPDATE_CHECK = "HYPERLIQUID_NO_UPDATE_CHECK" => "Set to 1 to skip release update checks.";
     NO_UPDATE_NOTIFIER = "NO_UPDATE_NOTIFIER" => "Set to a non-empty value to skip the update notice.";
     AUTO_UPDATE = "HYPERLIQUID_AUTO_UPDATE" => "Set to 1 to automatically update binary in place when a newer release is detected.";
@@ -71,34 +80,10 @@ env_vars! {
     CARGO_HOME = "CARGO_HOME" => "";
 }
 
-/// Compile-time builder default captured from the build environment.
-///
-/// Set `HYPERLIQUID_DEFAULT_BUILDER_ADDRESS` while building the binary to bake
-/// in a default builder address. A runtime variable with the same name still
-/// overrides it. Empty by default in the upstream repo. `option_env!` needs the
-/// literal name, which must match [`env::DEFAULT_BUILDER_ADDRESS`].
-pub const BUILD_DEFAULT_BUILDER_ADDRESS: &str =
-    match option_env!("HYPERLIQUID_DEFAULT_BUILDER_ADDRESS") {
-        Some(address) => address,
-        None => "",
-    };
-
-/// Compile-time default builder fee rate, a percent string such as `0.001%`.
-/// Pairs with [`BUILD_DEFAULT_BUILDER_ADDRESS`]; see [`env::DEFAULT_BUILDER_FEE_RATE`].
-pub const BUILD_DEFAULT_BUILDER_FEE_RATE: &str =
-    match option_env!("HYPERLIQUID_DEFAULT_BUILDER_FEE_RATE") {
-        Some(rate) => rate,
-        None => "",
-    };
-
-/// Compile-time default referral code. A runtime variable with the same name
-/// still overrides it. Empty by default in the upstream repo, meaning no mainnet
-/// default. See [`env::DEFAULT_REFERRAL_CODE`].
-pub const BUILD_DEFAULT_REFERRAL_CODE: &str = match option_env!("HYPERLIQUID_DEFAULT_REFERRAL_CODE")
-{
-    Some(code) => code,
-    None => "",
-};
+// Each `build` row above bakes the variable's value into the binary when it is
+// set at build time (`HYPERLIQUID_DEFAULT_BUILDER_ADDRESS=... cargo build`); a
+// runtime variable with the same name still overrides it. All are empty in the
+// upstream repo, meaning no default.
 
 const TESTNET_REFERRAL_FALLBACK: &str = "TESTNET";
 
@@ -164,9 +149,7 @@ impl EnvSource {
 
     #[must_use]
     pub fn get_trimmed(&self, name: &str) -> Option<String> {
-        self.get(name)
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+        nonblank(self.get(name).as_deref()).map(str::to_string)
     }
 
     /// Whether the variable is set at all, even to an empty or non-Unicode value.
@@ -191,6 +174,36 @@ pub struct BuilderDefaultSetting {
     pub fee_rate: Option<String>,
     pub address_label: &'static str,
     pub fee_label: &'static str,
+}
+
+/// Where the Bankr API key came from, which decides whether a stored address
+/// belongs to it: a key from the environment or the Bankr CLI is not the wallet
+/// that `wallet login` recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    Environment,
+    Config,
+    BankrCli,
+}
+
+/// The Bankr API key of a run and the host to send it to; see
+/// [`Settings::bankr_credentials`].
+#[derive(Clone)]
+pub struct BankrCredentials {
+    pub api_key: String,
+    /// `None` means the public endpoint.
+    pub api_url: Option<String>,
+    pub source: KeySource,
+}
+
+impl std::fmt::Debug for BankrCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BankrCredentials")
+            .field("api_key", &"[redacted]")
+            .field("api_url", &self.api_url)
+            .field("source", &self.source)
+            .finish()
+    }
 }
 
 enum ConfigSource {
@@ -333,9 +346,28 @@ impl Settings {
         }
     }
 
-    fn require_config_file(&self) -> Result<&ConfigFile, anyhow::Error> {
+    fn require_config_file(&self) -> Result<&ConfigFile, CliError> {
         self.config_file()
-            .ok_or_else(|| anyhow::anyhow!("Cannot determine config directory"))
+            .ok_or_else(|| CliError::Configuration("Cannot determine config directory".to_string()))
+    }
+
+    /// The config file when it exists on disk. `Ok(None)` for a run with no
+    /// config location and for a file that is genuinely absent; a file that
+    /// can't be inspected is an error, never "absent".
+    pub fn existing_config_file(&self) -> Result<Option<&ConfigFile>, CliError> {
+        match self.config_file() {
+            Some(file) if file.exists()? => Ok(Some(file)),
+            _ => Ok(None),
+        }
+    }
+
+    /// Where the config file is, for messages.
+    #[must_use]
+    pub fn config_path_display(&self) -> String {
+        self.config_file().map_or_else(
+            || "unavailable".to_string(),
+            |file| file.path().display().to_string(),
+        )
     }
 
     /// Lock the config file and read it fresh, for an edit that another process
@@ -527,6 +559,64 @@ impl Settings {
             .unwrap_or_default())
     }
 
+    /// `BANKR_API_URL`, which overrides the host in every case.
+    #[must_use]
+    pub fn bankr_env_api_url(&self) -> Option<String> {
+        self.env.get_trimmed(env::BANKR_API_URL)
+    }
+
+    /// The Bankr credentials of this run: `BANKR_API_KEY` first, then this CLI's
+    /// config, then the Bankr CLI's own `~/.bankr/config.json`, so an existing
+    /// login works without repeating it. The host is `BANKR_API_URL`, else the
+    /// host stored beside the key; `None` means the public endpoint. `Ok(None)`
+    /// when no source holds a key.
+    pub fn bankr_credentials(&self) -> Result<Option<BankrCredentials>, CliError> {
+        let login = self.bankr_login()?;
+        let stored_url = login.api_url().map(str::to_string);
+        let (api_key, file_url, source) =
+            if let Some(key) = self.env.get_trimmed(env::BANKR_API_KEY) {
+                (key, stored_url, KeySource::Environment)
+            } else if let Some(key) = login.api_key() {
+                (key.to_string(), stored_url, KeySource::Config)
+            } else if let Some((key, url)) = self.bankr_cli_credentials()? {
+                (key, url.or(stored_url), KeySource::BankrCli)
+            } else {
+                return Ok(None);
+            };
+        Ok(Some(BankrCredentials {
+            api_key,
+            api_url: self.bankr_env_api_url().or(file_url),
+            source,
+        }))
+    }
+
+    /// The key and host in the Bankr CLI's own config. A missing file or key is
+    /// no credentials; a file that can't be read or parsed is an error.
+    fn bankr_cli_credentials(&self) -> Result<Option<(String, Option<String>)>, CliError> {
+        let Some(path) = crate::paths::bankr_cli_config(&self.env) else {
+            return Ok(None);
+        };
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(CliError::Configuration(format!(
+                    "failed to read the Bankr CLI config {}: {err}",
+                    path.display()
+                )));
+            }
+        };
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|err| {
+            CliError::Configuration(format!(
+                "invalid Bankr CLI config {}: {err}",
+                path.display()
+            ))
+        })?;
+        let text_field = |name: &str| nonblank(value.get(name).and_then(serde_json::Value::as_str));
+        Ok(text_field("apiKey")
+            .map(|key| (key.to_string(), text_field("apiUrl").map(str::to_string))))
+    }
+
     fn env_builder_default(&self) -> Option<BuilderDefaultSetting> {
         let address = self.env.get_trimmed(env::DEFAULT_BUILDER_ADDRESS);
         let fee_rate = self.env.get_trimmed(env::DEFAULT_BUILDER_FEE_RATE);
@@ -542,34 +632,35 @@ impl Settings {
         if let Some(setting) = self.env_builder_default() {
             return Some(setting);
         }
-        if let Some(config) = config {
-            let trimmed = |value: &Option<String>| {
-                value
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string)
-            };
-            let address = trimmed(&config.default_builder_address);
-            let fee_rate = trimmed(&config.default_builder_fee_rate);
-            if address.is_some() || fee_rate.is_some() {
-                return Some(BuilderDefaultSetting {
-                    address,
-                    fee_rate,
-                    address_label: "default_builder_address",
-                    fee_label: "default_builder_fee_rate",
-                });
-            }
-        }
-        let non_empty = |value: &str| (!value.is_empty()).then(|| value.to_string());
-        let address = non_empty(BUILD_DEFAULT_BUILDER_ADDRESS);
-        let fee_rate = non_empty(BUILD_DEFAULT_BUILDER_FEE_RATE);
-        (address.is_some() || fee_rate.is_some()).then_some(BuilderDefaultSetting {
-            address,
-            fee_rate,
-            address_label: "DEFAULT_BUILDER_ADDRESS",
-            fee_label: "DEFAULT_BUILDER_FEE_RATE",
-        })
+        let owned = |value: Option<&str>| nonblank(value).map(str::to_string);
+        let layer = |address: Option<String>,
+                     fee_rate: Option<String>,
+                     address_label: &'static str,
+                     fee_label: &'static str| {
+            (address.is_some() || fee_rate.is_some()).then_some(BuilderDefaultSetting {
+                address,
+                fee_rate,
+                address_label,
+                fee_label,
+            })
+        };
+        config
+            .and_then(|config| {
+                layer(
+                    owned(config.default_builder_address.as_deref()),
+                    owned(config.default_builder_fee_rate.as_deref()),
+                    "default_builder_address",
+                    "default_builder_fee_rate",
+                )
+            })
+            .or_else(|| {
+                layer(
+                    owned(Some(BUILD_DEFAULT_BUILDER_ADDRESS)),
+                    owned(Some(BUILD_DEFAULT_BUILDER_FEE_RATE)),
+                    env::DEFAULT_BUILDER_ADDRESS,
+                    env::DEFAULT_BUILDER_FEE_RATE,
+                )
+            })
     }
 
     /// The default builder pair: environment, then config file, then the build-time default.
@@ -590,20 +681,14 @@ impl Settings {
     }
 
     fn layered_referral_code(&self, is_testnet: bool, config: Option<&Config>) -> Option<String> {
-        if let Some(code) = self.env.get_trimmed(env::DEFAULT_REFERRAL_CODE) {
-            return Some(code);
-        }
-        if let Some(code) = config
-            .and_then(|config| config.default_referral_code.as_deref())
-            .map(str::trim)
-            .filter(|code| !code.is_empty())
-        {
-            return Some(code.to_string());
-        }
-        if !BUILD_DEFAULT_REFERRAL_CODE.is_empty() {
-            return Some(BUILD_DEFAULT_REFERRAL_CODE.to_string());
-        }
-        is_testnet.then(|| TESTNET_REFERRAL_FALLBACK.to_string())
+        self.env
+            .get_trimmed(env::DEFAULT_REFERRAL_CODE)
+            .or_else(|| {
+                let stored = config.and_then(|config| config.default_referral_code.as_deref());
+                nonblank(stored).map(str::to_string)
+            })
+            .or_else(|| nonblank(Some(BUILD_DEFAULT_REFERRAL_CODE)).map(str::to_string))
+            .or_else(|| is_testnet.then(|| TESTNET_REFERRAL_FALLBACK.to_string()))
     }
 
     /// The default referral code: environment, config file, build-time default,
@@ -888,6 +973,167 @@ mod tests {
         assert!(!tmp.path().join("config.json").exists());
         assert!(!settings.testnet(false).unwrap());
         settings.remove_config().unwrap();
+    }
+
+    #[test]
+    fn config_failures_are_configuration_errors() {
+        let no_location = settings(&[], None)
+            .update_config(|config| config.default_wallet_id = Some("w".to_string()))
+            .unwrap_err();
+        assert_eq!(crate::errors::from_anyhow(no_location).exit_code(), 2);
+
+        // A config whose parent "directory" is a file can't be written.
+        let tmp = TempDir::new().unwrap();
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, "").unwrap();
+        let settings = Settings::new(
+            EnvSource::fixed::<&str, &str>([]),
+            Some(ConfigFile::at(blocker.join("config.json"))),
+        );
+        let unwritable = settings
+            .update_config(|config| config.default_wallet_id = Some("w".to_string()))
+            .unwrap_err();
+        let unwritable = crate::errors::from_anyhow(unwritable);
+        assert!(
+            matches!(unwritable, CliError::Configuration(_)),
+            "{unwritable}"
+        );
+    }
+
+    #[test]
+    fn an_existing_config_file_is_absent_only_when_it_is_really_absent() {
+        assert!(
+            settings(&[], None)
+                .existing_config_file()
+                .unwrap()
+                .is_none()
+        );
+
+        let (tmp, present) = file_settings(&[], "{}");
+        assert!(present.existing_config_file().unwrap().is_some());
+        std::fs::remove_file(tmp.path().join("config.json")).unwrap();
+        assert!(present.existing_config_file().unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_uninspectable_config_file_is_an_error_not_an_absent_one() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("locked");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), "{}").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let settings = Settings::new(
+            EnvSource::fixed::<&str, &str>([]),
+            Some(ConfigFile::at(dir.join("config.json"))),
+        );
+
+        let root_sees_through_the_mode = std::fs::metadata(dir.join("config.json")).is_ok();
+        let result = settings.existing_config_file().map(|file| file.is_some());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if !root_sees_through_the_mode {
+            assert!(
+                matches!(result, Err(CliError::Configuration(_))),
+                "{result:?}"
+            );
+        }
+    }
+
+    fn bankr_settings(env: &[(&str, &str)], home: &TempDir, config: Option<Config>) -> Settings {
+        let home_dir = home.path().to_str().unwrap().to_string();
+        let mut vars: Vec<(&str, &str)> = vec![(env::HOME_DIR, home_dir.as_str())];
+        vars.extend_from_slice(env);
+        Settings::detached(EnvSource::fixed(vars), config)
+    }
+
+    fn write_bankr_cli_config(home: &TempDir, contents: &str) {
+        let dir = home.path().join(".bankr");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.json"), contents).unwrap();
+    }
+
+    #[test]
+    fn bankr_credentials_prefer_env_then_config_then_the_bankr_cli() {
+        let home = TempDir::new().unwrap();
+        write_bankr_cli_config(
+            &home,
+            r#"{"apiKey": " bk_cli ", "apiUrl": "https://cli.example"}"#,
+        );
+        let login = Config {
+            bankr: BankrLogin::new(
+                "bk_config",
+                Some("https://config.example"),
+                "0x0000000000000000000000000000000000000009"
+                    .parse()
+                    .unwrap(),
+            ),
+            ..Config::default()
+        };
+
+        let env_key = bankr_settings(
+            &[(env::BANKR_API_KEY, " bk_env ")],
+            &home,
+            Some(login.clone()),
+        )
+        .bankr_credentials()
+        .unwrap()
+        .unwrap();
+        assert_eq!(env_key.api_key, "bk_env");
+        assert_eq!(env_key.source, KeySource::Environment);
+        assert_eq!(env_key.api_url.as_deref(), Some("https://config.example"));
+
+        let stored = bankr_settings(&[], &home, Some(login))
+            .bankr_credentials()
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.api_key, "bk_config");
+        assert_eq!(stored.source, KeySource::Config);
+
+        let cli = bankr_settings(&[], &home, None)
+            .bankr_credentials()
+            .unwrap()
+            .unwrap();
+        assert_eq!(cli.api_key, "bk_cli");
+        assert_eq!(cli.source, KeySource::BankrCli);
+        assert_eq!(cli.api_url.as_deref(), Some("https://cli.example"));
+
+        let overridden = bankr_settings(
+            &[(env::BANKR_API_URL, " https://env.example ")],
+            &home,
+            None,
+        )
+        .bankr_credentials()
+        .unwrap()
+        .unwrap();
+        assert_eq!(overridden.api_url.as_deref(), Some("https://env.example"));
+    }
+
+    #[test]
+    fn no_bankr_credentials_is_none_but_an_unreadable_bankr_cli_file_is_an_error() {
+        let home = TempDir::new().unwrap();
+        assert!(
+            bankr_settings(&[], &home, None)
+                .bankr_credentials()
+                .unwrap()
+                .is_none()
+        );
+
+        write_bankr_cli_config(&home, r#"{"apiKey": "   "}"#);
+        assert!(
+            bankr_settings(&[], &home, None)
+                .bankr_credentials()
+                .unwrap()
+                .is_none()
+        );
+
+        write_bankr_cli_config(&home, "{not json");
+        let err = bankr_settings(&[], &home, None)
+            .bankr_credentials()
+            .unwrap_err();
+        assert!(matches!(err, CliError::Configuration(_)), "{err}");
+        assert!(err.to_string().contains("config.json"), "{err}");
     }
 
     #[test]

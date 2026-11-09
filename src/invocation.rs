@@ -60,7 +60,6 @@ impl InvocationFlags {
 
 /// Network facts resolved from flags, environment and config file.
 pub struct Remote {
-    selection: SignerSelection,
     network: Network,
     api: ApiClient,
     signer: OnceLock<SelectedSigner>,
@@ -204,7 +203,6 @@ impl Invocation {
         }
         let network = self.settings.network(self.flags.testnet)?;
         let remote = Remote {
-            selection: SignerSelection::from_flags(&self.settings, &self.flags.signer)?,
             network,
             api: self.api_client_for(network)?,
             signer: OnceLock::new(),
@@ -224,25 +222,63 @@ impl Invocation {
         })
     }
 
-    /// The selected signer, resolved once per run. A failed resolution is not cached.
-    ///
-    /// A live run of a command that signs ([`CommandSpec::signs`]) also asks the
-    /// signer whether it can, so an unsupported provider fails here, before any
-    /// prompt or network lookup. A dry run signs nothing and only needs the identity.
-    pub fn resolve_signer(&self) -> Result<SelectedSigner, anyhow::Error> {
+    /// The selected signer, resolved once per run: who signs, with no check of
+    /// what they are asked to sign. A failed resolution is not cached. The
+    /// signer flags and the ambient key are read here, not for a command that
+    /// never asks.
+    fn signer_identity(&self) -> Result<&SelectedSigner, anyhow::Error> {
         let remote = self.remote()?;
-        let signer = match remote.signer.get() {
-            Some(signer) => signer,
-            None => {
-                let signer =
-                    crate::auth::resolve_signer(&remote.selection, &self.settings, &self.mode)?;
-                remote.signer.get_or_init(|| signer)
-            }
-        };
-        if !self.dry_run()
-            && let Some(signs) = self.command.signs
+        if let Some(signer) = remote.signer.get() {
+            return Ok(signer);
+        }
+        let selection = SignerSelection::from_flags(&self.settings, &self.flags.signer)?;
+        let signer = crate::auth::resolve_signer(&selection, &self.settings, &self.mode)?;
+        Ok(remote.signer.get_or_init(|| signer))
+    }
+
+    /// What the command needs of `signer`, live or dry run alike, so a preview
+    /// is never offered for a run the same signer would be refused: the
+    /// provider must cover what the command signs ([`CommandSpec::signs`]) and
+    /// a command only the master account may sign ([`CommandSpec::master_only`])
+    /// refuses a stored API wallet.
+    fn ensure_signer_fits(&self, signer: &SelectedSigner) -> Result<(), CliError> {
+        if let Some(signs) = self.command.signs {
+            signer.ensure_covers(signs)?;
+        }
+        if let Some(action) = self.command.master_only
+            && signer.is_stored_agent()
         {
-            signer.ensure_can_sign(signs)?;
+            return Err(CliError::Unsupported(format!(
+                "{action} must be signed by the master account; select the master wallet, not a stored API wallet"
+            )));
+        }
+        Ok(())
+    }
+
+    /// What a dry run knows of the signer: who it is, or why that is unknown
+    /// (nothing selected, a wallet that isn't there). A signer that resolves
+    /// must fit the command ([`Self::ensure_signer_fits`]) or the preview fails,
+    /// as the live run would; it need not hold a key.
+    pub(crate) fn preview_signer(
+        &self,
+    ) -> Result<Result<&SelectedSigner, anyhow::Error>, CliError> {
+        match self.signer_identity() {
+            Ok(signer) => self.ensure_signer_fits(signer).map(|()| Ok(signer)),
+            Err(unresolved) => Ok(Err(unresolved)),
+        }
+    }
+
+    /// The signer a live run signs with, checked before any prompt or network
+    /// lookup: it must fit the command ([`Self::ensure_signer_fits`]) and, for a
+    /// command that signs, hold a key. A dry run signs nothing, so it needs only
+    /// the identity: an address-only `--ows-signer` previews, and a run with no
+    /// signer previews with a null one ([`Self::signer_identity`] fails, and
+    /// the preview says so).
+    pub fn resolve_signer(&self) -> Result<SelectedSigner, anyhow::Error> {
+        let signer = self.signer_identity()?;
+        self.ensure_signer_fits(signer)?;
+        if !self.dry_run() && self.command.signs.is_some() {
+            signer.ensure_holds_key()?;
         }
         Ok(signer.clone())
     }
@@ -269,11 +305,14 @@ impl Invocation {
     }
 
     /// Like [`Self::asset_resolver`], falling back to the raw exchange metadata
-    /// when the SDK cannot decode the universe.
+    /// when the SDK cannot decode the universe. The SDK reports a reply it
+    /// cannot decode as an unclassified failure, so every classified one (the
+    /// network, a rate limit, a rejected credential, an HTTP status) is the
+    /// answer, not a reason to ask again.
     pub async fn trading_resolver(&self) -> Result<AssetResolver, CliError> {
         match self.asset_resolver().await {
-            Ok(resolver) => Ok(resolver),
-            Err(_) => AssetResolver::load_raw(self.remote()?.api()).await,
+            Err(CliError::Internal(_)) => AssetResolver::load_raw(self.remote()?.api()).await,
+            other => other,
         }
     }
 }
@@ -282,7 +321,11 @@ impl Invocation {
 mod tests {
     use super::*;
     use crate::command_spec::{CliCommand, NoArgs};
+    use crate::config::{BankrLogin, Config, ConfigFile};
     use crate::output::JsonRenderOptions;
+    use crate::settings::{EnvSource, env};
+    use crate::signing::Signs;
+    use tempfile::TempDir;
 
     struct Probe;
 
@@ -296,16 +339,162 @@ mod tests {
         }
     }
 
-    fn invocation(flags: InvocationFlags) -> Invocation {
+    fn invocation_over(
+        settings: Settings,
+        flags: InvocationFlags,
+        command: &'static CommandSpec,
+    ) -> Invocation {
         let mode = Mode::default().running(
             OutputFormat::Json,
             flags.non_interactive,
             flags.payload_from_stdin(),
         );
         let session = Session::new(JsonRenderOptions::default(), &mode);
-        let settings =
-            Settings::detached(crate::settings::EnvSource::fixed::<&str, &str>([]), None);
-        Invocation::new(settings, session, mode, flags, &Probe::SPEC)
+        Invocation::new(settings, session, mode, flags, command)
+    }
+
+    fn invocation(flags: InvocationFlags) -> Invocation {
+        let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
+        invocation_over(settings, flags, &Probe::SPEC)
+    }
+
+    const KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000009";
+    const RAW_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
+
+    static WITHDRAW: CommandSpec =
+        CommandSpec::signed(&["probe", "withdraw"], "system", "Probe", "Probe.")
+            .signs(Signs::UserSigned("Withdraw"));
+    static TRADE: CommandSpec =
+        CommandSpec::signed(&["probe", "trade"], "system", "Probe", "Probe.");
+    static MASTER_ONLY: CommandSpec =
+        CommandSpec::signed(&["probe", "approve"], "system", "Probe", "Probe.")
+            .master_only("approveAgent");
+
+    /// `--bankr` with the login `wallet login` stores, which needs no request.
+    fn bankr_invocation(command: &'static CommandSpec, dry_run: bool) -> Invocation {
+        let config = Config {
+            bankr: BankrLogin::new("bk_test", None, RAW_ADDRESS.parse().unwrap()),
+            ..Config::default()
+        };
+        let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), Some(config));
+        let mut flags = InvocationFlags {
+            dry_run,
+            ..InvocationFlags::default()
+        };
+        flags.signer.bankr = true;
+        invocation_over(settings, flags, command)
+    }
+
+    #[test]
+    fn a_run_that_never_signs_never_reads_the_signer_inputs() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, r#"{"private_key": 5}"#).unwrap();
+        let settings = Settings::new(
+            EnvSource::fixed([(env::NETWORK, "testnet")]),
+            Some(ConfigFile::at(path)),
+        );
+        let inv = invocation_over(settings, InvocationFlags::default(), &Probe::SPEC);
+
+        assert!(inv.remote().is_ok(), "a public read needs no signer");
+        assert!(
+            inv.resolve_signer().is_err(),
+            "the unreadable key is only an error for a run that signs"
+        );
+    }
+
+    #[test]
+    fn a_signer_must_cover_what_the_command_signs_on_a_dry_run_too() {
+        for dry_run in [false, true] {
+            let inv = bankr_invocation(&WITHDRAW, dry_run);
+            let err = inv.resolve_signer().unwrap_err();
+            assert_eq!(
+                crate::errors::from_anyhow(err).exit_code(),
+                13,
+                "dry_run={dry_run}"
+            );
+            let Err(err) = inv.preview_signer() else {
+                panic!("dry_run={dry_run}: a preview is refused where the live run would be");
+            };
+            assert_eq!(err.exit_code(), 13);
+
+            let trade = bankr_invocation(&TRADE, dry_run);
+            assert!(trade.resolve_signer().is_ok(), "dry_run={dry_run}");
+            assert!(matches!(trade.preview_signer(), Ok(Ok(_))));
+        }
+    }
+
+    #[test]
+    fn an_address_only_signer_previews_but_cannot_sign_live() {
+        let selected = |dry_run| {
+            let mut flags = InvocationFlags {
+                dry_run,
+                ..InvocationFlags::default()
+            };
+            flags.signer.ows_signer = Some(RAW_ADDRESS.to_string());
+            let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
+            invocation_over(settings, flags, &TRADE)
+        };
+        let live = selected(false);
+        assert_eq!(
+            crate::errors::from_anyhow(live.resolve_signer().unwrap_err()).exit_code(),
+            13
+        );
+        let preview = selected(true);
+        assert_eq!(
+            preview
+                .resolve_signer()
+                .unwrap()
+                .address()
+                .to_string()
+                .to_lowercase(),
+            RAW_ADDRESS
+        );
+        assert!(matches!(preview.preview_signer(), Ok(Ok(_))));
+    }
+
+    #[test]
+    fn a_run_with_no_signer_previews_without_one_but_fails_live() {
+        let tmp = TempDir::new().unwrap();
+        let vault = tmp.path().to_str().unwrap().to_string();
+        let build = |dry_run| {
+            let settings = Settings::detached(
+                EnvSource::fixed([(env::OWS_VAULT_PATH, vault.as_str())]),
+                None,
+            );
+            let flags = InvocationFlags {
+                dry_run,
+                ..InvocationFlags::default()
+            };
+            invocation_over(settings, flags, &TRADE)
+        };
+        assert!(matches!(build(true).preview_signer(), Ok(Err(_))));
+        assert!(build(false).resolve_signer().is_err());
+    }
+
+    #[test]
+    fn a_master_only_command_refuses_a_stored_api_wallet() {
+        let inv = invocation_over(
+            Settings::detached(EnvSource::fixed::<&str, &str>([]), None),
+            InvocationFlags::default(),
+            &MASTER_ONLY,
+        );
+        let key: hypersdk::hypercore::PrivateKeySigner = KEY.parse().unwrap();
+        let agent = SelectedSigner::stored_account(
+            key.clone(),
+            "agent".to_string(),
+            RAW_ADDRESS.parse().unwrap(),
+        );
+        let err = inv.ensure_signer_fits(&agent).unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert!(
+            err.to_string()
+                .contains("approveAgent must be signed by the master account")
+        );
+        assert!(
+            inv.ensure_signer_fits(&SelectedSigner::private_key(key))
+                .is_ok()
+        );
     }
 
     #[test]
@@ -351,5 +540,33 @@ mod tests {
         assert!(flags.payload_from_stdin());
         assert!(flags.has_payload());
         assert!(!InvocationFlags::default().payload_from_stdin());
+    }
+
+    #[tokio::test]
+    async fn a_classified_metadata_failure_is_not_retried_against_the_raw_metadata() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/info"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let settings =
+            Settings::detached(EnvSource::fixed([(env::API_BASE_URL, server.uri())]), None);
+        let inv = invocation_over(settings, InvocationFlags::default(), &Probe::SPEC);
+
+        let direct = inv.asset_resolver().await.unwrap_err();
+        assert!(!matches!(direct, CliError::Internal(_)), "{direct}");
+        let after_direct = server.received_requests().await.unwrap().len();
+
+        inv.trading_resolver().await.unwrap_err();
+        let after_trading = server.received_requests().await.unwrap().len();
+        assert_eq!(
+            after_trading,
+            after_direct * 2,
+            "only the SDK's own load ran again, not the raw metadata fallback"
+        );
     }
 }

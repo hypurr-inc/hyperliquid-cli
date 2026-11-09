@@ -97,14 +97,17 @@ fn unsupported_live_signing(selector: &str) -> CliError {
 }
 
 /// Sign `payload` with the vault wallet: a user-signed document goes through
-/// the vault's typed-data signer, every other payload as its EIP-712 digest.
+/// the vault's typed-data signer, every other payload as its EIP-712 `digest`.
+/// The signature is returned unverified; [`crate::signing::SelectedSigner`]
+/// proves it recovers to the selected address.
 pub(crate) fn sign(
     config: &OwsSigningConfig,
     payload: &Payload<'_>,
+    digest: B256,
 ) -> Result<HyperliquidSignature, CliError> {
     match payload {
         Payload::UserSigned(typed_data) => sign_typed_data(config, typed_data),
-        other => sign_hash(config, other.digest()?),
+        _ => sign_hash(config, digest),
     }
 }
 
@@ -123,12 +126,7 @@ fn sign_typed_data(
         wallet.vault.path(),
     )
     .map_err(super::map_ows_error)?;
-    let signature = Provider::OWS.parse_signature(&result.signature, result.recovery_id)?;
-    let signing_hash = typed_data.eip712_signing_hash().map_err(|err| {
-        CliError::Internal(anyhow::anyhow!("failed to hash OWS typed data: {err}"))
-    })?;
-    Provider::OWS.verify(&signature, signing_hash, config.address)?;
-    Ok(signature)
+    Provider::OWS.parse_signature(&result.signature, result.recovery_id)
 }
 
 fn sign_hash(config: &OwsSigningConfig, hash: B256) -> Result<HyperliquidSignature, CliError> {
@@ -142,9 +140,7 @@ fn sign_hash(config: &OwsSigningConfig, hash: B256) -> Result<HyperliquidSignatu
         wallet.vault.path(),
     )
     .map_err(super::map_ows_error)?;
-    let signature = Provider::OWS.parse_signature(&result.signature, result.recovery_id)?;
-    Provider::OWS.verify(&signature, hash, config.address)?;
-    Ok(signature)
+    Provider::OWS.parse_signature(&result.signature, result.recovery_id)
 }
 
 fn ows_typed_data_json(typed_data: &TypedData) -> Result<String, CliError> {
@@ -322,20 +318,6 @@ mod tests {
     }
 
     #[test]
-    fn signing_rejects_a_signature_from_a_different_address() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let wallet = import_test_wallet(tmp.path(), "test-wallet");
-        let other: Address = "0x0000000000000000000000000000000000000001"
-            .parse()
-            .unwrap();
-        let config = OwsSigningConfig::for_wallet(&wallet, other, Vault::at(tmp.path()));
-
-        let err = sign_hash(&config, B256::repeat_byte(0x42)).unwrap_err();
-        assert_eq!(err.exit_code(), 10);
-        assert!(err.to_string().contains("ows_signer_mismatch"));
-    }
-
-    #[test]
     fn ows_typed_data_signing_recovers_selected_wallet_address() {
         let tmp = tempfile::TempDir::new().unwrap();
         let wallet = import_test_wallet(tmp.path(), "test-wallet");
@@ -398,7 +380,8 @@ mod tests {
         }))
         .unwrap();
 
-        let signature = sign(&config, &Payload::UserSigned(&typed_data)).unwrap();
+        let payload = Payload::UserSigned(&typed_data);
+        let signature = sign(&config, &payload, payload.digest().unwrap()).unwrap();
 
         let recovered = alloy::primitives::Signature::from(signature)
             .recover_address_from_prehash(&typed_data.eip712_signing_hash().unwrap())

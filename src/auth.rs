@@ -1,9 +1,10 @@
 //! Signer selection: which key signs an authenticated action, and which account
 //! an account selector names.
 //!
-//! One signer precedence, written once in [`resolve_signer`]:
-//! `--bankr` > `--ows-signer` > private key (flag, env or legacy config) >
-//! `--keystore` > `--account` > the default wallet.
+//! One signer precedence, written once in [`SignerSelection::from_flags`]:
+//! `--bankr` > `--ows-signer` > `--keystore` > `--account` > a private key
+//! (flag, `HYPERLIQUID_PRIVATE_KEY` or the legacy config key) > the default
+//! wallet. A flag that names a signer means the ambient key is not even read.
 //!
 //! One account resolver serves both `--account` (which must yield a signer) and
 //! data lookups (which only need an address): a vault wallet by name, id or
@@ -17,12 +18,12 @@ use hypersdk::Address;
 use hypersdk::hypercore::PrivateKeySigner;
 use ows_lib::types::WalletInfo;
 
-use crate::bankr::{BankrClient, KeySource};
+use crate::bankr::BankrClient;
 use crate::errors::CliError;
 use crate::legacy_accounts::{LegacyAccount, LegacyAccounts};
 use crate::mode::Mode;
 use crate::ows::vault::{HyperliquidAccount, Vault};
-use crate::settings::{Settings, env};
+use crate::settings::{KeySource, Settings, env};
 use crate::signing::SelectedSigner;
 
 /// Signer flags exactly as parsed from the command line.
@@ -36,41 +37,43 @@ pub struct SignerFlags {
     pub ows_signer: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct SignerSelection {
-    pub bankr: bool,
-    pub ows: Option<String>,
-    pub private_key: Option<String>,
-    pub keystore: Option<PathBuf>,
-    pub keystore_password: Option<String>,
-    pub account: Option<String>,
+/// The one signer a run names.
+#[derive(Debug, Clone)]
+pub enum SignerSelection {
+    Bankr,
+    Ows(String),
+    Keystore {
+        path: PathBuf,
+        password: Option<String>,
+    },
+    Account(String),
+    PrivateKey(String),
+    /// No signer was named: the default wallet.
+    Default,
 }
 
 impl SignerSelection {
-    /// Gather the run's signer inputs.
-    ///
-    /// `--bankr`, `--ows-signer`, `--account` and `--keystore` name a signer
-    /// explicitly, so an ambient private key (`HYPERLIQUID_PRIVATE_KEY` or the
-    /// legacy config key) must not override them: the key is not even read.
-    /// Clap rejects `--private-key` together with another signer flag.
+    /// Pick the run's signer from its flags and ambient key. Clap rejects
+    /// `--private-key` together with another signer flag.
     pub fn from_flags(settings: &Settings, flags: &SignerFlags) -> Result<Self, CliError> {
-        let names_signer = flags.bankr
-            || flags.account.is_some()
-            || flags.ows_signer.is_some()
-            || flags.keystore.is_some();
-        let private_key = if names_signer {
-            None
-        } else {
-            settings.private_key(flags.private_key.as_deref())?
-        };
-        Ok(Self {
-            bankr: flags.bankr,
-            ows: flags.ows_signer.clone(),
-            private_key,
-            keystore: flags.keystore.clone(),
-            keystore_password: flags.keystore_password.clone(),
-            account: flags.account.clone(),
-        })
+        if flags.bankr {
+            return Ok(Self::Bankr);
+        }
+        if let Some(selector) = &flags.ows_signer {
+            return Ok(Self::Ows(selector.clone()));
+        }
+        if let Some(path) = &flags.keystore {
+            return Ok(Self::Keystore {
+                path: path.clone(),
+                password: flags.keystore_password.clone(),
+            });
+        }
+        if let Some(selector) = &flags.account {
+            return Ok(Self::Account(selector.clone()));
+        }
+        Ok(settings
+            .private_key(flags.private_key.as_deref())?
+            .map_or(Self::Default, Self::PrivateKey))
     }
 }
 
@@ -89,32 +92,30 @@ pub fn resolve_signer(
     settings: &Settings,
     mode: &Mode,
 ) -> Result<SelectedSigner, anyhow::Error> {
-    Ok(if selection.bankr {
-        resolve_bankr(settings)?
-    } else if let Some(selector) = selection.ows.as_deref() {
-        resolve_ows_flag(selector, settings)?
-    } else if let Some(private_key) = selection.private_key.as_deref() {
-        SelectedSigner::private_key(parse_private_key(private_key)?)
-    } else if let Some(path) = selection.keystore.as_deref() {
-        let password = selection
-            .keystore_password
-            .clone()
-            .or_else(|| settings.keystore_password())
-            .ok_or_else(|| {
-                CliError::InvalidAuth(format!(
-                    "keystore password is required with --keystore; set {} or pass --keystore-password",
-                    env::KEYSTORE_PASSWORD
-                ))
-            })?;
-        SelectedSigner::keystore(
-            PrivateKeySigner::decrypt_keystore(path, &password).map_err(|err| {
-                CliError::InvalidAuth(format!("failed to decrypt keystore: {err}"))
-            })?,
-        )
-    } else if let Some(selector) = selection.account.as_deref() {
-        find_account(selector, settings, mode)?.into_signer()?
-    } else {
-        find_default(settings, mode)?.into_signer()?
+    Ok(match selection {
+        SignerSelection::Bankr => resolve_bankr(settings)?,
+        SignerSelection::Ows(selector) => resolve_ows_flag(selector, settings)?,
+        SignerSelection::Keystore { path, password } => {
+            let password = password
+                .clone()
+                .or_else(|| settings.keystore_password())
+                .ok_or_else(|| {
+                    CliError::InvalidAuth(format!(
+                        "keystore password is required with --keystore; set {} or pass --keystore-password",
+                        env::KEYSTORE_PASSWORD
+                    ))
+                })?;
+            SelectedSigner::keystore(PrivateKeySigner::decrypt_keystore(path, &password).map_err(
+                |err| CliError::InvalidAuth(format!("failed to decrypt keystore: {err}")),
+            )?)
+        }
+        SignerSelection::Account(selector) => {
+            find_account(selector, settings, mode)?.into_signer()?
+        }
+        SignerSelection::PrivateKey(private_key) => {
+            SelectedSigner::private_key(parse_private_key(private_key)?)
+        }
+        SignerSelection::Default => find_default(settings, mode)?.into_signer()?,
     })
 }
 
@@ -135,7 +136,7 @@ fn resolve_bankr(settings: &Settings) -> Result<SelectedSigner, anyhow::Error> {
     };
     let address = match cached {
         Some(address) => address,
-        None => client.blocking_wallet()?.address,
+        None => client.blocking_wallet()?,
     };
     Ok(SelectedSigner::bankr(client, address))
 }
@@ -157,12 +158,8 @@ fn resolve_ows_flag(selector: &str, settings: &Settings) -> Result<SelectedSigne
         ));
     }
     let vault = Vault::from_settings(settings);
-    let (wallet, account) = vault_account_by_name(&vault, selector)?;
-    Ok(SelectedSigner::vault_wallet(
-        &wallet,
-        account.address,
-        vault,
-    ))
+    let wallet = vault.get(selector)?;
+    SelectedSigner::vault_wallet(&vault, &wallet)
 }
 
 enum Found {
@@ -187,15 +184,7 @@ impl Found {
 
     fn into_signer(self) -> Result<SelectedSigner, anyhow::Error> {
         match self {
-            Self::Vault {
-                wallet,
-                account,
-                vault,
-            } => Ok(SelectedSigner::vault_wallet(
-                &wallet,
-                account.address,
-                vault,
-            )),
+            Self::Vault { wallet, vault, .. } => Ok(SelectedSigner::vault_wallet(&vault, &wallet)?),
             Self::Legacy { store, account } => {
                 let signer = parse_private_key(&store.decrypt_private_key(&account)?)?;
                 let query_address = account.query_address()?;
@@ -218,33 +207,18 @@ fn is_vault_miss(err: &CliError) -> bool {
     )
 }
 
-fn vault_account_by_name(
-    vault: &Vault,
-    selector: &str,
-) -> Result<(WalletInfo, HyperliquidAccount), CliError> {
-    let wallet = vault.get(selector)?;
-    let account = Vault::hyperliquid_account(&wallet)?;
-    Ok((wallet, account))
-}
-
-/// The vault wallet named by `selector`: by name or id, or by its Hyperliquid
-/// address (compared case-insensitively). `None` when the vault holds no such
-/// wallet; any other vault failure is an error.
+/// The vault wallet an account selector names (see [`Vault::select`]) with the
+/// account it signs as. `None` when the vault holds no such wallet, or the
+/// wallet has no Hyperliquid account; any other vault failure is an error.
 fn find_vault_account(
     vault: &Vault,
     selector: &str,
 ) -> Result<Option<(WalletInfo, HyperliquidAccount)>, CliError> {
-    if selector.parse::<Address>().is_ok() {
-        for wallet in vault.list()? {
-            if let Ok(account) = Vault::hyperliquid_account(&wallet)
-                && account.address_text.eq_ignore_ascii_case(selector)
-            {
-                return Ok(Some((wallet, account)));
-            }
-        }
-        return Ok(None);
-    }
-    match vault_account_by_name(vault, selector) {
+    let found = vault.select(selector).and_then(|wallet| {
+        let account = Vault::hyperliquid_account(&wallet)?;
+        Ok((wallet, account))
+    });
+    match found {
         Ok(found) => Ok(Some(found)),
         Err(err) if is_vault_miss(&err) => Ok(None),
         Err(err) => Err(err),
@@ -386,10 +360,6 @@ mod tests {
         )
     }
 
-    fn selection() -> SignerSelection {
-        SignerSelection::default()
-    }
-
     #[test]
     fn parses_private_key_and_derives_its_address() {
         let signer = parse_private_key(KEY).unwrap();
@@ -406,16 +376,10 @@ mod tests {
     }
 
     #[test]
-    fn ows_flag_beats_every_other_source_and_raw_address_cannot_sign() {
+    fn ows_address_only_selection_has_an_identity_but_no_key() {
         let vault = TempDir::new().unwrap();
         let resolved = resolve(
-            &SignerSelection {
-                ows: Some(RAW_OWS_ADDRESS.to_string()),
-                private_key: Some(KEY.to_string()),
-                keystore: Some(PathBuf::from("/nonexistent")),
-                account: Some("main".to_string()),
-                ..selection()
-            },
+            &SignerSelection::Ows(RAW_OWS_ADDRESS.to_string()),
             &vault_settings(&vault, None),
         )
         .unwrap();
@@ -428,7 +392,8 @@ mod tests {
             description.source,
             format!("OWS signer ({RAW_OWS_ADDRESS})")
         );
-        assert!(resolved.ensure_can_sign(Signs::L1Action).is_err());
+        assert!(resolved.ensure_covers(Signs::L1Action).is_ok());
+        assert!(resolved.ensure_holds_key().is_err());
     }
 
     #[test]
@@ -439,24 +404,18 @@ mod tests {
         let settings = vault_settings(&vault, None);
 
         let by_flag = resolve(
-            &SignerSelection {
-                ows: Some(account.address_text.clone()),
-                ..selection()
-            },
+            &SignerSelection::Ows(account.address_text.clone()),
             &settings,
         )
         .unwrap();
-        assert!(by_flag.ensure_can_sign(Signs::L1Action).is_err());
+        assert!(by_flag.ensure_holds_key().is_err());
 
         let by_account = resolve(
-            &SignerSelection {
-                account: Some(account.address_text.to_lowercase()),
-                ..selection()
-            },
+            &SignerSelection::Account(account.address_text.to_lowercase()),
             &settings,
         )
         .unwrap();
-        assert!(by_account.ensure_can_sign(Signs::L1Action).is_ok());
+        assert!(by_account.ensure_holds_key().is_ok());
         assert_eq!(by_account.address(), account.address);
         let description = by_account.describe();
         assert_eq!(description.alias.as_deref(), Some("main"));
@@ -468,10 +427,7 @@ mod tests {
         let vault = TempDir::new().unwrap();
         let wallet = import_test_wallet(vault.path(), "main");
         let resolved = resolve(
-            &SignerSelection {
-                ows: Some(format!(" {} ", wallet.id)),
-                ..selection()
-            },
+            &SignerSelection::Ows(format!(" {} ", wallet.id)),
             &vault_settings(&vault, None),
         )
         .unwrap();
@@ -483,10 +439,7 @@ mod tests {
     fn empty_ows_selector_is_a_configuration_error() {
         let vault = TempDir::new().unwrap();
         let err = resolve(
-            &SignerSelection {
-                ows: Some("  ".to_string()),
-                ..selection()
-            },
+            &SignerSelection::Ows("  ".to_string()),
             &vault_settings(&vault, None),
         )
         .unwrap_err();
@@ -494,14 +447,10 @@ mod tests {
     }
 
     #[test]
-    fn private_key_beats_keystore() {
+    fn a_private_key_selection_signs_with_that_key() {
         let vault = TempDir::new().unwrap();
         let resolved = resolve(
-            &SignerSelection {
-                private_key: Some(KEY.to_string()),
-                keystore: Some(PathBuf::from("/nonexistent")),
-                ..selection()
-            },
+            &SignerSelection::PrivateKey(KEY.to_string()),
             &vault_settings(&vault, None),
         )
         .unwrap();
@@ -516,9 +465,9 @@ mod tests {
     fn keystore_requires_a_password() {
         let vault = TempDir::new().unwrap();
         let err = resolve(
-            &SignerSelection {
-                keystore: Some(PathBuf::from("/nonexistent")),
-                ..selection()
+            &SignerSelection::Keystore {
+                path: PathBuf::from("/nonexistent"),
+                password: None,
             },
             &vault_settings(&vault, None),
         )
@@ -535,7 +484,7 @@ mod tests {
         let vault = TempDir::new().unwrap();
         let first = import_test_wallet(vault.path(), "first");
 
-        let only = resolve(&selection(), &vault_settings(&vault, None)).unwrap();
+        let only = resolve(&SignerSelection::Default, &vault_settings(&vault, None)).unwrap();
         let name = |signer: &SelectedSigner| signer.describe().alias;
         assert_eq!(name(&only).as_deref(), Some("first"));
 
@@ -544,10 +493,14 @@ mod tests {
             default_wallet_id: Some(first.id.clone()),
             ..Config::default()
         };
-        let configured = resolve(&selection(), &vault_settings(&vault, Some(config))).unwrap();
+        let configured = resolve(
+            &SignerSelection::Default,
+            &vault_settings(&vault, Some(config)),
+        )
+        .unwrap();
         assert_eq!(name(&configured).as_deref(), Some("first"));
 
-        let err = resolve(&selection(), &vault_settings(&vault, None)).unwrap_err();
+        let err = resolve(&SignerSelection::Default, &vault_settings(&vault, None)).unwrap_err();
         assert!(err.to_string().contains("holds 2 wallets"));
     }
 
@@ -555,48 +508,116 @@ mod tests {
         SignerSelection::from_flags(settings, &flags).unwrap()
     }
 
-    #[test]
-    fn selection_ignores_ambient_key_when_a_signer_is_named() {
-        let ambient = Settings::detached(EnvSource::fixed([(env::PRIVATE_KEY, KEY)]), None);
-        let named = SignerFlags {
-            account: Some("main".to_string()),
-            ..SignerFlags::default()
-        };
-
-        assert_eq!(selected(&ambient, named).private_key, None);
-        assert_eq!(
-            selected(&ambient, SignerFlags::default())
-                .private_key
-                .as_deref(),
-            Some(KEY)
-        );
-        let bare = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
-        assert_eq!(selected(&bare, SignerFlags::default()).private_key, None);
+    fn ambient_key() -> Settings {
+        Settings::detached(EnvSource::fixed([(env::PRIVATE_KEY, KEY)]), None)
     }
 
     #[test]
-    fn an_explicit_keystore_is_not_overridden_by_an_ambient_key() {
-        let ambient = Settings::detached(EnvSource::fixed([(env::PRIVATE_KEY, KEY)]), None);
+    fn flags_pick_one_signer_in_the_documented_order() {
+        let ambient = ambient_key();
+        let everything = SignerFlags {
+            bankr: true,
+            ows_signer: Some("ows".to_string()),
+            keystore: Some(PathBuf::from("/keystore.json")),
+            keystore_password: Some("pw".to_string()),
+            account: Some("main".to_string()),
+            private_key: Some(KEY.to_string()),
+        };
+        assert!(matches!(
+            selected(&ambient, everything.clone()),
+            SignerSelection::Bankr
+        ));
 
-        let selection = selected(
-            &ambient,
+        let without_bankr = SignerFlags {
+            bankr: false,
+            ..everything
+        };
+        let SignerSelection::Ows(selector) = selected(&ambient, without_bankr.clone()) else {
+            panic!("--ows-signer comes right after --bankr");
+        };
+        assert_eq!(selector, "ows");
+
+        let without_ows = SignerFlags {
+            ows_signer: None,
+            ..without_bankr
+        };
+        let SignerSelection::Keystore { path, password } = selected(&ambient, without_ows.clone())
+        else {
+            panic!("--keystore comes before --account");
+        };
+        assert_eq!(path, PathBuf::from("/keystore.json"));
+        assert_eq!(password.as_deref(), Some("pw"));
+
+        let without_keystore = SignerFlags {
+            keystore: None,
+            ..without_ows
+        };
+        let SignerSelection::Account(selector) = selected(&ambient, without_keystore.clone())
+        else {
+            panic!("--account comes before a private key");
+        };
+        assert_eq!(selector, "main");
+
+        let key_only = SignerFlags {
+            account: None,
+            ..without_keystore
+        };
+        let SignerSelection::PrivateKey(key) = selected(&ambient, key_only) else {
+            panic!("a private key is the last explicit choice");
+        };
+        assert_eq!(key, KEY);
+    }
+
+    #[test]
+    fn a_named_signer_means_the_ambient_key_is_not_even_read() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        std::fs::write(&path, r#"{"private_key": 5}"#).unwrap();
+        let unreadable_key = Settings::new(
+            EnvSource::fixed::<&str, &str>([]),
+            Some(crate::config::ConfigFile::at(path)),
+        );
+
+        assert!(SignerSelection::from_flags(&unreadable_key, &SignerFlags::default()).is_err());
+        for flags in [
+            SignerFlags {
+                account: Some("main".to_string()),
+                ..SignerFlags::default()
+            },
             SignerFlags {
                 keystore: Some(PathBuf::from("/keystore.json")),
                 ..SignerFlags::default()
             },
-        );
-        assert_eq!(selection.private_key, None);
-        assert_eq!(selection.keystore, Some(PathBuf::from("/keystore.json")));
+            SignerFlags {
+                bankr: true,
+                ..SignerFlags::default()
+            },
+        ] {
+            assert!(SignerSelection::from_flags(&unreadable_key, &flags).is_ok());
+        }
     }
 
     #[test]
-    fn a_private_key_flag_is_the_selected_key() {
+    fn the_ambient_key_is_the_selection_only_when_nothing_else_is_named() {
+        let SignerSelection::PrivateKey(key) = selected(&ambient_key(), SignerFlags::default())
+        else {
+            panic!("the environment key is selected");
+        };
+        assert_eq!(key, KEY);
+
         let bare = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
+        assert!(matches!(
+            selected(&bare, SignerFlags::default()),
+            SignerSelection::Default
+        ));
         let flag = SignerFlags {
             private_key: Some(KEY.to_string()),
             ..SignerFlags::default()
         };
-        assert_eq!(selected(&bare, flag).private_key.as_deref(), Some(KEY));
+        assert!(matches!(
+            selected(&bare, flag),
+            SignerSelection::PrivateKey(key) if key == KEY
+        ));
     }
 
     /// A vault holding two wallets named `main`, which `ows-lib` itself refuses
@@ -620,14 +641,7 @@ mod tests {
         let (_vault, settings) = vault_with_duplicate_names();
         let ambiguous = |err: &anyhow::Error| err.to_string().contains("matched 2 wallets");
 
-        let signed = resolve(
-            &SignerSelection {
-                account: Some("main".to_string()),
-                ..selection()
-            },
-            &settings,
-        )
-        .unwrap_err();
+        let signed = resolve(&SignerSelection::Account("main".to_string()), &settings).unwrap_err();
         assert!(ambiguous(&signed), "signing: {signed}");
 
         let lookup = lookup_account_address("main", &settings, &Mode::default()).unwrap_err();
@@ -637,7 +651,11 @@ mod tests {
             default_wallet_id: Some("main".to_string()),
             ..Config::default()
         };
-        let default = resolve(&selection(), &vault_settings(&_vault, Some(config))).unwrap_err();
+        let default = resolve(
+            &SignerSelection::Default,
+            &vault_settings(&_vault, Some(config)),
+        )
+        .unwrap_err();
         assert!(ambiguous(&default), "default: {default}");
     }
 

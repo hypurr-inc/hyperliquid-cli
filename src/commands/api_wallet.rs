@@ -1,14 +1,14 @@
 use clap::Args;
 use hypersdk::Address;
+use hypersdk::hypercore::types::Action;
 use hypersdk::hypercore::types::api::ApproveAgent;
-use hypersdk::hypercore::types::{Action, Response};
 use hypersdk::hypercore::{Chain, PrivateKeySigner};
 use serde::Serialize;
 
 use crate::auth;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
 use crate::commands::actions;
-use crate::commands::support::require_master_signer;
+
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::input_hardening::validate_resource_id;
@@ -279,11 +279,7 @@ impl TableData for ApiAgentListOutput {
     }
 }
 
-async fn create(
-    inv: &Invocation,
-    signer: Option<&SelectedSigner>,
-    args: &CreateArgs,
-) -> Result<(), anyhow::Error> {
+async fn create(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error> {
     let prepared = prepare_agent_approval(
         Operation::Create,
         ApprovalInput {
@@ -294,14 +290,10 @@ async fn create(
         },
         actions::nonce_now(),
     )?;
-    approve_prepared(inv, signer, Operation::Create, prepared).await
+    approve_prepared(inv, Operation::Create, prepared).await
 }
 
-async fn approve(
-    inv: &Invocation,
-    signer: Option<&SelectedSigner>,
-    args: &ApproveArgs,
-) -> Result<(), anyhow::Error> {
+async fn approve(inv: &Invocation, args: &ApproveArgs) -> Result<(), anyhow::Error> {
     let prepared = prepare_agent_approval(
         Operation::Approve,
         ApprovalInput {
@@ -312,7 +304,7 @@ async fn approve(
         },
         actions::nonce_now(),
     )?;
-    approve_prepared(inv, signer, Operation::Approve, prepared).await
+    approve_prepared(inv, Operation::Approve, prepared).await
 }
 
 async fn list(inv: &Invocation, master_address: Address) -> Result<(), anyhow::Error> {
@@ -337,13 +329,9 @@ async fn list(inv: &Invocation, master_address: Address) -> Result<(), anyhow::E
     Ok(())
 }
 
-async fn revoke(
-    inv: &Invocation,
-    signer: Option<&SelectedSigner>,
-    args: &RevokeArgs,
-) -> Result<(), anyhow::Error> {
+async fn revoke(inv: &Invocation, args: &RevokeArgs) -> Result<(), anyhow::Error> {
     let prepared = prepare_revoke_replacement(args, actions::nonce_now())?;
-    approve_prepared(inv, signer, Operation::Revoke, prepared).await
+    approve_prepared(inv, Operation::Revoke, prepared).await
 }
 
 fn prepare_revoke_replacement(
@@ -369,7 +357,6 @@ fn prepare_revoke_replacement(
 
 async fn approve_prepared(
     inv: &Invocation,
-    signer: Option<&SelectedSigner>,
     operation: Operation,
     prepared: PreparedAgentApproval,
 ) -> Result<(), anyhow::Error> {
@@ -378,26 +365,31 @@ async fn approve_prepared(
     let nonce = actions::nonce_now();
     let approval = approval_action(chain, &prepared, nonce);
     let approval_value =
-        serde_json::to_value(Action::ApproveAgent(approval.clone())).unwrap_or_default();
+        serde_json::to_value(Action::ApproveAgent(approval.clone())).map_err(|err| {
+            CliError::Internal(anyhow::anyhow!(
+                "failed to encode approveAgent action: {err}"
+            ))
+        })?;
 
     if inv.dry_run() {
-        let row = approval_dry_run_row(
-            operation,
-            signer.map(SelectedSigner::address),
-            &prepared,
-            approval_value,
-        );
+        let master_address = inv.preview_signer()?.ok().map(SelectedSigner::address);
+        let row = approval_dry_run_row(operation, master_address, &prepared, approval_value);
         print_action_output(inv, row);
         return Ok(());
     }
 
     ensure_generated_key_projection_is_safe(&prepared, inv)?;
 
-    let signer = signer.ok_or(CliError::AuthRequired)?;
-    let master_address = signer.address();
-    let request = signer.sign_l1_action_sync(Action::ApproveAgent(approval), nonce, None, chain)?;
-    let response = remote.api().exchange::<Response>(&request).await?;
-    actions::ensure_default_response(response, "approveAgent action failed")?;
+    let signer = inv.resolve_signer()?;
+    actions::send_l1_action_raw(
+        remote.api(),
+        &signer,
+        Action::ApproveAgent(approval),
+        nonce,
+        None,
+        "approveAgent action failed",
+    )
+    .await?;
 
     let private_key = prepared.generated_private_key;
     print_action_output(
@@ -405,7 +397,7 @@ async fn approve_prepared(
         ApiWalletActionRow {
             status: "submitted".to_string(),
             action: operation.action().to_string(),
-            master_address: Some(master_address.to_string()),
+            master_address: Some(signer.address().to_string()),
             agent_address: prepared.agent_address.to_string(),
             name: prepared.display_name,
             action_agent_name: prepared.action_agent_name,
@@ -610,6 +602,7 @@ impl CliCommand for ApiWalletCreate {
         "Generate or approve a Hyperliquid API/agent wallet. When the CLI generates a local agent keypair, it prints the private key exactly once before approval.",
     )
     .signs(Signs::Digest)
+    .master_only("approveAgent")
     .long_about("Generate or approve an API wallet.\n\
 \n\
 By default this command generates a new local API wallet keypair, signs an approveAgent action for that address with the selected master account, and prints the generated private key exactly once unless command is running in dry-run.")
@@ -625,8 +618,7 @@ By default this command generates a new local API wallet keypair, signs an appro
     }
 
     async fn run(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error> {
-        let signer = api_wallet_approval_signer(inv)?;
-        create(inv, signer.as_ref(), args).await
+        create(inv, args).await
     }
 }
 
@@ -642,6 +634,7 @@ impl CliCommand for ApiWalletApprove {
         "Approve an existing or generated API/agent wallet address for the selected master account.",
     )
     .signs(Signs::Digest)
+    .master_only("approveAgent")
     .args(&[
         arg("name").describe("Optional API wallet name."),
         arg("expires_in").kind(InputKind::Duration).describe("Expiration duration such as 30d, 12h, or 1w. Requires name."),
@@ -654,8 +647,7 @@ impl CliCommand for ApiWalletApprove {
     }
 
     async fn run(inv: &Invocation, args: &ApproveArgs) -> Result<(), anyhow::Error> {
-        let signer = api_wallet_approval_signer(inv)?;
-        approve(inv, signer.as_ref(), args).await
+        approve(inv, args).await
     }
 }
 
@@ -699,6 +691,7 @@ impl CliCommand for ApiWalletRevoke {
         "Revoke a named API wallet by replacing it with a short-lived throwaway agent.",
     )
     .signs(Signs::Digest)
+    .master_only("approveAgent")
     .args(&[arg("name")
         .describe("Named API wallet to revoke.")
         .resource_id("API wallet name")]);
@@ -708,23 +701,8 @@ impl CliCommand for ApiWalletRevoke {
     }
 
     async fn run(inv: &Invocation, args: &RevokeArgs) -> Result<(), anyhow::Error> {
-        let signer = api_wallet_approval_signer(inv)?;
-        revoke(inv, signer.as_ref(), args).await
+        revoke(inv, args).await
     }
-}
-
-/// The signer that approves an agent: the master account itself, one that can
-/// sign `approveAgent`. `None` for a dry run, which signs nothing.
-fn api_wallet_approval_signer(inv: &Invocation) -> Result<Option<SelectedSigner>, anyhow::Error> {
-    let resolved = inv.resolve_signer();
-    if let Ok(signer) = &resolved {
-        require_master_signer(signer, "approveAgent")?;
-    }
-    if inv.dry_run() {
-        return Ok(None);
-    }
-    let signer = resolved?;
-    Ok(Some(signer))
 }
 
 fn validate_api_wallet_args(

@@ -125,6 +125,24 @@ impl Vault {
         ows_lib::get_wallet(name_or_id, self.path()).map_err(map_ows_error)
     }
 
+    /// The wallet an account selector names: by name or id, or by its Hyperliquid
+    /// address in any letter case. A vault that holds no such wallet is
+    /// `OwsWalletNotFound`; a name shared by several wallets is ambiguous.
+    pub fn select(&self, selector: &str) -> Result<WalletInfo, CliError> {
+        if selector.parse::<Address>().is_err() {
+            return self.get(selector);
+        }
+        self.list()?
+            .into_iter()
+            .find(|wallet| {
+                Self::hyperliquid_account(wallet)
+                    .is_ok_and(|account| account.address_text.eq_ignore_ascii_case(selector))
+            })
+            .ok_or_else(|| CliError::OwsWalletNotFound {
+                wallet: selector.to_string(),
+            })
+    }
+
     /// Create a wallet with a new 12-word BIP-39 mnemonic.
     pub fn create(&self, name: &str) -> Result<WalletInfo, CliError> {
         ows_lib::create_wallet(name, Some(12), self.passphrase(), self.path())
@@ -253,10 +271,7 @@ impl Vault {
                 ))),
                 Err(err) => Err(err),
             },
-            (Some(id), many) => Err(CliError::InvalidAuth(format!(
-                "ows_ambiguous_wallet: OWS wallet selector '{id}' matched {} wallets; use the wallet id",
-                many.len()
-            ))),
+            (Some(id), many) => Err(super::ambiguous_wallet(id, many.len())),
             (None, _) if wallets.is_empty() => Err(CliError::AuthRequired),
             (None, _) => Err(CliError::InvalidAuth(format!(
                 "No default wallet is set and the vault holds {} wallets.\nPick one:\n    {SET_DEFAULT_HINT}",
@@ -310,6 +325,32 @@ mod tests {
             Err(CliError::OwsWalletNotFound { .. })
         ));
         assert!(!tmp.path().join("missing").exists());
+    }
+
+    #[test]
+    fn select_matches_name_id_or_address_in_any_case_and_nothing_else() {
+        let tmp = TempDir::new().unwrap();
+        let vault = Vault::at(tmp.path());
+        let wallet = import_test_wallet(tmp.path(), "main");
+        let address = Vault::hyperliquid_account(&wallet).unwrap().address_text;
+
+        for selector in [
+            "main".to_string(),
+            wallet.id.clone(),
+            address.to_lowercase(),
+            address.to_uppercase().replace("0X", "0x"),
+        ] {
+            assert_eq!(vault.select(&selector).unwrap().id, wallet.id, "{selector}");
+        }
+        for selector in [
+            "Main",
+            "other",
+            "0x0000000000000000000000000000000000000001",
+        ] {
+            let err = vault.select(selector).unwrap_err();
+            assert!(matches!(err, CliError::OwsWalletNotFound { .. }), "{err}");
+            assert_eq!(err.exit_code(), 10);
+        }
     }
 
     #[test]

@@ -6,9 +6,10 @@
 //! sign: local keys sign any digest, an OWS wallet signs any digest once a wallet
 //! resolved, and Bankr signs only the typed-data documents it can rebuild.
 //! [`Signs`] names a payload's kind before it exists, so a command's spec can
-//! state what it signs and [`SelectedSigner::ensure_can_sign`] can refuse early.
-//! Provider failures are checked by [`signature::Provider`] before a signature
-//! is returned.
+//! state what it signs and [`SelectedSigner::ensure_covers`] can refuse early;
+//! [`Payload::signs`] derives the same kind from a payload, so the early and the
+//! late answer are one rule. Every signature a remote provider returns is
+//! checked, once, against the payload's own digest and the selected address.
 
 pub(crate) mod signature;
 
@@ -22,7 +23,8 @@ use hypersdk::hypercore::types::{Action, ActionRequest, Signature};
 use hypersdk::hypercore::{Chain, PrivateKeySigner};
 use ows_lib::types::WalletInfo;
 
-use crate::bankr::{BankrClient, BankrSigner, BankrTypedData};
+use self::signature::Provider;
+use crate::bankr::{self, BankrClient, BankrSigner};
 use crate::errors::CliError;
 use crate::ows::signing::{self as ows_signing, OwsSigningConfig};
 use crate::ows::vault::Vault;
@@ -32,18 +34,18 @@ pub(crate) const USER_SIGNED_PREFIX: &str = "HyperliquidTransaction:";
 
 /// The kind of signature a command asks for, known before anything is signed:
 /// what a [`CommandSpec`](crate::command_spec::CommandSpec) declares and what
-/// each provider answers [`SelectedSigner::ensure_can_sign`] for.
+/// each provider answers [`SelectedSigner::ensure_covers`] for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Signs {
+pub enum Signs<'a> {
     /// An L1 action: trading, margin, vault and subaccount actions.
     L1Action,
     /// A user-signed action's EIP-712 document, by struct name.
-    UserSigned(&'static str),
+    UserSigned(&'a str),
     /// A user-signed [`Action`] whose document hypersdk does not expose.
     Digest,
 }
 
-impl Signs {
+impl Signs<'static> {
     #[must_use]
     pub const fn user_signed<T: SolStruct>() -> Self {
         Self::UserSigned(T::NAME)
@@ -72,6 +74,20 @@ impl Payload<'_> {
                 CliError::Internal(anyhow::anyhow!("failed to hash typed data: {err}"))
             }),
             Self::Digest(digest) => Ok(*digest),
+        }
+    }
+
+    /// The kind of signature this payload is, as a command's spec would declare it.
+    pub(crate) fn signs(&self) -> Signs<'_> {
+        match self {
+            Self::Agent { .. } => Signs::L1Action,
+            Self::UserSigned(typed_data) => Signs::UserSigned(
+                typed_data
+                    .primary_type
+                    .strip_prefix(USER_SIGNED_PREFIX)
+                    .unwrap_or(&typed_data.primary_type),
+            ),
+            Self::Digest(_) => Signs::Digest,
         }
     }
 }
@@ -141,9 +157,14 @@ impl SelectedSigner {
         }
     }
 
-    #[must_use]
-    pub fn vault_wallet(wallet: &WalletInfo, address: Address, vault: Vault) -> Self {
-        Self::ows(OwsSigningConfig::for_wallet(wallet, address, vault))
+    /// A wallet in `vault`, signing as its Hyperliquid account.
+    pub fn vault_wallet(vault: &Vault, wallet: &WalletInfo) -> Result<Self, CliError> {
+        let account = Vault::hyperliquid_account(wallet)?;
+        Ok(Self::ows(OwsSigningConfig::for_wallet(
+            wallet,
+            account.address,
+            vault.clone(),
+        )))
     }
 
     /// An address named by `--ows-signer` that no vault wallet backs: it can
@@ -212,28 +233,64 @@ impl SelectedSigner {
         SignerDescription { alias, source }
     }
 
-    /// Whether this provider can sign `signs`, answered before any side effect.
-    /// A local key signs anything; an OWS wallet signs anything once a wallet
-    /// resolved (an address-only selector cannot); Bankr signs only what
-    /// [`BankrTypedData`] can rebuild. Signing still verifies the recovered
-    /// address of every payload before submission.
-    pub fn ensure_can_sign(&self, signs: Signs) -> Result<(), CliError> {
+    /// Whether this provider signs `signs` at all: a local key and an OWS wallet
+    /// sign anything, Bankr only what [`bankr::covers`] says. Holds whether or
+    /// not a key is at hand, so a dry run can ask it too.
+    pub fn ensure_covers(&self, signs: Signs<'_>) -> Result<(), CliError> {
         match &self.backend {
-            SignerBackend::Local { .. } => Ok(()),
+            SignerBackend::Local { .. } | SignerBackend::Ows(_) => Ok(()),
+            SignerBackend::Bankr(_) => bankr::ensure_covers(signs),
+        }
+    }
+
+    /// Whether a key stands behind this identity: an address-only `--ows-signer`
+    /// names an account to preview, not one to sign for.
+    pub fn ensure_holds_key(&self) -> Result<(), CliError> {
+        match &self.backend {
             SignerBackend::Ows(config) => config.ensure_signable(),
-            SignerBackend::Bankr(_) => BankrTypedData::ensure_covers(signs),
+            SignerBackend::Local { .. } | SignerBackend::Bankr(_) => Ok(()),
         }
     }
 
     fn sign(&self, payload: &Payload<'_>) -> Result<Signature, CliError> {
-        match &self.backend {
+        let digest = payload.digest()?;
+        let signature = match &self.backend {
             SignerBackend::Local { signer, .. } => signer
-                .sign_hash_sync(&payload.digest()?)
+                .sign_hash_sync(&digest)
                 .map(Into::into)
-                .map_err(|err| CliError::Internal(anyhow::anyhow!("failed to sign action: {err}"))),
-            SignerBackend::Ows(config) => ows_signing::sign(config, payload),
-            SignerBackend::Bankr(signer) => signer.sign(payload),
+                .map_err(|err| {
+                CliError::Internal(anyhow::anyhow!("failed to sign action: {err}"))
+            })?,
+            SignerBackend::Ows(config) => ows_signing::sign(config, payload, digest)?,
+            SignerBackend::Bankr(signer) => signer.sign(payload)?,
+        };
+        self.verified(signature, digest)
+    }
+
+    /// [`Self::sign`] for an async caller: Bankr's request is awaited instead of
+    /// run on a scoped runtime thread.
+    async fn sign_async(&self, payload: &Payload<'_>) -> Result<Signature, CliError> {
+        let SignerBackend::Bankr(signer) = &self.backend else {
+            return self.sign(payload);
+        };
+        let digest = payload.digest()?;
+        let signature = signer.sign_async(payload).await?;
+        self.verified(signature, digest)
+    }
+
+    /// A remote provider's signature, proven to be over `digest` by the address
+    /// that was selected. A local key needs no proof.
+    fn verified(&self, signature: Signature, digest: B256) -> Result<Signature, CliError> {
+        match &self.backend {
+            SignerBackend::Local { .. } => {}
+            SignerBackend::Ows(config) => {
+                Provider::OWS.verify(&signature, digest, config.address())?;
+            }
+            SignerBackend::Bankr(signer) => {
+                Provider::BANKR.verify(&signature, digest, signer.address())?;
+            }
         }
+        Ok(signature)
     }
 
     pub fn sign_l1_action_sync(
@@ -280,20 +337,18 @@ impl SelectedSigner {
         chain: Chain,
         connection_id: B256,
     ) -> Result<Signature, CliError> {
-        let payload = Payload::Agent {
+        self.sign_async(&Payload::Agent {
             chain,
             connection_id,
-        };
-        match &self.backend {
-            SignerBackend::Bankr(signer) => signer.sign_async(&payload).await,
-            _ => self.sign(&payload),
-        }
+        })
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ows::vault::test_support::import_test_wallet;
     use alloy::dyn_abi::{Eip712Types, Resolver};
     use alloy::sol_types::SolStruct;
     use hypersdk::hypercore::types::api::ApproveAgent;
@@ -377,7 +432,7 @@ mod tests {
     /// with a network error, so exit `13` proves the refusal came first.
     fn unreachable_bankr() -> SelectedSigner {
         SelectedSigner::bankr(
-            BankrClient::new("http://127.0.0.1:1", "bk_test"),
+            BankrClient::new("http://127.0.0.1:1", "bk_test").unwrap(),
             key().address(),
         )
     }
@@ -478,15 +533,15 @@ mod tests {
     fn bankr_documents_hash_exactly_like_the_typed_data_they_stand_for() {
         for chain in [Chain::Mainnet, Chain::Testnet] {
             let typed = usd_class_transfer(chain);
-            let document =
-                crate::bankr::BankrTypedData::for_payload(&Payload::UserSigned(&typed)).unwrap();
+            let document = crate::bankr::document(&Payload::UserSigned(&typed)).unwrap();
+            let sent: TypedData = serde_json::from_value(document.clone()).unwrap();
             assert_eq!(
-                document.signing_hash().unwrap(),
+                sent.eip712_signing_hash().unwrap(),
                 typed.eip712_signing_hash().unwrap(),
                 "{chain:?}"
             );
             assert_eq!(
-                document.document()["domain"]["chainId"],
+                document["domain"]["chainId"],
                 if chain.is_mainnet() { 42161 } else { 421_614 },
                 "the chain id goes to Bankr as a decimal number"
             );
@@ -494,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_is_asked_of_the_provider_before_signing() {
+    fn covering_is_asked_of_the_provider_and_holding_a_key_of_the_identity() {
         let usd_class = Signs::user_signed::<UsdClassTransfer>();
         let withdraw = Signs::user_signed::<Withdraw>();
         let address_only = SelectedSigner::ows_address_only(
@@ -505,25 +560,20 @@ mod tests {
         );
 
         for signs in [Signs::L1Action, usd_class, withdraw, Signs::Digest] {
-            assert!(
-                SelectedSigner::private_key(key())
-                    .ensure_can_sign(signs)
-                    .is_ok(),
-                "{signs:?}"
-            );
-            assert_eq!(
-                address_only.ensure_can_sign(signs).unwrap_err().exit_code(),
-                13,
-                "{signs:?}"
-            );
+            let local = SelectedSigner::private_key(key());
+            assert!(local.ensure_covers(signs).is_ok(), "{signs:?}");
+            assert!(local.ensure_holds_key().is_ok(), "{signs:?}");
+            assert!(address_only.ensure_covers(signs).is_ok(), "{signs:?}");
         }
+        assert_eq!(address_only.ensure_holds_key().unwrap_err().exit_code(), 13);
 
         let bankr = unreachable_bankr();
-        assert!(bankr.ensure_can_sign(Signs::L1Action).is_ok());
-        assert!(bankr.ensure_can_sign(usd_class).is_ok());
+        assert!(bankr.ensure_holds_key().is_ok());
+        assert!(bankr.ensure_covers(Signs::L1Action).is_ok());
+        assert!(bankr.ensure_covers(usd_class).is_ok());
         for refused in [withdraw, Signs::Digest] {
             assert_eq!(
-                bankr.ensure_can_sign(refused).unwrap_err().exit_code(),
+                bankr.ensure_covers(refused).unwrap_err().exit_code(),
                 13,
                 "{refused:?}"
             );
@@ -531,19 +581,78 @@ mod tests {
     }
 
     #[test]
-    fn a_declared_user_signed_action_is_the_document_bankr_accepts() {
-        for (signs, typed) in [
+    fn a_payload_is_the_kind_its_spec_declares() {
+        let usd_class = usd_class_transfer(Chain::Mainnet);
+        let withdraw = withdraw(Chain::Mainnet);
+        assert_eq!(
+            Payload::UserSigned(&usd_class).signs(),
+            Signs::user_signed::<UsdClassTransfer>()
+        );
+        assert_eq!(
+            Payload::UserSigned(&withdraw).signs(),
+            Signs::user_signed::<Withdraw>()
+        );
+        assert_eq!(
+            Payload::Agent {
+                chain: Chain::Mainnet,
+                connection_id: B256::ZERO
+            }
+            .signs(),
+            Signs::L1Action
+        );
+        assert_eq!(Payload::Digest(B256::ZERO).signs(), Signs::Digest);
+    }
+
+    #[test]
+    fn a_declared_kind_is_covered_exactly_when_its_payload_gets_a_document() {
+        for (typed, signs) in [
             (
-                Signs::user_signed::<UsdClassTransfer>(),
                 usd_class_transfer(Chain::Mainnet),
+                Signs::user_signed::<UsdClassTransfer>(),
             ),
-            (Signs::user_signed::<Withdraw>(), withdraw(Chain::Mainnet)),
+            (withdraw(Chain::Mainnet), Signs::user_signed::<Withdraw>()),
         ] {
             assert_eq!(
-                crate::bankr::BankrTypedData::covers(signs),
-                crate::bankr::BankrTypedData::for_payload(&Payload::UserSigned(&typed)).is_ok(),
+                crate::bankr::covers(signs),
+                crate::bankr::document(&Payload::UserSigned(&typed)).is_ok(),
                 "{signs:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_signature_from_another_address_is_refused_for_every_payload_kind() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let wallet = import_test_wallet(tmp.path(), "test-wallet");
+        let other: Address = "0x0000000000000000000000000000000000000001"
+            .parse()
+            .unwrap();
+        let signer = SelectedSigner::ows(OwsSigningConfig::for_wallet(
+            &wallet,
+            other,
+            Vault::at(tmp.path()),
+        ));
+
+        let chain = Chain::Testnet;
+        let results = [
+            signer.sign_typed_data(&withdraw(chain)).map(|_| ()),
+            signer
+                .sign_l1_action_sync(
+                    Action::ScheduleCancel(ScheduleCancel { time: None }),
+                    1,
+                    None,
+                    chain,
+                )
+                .map(|_| ()),
+            signer
+                .sign_l1_action_sync(approve_agent(chain), 1, None, chain)
+                .map(|_| ()),
+            block_on(signer.sign_l1_connection_id(chain, B256::repeat_byte(3))).map(|_| ()),
+        ];
+        for result in results {
+            let err = result.unwrap_err();
+            assert_eq!(err.exit_code(), 10, "{err}");
+            assert!(err.to_string().contains("ows_signer_mismatch"), "{err}");
         }
     }
 

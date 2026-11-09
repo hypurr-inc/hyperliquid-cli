@@ -12,7 +12,7 @@ use clap::{ArgMatches, Command, FromArgMatches};
 use serde::Serialize;
 
 use crate::assets::{AssetQuery, parse_asset_query};
-use crate::bankr::BankrTypedData;
+use crate::bankr;
 use crate::errors::CliError;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
@@ -342,10 +342,13 @@ pub struct CommandSpec {
     pub dry_run: DryRunPolicy,
     pub raw_payload: RawPayloadPolicy,
     pub confirmation: ConfirmationPolicy,
-    /// What a live run asks the selected signer to sign. `None` for a command
-    /// that signs nothing. The run checks the signer can do it before the
-    /// command starts, and the schema reports which providers can.
-    pub signs: Option<Signs>,
+    /// What a run asks the selected signer to sign. `None` for a command that
+    /// signs nothing. The signer is checked against it before the command
+    /// starts, and the schema reports which providers can.
+    pub signs: Option<Signs<'static>>,
+    /// The action only the master account may sign: a stored API wallet is
+    /// refused for it, live and dry run alike.
+    pub master_only: Option<&'static str>,
     pub ows_signer: OwsSupport,
     /// Mainnet asks for confirmation; `--testnet` runs without asking.
     pub testnet_unprompted: bool,
@@ -392,6 +395,7 @@ impl CommandSpec {
             raw_payload: RawPayloadPolicy::Unsupported,
             confirmation: ConfirmationPolicy::None,
             signs: None,
+            master_only: None,
             ows_signer: OwsSupport::NotRequired,
             testnet_unprompted: false,
             confirms_with_arg: None,
@@ -448,7 +452,7 @@ impl CommandSpec {
     #[must_use]
     pub fn bankr_signer(&self) -> SignerSupport {
         match self.signs {
-            Some(signs) if BankrTypedData::covers(signs) => SignerSupport::Supported,
+            Some(signs) if bankr::covers(signs) => SignerSupport::Supported,
             Some(_) => SignerSupport::Unsupported,
             None if self.auth_required => SignerSupport::Supported,
             None => SignerSupport::NotRequired,
@@ -456,8 +460,16 @@ impl CommandSpec {
     }
 
     #[must_use]
-    pub const fn signs(mut self, signs: Signs) -> Self {
+    pub const fn signs(mut self, signs: Signs<'static>) -> Self {
         self.signs = Some(signs);
+        self
+    }
+
+    /// Refuse a stored API wallet for `action`, which only the master account
+    /// may sign.
+    #[must_use]
+    pub const fn master_only(mut self, action: &'static str) -> Self {
+        self.master_only = Some(action);
         self
     }
 

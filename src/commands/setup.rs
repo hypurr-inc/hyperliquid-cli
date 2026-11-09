@@ -5,7 +5,6 @@
 //! the vault or config.
 
 use clap::Args;
-use hypersdk::Address;
 use serde::Serialize;
 
 use crate::builder_fee::{self, MaxFeeRate};
@@ -187,10 +186,7 @@ pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error
     } else {
         "setup"
     })?;
-    let config_path = settings
-        .config_file()
-        .map(|file| file.path().display().to_string())
-        .unwrap_or_else(|| "unavailable".to_string());
+    let config_path = settings.config_path_display();
     let vault_path_str = store.vault().display_path();
 
     let default_builder = builder_defaults
@@ -237,9 +233,8 @@ pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error
         &api,
         approve_builder,
         builder_defaults.as_ref(),
-        &stored.info,
-        stored.account.address,
         store.vault(),
+        &stored.info,
     )
     .await?;
 
@@ -431,9 +426,8 @@ async fn maybe_approve_default_builder(
     api: &ApiClient,
     approve: bool,
     builder_defaults: Option<&(String, String)>,
-    wallet: &WalletInfo,
-    signer_address: Address,
     vault: &Vault,
+    wallet: &WalletInfo,
 ) -> Result<String, anyhow::Error> {
     let Some((builder_text, fee)) = builder_defaults else {
         return Ok("not configured".to_string());
@@ -444,7 +438,7 @@ async fn maybe_approve_default_builder(
 
     let builder_address = wire::address(builder_text, AddressRole::Builder)?;
     let max_fee_rate = MaxFeeRate::parse(fee)?;
-    let signer = SelectedSigner::vault_wallet(wallet, signer_address, vault.clone());
+    let signer = SelectedSigner::vault_wallet(vault, wallet)?;
     let approval = builder::submit_approval(api, &signer, builder_address, &max_fee_rate).await;
     match approval {
         Ok(()) => {
