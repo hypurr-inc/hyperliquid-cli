@@ -8,7 +8,7 @@ use crate::assets::{
     parse_asset_query, perp_price_tick, qualify_dex_asset,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::commands::account::parse_time_millis;
+use crate::commands::common::time_range::{parse_time_millis, validate_optional_time_range};
 use crate::commands::common::paging;
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
@@ -497,7 +497,7 @@ fn oi_caps(pairs: &[CoinDecimal]) -> Vec<OiCapRow> {
 }
 
 async fn funding_history(inv: &Invocation, args: &FundingHistoryArgs) -> Result<(), anyhow::Error> {
-    crate::commands::account::validate_optional_time_range(Some(args.start), args.end)?;
+    validate_optional_time_range(Some(args.start), args.end)?;
     let api = inv.remote()?.api();
     let perp = inv
         .asset_resolver()

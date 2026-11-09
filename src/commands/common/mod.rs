@@ -9,6 +9,8 @@
 
 pub(crate) mod issue_report;
 pub(crate) mod paging;
+pub(crate) mod position;
 pub mod rows;
 pub mod selector;
 pub(crate) mod support;
+pub(crate) mod time_range;

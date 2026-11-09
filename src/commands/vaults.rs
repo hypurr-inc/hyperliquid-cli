@@ -10,7 +10,7 @@ use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::rows::{One, Row, or_missing};
 use crate::commands::common::support::print_dry_run;
-use crate::commands::positions::PositionRow;
+use crate::commands::common::position::PositionRow;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::errors::from_sdk;

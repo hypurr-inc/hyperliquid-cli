@@ -1,4 +1,3 @@
-use chrono::DateTime;
 use clap::Args;
 use hypersdk::Address;
 use hypersdk::Decimal;
@@ -10,9 +9,10 @@ use crate::assets::{AssetResolver, canonical_dex};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::paging::{self, Endpoint};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing, style_column};
+use crate::commands::common::time_range::{parse_time_millis, validate_optional_time_range};
 use crate::commands::common::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::orders;
-use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
+use crate::commands::common::position::{self, pretty_pnl};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
@@ -95,27 +95,6 @@ pub struct PortfolioArgs {
     pub dex: Option<String>,
 }
 
-pub fn parse_time_millis(raw: &str) -> Result<u64, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("time value cannot be empty".to_string());
-    }
-
-    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
-        return trimmed
-            .parse::<u64>()
-            .map_err(|err| format!("invalid epoch millisecond timestamp: {err}"));
-    }
-
-    let parsed = DateTime::parse_from_rfc3339(trimmed)
-        .map_err(|err| format!("invalid RFC3339 or epoch millisecond timestamp: {err}"))?;
-    let millis = parsed.timestamp_millis();
-    if millis < 0 {
-        return Err("time must be at or after the Unix epoch".to_string());
-    }
-    Ok(millis as u64)
-}
-
 pub(crate) async fn subaccounts(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     // The exchange answers `null` for an account without subaccounts.
     let subaccounts: Vec<SubaccountRow> = inv
@@ -131,20 +110,6 @@ pub(crate) async fn subaccounts(inv: &Invocation, user: Address) -> Result<(), a
         .map(SubaccountRow::from)
         .collect();
     inv.print(&Rows::new(subaccounts));
-    Ok(())
-}
-
-pub(crate) fn validate_optional_time_range(
-    start: Option<u64>,
-    end: Option<u64>,
-) -> Result<(), CliError> {
-    if let (Some(start), Some(end)) = (start, end)
-        && end < start
-    {
-        return Err(CliError::Configuration(
-            "--end must be greater than or equal to --start".to_string(),
-        ));
-    }
     Ok(())
 }
 
@@ -376,7 +341,7 @@ impl Row for FillRow {
     fn pretty_cells(&self) -> Vec<String> {
         let mut cells = self.cells();
         style_column::<Self>(&mut cells, "Closed PnL", |_| {
-            format_pretty_pnl(self.closed_pnl)
+            pretty_pnl(self.closed_pnl)
         });
         cells
     }
@@ -483,7 +448,7 @@ impl From<AssetPosition> for PositionRow {
             since_open: position.cum_funding.since_open,
             since_change: position.cum_funding.since_change,
         };
-        let row = positions::PositionRow::from(asset);
+        let row = position::PositionRow::from(asset);
         Self {
             coin: row.coin,
             side: row.side.to_string(),
@@ -666,7 +631,7 @@ impl TableData for PortfolioOutput {
     }
 
     fn pretty_rows(&self) -> Vec<Vec<String>> {
-        let mut rows = self.table_rows(format_pretty_pnl);
+        let mut rows = self.table_rows(pretty_pnl);
         if self.summary.perp_state_is_partial {
             rows.insert(
                 3,

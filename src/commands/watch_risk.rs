@@ -21,7 +21,7 @@ use crate::clock::{self, DurationError};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::borrowlend::fetch_user_state;
 use crate::commands::common::rows::{One, Row};
-use crate::commands::positions::mark_price;
+use crate::commands::common::position::mark_price;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
