@@ -60,9 +60,9 @@ fn subscribed_user(subscription: &Subscription) -> Option<Address> {
 
 /// Refuse a subscription set the exchange would reject, before any socket opens.
 ///
-/// The exchange limits (rate-limits page): 1000 subscriptions and 10 unique users
-/// across user-specific subscriptions. One `subscribe` command holds one
-/// connection, so the connection limits cannot be reached from here.
+/// The exchange limits the subscriptions and the unique users across
+/// user-specific subscriptions (rate-limits page). One `subscribe` command
+/// holds one connection, so the connection limits cannot be reached from here.
 pub fn ensure_within_limits(subscriptions: &[Subscription]) -> Result<(), CliError> {
     ensure_subscription_count(subscriptions.len())?;
     let users: HashSet<Address> = subscriptions.iter().filter_map(subscribed_user).collect();

@@ -16,7 +16,7 @@ use crate::signing::SelectedSigner;
 
 /// The leverage an order is assumed to run at when sizing its margin.
 const DEFAULT_HIP3_LEVERAGE: i64 = 10;
-/// The margin kept, in basis points of the estimate: 12,000 is 120% of it.
+/// The margin kept, in basis points of the estimate; above 10,000 is headroom.
 const MARGIN_BUFFER_BPS: i64 = 12_000;
 
 #[derive(Debug, Clone)]

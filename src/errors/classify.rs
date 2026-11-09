@@ -293,7 +293,7 @@ pub fn from_anyhow(err: anyhow::Error) -> CliError {
     recover_typed(err).unwrap_or_else(CliError::Internal)
 }
 
-/// hypersdk 0.3 returns `anyhow::Error`. API failures carry a
+/// hypersdk returns `anyhow::Error`. API failures carry a
 /// [`hypersdk::hypercore::ApiError`] (HTTP non-2xx arrives as
 /// `HTTP {status} body={text}`) and transport failures carry a
 /// `reqwest::Error`. Everything else is plain text.
@@ -335,39 +335,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn http_rate_limit_detection_always_accepts_429() {
-        assert!(http_response_indicates_rate_limit(
-            429,
-            r#"{"status":"ok","message":"ordinary success"}"#
-        ));
-    }
-
-    #[test]
-    fn http_rate_limit_detection_accepts_non_success_body_phrase() {
-        assert!(http_response_indicates_rate_limit(
-            503,
-            "temporarily unavailable due to rate-limit pressure"
-        ));
-    }
-
-    #[test]
-    fn http_rate_limit_detection_accepts_structured_error_on_success_status() {
-        assert!(http_response_indicates_rate_limit(
-            200,
-            r#"{"status":"err","response":"rate limit exceeded"}"#
-        ));
-        assert!(http_response_indicates_rate_limit(
-            200,
-            r#"{"error":"too many requests"}"#
-        ));
-    }
-
-    #[test]
-    fn http_rate_limit_detection_ignores_success_body_mentions() {
-        assert!(!http_response_indicates_rate_limit(
-            200,
-            r#"{"status":"ok","message":"read the rate-limit docs","code":"RATE-LIMIT-DOCS"}"#
-        ));
+    fn http_rate_limit_detection_reads_the_status_then_the_body() {
+        let cases = [
+            (429, r#"{"status":"ok","message":"ordinary success"}"#, true),
+            (
+                503,
+                "temporarily unavailable due to rate-limit pressure",
+                true,
+            ),
+            (
+                200,
+                r#"{"status":"err","response":"rate limit exceeded"}"#,
+                true,
+            ),
+            (200, r#"{"error":"too many requests"}"#, true),
+            (
+                200,
+                r#"{"status":"ok","message":"read the rate-limit docs","code":"RATE-LIMIT-DOCS"}"#,
+                false,
+            ),
+        ];
+        for (status, body, limited) in cases {
+            assert_eq!(
+                http_response_indicates_rate_limit(status, body),
+                limited,
+                "{status} {body}"
+            );
+        }
     }
 
     #[test]

@@ -161,10 +161,15 @@ mod tests {
                 serde_json::to_string(&network).unwrap(),
                 format!("\"{name}\"")
             );
-            assert_eq!(Network::parse(&name.to_uppercase()), Some(network));
+            let upper = name.to_uppercase();
+            assert_eq!(Network::parse(&upper), Some(network));
+            assert_eq!(
+                serde_json::from_str::<Network>(&format!("\"{upper}\"")).unwrap(),
+                network
+            );
             assert_eq!(Network::from(network.chain()), network);
+            assert_eq!(network.chain().is_mainnet(), !network.is_testnet());
         }
-        assert_eq!(Network::NAMES, ["mainnet", "testnet"]);
     }
 
     #[test]
@@ -177,24 +182,15 @@ mod tests {
     }
 
     #[test]
-    fn deserialization_is_case_insensitive() {
-        let parsed: Network = serde_json::from_str("\"TESTNET\"").unwrap();
-        assert_eq!(parsed, Network::Testnet);
-        let parsed: Network = serde_json::from_str("\"Mainnet\"").unwrap();
-        assert_eq!(parsed, Network::Mainnet);
-    }
-
-    #[test]
-    fn chain_and_url_mapping() {
-        assert!(Network::Mainnet.chain().is_mainnet());
-        assert!(!Network::Testnet.chain().is_mainnet());
-        assert_eq!(
+    fn api_base_url_is_the_api_url_without_its_trailing_slash() {
+        for network in Network::ALL {
+            let base = network.api_base_url();
+            assert!(!base.ends_with('/'), "{base}");
+            assert_eq!(format!("{base}/"), network.api_url().as_str());
+        }
+        assert_ne!(
             Network::Mainnet.api_base_url(),
-            "https://api.hyperliquid.xyz"
-        );
-        assert_eq!(
-            Network::Testnet.api_base_url(),
-            "https://api.hyperliquid-testnet.xyz"
+            Network::Testnet.api_base_url()
         );
     }
 

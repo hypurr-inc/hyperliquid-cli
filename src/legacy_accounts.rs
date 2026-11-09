@@ -1,8 +1,8 @@
 //! Read-only access to the encrypted SQLite account store older releases wrote.
 //!
-//! Wallets now live in the OWS vault and nothing writes `accounts.db` any more.
-//! Existing databases keep working as a signer and address-lookup fallback:
-//! `--account` and the default signer consult this store after the vault.
+//! Nothing writes `accounts.db`; wallets live in the OWS vault. Existing
+//! databases keep working as a signer and address-lookup fallback: `--account`
+//! and the default signer consult this store after the vault.
 //! Private keys are decrypted only when a signer is resolved from a row.
 
 use std::path::Path;

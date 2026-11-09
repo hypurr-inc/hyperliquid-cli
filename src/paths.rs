@@ -10,10 +10,8 @@ const APP_DIR: &str = "hyperliquid";
 
 pub const DEFAULT_VAULT_DIR: &str = ".hyperliquid";
 
-/// Config directory, overridden by `HYPERLIQUID_CONFIG_DIR` when nonempty:
-/// - macOS: `~/Library/Application Support/hyperliquid`
-/// - Linux: `~/.config/hyperliquid`
-/// - Windows: `C:\Users\<user>\AppData\Roaming\hyperliquid`
+/// Config directory: `HYPERLIQUID_CONFIG_DIR` when nonempty, else the
+/// platform's config directory.
 #[must_use]
 pub fn config_dir(env: &EnvSource) -> Option<PathBuf> {
     directory_override(env, env::CONFIG_DIR)

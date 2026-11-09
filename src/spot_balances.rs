@@ -1,8 +1,6 @@
 //! A user's spot balances as `spotClearinghouseState` reports them.
 //!
-//! Layer rule: below `commands`. Where an account's USDC lives
-//! ([`crate::exchange::funds`]), the unified account ratio
-//! ([`crate::account_mode`]) and the account readers all start from this read.
+//! Layer rule: below `commands`; it reads the API and nothing above it.
 
 use hypersdk::{Address, Decimal};
 use serde::Deserialize;
