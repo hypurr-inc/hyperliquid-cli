@@ -281,6 +281,79 @@ async fn orders_create_dry_run_resolves_hip3_dex_markets() {
     assert_eq!(json["args"]["amount_unit"], "USDC");
 }
 
+async fn hip3_order_attempt(fail_abstraction: bool) -> (assert_cmd::assert::Assert, MockServer) {
+    let server = mock_advanced_server().await;
+    let (abstraction_status, abstraction_body) = if fail_abstraction {
+        (500, serde_json::json!(null))
+    } else {
+        (200, serde_json::json!("disabled"))
+    };
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
+            serde_json::json!({"type": "userAbstraction"}),
+        ))
+        .respond_with(ResponseTemplate::new(abstraction_status).set_body_json(abstraction_body))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
+            serde_json::json!({"type": "clearinghouseState"}),
+        ))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let assert = Command::cargo_bin("hyperliquid")
+        .unwrap()
+        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "orders",
+            "create",
+            "--coin",
+            "xyz:TOKEN",
+            "--side",
+            "buy",
+            "--price",
+            "1.23",
+            "--size",
+            "10",
+            "--testnet",
+        ])
+        .assert();
+    (assert, server)
+}
+
+async fn exchange_requests(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path() == "/exchange")
+        .count()
+}
+
+#[tokio::test]
+async fn hip3_margin_helper_does_not_transfer_when_the_dex_balance_cannot_be_read() {
+    let (assert, server) = hip3_order_attempt(false).await;
+    assert.failure();
+    assert_eq!(
+        exchange_requests(&server).await,
+        0,
+        "a failed balance read must not plan a transfer or place the order"
+    );
+}
+
+#[tokio::test]
+async fn hip3_margin_helper_does_not_skip_the_transfer_when_the_account_mode_cannot_be_read() {
+    let (assert, server) = hip3_order_attempt(true).await;
+    assert.failure();
+    assert_eq!(exchange_requests(&server).await, 0);
+}
+
 #[tokio::test]
 async fn orders_create_dry_run_resolves_non_xyz_hip3_dex_markets() {
     let server = mock_advanced_server().await;

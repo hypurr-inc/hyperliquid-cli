@@ -1088,6 +1088,44 @@ async fn orders_modify_omits_a_from_the_action_by_default() {
     );
 }
 
+#[tokio::test]
+async fn orders_modify_truncates_price_trigger_and_size_to_the_market_precision() {
+    let env = IsolatedHome::new();
+    let server = mock_order_management_server(
+        Some(basic_order_with_type("BTC", 12345, None, "Stop Limit")),
+        vec![],
+        vec![serde_json::json!({"resting": {"oid": 12345, "cloid": null}})],
+        "order",
+    )
+    .await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "orders",
+            "modify",
+            "12345",
+            "--price",
+            "51000.987654",
+            "--trigger-price",
+            "49000.123456",
+            "--size",
+            "0.0500012345",
+            "--always-place",
+            "--testnet",
+        ])
+        .assert()
+        .success();
+
+    let action = modify_exchange_action(&server).await;
+    let order = &action["modifies"][0]["order"];
+    assert_eq!(order["p"], "51000");
+    assert_eq!(order["t"]["trigger"]["triggerPx"], "49000");
+    let size: rust_decimal::Decimal = order["s"].as_str().unwrap().parse().unwrap();
+    assert_eq!(size, rust_decimal::Decimal::new(5, 2));
+}
+
 #[test]
 fn orders_modify_dry_run_reports_always_place() {
     let env = IsolatedHome::new();

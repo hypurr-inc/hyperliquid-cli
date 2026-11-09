@@ -1435,6 +1435,7 @@ mod tests {
     use super::*;
     use crate::assets::test_support::hip3_perp;
     use crate::assets::{AssetMetadata, PerpAsset, SpotAsset};
+    use std::time::Duration;
 
     fn resolver() -> AssetResolver {
         AssetResolver::new(AssetMetadata::from_assets(
@@ -2077,5 +2078,254 @@ mod tests {
             assert!(message.contains(name), "{message}");
             assert!(message.contains(hint), "{message}");
         }
+    }
+    fn scale_args(total_size: Decimal, start: Decimal, end: Decimal, count: usize) -> ScaleArgs {
+        ScaleArgs {
+            coin: "BTC".to_string(),
+            dex: None,
+            side: OrderSide::Buy,
+            start_price: start,
+            end_price: end,
+            total_size,
+            order_count: count,
+            tif: TifArg::Gtc,
+            reduce_only: false,
+            on_behalf_of: None,
+            margin_mode: None,
+            yes: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn scale_places_the_whole_total_size_across_legs() {
+        let client = HttpClient::new(Chain::Testnet);
+        let args = scale_args(
+            Decimal::new(3, 1),
+            Decimal::from(50_000),
+            Decimal::from(49_000),
+            3,
+        );
+        let prepared = planning::prepare_scale_batch(&client, &resolver(), &args)
+            .await
+            .unwrap();
+        let sizes: Vec<_> = prepared.legs.iter().map(|leg| leg.order.size).collect();
+        assert_eq!(sizes, vec![Decimal::new(1, 1); 3]);
+    }
+
+    #[tokio::test]
+    async fn scale_rejects_legs_whose_size_would_be_lost_to_the_lot() {
+        // 0.00003 / 2 = 0.000015 per leg, which BTC's 5-decimal lot truncates to
+        // 0.00001: the ladder would place 0.00002 of the 0.00003 requested.
+        let client = HttpClient::new(Chain::Testnet);
+        let args = scale_args(
+            Decimal::new(3, 5),
+            Decimal::from(50_000),
+            Decimal::from(49_000),
+            2,
+        );
+        let err = planning::prepare_scale_batch(&client, &resolver(), &args)
+            .await
+            .err()
+            .expect("size lost to the lot must be rejected");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("lot size"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn scale_rejects_prices_that_collapse_onto_one_tick() {
+        // 50000 and 50000.9 are both 50000 on BTC's whole-number tick grid.
+        let client = HttpClient::new(Chain::Testnet);
+        let args = scale_args(
+            Decimal::new(2, 1),
+            Decimal::from(50_000),
+            Decimal::new(500_009, 1),
+            2,
+        );
+        let err = planning::prepare_scale_batch(&client, &resolver(), &args)
+            .await
+            .err()
+            .expect("collapsed ladder must be rejected");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("same tick"), "{err}");
+    }
+
+    #[test]
+    fn scale_validation_names_the_flag_that_is_not_positive() {
+        let args = scale_args(
+            Decimal::ZERO,
+            Decimal::from(50_000),
+            Decimal::from(49_000),
+            2,
+        );
+        let err = validate_scale_args(&args).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("total-size must be greater than zero"),
+            "{err}"
+        );
+
+        let args = scale_args(Decimal::ONE, Decimal::from(-1), Decimal::from(49_000), 2);
+        let err = validate_scale_args(&args).unwrap_err();
+        assert!(
+            err.to_string().contains("start-price must be positive"),
+            "{err}"
+        );
+    }
+
+    fn twap_args(size: Decimal) -> TwapCreateArgs {
+        TwapCreateArgs {
+            coin: "BTC".to_string(),
+            dex: None,
+            side: OrderSide::Buy,
+            size,
+            duration: 300,
+            margin_mode: None,
+            on_behalf_of: None,
+            randomize: false,
+            yes: false,
+        }
+    }
+
+    #[test]
+    fn twap_size_truncates_to_the_market_lot() {
+        let plan =
+            planning::prepare_twap_create_plan(&btc(), &twap_args(Decimal::new(123_456_789, 9)))
+                .unwrap();
+        assert_eq!(plan.size, Decimal::new(12_345, 5));
+        let wire = serde_json::to_value(&plan.action).unwrap();
+        assert_eq!(wire["twap"]["s"], "0.12345");
+        assert_eq!(plan.duration_minutes, 5);
+
+        let err = planning::prepare_twap_create_plan(&btc(), &twap_args(Decimal::new(1, 8)))
+            .err()
+            .expect("a size below one lot is rejected");
+        assert!(err.to_string().contains("truncates to zero"), "{err}");
+    }
+
+    fn fixed_tpsl_args(size: Decimal) -> TpslArgs {
+        TpslArgs {
+            coin: "BTC".to_string(),
+            dex: None,
+            take_profit: Some(TriggerPriceSpec::Absolute(Decimal::from(55_000))),
+            stop_loss: Some(TriggerPriceSpec::Absolute(Decimal::from(49_000))),
+            grouping: PositionTpslGroupingArg::PositionTpsl,
+            side: Some(OrderSide::Sell),
+            size: Some(size),
+            on_behalf_of: None,
+            margin_mode: None,
+            yes: false,
+            cloid: None,
+        }
+    }
+
+    #[test]
+    fn tpsl_fixed_size_truncates_to_the_market_lot_in_the_dry_run_plan() {
+        let plan =
+            planning::tpsl_dry_run_plan(&btc(), &fixed_tpsl_args(Decimal::new(123_456_789, 9)))
+                .unwrap()
+                .into_args();
+        assert_eq!(plan["legs"][0]["size"], "0.12345");
+        assert_eq!(plan["batch_order"]["orders"][1]["s"], "0.12345");
+    }
+
+    #[test]
+    fn market_precision_truncates_prices_to_the_tick_grid() {
+        let perp = MarketPrecision::perp(5);
+        for (price, expected) in [
+            // One decimal of room on a 5-decimal-lot perp, integers exempt from the 5-figure cap.
+            (Decimal::new(500_005, 1), Decimal::from(50_000)),
+            (Decimal::new(123_456_789, 3), Decimal::from(123_456)),
+            (Decimal::new(12_345_678, 4), Decimal::new(12_345, 1)),
+            (Decimal::new(1_234_567, 6), Decimal::new(12, 1)),
+        ] {
+            assert_eq!(perp.price(price, "BTC").unwrap(), expected, "{price}");
+        }
+        assert_eq!(
+            MarketPrecision::spot(2)
+                .price(Decimal::new(969_012_345, 8), "HYPE/USDC")
+                .unwrap(),
+            Decimal::new(96_901, 4)
+        );
+        let err = perp.price(Decimal::new(1, 9), "BTC").unwrap_err();
+        assert!(err.to_string().contains("smallest valid tick"), "{err}");
+    }
+
+    #[test]
+    fn market_precision_clamps_the_decimal_budget_for_oversized_lots() {
+        // szDecimals above the budget leaves no decimals: whole-number prices only.
+        assert_eq!(
+            MarketPrecision::perp(8)
+                .price(Decimal::new(500_005, 1), "TOKEN")
+                .unwrap(),
+            Decimal::from(50_000)
+        );
+    }
+
+    #[test]
+    fn margin_mode_on_a_spot_market_is_rejected_with_one_message() {
+        let mut args = base_args();
+        args.coin = "HYPE/USDC".to_string();
+        args.margin_mode = Some(MarginModeArg::Isolated);
+        let spot = resolver().resolve("HYPE/USDC").unwrap();
+        let err =
+            validate_order_for_market(&OrderSpec::from_create(&args).unwrap(), &spot).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert_eq!(
+            err.to_string(),
+            "Configuration error: --margin-mode isolated is only supported for perpetual orders"
+        );
+    }
+
+    #[tokio::test]
+    async fn outcome_market_orders_are_rejected_before_any_mid_lookup() {
+        let mut args = base_args();
+        args.coin = "#10".to_string();
+        args.order_type = CreateOrderType::Market;
+        args.price = None;
+        args.size = None;
+        args.amount = Some(Decimal::from(5));
+        let err = prepare(&args).await.unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert!(
+            err.to_string()
+                .contains("outcome orders do not support --type market"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn schedule_cancel_counts_from_the_moment_of_sending() {
+        let plan = planning::prepare_schedule_cancel_plan(&ScheduleCancelArgs {
+            in_duration: Some(Duration::from_secs(30)),
+            clear: false,
+            on_behalf_of: None,
+            yes: false,
+        })
+        .unwrap();
+        let now = Utc::now();
+        let first = plan.scheduled(now).unwrap();
+        let later = plan.scheduled(now + chrono::Duration::seconds(7)).unwrap();
+        assert_eq!(first.in_seconds, 30);
+        assert_eq!(later.at - first.at, chrono::Duration::seconds(7));
+        assert!(
+            planning::prepare_schedule_cancel_plan(&ScheduleCancelArgs {
+                in_duration: None,
+                clear: true,
+                on_behalf_of: None,
+                yes: false,
+            })
+            .unwrap()
+            .scheduled(now)
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn cloid_sentinel_round_trips_through_the_wire_value() {
+        let cloid = "0x00000000000000000000000000000001"
+            .parse::<Cloid>()
+            .unwrap();
+        assert_eq!(cloid_from_wire(wire_cloid(Some(cloid))), Some(cloid));
+        assert_eq!(cloid_from_wire(wire_cloid(None)), None);
     }
 }

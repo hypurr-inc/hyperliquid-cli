@@ -1368,6 +1368,71 @@ async fn orders_tpsl_truncates_trigger_prices_to_the_tick() {
 }
 
 #[tokio::test]
+async fn orders_tpsl_failed_position_read_reports_the_cause_not_a_missing_position() {
+    let env = IsolatedHome::new();
+    let server = mock_order_server_without_exchange().await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
+            serde_json::json!({"type": "clearinghouseState"}),
+        ))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "orders",
+            "tpsl",
+            "--coin",
+            "BTC",
+            "--side",
+            "sell",
+            "--size",
+            "0.1",
+            "--take-profit",
+            "+10%",
+            "--testnet",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("require an open BTC position").not());
+}
+
+#[tokio::test]
+async fn orders_create_with_an_address_only_ows_signer_fails_before_any_exchange_call() {
+    let env = IsolatedHome::new();
+    let server = mock_order_server_without_exchange().await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .args([
+            "--ows-signer",
+            "0x0000000000000000000000000000000000000001",
+            "orders",
+            "create",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--price",
+            "50000",
+            "--size",
+            "0.1",
+            "--yes",
+            "--testnet",
+        ])
+        .assert()
+        .code(13)
+        .stderr(predicate::str::contains(
+            "does not have a resolved wallet for live signing",
+        ));
+}
+
+#[tokio::test]
 async fn orders_tpsl_on_behalf_uses_acting_account_for_position_and_submission() {
     let env = IsolatedHome::new();
     let subaccount = "0x0000000000000000000000000000000000000123";

@@ -798,3 +798,79 @@ pub(crate) fn parse_relative_duration(input: &str) -> Result<Duration, String> {
         .map(Duration::from_secs)
         .ok_or_else(|| "duration is too large".to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_leg_reads_a_minimal_leg_with_defaults() {
+        let leg = parse_batch_leg(
+            0,
+            &serde_json::json!({
+                "coin": "BTC", "side": "buy", "price": "50000", "size": "0.1",
+                "dex": null, "tif": null, "cloid": null
+            }),
+        )
+        .unwrap();
+        assert_eq!(leg.coin, "BTC");
+        assert_eq!(leg.side, OrderSide::Buy);
+        assert_eq!(leg.dex, None);
+        assert_eq!(leg.tif, None);
+        assert!(!leg.reduce_only);
+    }
+
+    #[test]
+    fn batch_leg_names_every_invalid_field_in_one_pass() {
+        let problems = parse_batch_leg(
+            3,
+            &serde_json::json!({
+                "side": "up", "price": "x", "reduce_only": "yes", "tif": "fok"
+            }),
+        )
+        .unwrap_err();
+        let fields: Vec<_> = problems
+            .iter()
+            .map(|problem| problem.split([':', ' ']).next().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "orders[3].coin",
+                "orders[3].side",
+                "orders[3].price",
+                "orders[3].size",
+                "orders[3].tif",
+                "orders[3].reduce_only",
+            ]
+        );
+        assert!(problems[0].ends_with("is required"));
+        assert!(problems[5].starts_with("orders[3].reduce_only: "));
+    }
+
+    #[test]
+    fn batch_leg_rejects_non_objects() {
+        let problems = parse_batch_leg(1, &serde_json::json!(["BTC"])).unwrap_err();
+        assert_eq!(problems, ["orders[1] must be an object"]);
+    }
+
+    #[test]
+    fn twap_duration_validates_and_returns_whole_minutes() {
+        let args = |duration| TwapCreateArgs {
+            coin: "BTC".to_string(),
+            dex: None,
+            side: OrderSide::Buy,
+            size: Decimal::ONE,
+            duration,
+            margin_mode: None,
+            on_behalf_of: None,
+            randomize: false,
+            yes: false,
+        };
+        assert_eq!(validate_twap_create_args(&args(300)).unwrap(), 5);
+        assert_eq!(validate_twap_create_args(&args(3600)).unwrap(), 60);
+        assert!(validate_twap_create_args(&args(299)).is_err());
+        assert!(validate_twap_create_args(&args(330)).is_err());
+        assert!(validate_twap_create_args(&args(7 * 24 * 60 * 60 + 60)).is_err());
+    }
+}
