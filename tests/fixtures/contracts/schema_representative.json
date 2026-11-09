@@ -948,6 +948,19 @@
       "aliases": [],
       "args": [
         {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "input_kind": null,
+          "long": "dex",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
           "arg_type": "integer",
           "default": null,
           "description": "Stop after this many matching events.",
@@ -993,6 +1006,10 @@
       "json_schema": {
         "additionalProperties": false,
         "properties": {
+          "dex": {
+            "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+            "type": "string"
+          },
           "idle_timeout_ms": {
             "description": "Stop if no matching events arrive within this many milliseconds.",
             "type": "number"

@@ -2831,7 +2831,9 @@
       "dangerous": false,
       "dry_run": "not_supported",
       "group": "subscribe",
-      "input_kinds": {},
+      "input_kinds": {
+        "user": "public_user_selector"
+      },
       "mutability": "streaming",
       "output_contract": "bounded_ndjson_stream",
       "raw_payload": "unsupported",
@@ -2851,7 +2853,250 @@
       "dangerous": false,
       "dry_run": "not_supported",
       "group": "subscribe",
+      "input_kinds": {
+        "skip_snapshot": "boolean",
+        "user": "public_user_selector"
+      },
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid subscribe bbo",
+      "command_path": [
+        "subscribe",
+        "bbo"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
       "input_kinds": {},
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid subscribe active-asset-ctx",
+      "command_path": [
+        "subscribe",
+        "active-asset-ctx"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "input_kinds": {},
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid subscribe active-asset-data",
+      "command_path": [
+        "subscribe",
+        "active-asset-data"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "input_kinds": {
+        "user": "public_user_selector"
+      },
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid subscribe user-events",
+      "command_path": [
+        "subscribe",
+        "user-events"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "input_kinds": {
+        "user": "public_user_selector"
+      },
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid subscribe user-fundings",
+      "command_path": [
+        "subscribe",
+        "user-fundings"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "input_kinds": {
+        "skip_snapshot": "boolean",
+        "user": "public_user_selector"
+      },
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid subscribe notifications",
+      "command_path": [
+        "subscribe",
+        "notifications"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "input_kinds": {
+        "user": "public_user_selector"
+      },
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid subscribe twap-states",
+      "command_path": [
+        "subscribe",
+        "twap-states"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "input_kinds": {
+        "user": "public_user_selector"
+      },
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid subscribe twap-slice-fills",
+      "command_path": [
+        "subscribe",
+        "twap-slice-fills"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "input_kinds": {
+        "skip_snapshot": "boolean",
+        "user": "public_user_selector"
+      },
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid subscribe clearinghouse-state",
+      "command_path": [
+        "subscribe",
+        "clearinghouse-state"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "input_kinds": {
+        "user": "public_user_selector"
+      },
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid subscribe open-orders",
+      "command_path": [
+        "subscribe",
+        "open-orders"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "input_kinds": {
+        "user": "public_user_selector"
+      },
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid subscribe spot-state",
+      "command_path": [
+        "subscribe",
+        "spot-state"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "input_kinds": {
+        "user": "public_user_selector"
+      },
       "mutability": "streaming",
       "output_contract": "bounded_ndjson_stream",
       "raw_payload": "unsupported",

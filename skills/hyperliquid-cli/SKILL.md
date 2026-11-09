@@ -219,10 +219,13 @@ Use bounded streams only:
 ```bash
 hyperliquid --format json subscribe trades --asset BTC --max-events 5 --idle-timeout-ms 8000
 hyperliquid --format json subscribe orderbook --asset BTC --max-events 3 --idle-timeout-ms 8000
+hyperliquid --format json subscribe fills --user <ADDRESS> --skip-snapshot --max-events 5 --idle-timeout-ms 30000
 hyperliquid --format json --max-ticks 5 mids --watch
 ```
 
 Subscribe commands emit JSONL, not a single JSON document.
+
+User streams (`fills`, `user-fundings`, `twap-slice-fills`) start with an `isSnapshot:true` history message; `--skip-snapshot` drops it and does not count it against `--max-events`. User streams read `--user` (address, wallet name or id) and default to the selected signer.
 
 ## Planning Orders Safely
 

@@ -281,7 +281,7 @@ Canonical top-level aliases accepted by the CLI:
 | `outcomes merge-question --question <ID> (--amount <N> \| --max) [--yes]` | Merge Yes shares of every outcome of a question into quote tokens. |
 | `outcomes negate --question <ID> --outcome <ID> --amount <N> [--yes]` | Convert No shares of a question outcome into Yes shares of every other outcome of the question. |
 | `search <QUERY> [--type perp\|hip3\|spot\|outcome\|all]` | Search perps, HIP-3, spot, and outcomes in one list. Alias of `asset search`. |
-| `book <COIN> [-w] [--max-ticks <TICKS>]` | Show L2 order book snapshot or watch updates. |
+| `book <COIN> [--n-sig-figs <2-5>] [--mantissa <1\|2\|5>] [-w] [--max-ticks <TICKS>]` | Show L2 order book snapshot or watch updates. `--n-sig-figs` aggregates price levels; `--mantissa` needs `--n-sig-figs 5`. |
 | `mids [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | Show all mid prices. |
 | `candles <COIN> [--interval <INTERVAL>] [--limit <N>] [-w] [--max-ticks <TICKS>]` | Show candle history. |
 | `spread <COIN>` | Show bid, ask, and spread. |
@@ -423,7 +423,8 @@ Outcome market notation (`#N` spot coin and `+N` token name) is available for di
 | `referral register <CODE>` / `referral set [CODE]` / `referral status` | Register your own referral code, set a referrer, or inspect referral state. |
 | `feedback (--scenario-json <JSON>\|--scenario-file <PATH\|->) [--contact <CONTACT>] [--tags <TAG>] [--url <URL>]` | Send structured CLI feedback as a scenario JSON object to the configured feedback endpoint; include `agent_address`, `signer_address`, or `wallet_address` in the scenario for rate-limit attribution, and use `--url` to override defaults. |
 | `schema [COMMAND...]` | Show machine-readable command schemas for agents. |
-| `subscribe trades --asset <ASSET>` / `subscribe orderbook --asset <ASSET>` / `subscribe candles --asset <ASSET> [--interval <INTERVAL>]` / `subscribe all-mids` / `subscribe order-updates` / `subscribe fills` `[--max-events <N>] [--idle-timeout-ms <MS>]` | Stream WebSocket events. |
+| `subscribe trades --asset <ASSET>` / `subscribe orderbook --asset <ASSET> [--n-sig-figs <2-5>] [--mantissa <1\|2\|5>]` / `subscribe bbo --asset <ASSET>` / `subscribe candles --asset <ASSET> [--interval <INTERVAL>]` / `subscribe active-asset-ctx --asset <ASSET>` / `subscribe all-mids [--dex <NAME>]` `[--max-events <N>] [--idle-timeout-ms <MS>]` | Stream public market WebSocket events. |
+| `subscribe order-updates` / `subscribe fills` / `subscribe user-events` / `subscribe user-fundings` / `subscribe twap-slice-fills` / `subscribe notifications` / `subscribe spot-state` / `subscribe twap-states [--dex <NAME>...]` / `subscribe clearinghouse-state [--dex <NAME>...]` / `subscribe open-orders [--dex <NAME>...]` / `subscribe active-asset-data --asset <ASSET>` `[--user <ADDRESS\|WALLET>] [--max-events <N>] [--idle-timeout-ms <MS>]` | Stream one account's WebSocket events. `--user` defaults to the selected signer; `--dex` repeats (one subscription each, at most 1000 per command). `fills`, `user-fundings` and `twap-slice-fills` take `--skip-snapshot` to drop the `isSnapshot:true` history message the exchange sends first (it is then not counted by `--max-events`). |
 | `watch risk [--user <ADDRESS>] [--max-events <N>] [--idle-timeout-ms <MS>]` | Read-only liquidation and risk alerts. Never places orders. Agent mode requires a bound. |
 | `update` | Update this binary from the latest GitHub release on Linux/macOS. Windows users should rerun `install.sh` to install the latest `.zip` release. Use global `--dry-run` to preview. |
 
