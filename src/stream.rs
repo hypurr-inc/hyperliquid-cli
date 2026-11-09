@@ -961,12 +961,17 @@ mod tests {
         assert_eq!(err.exit_code(), 13);
         assert_eq!(
             err.to_string(),
-            "Unsupported input: JSON watch risk output must be bounded with --max-events <N> or --idle-timeout-ms <N>"
+            "Unsupported input: watch risk requires --max-events or --idle-timeout-ms in agent mode.\n  hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20"
         );
         let other =
             require_bound("alerts feed", StreamBound::Polled, &matches(&["c"]), &none).unwrap_err();
         assert!(
-            other.to_string().contains("JSON alerts feed output"),
+            other
+                .to_string()
+                .starts_with("Unsupported input: alerts feed requires")
+                && other
+                    .to_string()
+                    .contains("hyperliquid --format json alerts feed --user"),
             "{other}"
         );
         for bounded in [["c", "--max-events", "3"], ["c", "--idle-timeout-ms", "50"]] {

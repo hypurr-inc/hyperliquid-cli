@@ -70,7 +70,6 @@
 - `mcp` exits `2` (configuration error) when `HYPERLIQUID_MCP_TIMEOUT_MS` is not a positive whole number of milliseconds or `HYPERLIQUID_MCP_ALLOW_UNSAFE` is not one of `1|true|yes|on|0|false|no|off`, like the other environment bounds; it used to fall back silently to 30 seconds or to read-only. A client that closes the server's stdout now ends it instead of being ignored.
 - An SDK error whose text says `User or API Wallet … does not exist` exits `10` (`signer_not_registered`) like the same text from the exchange, and an address rate limit reported under the status `error`, `failed` or `failure` (not only `err`) is recognised as `rate_limited` with its hint.
 - The `rate_limited` entry in `.claude/error-catalog.json` points agents at `data.hint` for the address limit instead of repeating its text; the hint itself is unchanged.
-- The refusal of an unbounded `watch risk` run in agent mode names the command and the options (`JSON watch risk output must be bounded with --max-events <N> or --idle-timeout-ms <N>`); it is generated like the other stream bounds.
 - A one-shot WebSocket read that times out (the `book` snapshot and funding context) reports the reason `timeout` (exit `12` as before) instead of `network_error`, like a silent `subscribe`.
 - `update` reports a failed release request as `Couldn't reach <host>. <cause>.` (refused, timed out, DNS, TLS) like API calls do, instead of the raw HTTP client text.
 

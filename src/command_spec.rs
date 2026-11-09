@@ -203,27 +203,51 @@ impl StreamBound {
 
     /// What a machine-context run is told when it declares no stop condition:
     /// the flags and the environment variable that would bound it. `command`
-    /// names the run for a stream that is a command of its own (`Polled`).
+    /// names the run for a stream that is a command of its own (`Polled`),
+    /// whose message also carries a runnable example.
     #[must_use]
     pub fn unbounded_message(self, command: &str) -> String {
-        let subject = match self {
-            Self::SnapshotWatch => "watch",
-            Self::Subscribe => "subscribe",
-            Self::Polled => command,
-        };
         let mut ways: Vec<String> = self
             .cli_args()
             .iter()
             .map(|id| format!("--{} <N>", id.replace('_', "-")))
             .collect();
         ways.extend(self.env().map(|env| env.name.to_string()));
-        let last = ways.pop().unwrap_or_default();
-        let joined = match ways.len() {
-            0 => last,
-            1 => format!("{} or {last}", ways[0]),
-            _ => format!("{}, or {last}", ways.join(", ")),
-        };
-        format!("JSON {subject} output must be bounded with {joined}")
+        match self {
+            Self::SnapshotWatch => format!(
+                "JSON watch output must be bounded with {}",
+                join_alternatives(ways)
+            ),
+            Self::Subscribe => format!(
+                "JSON subscribe output must be bounded with {}",
+                join_alternatives(ways)
+            ),
+            Self::Polled => {
+                let flags = self
+                    .cli_args()
+                    .iter()
+                    .map(|id| format!("--{}", id.replace('_', "-")))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                format!(
+                    "{command} requires {flags} in agent mode.\n  \
+                     hyperliquid --format json {command} {POLLED_EXAMPLE_ARGS} --max-events 20"
+                )
+            }
+        }
+    }
+}
+
+/// The address a polled stream's example names: every polled stream watches an
+/// address.
+const POLLED_EXAMPLE_ARGS: &str = "--user 0x0000000000000000000000000000000000000001";
+
+fn join_alternatives(mut ways: Vec<String>) -> String {
+    let last = ways.pop().unwrap_or_default();
+    match ways.len() {
+        0 => last,
+        1 => format!("{} or {last}", ways[0]),
+        _ => format!("{}, or {last}", ways.join(", ")),
     }
 }
 
