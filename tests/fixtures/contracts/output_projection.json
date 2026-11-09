@@ -1,14 +1,10 @@
-{
-  "characterization": true,
-  "output": [
-    {
-      "max_leverage": 50,
-      "name": "BTC"
-    },
-    {
-      "max_leverage": 25,
-      "name": "ETH"
-    }
-  ],
-  "review_required_to_update": true
-}
+[
+  {
+    "max_leverage": 50,
+    "name": "BTC"
+  },
+  {
+    "max_leverage": 25,
+    "name": "ETH"
+  }
+]

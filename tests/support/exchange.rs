@@ -167,6 +167,16 @@ impl ExchangeFixture {
             .await;
     }
 
+    /// Answer every `/exchange` request with HTTP `status` and no body, as a
+    /// gateway does when it is down.
+    pub async fn mount_exchange_http_status(&self, status: u16) {
+        Mock::given(method("POST"))
+            .and(path("/exchange"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&self.server)
+            .await;
+    }
+
     /// Answer the next `/exchange` request, once, with `response`; mounted
     /// before [`Self::mount_exchange`] it gives a command a different answer
     /// for its first action than for the rest.

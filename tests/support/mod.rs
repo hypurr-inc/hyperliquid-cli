@@ -188,6 +188,13 @@ impl IsolatedHome {
         command
     }
 
+    /// [`Self::command`] printing JSON.
+    pub fn json_command(&self) -> Command {
+        let mut command = self.command();
+        command.args(["--format", "json"]);
+        command
+    }
+
     /// Point the CLI's directories at this home's, with `home` and `data_dir`
     /// replacing the default home and data directory.
     fn point_at(&self, command: &mut Command, home: &Path, data_dir: &Path) {
@@ -436,6 +443,20 @@ pub fn stderr_text(assert: &assert_cmd::assert::Assert) -> String {
 /// Run `command`, require success, and return the JSON it printed.
 pub fn run_json(command: &mut Command) -> serde_json::Value {
     json_stdout(&command.assert().success())
+}
+
+/// Run `command`, require it to exit with `code`, and return the JSON error
+/// envelope it printed.
+pub fn run_json_failure(command: &mut Command, code: i32) -> serde_json::Value {
+    json_stdout(&command.assert().failure().code(code))
+}
+
+/// [`hermetic_command`] printing JSON, for a test of the JSON output that
+/// needs no home.
+pub fn json_command() -> Command {
+    let mut command = hermetic_command();
+    command.args(["--format", "json"]);
+    command
 }
 
 /// Every body `server` received on `path`, in arrival order. A body that is

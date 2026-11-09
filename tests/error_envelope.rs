@@ -1,54 +1,23 @@
 mod support;
 
-use support::exchange::ExchangeFixture;
-
 use predicates::prelude::*;
-use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, mount_override_healthcheck,
-    stdout_json,
-};
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use serde_json::json;
 
-async fn exchange_server(response: ResponseTemplate) -> MockServer {
-    let server = MockServer::start().await;
-    mount_override_healthcheck(&server).await;
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(response)
-        .mount(&server)
-        .await;
-    server
-}
-
-async fn exchange_hits(server: &MockServer) -> usize {
-    server
-        .received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .filter(|request| request.url.path() == "/exchange")
-        .count()
-}
+use support::exchange::ExchangeFixture;
+use support::{IsolatedHome, json_command, run_json_failure};
 
 #[tokio::test]
 async fn exchange_503_is_unknown_outcome_with_one_post() {
-    let env = IsolatedHome::new();
-    let server = exchange_server(ResponseTemplate::new(503)).await;
+    let home = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server.mount_exchange_http_status(503).await;
 
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["--format", "json", "staking", "deposit", "--amount", "3"])
-        .args(["--testnet"])
-        .assert()
-        .code(12)
-        .get_output()
-        .stdout
-        .clone();
+    let json = run_json_failure(
+        home.live_json(&server)
+            .args(["staking", "deposit", "--amount", "3"]),
+        12,
+    );
 
-    let json = stdout_json(&output);
     assert_eq!(json["category"], "unavailable");
     assert_eq!(json["exit_code"], 12);
     assert_eq!(json["reason"], "unknown_outcome");
@@ -63,7 +32,7 @@ async fn exchange_503_is_unknown_outcome_with_one_post() {
     assert_eq!(json["next"][0]["command"], "hyperliquid orders open");
     assert_eq!(json["next"][1]["command"], "hyperliquid account fills");
     assert_eq!(
-        exchange_hits(&server).await,
+        server.exchange_bodies().await.len(),
         1,
         "mutations are never retried"
     );
@@ -71,14 +40,13 @@ async fn exchange_503_is_unknown_outcome_with_one_post() {
 
 #[tokio::test]
 async fn exchange_503_human_output_has_recovery_block() {
-    let env = IsolatedHome::new();
-    let server = exchange_server(ResponseTemplate::new(503)).await;
+    let home = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server.mount_exchange_http_status(503).await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["--format", "table", "staking", "deposit", "--amount", "3"])
-        .args(["--testnet"])
+    home.live_command(&server)
+        .args(["--format", "table", "--testnet"])
+        .args(["staking", "deposit", "--amount", "3"])
         .assert()
         .code(12)
         .stderr(predicate::str::contains(
@@ -87,31 +55,26 @@ async fn exchange_503_human_output_has_recovery_block() {
         .stderr(predicate::str::contains(
             "\n\nCheck open orders and recent fills:\n    hyperliquid orders open\n    hyperliquid account fills",
         ));
-    assert_eq!(exchange_hits(&server).await, 1);
+    assert_eq!(server.exchange_bodies().await.len(), 1);
 }
 
 #[tokio::test]
 async fn exchange_rejection_with_network_words_is_not_unavailable() {
-    let env = IsolatedHome::new();
-    let server = exchange_server(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-        "status": "err",
-        "response": "Connection pool timeout while matching dns http 503"
-    })))
-    .await;
+    let home = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_exchange(json!({
+            "status": "err",
+            "response": "Connection pool timeout while matching dns http 503"
+        }))
+        .await;
 
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["--format", "json", "staking", "deposit", "--amount", "3"])
-        .args(["--testnet"])
-        .assert()
-        .code(1)
-        .get_output()
-        .stdout
-        .clone();
+    let json = run_json_failure(
+        home.live_json(&server)
+            .args(["staking", "deposit", "--amount", "3"]),
+        1,
+    );
 
-    let json = stdout_json(&output);
     assert_eq!(json["reason"], "exchange_rejected");
     assert_ne!(json["category"], "unavailable");
     assert!(
@@ -124,127 +87,156 @@ async fn exchange_rejection_with_network_words_is_not_unavailable() {
 }
 
 #[tokio::test]
-async fn funding_unknown_asset_suggests_one_close_match_in_data() {
-    let env = IsolatedHome::new();
+async fn an_unknown_asset_suggests_a_close_match_in_data_only_when_there_is_one() {
+    let home = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
+    let funding = |coin: &str| {
+        run_json_failure(
+            home.json_command()
+                .env(support::API_OVERRIDE_ENV, server.uri())
+                .args(["funding", coin]),
+            13,
+        )
+    };
 
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args(["--format", "json", "funding", "BTCC"])
-        .assert()
-        .code(13)
-        .get_output()
-        .stdout
-        .clone();
-
-    let json = stdout_json(&output);
-    assert_eq!(json["category"], "unsupported");
-    assert_eq!(json["exit_code"], 13);
-    assert_eq!(json["reason"], "asset_not_found");
+    let near = funding("BTCC");
+    assert_eq!(near["category"], "unsupported");
+    assert_eq!(near["exit_code"], 13);
+    assert_eq!(near["reason"], "asset_not_found");
     assert_eq!(
-        json["error"],
+        near["error"],
         "Couldn't find asset \"BTCC\". Did you mean BTC?"
     );
-    assert_eq!(json["data"]["suggestion"], "BTC");
+    assert_eq!(near["data"]["suggestion"], "BTC");
     assert!(
-        json.get("next").is_none(),
+        near.get("next").is_none(),
         "a suggestion is never a command"
     );
-}
 
-#[tokio::test]
-async fn funding_unknown_asset_without_close_match_has_no_suggestion() {
-    let env = IsolatedHome::new();
-    let server = ExchangeFixture::start().await;
-
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args(["--format", "json", "funding", "NOTACOIN"])
-        .assert()
-        .code(13)
-        .get_output()
-        .stdout
-        .clone();
-
-    let json = stdout_json(&output);
-    assert_eq!(json["reason"], "asset_not_found");
-    assert_eq!(json["error"], "Couldn't find asset \"NOTACOIN\".");
-    assert!(json.get("data").is_none());
+    let far = funding("NOTACOIN");
+    assert_eq!(far["reason"], "asset_not_found");
+    assert_eq!(far["error"], "Couldn't find asset \"NOTACOIN\".");
+    assert!(far.get("data").is_none());
 }
 
 #[test]
-fn usage_error_envelope_moves_usage_block_into_data() {
-    let output = support::hermetic_command()
-        .args(["--format", "json", "wallet", "show", "--bogus"])
-        .assert()
-        .code(2)
-        .get_output()
-        .stdout
-        .clone();
+fn a_mistyped_command_suggests_the_fix_and_points_at_its_group_help() {
+    let top = run_json_failure(json_command().arg("ordres"), 2);
+    assert_eq!(top["reason"], "unknown_command");
+    assert_eq!(top["data"]["suggestion"], "orders");
 
-    let json = stdout_json(&output);
-    assert_eq!(json["category"], "usage");
-    assert_eq!(json["exit_code"], 2);
-    assert_eq!(json["reason"], "invalid_arguments");
-    let error = json["error"].as_str().unwrap();
+    let nested = run_json_failure(json_command().args(["orders", "cancl"]), 2);
+    assert_eq!(nested["reason"], "unknown_command");
+    assert_eq!(nested["data"]["suggestion"], "cancel");
+    assert_eq!(nested["next"][0]["command"], "hyperliquid orders --help");
     assert!(
-        error.starts_with("unexpected argument '--bogus' found"),
-        "{error}"
+        nested["data"]["usage"]
+            .as_str()
+            .is_some_and(|usage| usage.starts_with("Usage: hyperliquid orders")),
+        "{nested}"
     );
-    assert!(!error.contains("Usage:"), "{error}");
-    let usage = json["data"]["usage"].as_str().unwrap();
-    assert!(usage.starts_with("Usage: "), "{usage}");
-    assert!(!usage.contains("See all options"), "{usage}");
-    assert_eq!(json["next"][0]["command"], "hyperliquid wallet show --help");
+}
+
+/// The usage envelope's parts for each way an invocation can be malformed:
+/// the clap message as the headline, a suggestion when clap has one, the help
+/// command to run next and the usage line (absent for a rejected value).
+#[test]
+fn a_usage_error_names_its_suggestion_help_command_and_usage_line() {
+    struct Case {
+        args: &'static [&'static str],
+        headline: &'static str,
+        suggestion: Option<&'static str>,
+        help: &'static str,
+        usage: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            args: &["account", "abstraction", "set", "--mode", "unified"],
+            headline: "invalid value 'unified' for '--mode <MODE>'",
+            suggestion: Some("unified-account"),
+            help: "hyperliquid account abstraction set --help",
+            usage: None,
+        },
+        Case {
+            args: &["orders", "scale", "--order-count", "1", "--coin", "BTC"],
+            headline: "unexpected argument '--order-count' found",
+            suggestion: Some("--orders"),
+            help: "hyperliquid orders scale --help",
+            usage: Some("Usage: hyperliquid orders scale"),
+        },
+        Case {
+            args: &["orders", "--bogus"],
+            headline: "unexpected argument '--bogus' found",
+            suggestion: None,
+            help: "hyperliquid orders --help",
+            usage: Some("Usage: hyperliquid orders [OPTIONS] <COMMAND>"),
+        },
+        Case {
+            args: &["perps", "get"],
+            headline: "the following required arguments were not provided:\n  <COIN>",
+            suggestion: None,
+            help: "hyperliquid perps get --help",
+            usage: Some("Usage: hyperliquid perps get [OPTIONS] <COIN>"),
+        },
+        Case {
+            args: &["perps", "get", "BTC", "extra"],
+            headline: "unexpected argument 'extra' found",
+            suggestion: None,
+            help: "hyperliquid perps get --help",
+            usage: Some("Usage: hyperliquid perps get [OPTIONS] <COIN>"),
+        },
+        Case {
+            args: &["--max-results", "0", "perps", "list"],
+            headline: "invalid value '0' for '--max-results <N>': value must be at least 1",
+            suggestion: None,
+            help: "hyperliquid perps list --help",
+            usage: None,
+        },
+    ];
+
+    for case in cases {
+        let json = run_json_failure(json_command().args(case.args), 2);
+        let args = case.args;
+        assert_eq!(json["category"], "usage", "{args:?}");
+        assert_eq!(json["reason"], "invalid_arguments", "{args:?}");
+        assert!(
+            json["error"].as_str().unwrap().starts_with(case.headline),
+            "{args:?}: {json}"
+        );
+        assert_eq!(
+            json["data"]["suggestion"],
+            json!(case.suggestion),
+            "{args:?}"
+        );
+        match case.usage {
+            Some(usage) => assert!(
+                json["data"]["usage"]
+                    .as_str()
+                    .is_some_and(|line| line.starts_with(usage)),
+                "{args:?}: {json}"
+            ),
+            None => assert!(json["data"]["usage"].is_null(), "{args:?}: {json}"),
+        }
+        assert_eq!(json["next"][0]["command"], case.help, "{args:?}");
+    }
 }
 
 #[test]
-fn unknown_subcommand_envelope_has_reason_and_suggestion() {
-    let output = support::hermetic_command()
-        .args(["--format", "json", "ordres"])
-        .assert()
-        .code(2)
-        .get_output()
-        .stdout
-        .clone();
+fn auth_required_names_how_to_set_up_a_wallet_in_both_formats() {
+    let home = IsolatedHome::new();
+    let deposit = ["staking", "deposit", "--amount", "3", "--testnet"];
 
-    let json = stdout_json(&output);
-    assert_eq!(json["reason"], "unknown_command");
-    assert_eq!(json["data"]["suggestion"], "orders");
-}
-
-#[test]
-fn auth_required_prints_recovery_block_in_human_mode() {
-    let env = IsolatedHome::new();
-
-    env.command()
-        .args(["--format", "table", "staking", "deposit", "--amount", "3"])
-        .args(["--testnet"])
+    home.command()
+        .args(["--format", "table"])
+        .args(deposit)
         .assert()
         .code(10)
         .stderr(predicate::str::starts_with("Error: Authentication required."))
         .stderr(predicate::str::contains(
             "\n\nSet up a wallet:\n    hyperliquid setup\n    hyperliquid wallet login\nOr set HYPERLIQUID_PRIVATE_KEY, or BANKR_API_KEY with --bankr, for this run.",
         ));
-}
 
-#[test]
-fn auth_required_json_envelope_has_next_command() {
-    let env = IsolatedHome::new();
-
-    let output = env
-        .command()
-        .args(["--format", "json", "staking", "deposit", "--amount", "3"])
-        .args(["--testnet"])
-        .assert()
-        .code(10)
-        .get_output()
-        .stdout
-        .clone();
-
-    let json = stdout_json(&output);
+    let json = run_json_failure(home.json_command().args(deposit), 10);
     assert_eq!(json["reason"], "auth_required");
     assert_eq!(json["category"], "auth");
     assert_eq!(json["next"][0]["command"], "hyperliquid setup");

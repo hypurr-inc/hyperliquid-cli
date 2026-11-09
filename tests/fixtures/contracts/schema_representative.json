@@ -1,108 +1,390 @@
-{
-  "characterization": true,
-  "commands": [
-    {
-      "aliases": [],
-      "args": [
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Perpetual coin such as BTC, supported spot pair, or outcome notation (#<encoding> or +<encoding>) for verified outcome limit orders.",
-          "enum_values": [],
-          "id": "coin",
-          "input_kind": "market_symbol",
-          "long": "coin",
-          "multiple": false,
-          "positional_index": null,
-          "required": true,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "HIP-3 DEX name.",
-          "enum_values": [],
-          "id": "dex",
-          "input_kind": "venue_selector",
-          "long": "dex",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Order side.",
-          "enum_values": [
-            "buy",
-            "sell"
-          ],
-          "id": "side",
-          "input_kind": null,
-          "long": "side",
-          "multiple": false,
-          "positional_index": null,
-          "required": true,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Limit price. For stop-loss and take-profit market trigger orders, also accepted as a legacy trigger price.",
-          "enum_values": [],
-          "id": "price",
-          "input_kind": "price",
-          "long": "price",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Trigger price for stop-loss, take-profit, stop-limit, and take-limit orders.",
-          "enum_values": [],
-          "id": "trigger_price",
-          "input_kind": "price",
-          "long": "trigger-price",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Base-asset size. Required for limit and trigger-limit orders.",
-          "enum_values": [],
-          "id": "size",
-          "input_kind": "amount",
-          "long": "size",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
+[
+  {
+    "aliases": [],
+    "args": [
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Perpetual coin such as BTC, supported spot pair, or outcome notation (#<encoding> or +<encoding>) for verified outcome limit orders.",
+        "enum_values": [],
+        "id": "coin",
+        "input_kind": "market_symbol",
+        "long": "coin",
+        "multiple": false,
+        "positional_index": null,
+        "required": true,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "HIP-3 DEX name.",
+        "enum_values": [],
+        "id": "dex",
+        "input_kind": "venue_selector",
+        "long": "dex",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Order side.",
+        "enum_values": [
+          "buy",
+          "sell"
+        ],
+        "id": "side",
+        "input_kind": null,
+        "long": "side",
+        "multiple": false,
+        "positional_index": null,
+        "required": true,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Limit price. For stop-loss and take-profit market trigger orders, also accepted as a legacy trigger price.",
+        "enum_values": [],
+        "id": "price",
+        "input_kind": "price",
+        "long": "price",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Trigger price for stop-loss, take-profit, stop-limit, and take-limit orders.",
+        "enum_values": [],
+        "id": "trigger_price",
+        "input_kind": "price",
+        "long": "trigger-price",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Base-asset size. Required for limit and trigger-limit orders.",
+        "enum_values": [],
+        "id": "size",
+        "input_kind": "amount",
+        "long": "size",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Quote-sized amount in USDC. Required for market orders.",
+        "enum_values": [],
+        "id": "amount",
+        "input_kind": "amount",
+        "long": "amount",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": "limit",
+        "description": "Order type: limit, market, market-trigger, or trigger-limit.",
+        "enum_values": [
+          "limit",
+          "market",
+          "stop-loss",
+          "take-profit",
+          "stop-limit",
+          "take-limit"
+        ],
+        "id": "order_type",
+        "input_kind": null,
+        "long": "type",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": "gtc",
+        "description": "Time in force: gtc, ioc, or alo.",
+        "enum_values": [
+          "gtc",
+          "alo",
+          "ioc"
+        ],
+        "id": "tif",
+        "input_kind": null,
+        "long": "tif",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "boolean",
+        "default": null,
+        "description": "Only reduce an existing perpetual position; spot markets are not supported.",
+        "enum_values": [],
+        "id": "reduce_only",
+        "input_kind": "boolean",
+        "long": "reduce-only",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "integer",
+        "default": "500",
+        "description": "Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000.",
+        "enum_values": [],
+        "id": "max_slippage_bps",
+        "input_kind": null,
+        "long": "max-slippage-bps",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Take-profit trigger price for a normal-tpsl child order.",
+        "enum_values": [],
+        "id": "take_profit",
+        "input_kind": "price",
+        "long": "take-profit",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Stop-loss trigger price for a normal-tpsl child order.",
+        "enum_values": [],
+        "id": "stop_loss",
+        "input_kind": "price",
+        "long": "stop-loss",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Parent-attached TP/SL grouping. orders create requires normal-tpsl when TP/SL children are present.",
+        "enum_values": [
+          "normal-tpsl"
+        ],
+        "id": "grouping",
+        "input_kind": null,
+        "long": "grouping",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
+        "enum_values": [],
+        "id": "on_behalf_of",
+        "input_kind": "acting_account_selector",
+        "long": "on-behalf-of",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
+        "enum_values": [
+          "cross",
+          "isolated"
+        ],
+        "id": "margin_mode",
+        "input_kind": null,
+        "long": "margin-mode",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Builder address to receive the additional order fee. Requires --builder-fee-rate.",
+        "enum_values": [],
+        "id": "builder",
+        "input_kind": "protocol_object_address",
+        "long": "builder",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Builder fee rate percent string, e.g. 0.001%. Requires --builder.",
+        "enum_values": [],
+        "id": "builder_fee_rate",
+        "input_kind": null,
+        "long": "builder-fee-rate",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Up to 5; shares sum to at most 100%. Requires --builder.",
+        "enum_values": [],
+        "id": "sub_builder",
+        "input_kind": "protocol_object_address",
+        "long": "sub-builder",
+        "multiple": true,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "integer",
+        "default": null,
+        "description": "Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps; max 100000000). Requires a limit order with --tif ioc, or --tif alo without --reduce-only; cannot combine with --grouping, --take-profit or --stop-loss.",
+        "enum_values": [],
+        "id": "priority_rate",
+        "input_kind": null,
+        "long": "priority-rate",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "0x-prefixed 16-byte client order id.",
+        "enum_values": [],
+        "id": "cloid",
+        "input_kind": "identifier",
+        "long": "cloid",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "boolean",
+        "default": null,
+        "description": "Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt.",
+        "enum_values": [],
+        "id": "yes",
+        "input_kind": "boolean",
+        "long": "yes",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": "y"
+      }
+    ],
+    "auth_required": true,
+    "bankr_signer": "supported",
+    "command": "hyperliquid orders create",
+    "command_path": [
+      "orders",
+      "create"
+    ],
+    "confirmation": "prompt",
+    "confirmation_bypass": {
+      "arg": "yes",
+      "supported": true
+    },
+    "dangerous": true,
+    "description": "Create a live limit, market, stop-loss, take-profit, stop-limit, take-limit, or verified outcome limit order. Supports optional per-order builder fee params. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+    "dry_run": "optional",
+    "group": "trade",
+    "json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
           "description": "Quote-sized amount in USDC. Required for market orders.",
-          "enum_values": [],
-          "id": "amount",
           "input_kind": "amount",
-          "long": "amount",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
+          "type": "string"
         },
-        {
-          "arg_type": "string",
+        "builder": {
+          "description": "Builder address to receive the additional order fee. Requires --builder-fee-rate.",
+          "input_kind": "protocol_object_address",
+          "type": "string"
+        },
+        "builder_fee_rate": {
+          "description": "Builder fee rate percent string, e.g. 0.001%. Requires --builder.",
+          "type": "string"
+        },
+        "cloid": {
+          "description": "0x-prefixed 16-byte client order id.",
+          "input_kind": "identifier",
+          "type": "string"
+        },
+        "coin": {
+          "description": "Perpetual coin such as BTC, supported spot pair, or outcome notation (#<encoding> or +<encoding>) for verified outcome limit orders.",
+          "input_kind": "market_symbol",
+          "type": "string"
+        },
+        "dex": {
+          "description": "HIP-3 DEX name.",
+          "input_kind": "venue_selector",
+          "type": "string"
+        },
+        "grouping": {
+          "description": "Parent-attached TP/SL grouping. orders create requires normal-tpsl when TP/SL children are present.",
+          "enum": [
+            "normal-tpsl"
+          ],
+          "type": "string"
+        },
+        "margin_mode": {
+          "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
+          "enum": [
+            "cross",
+            "isolated"
+          ],
+          "type": "string"
+        },
+        "max_slippage_bps": {
+          "default": "500",
+          "description": "Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000.",
+          "type": "number"
+        },
+        "on_behalf_of": {
+          "description": "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
+          "input_kind": "acting_account_selector",
+          "type": "string"
+        },
+        "order_type": {
           "default": "limit",
           "description": "Order type: limit, market, market-trigger, or trigger-limit.",
-          "enum_values": [
+          "enum": [
             "limit",
             "market",
             "stop-loss",
@@ -110,1006 +392,720 @@
             "stop-limit",
             "take-limit"
           ],
-          "id": "order_type",
-          "input_kind": null,
-          "long": "type",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
+          "type": "string"
         },
-        {
-          "arg_type": "string",
+        "price": {
+          "description": "Limit price. For stop-loss and take-profit market trigger orders, also accepted as a legacy trigger price.",
+          "input_kind": "price",
+          "type": "string"
+        },
+        "priority_rate": {
+          "description": "Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps; max 100000000). Requires a limit order with --tif ioc, or --tif alo without --reduce-only; cannot combine with --grouping, --take-profit or --stop-loss.",
+          "type": "number"
+        },
+        "reduce_only": {
+          "description": "Only reduce an existing perpetual position; spot markets are not supported.",
+          "input_kind": "boolean",
+          "type": "boolean"
+        },
+        "side": {
+          "description": "Order side.",
+          "enum": [
+            "buy",
+            "sell"
+          ],
+          "type": "string"
+        },
+        "size": {
+          "description": "Base-asset size. Required for limit and trigger-limit orders.",
+          "input_kind": "amount",
+          "type": "string"
+        },
+        "stop_loss": {
+          "description": "Stop-loss trigger price for a normal-tpsl child order.",
+          "input_kind": "price",
+          "type": "string"
+        },
+        "sub_builder": {
+          "description": "Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Up to 5; shares sum to at most 100%. Requires --builder.",
+          "input_kind": "protocol_object_address",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "take_profit": {
+          "description": "Take-profit trigger price for a normal-tpsl child order.",
+          "input_kind": "price",
+          "type": "string"
+        },
+        "tif": {
           "default": "gtc",
           "description": "Time in force: gtc, ioc, or alo.",
-          "enum_values": [
+          "enum": [
             "gtc",
             "alo",
             "ioc"
           ],
-          "id": "tif",
-          "input_kind": null,
-          "long": "tif",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
+          "type": "string"
         },
-        {
-          "arg_type": "boolean",
-          "default": null,
-          "description": "Only reduce an existing perpetual position; spot markets are not supported.",
-          "enum_values": [],
-          "id": "reduce_only",
-          "input_kind": "boolean",
-          "long": "reduce-only",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "integer",
-          "default": "500",
-          "description": "Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000.",
-          "enum_values": [],
-          "id": "max_slippage_bps",
-          "input_kind": null,
-          "long": "max-slippage-bps",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Take-profit trigger price for a normal-tpsl child order.",
-          "enum_values": [],
-          "id": "take_profit",
+        "trigger_price": {
+          "description": "Trigger price for stop-loss, take-profit, stop-limit, and take-limit orders.",
           "input_kind": "price",
-          "long": "take-profit",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
+          "type": "string"
         },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Stop-loss trigger price for a normal-tpsl child order.",
-          "enum_values": [],
-          "id": "stop_loss",
-          "input_kind": "price",
-          "long": "stop-loss",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Parent-attached TP/SL grouping. orders create requires normal-tpsl when TP/SL children are present.",
-          "enum_values": [
-            "normal-tpsl"
-          ],
-          "id": "grouping",
-          "input_kind": null,
-          "long": "grouping",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
-          "enum_values": [],
-          "id": "on_behalf_of",
-          "input_kind": "acting_account_selector",
-          "long": "on-behalf-of",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
-          "enum_values": [
-            "cross",
-            "isolated"
-          ],
-          "id": "margin_mode",
-          "input_kind": null,
-          "long": "margin-mode",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Builder address to receive the additional order fee. Requires --builder-fee-rate.",
-          "enum_values": [],
-          "id": "builder",
-          "input_kind": "protocol_object_address",
-          "long": "builder",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Builder fee rate percent string, e.g. 0.001%. Requires --builder.",
-          "enum_values": [],
-          "id": "builder_fee_rate",
-          "input_kind": null,
-          "long": "builder-fee-rate",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Up to 5; shares sum to at most 100%. Requires --builder.",
-          "enum_values": [],
-          "id": "sub_builder",
-          "input_kind": "protocol_object_address",
-          "long": "sub-builder",
-          "multiple": true,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "integer",
-          "default": null,
-          "description": "Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps; max 100000000). Requires a limit order with --tif ioc, or --tif alo without --reduce-only; cannot combine with --grouping, --take-profit or --stop-loss.",
-          "enum_values": [],
-          "id": "priority_rate",
-          "input_kind": null,
-          "long": "priority-rate",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "0x-prefixed 16-byte client order id.",
-          "enum_values": [],
-          "id": "cloid",
-          "input_kind": "identifier",
-          "long": "cloid",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "boolean",
-          "default": null,
+        "yes": {
           "description": "Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt.",
-          "enum_values": [],
-          "id": "yes",
           "input_kind": "boolean",
-          "long": "yes",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": "y"
+          "type": "boolean"
         }
-      ],
-      "auth_required": true,
-      "bankr_signer": "supported",
-      "command": "hyperliquid orders create",
-      "command_path": [
-        "orders",
-        "create"
-      ],
-      "confirmation": "prompt",
-      "confirmation_bypass": {
-        "arg": "yes",
-        "supported": true
       },
-      "dangerous": true,
-      "description": "Create a live limit, market, stop-loss, take-profit, stop-limit, take-limit, or verified outcome limit order. Supports optional per-order builder fee params. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
-      "dry_run": "optional",
-      "group": "trade",
-      "json_schema": {
-        "additionalProperties": false,
-        "properties": {
-          "amount": {
-            "description": "Quote-sized amount in USDC. Required for market orders.",
-            "input_kind": "amount",
-            "type": "string"
-          },
-          "builder": {
-            "description": "Builder address to receive the additional order fee. Requires --builder-fee-rate.",
-            "input_kind": "protocol_object_address",
-            "type": "string"
-          },
-          "builder_fee_rate": {
-            "description": "Builder fee rate percent string, e.g. 0.001%. Requires --builder.",
-            "type": "string"
-          },
-          "cloid": {
-            "description": "0x-prefixed 16-byte client order id.",
-            "input_kind": "identifier",
-            "type": "string"
-          },
-          "coin": {
-            "description": "Perpetual coin such as BTC, supported spot pair, or outcome notation (#<encoding> or +<encoding>) for verified outcome limit orders.",
-            "input_kind": "market_symbol",
-            "type": "string"
-          },
-          "dex": {
-            "description": "HIP-3 DEX name.",
-            "input_kind": "venue_selector",
-            "type": "string"
-          },
-          "grouping": {
-            "description": "Parent-attached TP/SL grouping. orders create requires normal-tpsl when TP/SL children are present.",
-            "enum": [
-              "normal-tpsl"
-            ],
-            "type": "string"
-          },
-          "margin_mode": {
-            "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
-            "enum": [
-              "cross",
-              "isolated"
-            ],
-            "type": "string"
-          },
-          "max_slippage_bps": {
-            "default": "500",
-            "description": "Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000.",
-            "type": "number"
-          },
-          "on_behalf_of": {
-            "description": "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
-            "input_kind": "acting_account_selector",
-            "type": "string"
-          },
-          "order_type": {
-            "default": "limit",
-            "description": "Order type: limit, market, market-trigger, or trigger-limit.",
-            "enum": [
-              "limit",
-              "market",
-              "stop-loss",
-              "take-profit",
-              "stop-limit",
-              "take-limit"
-            ],
-            "type": "string"
-          },
-          "price": {
-            "description": "Limit price. For stop-loss and take-profit market trigger orders, also accepted as a legacy trigger price.",
-            "input_kind": "price",
-            "type": "string"
-          },
-          "priority_rate": {
-            "description": "Order write priority rate in 1/100,000,000 of notional (80000 is 8 bps; max 100000000). Requires a limit order with --tif ioc, or --tif alo without --reduce-only; cannot combine with --grouping, --take-profit or --stop-loss.",
-            "type": "number"
-          },
-          "reduce_only": {
-            "description": "Only reduce an existing perpetual position; spot markets are not supported.",
-            "input_kind": "boolean",
-            "type": "boolean"
-          },
-          "side": {
-            "description": "Order side.",
-            "enum": [
-              "buy",
-              "sell"
-            ],
-            "type": "string"
-          },
-          "size": {
-            "description": "Base-asset size. Required for limit and trigger-limit orders.",
-            "input_kind": "amount",
-            "type": "string"
-          },
-          "stop_loss": {
-            "description": "Stop-loss trigger price for a normal-tpsl child order.",
-            "input_kind": "price",
-            "type": "string"
-          },
-          "sub_builder": {
-            "description": "Sub-builder ADDRESS:SHARE, with SHARE a percent of the builder fee such as 25%. Up to 5; shares sum to at most 100%. Requires --builder.",
-            "input_kind": "protocol_object_address",
-            "items": {
-              "type": "string"
-            },
-            "type": "array"
-          },
-          "take_profit": {
-            "description": "Take-profit trigger price for a normal-tpsl child order.",
-            "input_kind": "price",
-            "type": "string"
-          },
-          "tif": {
-            "default": "gtc",
-            "description": "Time in force: gtc, ioc, or alo.",
-            "enum": [
-              "gtc",
-              "alo",
-              "ioc"
-            ],
-            "type": "string"
-          },
-          "trigger_price": {
-            "description": "Trigger price for stop-loss, take-profit, stop-limit, and take-limit orders.",
-            "input_kind": "price",
-            "type": "string"
-          },
-          "yes": {
-            "description": "Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt.",
-            "input_kind": "boolean",
-            "type": "boolean"
-          }
+      "required": [
+        "coin",
+        "side"
+      ],
+      "type": "object",
+      "x-hyperliquid": {
+        "aliases": [],
+        "bankr_signer": "supported",
+        "confirmation": "prompt",
+        "confirmation_bypass": {
+          "arg": "yes",
+          "supported": true
         },
-        "required": [
-          "coin",
-          "side"
-        ],
-        "type": "object",
-        "x-hyperliquid": {
-          "aliases": [],
-          "bankr_signer": "supported",
-          "confirmation": "prompt",
-          "confirmation_bypass": {
-            "arg": "yes",
-            "supported": true
-          },
-          "dry_run": "optional",
-          "lifecycle": "live_mutating",
-          "mutability": "live_mutating",
-          "output_contract": "command_result_or_dry_run_envelope",
-          "ows_signer": "experimental_feature_gated",
-          "raw_payload": "dry_run_only",
-          "risk": "funds_movement",
-          "stream_bounds": null,
-          "transport": [
-            "cli_process"
+        "dry_run": "optional",
+        "lifecycle": "live_mutating",
+        "mutability": "live_mutating",
+        "output_contract": "command_result_or_dry_run_envelope",
+        "ows_signer": "experimental_feature_gated",
+        "raw_payload": "dry_run_only",
+        "risk": "funds_movement",
+        "stream_bounds": null,
+        "transport": [
+          "cli_process"
+        ]
+      }
+    },
+    "lifecycle": "live_mutating",
+    "mutability": "live_mutating",
+    "output_contract": "command_result_or_dry_run_envelope",
+    "ows_signer": "experimental_feature_gated",
+    "raw_payload": "dry_run_only",
+    "risk": "funds_movement",
+    "stream_bounds": null,
+    "transport": [
+      "cli_process"
+    ]
+  },
+  {
+    "aliases": [],
+    "args": [
+      {
+        "arg_type": "integer",
+        "default": null,
+        "description": "Exchange-assigned order id.",
+        "enum_values": [],
+        "id": "order_id",
+        "input_kind": "identifier",
+        "long": null,
+        "multiple": false,
+        "positional_index": 0,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "0x-prefixed 16-byte client order id.",
+        "enum_values": [],
+        "id": "cloid",
+        "input_kind": "identifier",
+        "long": "cloid",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Replacement price.",
+        "enum_values": [],
+        "id": "price",
+        "input_kind": "price",
+        "long": "price",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Replacement trigger price for trigger orders.",
+        "enum_values": [],
+        "id": "trigger_price",
+        "input_kind": "price",
+        "long": "trigger-price",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Replacement size.",
+        "enum_values": [],
+        "id": "size",
+        "input_kind": "amount",
+        "long": "size",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "boolean",
+        "default": null,
+        "description": "Place the replacement even if the cancel fails. When off, the replacement must be a non-trigger ALO order or a non-executable GTC order, so set this to modify trigger orders.",
+        "enum_values": [],
+        "id": "always_place",
+        "input_kind": "boolean",
+        "long": "always-place",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id.",
+        "enum_values": [],
+        "id": "on_behalf_of",
+        "input_kind": "acting_account_selector",
+        "long": "on-behalf-of",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      }
+    ],
+    "auth_required": true,
+    "bankr_signer": "supported",
+    "command": "hyperliquid orders modify <ORDER_ID>",
+    "command_path": [
+      "orders",
+      "modify"
+    ],
+    "confirmation": "none",
+    "confirmation_bypass": {
+      "arg": null,
+      "supported": false
+    },
+    "dangerous": true,
+    "description": "Modify an existing order.",
+    "dry_run": "optional",
+    "group": "trade",
+    "json_schema": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "order_id"
+          ]
+        },
+        {
+          "required": [
+            "cloid"
           ]
         }
-      },
-      "lifecycle": "live_mutating",
-      "mutability": "live_mutating",
-      "output_contract": "command_result_or_dry_run_envelope",
-      "ows_signer": "experimental_feature_gated",
-      "raw_payload": "dry_run_only",
-      "risk": "funds_movement",
-      "stream_bounds": null,
-      "transport": [
-        "cli_process"
-      ]
-    },
-    {
-      "aliases": [],
-      "args": [
-        {
-          "arg_type": "integer",
-          "default": null,
-          "description": "Exchange-assigned order id.",
-          "enum_values": [],
-          "id": "order_id",
-          "input_kind": "identifier",
-          "long": null,
-          "multiple": false,
-          "positional_index": 0,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "0x-prefixed 16-byte client order id.",
-          "enum_values": [],
-          "id": "cloid",
-          "input_kind": "identifier",
-          "long": "cloid",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Replacement price.",
-          "enum_values": [],
-          "id": "price",
-          "input_kind": "price",
-          "long": "price",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Replacement trigger price for trigger orders.",
-          "enum_values": [],
-          "id": "trigger_price",
-          "input_kind": "price",
-          "long": "trigger-price",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Replacement size.",
-          "enum_values": [],
-          "id": "size",
-          "input_kind": "amount",
-          "long": "size",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "boolean",
-          "default": null,
+      ],
+      "properties": {
+        "always_place": {
           "description": "Place the replacement even if the cancel fails. When off, the replacement must be a non-trigger ALO order or a non-executable GTC order, so set this to modify trigger orders.",
-          "enum_values": [],
-          "id": "always_place",
           "input_kind": "boolean",
-          "long": "always-place",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
+          "type": "boolean"
         },
-        {
-          "arg_type": "string",
-          "default": null,
+        "cloid": {
+          "description": "0x-prefixed 16-byte client order id.",
+          "input_kind": "identifier",
+          "type": "string"
+        },
+        "on_behalf_of": {
           "description": "Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id.",
-          "enum_values": [],
-          "id": "on_behalf_of",
           "input_kind": "acting_account_selector",
-          "long": "on-behalf-of",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        }
-      ],
-      "auth_required": true,
-      "bankr_signer": "supported",
-      "command": "hyperliquid orders modify <ORDER_ID>",
-      "command_path": [
-        "orders",
-        "modify"
-      ],
-      "confirmation": "none",
-      "confirmation_bypass": {
-        "arg": null,
-        "supported": false
-      },
-      "dangerous": true,
-      "description": "Modify an existing order.",
-      "dry_run": "optional",
-      "group": "trade",
-      "json_schema": {
-        "additionalProperties": false,
-        "oneOf": [
-          {
-            "required": [
-              "order_id"
-            ]
-          },
-          {
-            "required": [
-              "cloid"
-            ]
-          }
-        ],
-        "properties": {
-          "always_place": {
-            "description": "Place the replacement even if the cancel fails. When off, the replacement must be a non-trigger ALO order or a non-executable GTC order, so set this to modify trigger orders.",
-            "input_kind": "boolean",
-            "type": "boolean"
-          },
-          "cloid": {
-            "description": "0x-prefixed 16-byte client order id.",
-            "input_kind": "identifier",
-            "type": "string"
-          },
-          "on_behalf_of": {
-            "description": "Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id.",
-            "input_kind": "acting_account_selector",
-            "type": "string"
-          },
-          "order_id": {
-            "description": "Exchange-assigned order id.",
-            "input_kind": "identifier",
-            "type": "number"
-          },
-          "price": {
-            "description": "Replacement price.",
-            "input_kind": "price",
-            "type": "string"
-          },
-          "size": {
-            "description": "Replacement size.",
-            "input_kind": "amount",
-            "type": "string"
-          },
-          "trigger_price": {
-            "description": "Replacement trigger price for trigger orders.",
-            "input_kind": "price",
-            "type": "string"
-          }
+          "type": "string"
         },
-        "type": "object",
-        "x-hyperliquid": {
-          "aliases": [],
-          "bankr_signer": "supported",
-          "confirmation": "none",
-          "confirmation_bypass": {
-            "arg": null,
-            "supported": false
-          },
-          "dry_run": "optional",
-          "lifecycle": "live_mutating",
-          "mutability": "live_mutating",
-          "output_contract": "command_result_or_dry_run_envelope",
-          "ows_signer": "experimental_feature_gated",
-          "raw_payload": "dry_run_only",
-          "risk": "funds_movement",
-          "stream_bounds": null,
-          "transport": [
-            "cli_process"
-          ]
+        "order_id": {
+          "description": "Exchange-assigned order id.",
+          "input_kind": "identifier",
+          "type": "number"
+        },
+        "price": {
+          "description": "Replacement price.",
+          "input_kind": "price",
+          "type": "string"
+        },
+        "size": {
+          "description": "Replacement size.",
+          "input_kind": "amount",
+          "type": "string"
+        },
+        "trigger_price": {
+          "description": "Replacement trigger price for trigger orders.",
+          "input_kind": "price",
+          "type": "string"
         }
       },
-      "lifecycle": "live_mutating",
-      "mutability": "live_mutating",
-      "output_contract": "command_result_or_dry_run_envelope",
-      "ows_signer": "experimental_feature_gated",
-      "raw_payload": "dry_run_only",
-      "risk": "funds_movement",
-      "stream_bounds": null,
-      "transport": [
-        "cli_process"
-      ]
+      "type": "object",
+      "x-hyperliquid": {
+        "aliases": [],
+        "bankr_signer": "supported",
+        "confirmation": "none",
+        "confirmation_bypass": {
+          "arg": null,
+          "supported": false
+        },
+        "dry_run": "optional",
+        "lifecycle": "live_mutating",
+        "mutability": "live_mutating",
+        "output_contract": "command_result_or_dry_run_envelope",
+        "ows_signer": "experimental_feature_gated",
+        "raw_payload": "dry_run_only",
+        "risk": "funds_movement",
+        "stream_bounds": null,
+        "transport": [
+          "cli_process"
+        ]
+      }
     },
-    {
-      "aliases": [
-        "transfers"
-      ],
-      "args": [
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Explicit destination address. Wallet aliases are not resolved.",
-          "enum_values": [],
-          "id": "to",
-          "input_kind": "raw_destination_address",
-          "long": "to",
-          "multiple": false,
-          "positional_index": null,
-          "required": true,
-          "short": null
-        },
-        {
-          "arg_type": "string",
-          "default": null,
+    "lifecycle": "live_mutating",
+    "mutability": "live_mutating",
+    "output_contract": "command_result_or_dry_run_envelope",
+    "ows_signer": "experimental_feature_gated",
+    "raw_payload": "dry_run_only",
+    "risk": "funds_movement",
+    "stream_bounds": null,
+    "transport": [
+      "cli_process"
+    ]
+  },
+  {
+    "aliases": [
+      "transfers"
+    ],
+    "args": [
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Explicit destination address. Wallet aliases are not resolved.",
+        "enum_values": [],
+        "id": "to",
+        "input_kind": "raw_destination_address",
+        "long": "to",
+        "multiple": false,
+        "positional_index": null,
+        "required": true,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "USDC amount.",
+        "enum_values": [],
+        "id": "amount",
+        "input_kind": "amount",
+        "long": "amount",
+        "multiple": false,
+        "positional_index": null,
+        "required": true,
+        "short": null
+      },
+      {
+        "arg_type": "boolean",
+        "default": null,
+        "description": "Skip confirmation prompt for deliberate automation.",
+        "enum_values": [],
+        "id": "yes",
+        "input_kind": "boolean",
+        "long": "yes",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": "y"
+      }
+    ],
+    "auth_required": true,
+    "bankr_signer": "unsupported",
+    "command": "hyperliquid transfer send",
+    "command_path": [
+      "transfer",
+      "send"
+    ],
+    "confirmation": "prompt",
+    "confirmation_bypass": {
+      "arg": "yes",
+      "supported": true
+    },
+    "dangerous": true,
+    "description": "Send USDC to another Hyperliquid address.",
+    "dry_run": "optional",
+    "group": "transfer",
+    "json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
           "description": "USDC amount.",
-          "enum_values": [],
-          "id": "amount",
           "input_kind": "amount",
-          "long": "amount",
-          "multiple": false,
-          "positional_index": null,
-          "required": true,
-          "short": null
+          "type": "string"
         },
-        {
-          "arg_type": "boolean",
-          "default": null,
+        "to": {
+          "description": "Explicit destination address. Wallet aliases are not resolved.",
+          "input_kind": "raw_destination_address",
+          "type": "string"
+        },
+        "yes": {
           "description": "Skip confirmation prompt for deliberate automation.",
-          "enum_values": [],
-          "id": "yes",
           "input_kind": "boolean",
-          "long": "yes",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": "y"
+          "type": "boolean"
         }
-      ],
-      "auth_required": true,
-      "bankr_signer": "unsupported",
-      "command": "hyperliquid transfer send",
-      "command_path": [
-        "transfer",
-        "send"
-      ],
-      "confirmation": "prompt",
-      "confirmation_bypass": {
-        "arg": "yes",
-        "supported": true
       },
-      "dangerous": true,
-      "description": "Send USDC to another Hyperliquid address.",
-      "dry_run": "optional",
-      "group": "transfer",
-      "json_schema": {
-        "additionalProperties": false,
-        "properties": {
-          "amount": {
-            "description": "USDC amount.",
-            "input_kind": "amount",
-            "type": "string"
-          },
-          "to": {
-            "description": "Explicit destination address. Wallet aliases are not resolved.",
-            "input_kind": "raw_destination_address",
-            "type": "string"
-          },
-          "yes": {
-            "description": "Skip confirmation prompt for deliberate automation.",
-            "input_kind": "boolean",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "to",
-          "amount"
+      "required": [
+        "to",
+        "amount"
+      ],
+      "type": "object",
+      "x-hyperliquid": {
+        "aliases": [
+          "transfers"
         ],
-        "type": "object",
-        "x-hyperliquid": {
-          "aliases": [
-            "transfers"
-          ],
-          "bankr_signer": "unsupported",
-          "confirmation": "prompt",
-          "confirmation_bypass": {
-            "arg": "yes",
-            "supported": true
-          },
-          "dry_run": "optional",
-          "lifecycle": "live_mutating",
-          "mutability": "live_mutating",
-          "output_contract": "command_result_or_dry_run_envelope",
-          "ows_signer": "experimental_feature_gated",
-          "raw_payload": "dry_run_only",
-          "risk": "funds_movement",
-          "stream_bounds": null,
-          "transport": [
-            "cli_process"
-          ]
-        }
-      },
-      "lifecycle": "live_mutating",
-      "mutability": "live_mutating",
-      "output_contract": "command_result_or_dry_run_envelope",
-      "ows_signer": "experimental_feature_gated",
-      "raw_payload": "dry_run_only",
-      "risk": "funds_movement",
-      "stream_bounds": null,
-      "transport": [
-        "cli_process"
-      ]
-    },
-    {
-      "aliases": [],
-      "args": [],
-      "auth_required": true,
-      "bankr_signer": "supported",
-      "command": "hyperliquid wallet address",
-      "command_path": [
-        "wallet",
-        "address"
-      ],
-      "confirmation": "none",
-      "confirmation_bypass": {
-        "arg": null,
-        "supported": false
-      },
-      "dangerous": false,
-      "description": "Print the configured wallet address.",
-      "dry_run": "not_supported",
-      "group": "wallet",
-      "json_schema": {
-        "additionalProperties": false,
-        "properties": {},
-        "type": "object",
-        "x-hyperliquid": {
-          "aliases": [],
-          "bankr_signer": "supported",
-          "confirmation": "none",
-          "confirmation_bypass": {
-            "arg": null,
-            "supported": false
-          },
-          "dry_run": "not_supported",
-          "lifecycle": "read_only",
-          "mutability": "local_only",
-          "output_contract": "json_value",
-          "ows_signer": "address_selector_supported",
-          "raw_payload": "unsupported",
-          "risk": "local_secret",
-          "stream_bounds": null,
-          "transport": [
-            "cli_process"
-          ]
-        }
-      },
-      "lifecycle": "read_only",
-      "mutability": "local_only",
-      "output_contract": "json_value",
-      "ows_signer": "address_selector_supported",
-      "raw_payload": "unsupported",
-      "risk": "local_secret",
-      "stream_bounds": null,
-      "transport": [
-        "cli_process"
-      ]
-    },
-    {
-      "aliases": [],
-      "args": [
-        {
-          "arg_type": "string",
-          "default": null,
-          "description": "Borrow/lend reserve token, for example USDC.",
-          "enum_values": [],
-          "id": "token",
-          "input_kind": "market_symbol",
-          "long": null,
-          "multiple": false,
-          "positional_index": 0,
-          "required": true,
-          "short": null
+        "bankr_signer": "unsupported",
+        "confirmation": "prompt",
+        "confirmation_bypass": {
+          "arg": "yes",
+          "supported": true
         },
-        {
-          "arg_type": "string",
-          "default": null,
+        "dry_run": "optional",
+        "lifecycle": "live_mutating",
+        "mutability": "live_mutating",
+        "output_contract": "command_result_or_dry_run_envelope",
+        "ows_signer": "experimental_feature_gated",
+        "raw_payload": "dry_run_only",
+        "risk": "funds_movement",
+        "stream_bounds": null,
+        "transport": [
+          "cli_process"
+        ]
+      }
+    },
+    "lifecycle": "live_mutating",
+    "mutability": "live_mutating",
+    "output_contract": "command_result_or_dry_run_envelope",
+    "ows_signer": "experimental_feature_gated",
+    "raw_payload": "dry_run_only",
+    "risk": "funds_movement",
+    "stream_bounds": null,
+    "transport": [
+      "cli_process"
+    ]
+  },
+  {
+    "aliases": [],
+    "args": [],
+    "auth_required": true,
+    "bankr_signer": "supported",
+    "command": "hyperliquid wallet address",
+    "command_path": [
+      "wallet",
+      "address"
+    ],
+    "confirmation": "none",
+    "confirmation_bypass": {
+      "arg": null,
+      "supported": false
+    },
+    "dangerous": false,
+    "description": "Print the configured wallet address.",
+    "dry_run": "not_supported",
+    "group": "wallet",
+    "json_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object",
+      "x-hyperliquid": {
+        "aliases": [],
+        "bankr_signer": "supported",
+        "confirmation": "none",
+        "confirmation_bypass": {
+          "arg": null,
+          "supported": false
+        },
+        "dry_run": "not_supported",
+        "lifecycle": "read_only",
+        "mutability": "local_only",
+        "output_contract": "json_value",
+        "ows_signer": "address_selector_supported",
+        "raw_payload": "unsupported",
+        "risk": "local_secret",
+        "stream_bounds": null,
+        "transport": [
+          "cli_process"
+        ]
+      }
+    },
+    "lifecycle": "read_only",
+    "mutability": "local_only",
+    "output_contract": "json_value",
+    "ows_signer": "address_selector_supported",
+    "raw_payload": "unsupported",
+    "risk": "local_secret",
+    "stream_bounds": null,
+    "transport": [
+      "cli_process"
+    ]
+  },
+  {
+    "aliases": [],
+    "args": [
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Borrow/lend reserve token, for example USDC.",
+        "enum_values": [],
+        "id": "token",
+        "input_kind": "market_symbol",
+        "long": null,
+        "multiple": false,
+        "positional_index": 0,
+        "required": true,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Human-readable token amount to supply.",
+        "enum_values": [],
+        "id": "amount",
+        "input_kind": "amount",
+        "long": "amount",
+        "multiple": false,
+        "positional_index": null,
+        "required": true,
+        "short": null
+      },
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw and repay accept --max.",
+        "enum_values": [],
+        "id": "max",
+        "input_kind": null,
+        "long": "max",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      }
+    ],
+    "auth_required": true,
+    "bankr_signer": "supported",
+    "command": "hyperliquid borrowlend supply <TOKEN> --amount <AMOUNT>",
+    "command_path": [
+      "borrowlend",
+      "supply"
+    ],
+    "confirmation": "none",
+    "confirmation_bypass": {
+      "arg": null,
+      "supported": false
+    },
+    "dangerous": true,
+    "description": "Supply a borrow/lend reserve token with a wallet-signed borrowLend exchange action. Runs live without a confirmation prompt; --dry-run previews the action without submitting.",
+    "dry_run": "optional",
+    "group": "market",
+    "json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "amount": {
           "description": "Human-readable token amount to supply.",
-          "enum_values": [],
-          "id": "amount",
           "input_kind": "amount",
-          "long": "amount",
-          "multiple": false,
-          "positional_index": null,
-          "required": true,
-          "short": null
+          "type": "string"
         },
-        {
-          "arg_type": "string",
-          "default": null,
+        "max": {
           "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw and repay accept --max.",
-          "enum_values": [],
-          "id": "max",
-          "input_kind": null,
-          "long": "max",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        }
-      ],
-      "auth_required": true,
-      "bankr_signer": "supported",
-      "command": "hyperliquid borrowlend supply <TOKEN> --amount <AMOUNT>",
-      "command_path": [
-        "borrowlend",
-        "supply"
-      ],
-      "confirmation": "none",
-      "confirmation_bypass": {
-        "arg": null,
-        "supported": false
-      },
-      "dangerous": true,
-      "description": "Supply a borrow/lend reserve token with a wallet-signed borrowLend exchange action. Runs live without a confirmation prompt; --dry-run previews the action without submitting.",
-      "dry_run": "optional",
-      "group": "market",
-      "json_schema": {
-        "additionalProperties": false,
-        "properties": {
-          "amount": {
-            "description": "Human-readable token amount to supply.",
-            "input_kind": "amount",
-            "type": "string"
-          },
-          "max": {
-            "description": "Not supported for supply: the command rejects --max and requires --amount. Only withdraw and repay accept --max.",
-            "type": "string"
-          },
-          "token": {
-            "description": "Borrow/lend reserve token, for example USDC.",
-            "input_kind": "market_symbol",
-            "type": "string"
-          }
+          "type": "string"
         },
-        "required": [
-          "token",
-          "amount"
-        ],
-        "type": "object",
-        "x-hyperliquid": {
-          "aliases": [],
-          "bankr_signer": "supported",
-          "confirmation": "none",
-          "confirmation_bypass": {
-            "arg": null,
-            "supported": false
-          },
-          "dry_run": "optional",
-          "lifecycle": "live_mutating",
-          "mutability": "live_mutating",
-          "output_contract": "command_result_or_dry_run_envelope",
-          "ows_signer": "experimental_feature_gated",
-          "raw_payload": "dry_run_only",
-          "risk": "funds_movement",
-          "stream_bounds": null,
-          "transport": [
-            "cli_process"
-          ]
+        "token": {
+          "description": "Borrow/lend reserve token, for example USDC.",
+          "input_kind": "market_symbol",
+          "type": "string"
         }
       },
-      "lifecycle": "live_mutating",
-      "mutability": "live_mutating",
-      "output_contract": "command_result_or_dry_run_envelope",
-      "ows_signer": "experimental_feature_gated",
-      "raw_payload": "dry_run_only",
-      "risk": "funds_movement",
-      "stream_bounds": null,
-      "transport": [
-        "cli_process"
-      ]
+      "required": [
+        "token",
+        "amount"
+      ],
+      "type": "object",
+      "x-hyperliquid": {
+        "aliases": [],
+        "bankr_signer": "supported",
+        "confirmation": "none",
+        "confirmation_bypass": {
+          "arg": null,
+          "supported": false
+        },
+        "dry_run": "optional",
+        "lifecycle": "live_mutating",
+        "mutability": "live_mutating",
+        "output_contract": "command_result_or_dry_run_envelope",
+        "ows_signer": "experimental_feature_gated",
+        "raw_payload": "dry_run_only",
+        "risk": "funds_movement",
+        "stream_bounds": null,
+        "transport": [
+          "cli_process"
+        ]
+      }
     },
-    {
-      "aliases": [],
-      "args": [
-        {
-          "arg_type": "string",
-          "default": null,
+    "lifecycle": "live_mutating",
+    "mutability": "live_mutating",
+    "output_contract": "command_result_or_dry_run_envelope",
+    "ows_signer": "experimental_feature_gated",
+    "raw_payload": "dry_run_only",
+    "risk": "funds_movement",
+    "stream_bounds": null,
+    "transport": [
+      "cli_process"
+    ]
+  },
+  {
+    "aliases": [],
+    "args": [
+      {
+        "arg_type": "string",
+        "default": null,
+        "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+        "enum_values": [],
+        "id": "dex",
+        "input_kind": null,
+        "long": "dex",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "integer",
+        "default": null,
+        "description": "Stop after this many matching events.",
+        "enum_values": [],
+        "id": "max_events",
+        "input_kind": null,
+        "long": "max-events",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      },
+      {
+        "arg_type": "integer",
+        "default": null,
+        "description": "Stop if no matching events arrive within this many milliseconds.",
+        "enum_values": [],
+        "id": "idle_timeout_ms",
+        "input_kind": null,
+        "long": "idle-timeout-ms",
+        "multiple": false,
+        "positional_index": null,
+        "required": false,
+        "short": null
+      }
+    ],
+    "auth_required": false,
+    "bankr_signer": "not_required",
+    "command": "hyperliquid subscribe all-mids",
+    "command_path": [
+      "subscribe",
+      "all-mids"
+    ],
+    "confirmation": "none",
+    "confirmation_bypass": {
+      "arg": null,
+      "supported": false
+    },
+    "dangerous": false,
+    "description": "Stream all mid-price updates. automation callers should set max_events or idle_timeout_ms so the call returns.",
+    "dry_run": "not_supported",
+    "group": "subscribe",
+    "json_schema": {
+      "additionalProperties": false,
+      "properties": {
+        "dex": {
           "description": "Perp dex name (HIP-3). Defaults to the first dex.",
-          "enum_values": [],
-          "id": "dex",
-          "input_kind": null,
-          "long": "dex",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
+          "type": "string"
         },
-        {
-          "arg_type": "integer",
-          "default": null,
-          "description": "Stop after this many matching events.",
-          "enum_values": [],
-          "id": "max_events",
-          "input_kind": null,
-          "long": "max-events",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "integer",
-          "default": null,
+        "idle_timeout_ms": {
           "description": "Stop if no matching events arrive within this many milliseconds.",
-          "enum_values": [],
-          "id": "idle_timeout_ms",
-          "input_kind": null,
-          "long": "idle-timeout-ms",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        }
-      ],
-      "auth_required": false,
-      "bankr_signer": "not_required",
-      "command": "hyperliquid subscribe all-mids",
-      "command_path": [
-        "subscribe",
-        "all-mids"
-      ],
-      "confirmation": "none",
-      "confirmation_bypass": {
-        "arg": null,
-        "supported": false
-      },
-      "dangerous": false,
-      "description": "Stream all mid-price updates. automation callers should set max_events or idle_timeout_ms so the call returns.",
-      "dry_run": "not_supported",
-      "group": "subscribe",
-      "json_schema": {
-        "additionalProperties": false,
-        "properties": {
-          "dex": {
-            "description": "Perp dex name (HIP-3). Defaults to the first dex.",
-            "type": "string"
-          },
-          "idle_timeout_ms": {
-            "description": "Stop if no matching events arrive within this many milliseconds.",
-            "type": "number"
-          },
-          "max_events": {
-            "description": "Stop after this many matching events.",
-            "type": "number"
-          }
+          "type": "number"
         },
-        "type": "object",
-        "x-hyperliquid": {
-          "aliases": [],
-          "bankr_signer": "not_required",
-          "confirmation": "none",
-          "confirmation_bypass": {
-            "arg": null,
-            "supported": false
-          },
-          "dry_run": "not_supported",
-          "lifecycle": "streaming",
-          "mutability": "streaming",
-          "output_contract": "bounded_ndjson_stream",
-          "ows_signer": "not_required",
-          "raw_payload": "unsupported",
-          "risk": "none",
-          "stream_bounds": {
-            "cli_args": [
-              "max_events",
-              "idle_timeout_ms"
-            ],
-            "env": [
-              "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
-            ],
-            "output_mode": "ndjson",
-            "required_in_machine_context": true
-          },
-          "transport": [
-            "cli_process"
-          ]
+        "max_events": {
+          "description": "Stop after this many matching events.",
+          "type": "number"
         }
       },
-      "lifecycle": "streaming",
-      "mutability": "streaming",
-      "output_contract": "bounded_ndjson_stream",
-      "ows_signer": "not_required",
-      "raw_payload": "unsupported",
-      "risk": "none",
-      "stream_bounds": {
-        "cli_args": [
-          "max_events",
-          "idle_timeout_ms"
-        ],
-        "env": [
-          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
-        ],
-        "output_mode": "ndjson",
-        "required_in_machine_context": true
-      },
-      "transport": [
-        "cli_process"
-      ]
-    }
-  ],
-  "review_required_to_update": true
-}
+      "type": "object",
+      "x-hyperliquid": {
+        "aliases": [],
+        "bankr_signer": "not_required",
+        "confirmation": "none",
+        "confirmation_bypass": {
+          "arg": null,
+          "supported": false
+        },
+        "dry_run": "not_supported",
+        "lifecycle": "streaming",
+        "mutability": "streaming",
+        "output_contract": "bounded_ndjson_stream",
+        "ows_signer": "not_required",
+        "raw_payload": "unsupported",
+        "risk": "none",
+        "stream_bounds": {
+          "cli_args": [
+            "max_events",
+            "idle_timeout_ms"
+          ],
+          "env": [
+            "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+          ],
+          "output_mode": "ndjson",
+          "required_in_machine_context": true
+        },
+        "transport": [
+          "cli_process"
+        ]
+      }
+    },
+    "lifecycle": "streaming",
+    "mutability": "streaming",
+    "output_contract": "bounded_ndjson_stream",
+    "ows_signer": "not_required",
+    "raw_payload": "unsupported",
+    "risk": "none",
+    "stream_bounds": {
+      "cli_args": [
+        "max_events",
+        "idle_timeout_ms"
+      ],
+      "env": [
+        "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+      ],
+      "output_mode": "ndjson",
+      "required_in_machine_context": true
+    },
+    "transport": [
+      "cli_process"
+    ]
+  }
+]

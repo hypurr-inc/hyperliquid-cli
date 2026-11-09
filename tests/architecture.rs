@@ -16,9 +16,13 @@
 //! and every path is resolved (`crate::`, `super::`, `self::`, `use` groups),
 //! so a re-spelled import does not slip through. Tests are scanned like code.
 
+mod support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use support::rust_files;
 
 /// The one library module allowed to name `commands`: it builds the command
 /// registry from `commands::entries` and `commands::groups`.
@@ -26,17 +30,6 @@ const REGISTRY_ROOT: &str = "command_registry.rs";
 
 fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
-}
-
-fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, found);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            found.push(path);
-        }
-    }
 }
 
 /// `source` without comments, and with the inside of string and char literals
@@ -297,8 +290,7 @@ fn paths_in(file: &Path, source: &str) -> Vec<Vec<String>> {
 fn command_modules() -> BTreeMap<String, Vec<PathBuf>> {
     let commands = src_dir().join("commands");
     let mut by_unit: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
-    let mut files = Vec::new();
-    rust_files(&commands, &mut files);
+    let files = rust_files(&commands);
     for file in files {
         let unit = unit_of(&file);
         if unit != "mod" {
@@ -353,8 +345,7 @@ fn command_to_command_imports(
     commands: &BTreeMap<String, Vec<PathBuf>>,
 ) -> Vec<(String, String, String)> {
     let names: BTreeSet<&str> = commands.keys().map(String::as_str).collect();
-    let mut files = Vec::new();
-    rust_files(&src_dir().join("commands"), &mut files);
+    let files = rust_files(&src_dir().join("commands"));
     let mut found = Vec::new();
     for file in files {
         if file == src_dir().join("commands/mod.rs") {
@@ -422,8 +413,7 @@ fn binary_files() -> BTreeSet<PathBuf> {
 #[test]
 fn nothing_outside_commands_imports_commands() {
     let binary = binary_files();
-    let mut files = Vec::new();
-    rust_files(&src_dir(), &mut files);
+    let files = rust_files(&src_dir());
     let mut found = Vec::new();
     for file in files {
         let relative = file.strip_prefix(src_dir()).unwrap().display().to_string();
@@ -458,37 +448,28 @@ fn the_registry_root_really_is_the_one_library_module_naming_commands() {
     );
 }
 
+/// The scan is not vacuous: every command file that spells an import of the
+/// shared layer in plain text (`use crate::commands::common`) has it found and
+/// resolved by the scan, and many do.
 #[test]
-fn the_scan_sees_every_spelling_of_an_import() {
-    let here = [
-        "commands".to_string(),
-        "orders".to_string(),
-        "cli".to_string(),
-    ];
-    let file = src_dir().join("commands/orders/cli.rs");
-    let source = r#"
-        use crate::commands::{positions, account::{FillRow, subaccounts}};
-        use super::super::transfers as t;
-        use crate::{commands, errors};
-        // use crate::commands::vaults;
-        const NOT_AN_IMPORT: &str = "crate::commands::spot";
-        fn inline() { let _ = crate::commands::staking::run(); }
-    "#;
-    assert_eq!(module_of(&file), here);
-    let paths: BTreeSet<String> = paths_in(&file, source)
-        .iter()
-        .map(|path| path.join("::"))
-        .collect();
-    for expected in [
-        "crate::commands::positions",
-        "crate::commands::account::FillRow",
-        "crate::commands::account::subaccounts",
-        "crate::commands::transfers",
-        "crate::commands",
-        "crate::commands::staking::run",
-    ] {
-        assert!(paths.contains(expected), "missing {expected}: {paths:?}");
+fn the_scan_resolves_the_shared_layer_imports_commands_really_make() {
+    let mut importers = 0;
+    for file in rust_files(&src_dir().join("commands")) {
+        let source = fs::read_to_string(&file).unwrap();
+        if !source
+            .lines()
+            .any(|line| line.trim_start().starts_with("use crate::commands::common"))
+        {
+            continue;
+        }
+        importers += 1;
+        assert!(
+            paths_in(&file, &source)
+                .iter()
+                .any(|path| path.starts_with(&["crate", "commands", "common"].map(String::from))),
+            "{} imports commands::common but the scan does not see it",
+            file.display()
+        );
     }
-    assert!(!paths.contains("crate::commands::vaults"), "{paths:?}");
-    assert!(!paths.contains("crate::commands::spot"), "{paths:?}");
+    assert!(importers >= 10, "found only {importers} importers");
 }

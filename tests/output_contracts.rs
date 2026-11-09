@@ -1,71 +1,38 @@
-//! First-use owner: #42 command contract freeze.
-//!
-//! These tests own stable top-level JSON/error/output contracts that are not
-//! specific to one command family.
+//! Top-level JSON output contracts that belong to no one command family,
+//! pinned as snapshots in `tests/fixtures/contracts`.
 
 mod contract_support;
 mod support;
 
-use support::exchange::ExchangeFixture;
-
-use serde_json::{Value, json};
-
 use contract_support::assert_json_fixture;
-use support::{API_OVERRIDE_ENV, IsolatedHome, TEST_ACCOUNT_PASSPHRASE};
+use support::exchange::ExchangeFixture;
+use support::{API_OVERRIDE_ENV, IsolatedHome, json_command, run_json, run_json_failure};
 
 #[test]
-fn json_error_envelope_matches_characterization_fixture() {
-    let output = support::hermetic_command()
-        .args(["--format", "json", "wallet", "show", "--bogus"])
-        .assert()
-        .failure()
-        .code(2)
-        .get_output()
-        .stdout
-        .clone();
-    let error: Value = serde_json::from_slice(&output).unwrap();
+fn a_usage_error_prints_this_json_envelope() {
+    let envelope = run_json_failure(json_command().args(["wallet", "show", "--bogus"]), 2);
 
-    assert_json_fixture(
-        "output_error_envelope.json",
-        &json!({
-            "characterization": true,
-            "review_required_to_update": true,
-            "error": error,
-        }),
-    );
+    assert_json_fixture("output_error_envelope.json", &envelope);
 }
 
 #[tokio::test]
-async fn results_only_and_select_output_matches_characterization_fixture() {
-    let env = IsolatedHome::new();
+async fn results_only_max_results_and_select_compose_on_a_list() {
+    let home = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
-    let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
-    let output = command
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args([
-            "--format",
-            "json",
-            "--results-only",
-            "--max-results",
-            "2",
-            "--select",
-            "name,max_leverage",
-            "perps",
-            "list",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let value: Value = serde_json::from_slice(&output).unwrap();
 
-    assert_json_fixture(
-        "output_projection.json",
-        &json!({
-            "characterization": true,
-            "review_required_to_update": true,
-            "output": value,
-        }),
+    let output = run_json(
+        home.json_command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .args([
+                "--results-only",
+                "--max-results",
+                "2",
+                "--select",
+                "name,max_leverage",
+                "perps",
+                "list",
+            ]),
     );
+
+    assert_json_fixture("output_projection.json", &output);
 }
