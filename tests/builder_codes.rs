@@ -1,125 +1,66 @@
+//! `builder max-fee`, `builder approved` and `builder approve`: reading an
+//! account's approvals and signing a new one.
+
 mod support;
 
+use hypersdk::hypercore::Chain;
 use predicates::prelude::*;
-use serde_json::Value;
-use support::{IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address, stdout_json};
-use wiremock::matchers::{body_partial_json, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use serde_json::json;
+use support::exchange::ExchangeFixture;
+use support::orders::words;
+use support::signing::{recover_signer, test_signer};
+use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, run_json};
 
 const USER: &str = "0x00000000000000000000000000000000000000aa";
 const BUILDER: &str = "0x00000000000000000000000000000000000000bb";
 const SECOND_BUILDER: &str = "0x00000000000000000000000000000000000000cc";
-async fn builder_server() -> MockServer {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "BTC": "50000"
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {"type": "default"}
-        })))
-        .mount(&server)
-        .await;
+
+async fn mount_max_fee(server: &ExchangeFixture, builder: &str, tenths_bps: u64) {
     server
+        .mount_info(
+            json!({"type": "maxBuilderFee", "user": USER, "builder": builder}),
+            json!(tenths_bps),
+        )
+        .await;
 }
 
 #[tokio::test]
-async fn builder_max_fee_reads_tenths_bps_and_percent() {
+async fn max_fee_reads_tenths_of_a_basis_point_and_a_percentage() {
     let env = IsolatedHome::new();
-    let server = builder_server().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({
-            "type": "maxBuilderFee",
-            "user": USER,
-            "builder": BUILDER
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(10))
-        .mount(&server)
-        .await;
+    let server = ExchangeFixture::start().await;
+    mount_max_fee(&server, BUILDER, 10).await;
 
-    let out = env
-        .command_with_server(&server)
-        .args([
-            "--format",
-            "json",
-            "builder",
-            "max-fee",
-            "--user",
-            USER,
-            "--builder",
-            BUILDER,
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let fee = run_json(env.command_with_server(&server).args(words(&format!(
+        "--format json builder max-fee --user {USER} --builder {BUILDER}"
+    ))));
 
-    let json = stdout_json(&out);
-    assert_eq!(json["user"].as_str().unwrap().to_ascii_lowercase(), USER);
+    assert_eq!(fee["user"].as_str().unwrap().to_ascii_lowercase(), USER);
     assert_eq!(
-        json["builder"].as_str().unwrap().to_ascii_lowercase(),
+        fee["builder"].as_str().unwrap().to_ascii_lowercase(),
         BUILDER
     );
-    assert_eq!(json["max_fee_tenths_bps"], 10);
-    assert_eq!(json["max_fee_rate"], "0.01%");
+    assert_eq!(fee["max_fee_tenths_bps"], 10);
+    assert_eq!(fee["max_fee_rate"], "0.01%");
 }
 
 #[tokio::test]
-async fn builder_approved_lists_builders_with_fee_caps() {
+async fn approved_lists_each_builder_with_its_fee_cap() {
     let env = IsolatedHome::new();
-    let server = builder_server().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({
-            "type": "approvedBuilders",
-            "user": USER
-        })))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!([BUILDER, SECOND_BUILDER])),
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_info(
+            json!({"type": "approvedBuilders", "user": USER}),
+            json!([BUILDER, SECOND_BUILDER]),
         )
-        .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({
-            "type": "maxBuilderFee",
-            "user": USER,
-            "builder": BUILDER
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(10))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({
-            "type": "maxBuilderFee",
-            "user": USER,
-            "builder": SECOND_BUILDER
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(1))
-        .mount(&server)
-        .await;
+    mount_max_fee(&server, BUILDER, 10).await;
+    mount_max_fee(&server, SECOND_BUILDER, 1).await;
 
-    let out = env
-        .command_with_server(&server)
-        .args(["--format", "json", "builder", "approved", "--user", USER])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let rows = run_json(env.command_with_server(&server).args(words(&format!(
+        "--format json builder approved --user {USER}"
+    ))));
 
-    let json = stdout_json(&out);
-    let rows = json.as_array().unwrap();
+    let rows = rows.as_array().unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["user"].as_str().unwrap().to_ascii_lowercase(), USER);
     assert_eq!(
@@ -137,38 +78,24 @@ async fn builder_approved_lists_builders_with_fee_caps() {
 }
 
 #[tokio::test]
-async fn builder_approved_empty_list_returns_empty_json_array() {
+async fn approved_with_no_builders_is_an_empty_json_array() {
     let env = IsolatedHome::new();
-    let server = builder_server().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({
-            "type": "approvedBuilders",
-            "user": USER
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server)
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_info(json!({"type": "approvedBuilders", "user": USER}), json!([]))
         .await;
 
-    let out = env
-        .command_with_server(&server)
-        .args(["--format", "json", "builder", "approved", "--user", USER])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let rows = run_json(env.command_with_server(&server).args(words(&format!(
+        "--format json builder approved --user {USER}"
+    ))));
 
-    let json = stdout_json(&out);
-    assert_eq!(json.as_array().unwrap().len(), 0);
+    assert_eq!(rows, json!([]));
 }
 
 #[test]
-fn builder_approved_rejects_bad_user_before_network() {
-    let env = IsolatedHome::new();
-
-    env.command()
-        .env("HYPERLIQUID_FORMAT", "pretty")
+fn approved_refuses_a_bad_user_before_any_request() {
+    IsolatedHome::new()
+        .command()
         .args(["builder", "approved", "--user", "not-an-address"])
         .assert()
         .failure()
@@ -177,114 +104,78 @@ fn builder_approved_rejects_bad_user_before_network() {
         ));
 }
 
-#[test]
-fn builder_approve_dry_run_previews_action() {
+#[tokio::test]
+async fn approve_dry_run_previews_the_action() {
     let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
     let signer = expected_address(VALID_PRIVATE_KEY);
-    let out = env
-        .command()
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "builder",
-            "approve",
-            "--builder",
-            BUILDER,
-            "--max-fee-rate",
-            "0.001%",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
 
-    let json = stdout_json(&out);
-    assert_eq!(json["dry_run"], true);
-    assert_eq!(json["command"], "builder approve");
-    assert_eq!(json["would_execute"], "approve_builder_fee");
-    assert_eq!(json["args"]["network"], "Mainnet");
-    assert_eq!(json["args"]["signer"], signer);
-    assert_eq!(json["args"]["query_address"], signer);
-    assert_eq!(json["args"]["max_fee_rate"], "0.001%");
-    assert_eq!(json["args"]["max_fee_tenths_bps"], 1);
-    assert_eq!(json["args"]["reversibility"], "reversible");
-    assert_eq!(json["args"]["action"]["type"], "approveBuilderFee");
-    assert_eq!(json["args"]["action"]["maxFeeRate"], "0.001%");
+    let preview = run_json(env.live_command(&server).args(words(&format!(
+        "--format json --dry-run builder approve --builder {BUILDER} --max-fee-rate 0.001%"
+    ))));
+
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(preview["command"], "builder approve");
+    assert_eq!(preview["would_execute"], "approve_builder_fee");
+    assert_eq!(preview["args"]["network"], "Mainnet");
+    assert_eq!(preview["args"]["signer"], signer);
+    assert_eq!(preview["args"]["query_address"], signer);
+    assert_eq!(preview["args"]["max_fee_rate"], "0.001%");
+    assert_eq!(preview["args"]["max_fee_tenths_bps"], 1);
+    assert_eq!(preview["args"]["reversibility"], "reversible");
+    assert_eq!(preview["args"]["action"]["type"], "approveBuilderFee");
+    assert_eq!(preview["args"]["action"]["maxFeeRate"], "0.001%");
     assert_eq!(
-        json["args"]["action"]["builder"]
+        preview["args"]["action"]["builder"]
             .as_str()
             .unwrap()
             .to_ascii_lowercase(),
         BUILDER
     );
-    assert_eq!(json["signer"], signer);
-    assert_eq!(json["acting_as"], signer);
-    assert!(json["vault_address"].is_null());
+    assert_eq!(preview["signer"], signer);
+    assert_eq!(preview["acting_as"], signer);
+    assert!(preview["vault_address"].is_null());
 }
 
 #[test]
-fn builder_approve_rejects_bad_fee_before_auth() {
-    let env = IsolatedHome::new();
-
-    env.command()
-        .env("HYPERLIQUID_FORMAT", "pretty")
-        .args([
-            "builder",
-            "approve",
-            "--builder",
-            BUILDER,
-            "--max-fee-rate",
-            "0.0001%",
-        ])
+fn approve_refuses_a_fee_that_is_not_a_multiple_of_the_unit_before_auth() {
+    IsolatedHome::new()
+        .command()
+        .args(words(&format!(
+            "builder approve --builder {BUILDER} --max-fee-rate 0.0001%"
+        )))
         .assert()
         .code(13)
         .stderr(predicate::str::contains("multiple of 0.001%"));
 }
 
 #[tokio::test]
-async fn builder_approve_submits_signed_payload_with_yes() {
+async fn approve_submits_a_payload_signed_by_the_key_with_yes() {
     let env = IsolatedHome::new();
-    let server = builder_server().await;
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_exchange(json!({"status": "ok", "response": {"type": "default"}}))
+        .await;
     let user = expected_address(VALID_PRIVATE_KEY);
 
-    let out = env
-        .command_with_server(&server)
-        .args([
-            "--format",
-            "json",
-            "--private-key",
-            VALID_PRIVATE_KEY,
-            "builder",
-            "approve",
-            "--builder",
-            BUILDER,
-            "--max-fee-rate",
-            "0.001%",
-            "-y",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let receipt = run_json(
+        env.command_with_server(&server)
+            .args(["--format", "json", "--private-key", VALID_PRIVATE_KEY])
+            .args(words(&format!(
+                "builder approve --builder {BUILDER} --max-fee-rate 0.001% -y"
+            ))),
+    );
 
-    let json = stdout_json(&out);
-    assert_eq!(json["status"], "submitted");
-    assert_eq!(json["signer"], user);
-    assert_eq!(json["query_address"], user);
-    assert_eq!(json["max_fee_tenths_bps"], 1);
-    assert_eq!(json["network"], "Mainnet");
-    assert_eq!(json["reversibility"], "reversible");
+    assert_eq!(receipt["status"], "submitted");
+    assert_eq!(receipt["signer"], user);
+    assert_eq!(receipt["query_address"], user);
+    assert_eq!(receipt["max_fee_tenths_bps"], 1);
+    assert_eq!(receipt["network"], "Mainnet");
+    assert_eq!(receipt["reversibility"], "reversible");
 
-    let requests = server.received_requests().await.unwrap();
-    let exchange = requests
-        .iter()
-        .find(|request| request.url.path() == "/exchange")
-        .expect("expected /exchange request");
-    let body: Value = serde_json::from_slice(&exchange.body).unwrap();
+    let bodies = server.exchange_bodies().await;
+    assert_eq!(bodies.len(), 1);
+    let body = &bodies[0];
     assert_eq!(body["action"]["type"], "approveBuilderFee");
     assert_eq!(body["action"]["maxFeeRate"], "0.001%");
     assert_eq!(
@@ -295,5 +186,5 @@ async fn builder_approve_submits_signed_payload_with_yes() {
         BUILDER
     );
     assert_eq!(body["action"]["nonce"], body["nonce"]);
-    assert!(body["signature"]["r"].as_str().unwrap().starts_with("0x"));
+    assert_eq!(recover_signer(body, Chain::Mainnet), test_signer());
 }

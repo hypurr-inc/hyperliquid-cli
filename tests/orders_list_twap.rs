@@ -1,242 +1,50 @@
+//! `orders open`, the TWAP commands and `orders schedule-cancel`: listing in
+//! each output format, the signed action each sends, and the mainnet prompt.
+
 mod support;
 
 use predicates::prelude::*;
-use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, exchange_actions,
-    unix_millis, wire,
-};
-use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use serde_json::{Value, json};
+use support::exchange::ExchangeFixture;
+use support::orders::{assert_nothing_sent, error_text, mainnet_command, testnet_command, words};
+use support::{IsolatedHome, json_stdout, run_json, stderr_text, unix_millis, wire};
 
-fn historical_order_update(coin: &str, oid: u64) -> serde_json::Value {
-    serde_json::json!({
-        "order": wire::basic_order(coin, oid),
-        "status": "filled",
-        "statusTimestamp": 1700000000001_u64
-    })
+const TWAP: &str = "orders twap-create --coin BTC --side buy --size 1.0 --duration 3600";
+const SUBACCOUNT: &str = "0x0000000000000000000000000000000000000123";
+
+fn twap_reply(status: Value) -> Value {
+    json!({"status": "ok", "response": {"type": "twapOrder", "data": {"status": status}}})
 }
 
-async fn mock_orders_server(
-    open_orders: Vec<serde_json::Value>,
-    historical_orders: Vec<serde_json::Value>,
-) -> MockServer {
-    let server = MockServer::start().await;
+fn twap_running(twap_id: u64) -> Value {
+    twap_reply(json!({"running": {"twapId": twap_id}}))
+}
 
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "BTC": "50000",
-            "ETH": "3000"
-        })))
-        .mount(&server)
-        .await;
+fn default_reply() -> Value {
+    json!({"status": "ok", "response": {"type": "default"}})
+}
 
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "spotMeta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(wire::spot_meta_usdc_only()))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "meta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [
-                {
-                    "name": "BTC",
-                    "szDecimals": 5,
-                    "maxLeverage": 50,
-                    "onlyIsolated": false,
-                    "marginMode": null,
-                    "growthMode": "disabled"
-                },
-                {
-                    "name": "ETH",
-                    "szDecimals": 4,
-                    "maxLeverage": 50,
-                    "onlyIsolated": false,
-                    "marginMode": null,
-                    "growthMode": "disabled"
-                }
-            ],
-            "collateralToken": 0
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "perpDexs"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "frontendOpenOrders"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(open_orders))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "historicalOrders"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(historical_orders))
-        .mount(&server)
-        .await;
-
+async fn exchange_answering(reply: Value) -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
+    server.mount_exchange(reply).await;
     server
 }
 
-async fn mock_trading_server(exchange_response: serde_json::Value) -> MockServer {
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "BTC": "50000",
-            "ETH": "3000"
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "spotMeta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [],
-            "tokens": []
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "meta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [
-                {
-                    "name": "BTC",
-                    "szDecimals": 5,
-                    "maxLeverage": 50,
-                    "onlyIsolated": false,
-                    "marginMode": null,
-                    "growthMode": "disabled"
-                },
-                {
-                    "name": "ETH",
-                    "szDecimals": 4,
-                    "maxLeverage": 50,
-                    "onlyIsolated": false,
-                    "marginMode": null,
-                    "growthMode": "disabled"
-                }
-            ],
-            "collateralToken": 0
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "perpDexs"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(exchange_response))
-        .mount(&server)
-        .await;
-
+async fn exchange_listing(open: Vec<Value>) -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
     server
-}
-
-async fn mock_twap_server_without_exchange() -> MockServer {
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "BTC": "50000",
-            "ETH": "3000"
-        })))
-        .mount(&server)
+        .mount_info_containing(json!({"type": "frontendOpenOrders"}), Value::Array(open))
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "spotMeta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [],
-            "tokens": []
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "meta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [
-                {
-                    "name": "BTC",
-                    "szDecimals": 5,
-                    "maxLeverage": 50,
-                    "onlyIsolated": false,
-                    "marginMode": null,
-                    "growthMode": "disabled"
-                },
-                {
-                    "name": "ETH",
-                    "szDecimals": 4,
-                    "maxLeverage": 50,
-                    "onlyIsolated": false,
-                    "marginMode": null,
-                    "growthMode": "disabled"
-                }
-            ],
-            "collateralToken": 0
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "perpDexs"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(500))
-        .expect(0)
-        .mount(&server)
-        .await;
-
     server
 }
 
 #[tokio::test]
-async fn orders_open_pretty_empty_state_uses_theme_colors() {
+async fn an_empty_open_orders_list_uses_theme_colors_in_pretty_output() {
     let env = IsolatedHome::new();
-    let server = mock_orders_server(vec![], vec![]).await;
+    let server = exchange_listing(vec![]).await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    testnet_command(&env, &server, "orders open")
         .env("FORCE_COLOR", "1")
-        .args(["orders", "open"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\u{1b}[36mCoin\u{1b}[0m"))
@@ -245,14 +53,12 @@ async fn orders_open_pretty_empty_state_uses_theme_colors() {
 }
 
 #[tokio::test]
-async fn orders_open_table_and_json_empty_state_are_uncolored() {
+async fn an_empty_open_orders_list_is_uncolored_in_table_and_json() {
     let env = IsolatedHome::new();
-    let server = mock_orders_server(vec![], vec![]).await;
+    let server = exchange_listing(vec![]).await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["--format", "table", "orders", "open"])
+    testnet_command(&env, &server, "orders open")
+        .args(["--format", "table"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Coin"))
@@ -260,67 +66,30 @@ async fn orders_open_table_and_json_empty_state_are_uncolored() {
         .stdout(predicate::str::contains("\u{1b}[").not())
         .stderr(predicate::str::contains("No open orders."));
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["--format", "json", "orders", "open"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("[]"))
-        .stdout(predicate::str::contains("\u{1b}[").not());
+    let rows = run_json(env.live_json(&server).args(["orders", "open"]));
+    assert_eq!(rows, json!([]));
 }
 
 #[tokio::test]
-async fn orders_open_shows_open_orders() {
+async fn open_orders_are_listed_and_select_narrows_the_json_columns() {
     let env = IsolatedHome::new();
-    let server = mock_orders_server(vec![wire::basic_order("BTC", 12345)], vec![]).await;
+    let server = exchange_listing(vec![wire::basic_order("BTC", 12345)]).await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "open"])
+    testnet_command(&env, &server, "orders open")
         .assert()
         .success()
         .stdout(predicate::str::contains("BTC"))
         .stdout(predicate::str::contains("12345"));
-}
 
-#[tokio::test]
-async fn orders_open_selects_coin_price_and_size_json() {
-    let env = IsolatedHome::new();
-    let server = mock_orders_server(vec![wire::basic_order("BTC", 12345)], vec![]).await;
-
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--testnet",
-            "--format",
-            "json",
-            "--select",
-            "coin,price,size",
-            "orders",
-            "open",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let first = json
-        .as_array()
-        .unwrap()
-        .first()
-        .unwrap()
-        .as_object()
-        .unwrap();
-
+    let rows =
+        run_json(
+            env.live_json(&server)
+                .args(["--select", "coin,price,size", "orders", "open"]),
+        );
+    let first = rows[0].as_object().unwrap();
     assert_eq!(
         first.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["coin", "price", "size"]
+        ["coin", "price", "size"]
     );
     assert_eq!(first["coin"], "BTC");
     assert_eq!(first["price"], "50000");
@@ -328,182 +97,56 @@ async fn orders_open_selects_coin_price_and_size_json() {
 }
 
 #[tokio::test]
-async fn orders_history_shows_historical_orders() {
+async fn a_twap_is_signed_with_its_asset_side_minutes_and_randomize_flag() {
     let env = IsolatedHome::new();
-    let server = mock_orders_server(vec![], vec![wire::basic_order("ETH", 54321)]).await;
+    let server = exchange_answering(twap_running(77738308)).await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "history"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("ETH"))
-        .stdout(predicate::str::contains("54321"));
-}
-
-#[tokio::test]
-async fn orders_history_accepts_wrapped_live_order_updates() {
-    let env = IsolatedHome::new();
-    let server = mock_orders_server(vec![], vec![historical_order_update("ETH", 54321)]).await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "history"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("ETH"))
-        .stdout(predicate::str::contains("54321"));
-}
-
-#[tokio::test]
-async fn orders_twap_create_outputs_twap_id() {
-    let env = IsolatedHome::new();
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "twapOrder",
-            "data": {
-                "status": {
-                    "running": {
-                        "twapId": 77738308
-                    }
-                }
-            }
-        }
-    }))
-    .await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "twap-create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--size",
-            "1.0",
-            "--duration",
-            "3600",
-            "--testnet",
-        ])
+    testnet_command(&env, &server, TWAP)
         .assert()
         .success()
         .stdout(predicate::str::contains("77738308"))
         .stdout(predicate::str::contains("running"))
         .stderr(predicate::str::contains("Mainnet TWAP confirmation required").not());
+    run_json(
+        env.live_json(&server)
+            .args(words(&format!("{TWAP} --randomize"))),
+    );
 
-    let actions = exchange_actions(&server).await;
-    assert_eq!(actions.len(), 1);
+    let actions = server.exchange_actions().await;
+    assert_eq!(actions.len(), 2);
     assert_eq!(actions[0]["type"], "twapOrder");
     assert_eq!(actions[0]["twap"]["a"], 0);
     assert_eq!(actions[0]["twap"]["b"], true);
     assert_eq!(actions[0]["twap"]["m"], 60);
     assert_eq!(actions[0]["twap"]["t"], false);
+    assert_eq!(actions[1]["twap"]["t"], true);
 }
 
 #[tokio::test]
-async fn orders_twap_create_supports_randomize_flag() {
+async fn a_twap_size_is_normalized_and_its_units_reported() {
     let env = IsolatedHome::new();
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "twapOrder",
-            "data": {
-                "status": {
-                    "running": {
-                        "twapId": 77738399
-                    }
-                }
-            }
-        }
-    }))
-    .await;
+    let server = exchange_answering(twap_running(77738311)).await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "twap-create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--size",
-            "1.0",
-            "--duration",
-            "3600",
-            "--randomize",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("77738399"));
+    testnet_command(
+        &env,
+        &server,
+        "orders twap-create --coin BTC --side buy --size 0.00070 --duration 300",
+    )
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("77738311"))
+    .stdout(predicate::str::contains("300"))
+    .stdout(predicate::str::contains("5"));
 
-    let actions = exchange_actions(&server).await;
-    assert_eq!(actions.len(), 1);
-    assert_eq!(actions[0]["twap"]["t"], true);
+    let twap = &server.exchange_actions().await[0]["twap"];
+    assert_eq!(twap["s"], "0.0007");
+    assert_eq!(twap["m"], 5);
 }
 
 #[tokio::test]
-async fn orders_twap_create_normalizes_size_and_reports_matching_units() {
+async fn unsupported_twap_durations_are_refused_before_submission() {
     let env = IsolatedHome::new();
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "twapOrder",
-            "data": {
-                "status": {
-                    "running": {
-                        "twapId": 77738311
-                    }
-                }
-            }
-        }
-    }))
-    .await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "twap-create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--size",
-            "0.00070",
-            "--duration",
-            "300",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("77738311"))
-        .stdout(predicate::str::contains("300"))
-        .stdout(predicate::str::contains("5"));
-
-    let requests = server.received_requests().await.unwrap();
-    let exchange_request = requests
-        .iter()
-        .find(|request| request.url.path() == "/exchange")
-        .expect("expected twap exchange request");
-    let body: serde_json::Value = serde_json::from_slice(&exchange_request.body).unwrap();
-    assert_eq!(body["action"]["twap"]["s"], "0.0007");
-    assert_eq!(body["action"]["twap"]["m"], 5);
-}
-
-#[tokio::test]
-async fn orders_twap_create_rejects_unsupported_durations_before_submission() {
-    let env = IsolatedHome::new();
-    let server = mock_twap_server_without_exchange().await;
+    let server = ExchangeFixture::start().await;
 
     for (duration, message) in [
         ("299", "TWAP duration must be at least 300 seconds"),
@@ -513,49 +156,26 @@ async fn orders_twap_create_rejects_unsupported_durations_before_submission() {
         ),
         ("604860", "cannot exceed 7 days"),
     ] {
-        env.command()
-            .env(API_OVERRIDE_ENV, server.uri())
-            .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-            .args([
-                "orders",
-                "twap-create",
-                "--coin",
-                "BTC",
-                "--side",
-                "buy",
-                "--size",
-                "1.0",
-                "--duration",
-                duration,
-                "--testnet",
-            ])
-            .assert()
-            .code(2)
-            .stderr(predicate::str::contains(message));
+        testnet_command(
+            &env,
+            &server,
+            &format!("orders twap-create --coin BTC --side buy --size 1.0 --duration {duration}"),
+        )
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains(message));
     }
+
+    assert_nothing_sent(&server).await;
 }
 
 #[tokio::test]
-async fn orders_twap_create_mainnet_prompts_and_aborts_without_submission() {
+async fn a_mainnet_twap_asks_first_unless_yes_is_given() {
     let env = IsolatedHome::new();
-    let server = mock_twap_server_without_exchange().await;
+    let server = exchange_answering(twap_running(77738309)).await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    mainnet_command(&env, &server, TWAP)
         .write_stdin("n\n")
-        .args([
-            "orders",
-            "twap-create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--size",
-            "1.0",
-            "--duration",
-            "3600",
-        ])
         .assert()
         .code(2)
         .stderr(predicate::str::contains(
@@ -567,134 +187,68 @@ async fn orders_twap_create_mainnet_prompts_and_aborts_without_submission() {
         .stderr(predicate::str::contains("3600"))
         .stderr(predicate::str::contains("mainnet"))
         .stderr(predicate::str::contains("TWAP creation cancelled"));
-}
+    assert_nothing_sent(&server).await;
 
-#[tokio::test]
-async fn orders_twap_create_mainnet_yes_bypasses_confirmation_prompt() {
-    let env = IsolatedHome::new();
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "twapOrder",
-            "data": {
-                "status": {
-                    "running": {
-                        "twapId": 77738309
-                    }
-                }
-            }
-        }
-    }))
-    .await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "twap-create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--size",
-            "1.0",
-            "--duration",
-            "3600",
-            "--yes",
-        ])
+    mainnet_command(&env, &server, &format!("{TWAP} --yes"))
         .assert()
         .success()
         .stdout(predicate::str::contains("77738309"))
         .stderr(predicate::str::contains("Mainnet TWAP confirmation required").not());
+    assert_eq!(server.exchange_actions().await.len(), 1);
 }
 
-#[tokio::test]
-async fn orders_twap_cancel_requires_coin() {
-    let env = IsolatedHome::new();
-
-    env.command()
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "twap-cancel", "42", "--testnet"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("--coin"))
-        .stderr(predicate::str::contains("required"));
-}
-
-#[tokio::test]
-async fn twap_cancel_with_non_btc_coin() {
-    let env = IsolatedHome::new();
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "twapCancel",
-            "data": {
-                "status": "success"
-            }
+#[test]
+fn twap_commands_name_the_arguments_they_require() {
+    let cases = [
+        ("orders twap-cancel 42", &["--coin", "required"][..]),
+        (
+            "orders twap-create --coin BTC --side buy",
+            &["--size", "--duration"][..],
+        ),
+    ];
+    for (line, expected) in cases {
+        let assert = IsolatedHome::new()
+            .command()
+            .arg("--testnet")
+            .args(words(line))
+            .assert()
+            .code(2);
+        let stderr = stderr_text(&assert);
+        for fragment in expected {
+            assert!(stderr.contains(fragment), "{line}: {fragment} in {stderr}");
         }
-    }))
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_twap_names_its_coins_asset_and_id() {
+    let env = IsolatedHome::new();
+    let server = exchange_answering(
+        json!({"status": "ok", "response": {"type": "twapCancel", "data": {"status": "success"}}}),
+    )
     .await;
 
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_string_contains("\"type\":\"twapCancel\""))
-        .and(body_string_contains("\"a\":1"))
-        .and(body_string_contains("\"t\":42"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {
-                "type": "twapCancel",
-                "data": {
-                    "status": "success"
-                }
-            }
-        })))
-        .with_priority(1)
-        .expect(1)
-        .named("ETH twapCancel exchange request")
-        .mount(&server)
-        .await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "twap-cancel", "42", "--coin", "ETH", "--testnet"])
+    testnet_command(&env, &server, "orders twap-cancel 42 --coin ETH")
         .assert()
         .success()
         .stdout(predicate::str::contains("ETH"))
         .stdout(predicate::str::contains("42"))
         .stdout(predicate::str::contains("cancelled"));
 
-    let requests = server.received_requests().await.unwrap();
-    let exchange_requests: Vec<_> = requests
-        .iter()
-        .filter(|request| request.url.path() == "/exchange")
-        .collect();
     assert_eq!(
-        exchange_requests.len(),
-        1,
-        "expected exactly one /exchange request"
+        server.exchange_actions().await,
+        [json!({"type": "twapCancel", "a": 1, "t": 42})]
     );
-
-    let body: serde_json::Value = serde_json::from_slice(&exchange_requests[0].body).unwrap();
-    assert_eq!(body["action"]["type"], "twapCancel");
-    assert_eq!(body["action"]["a"], 1);
-    assert_eq!(body["action"]["t"], 42);
 }
 
 #[tokio::test]
-async fn orders_schedule_cancel_mainnet_prompts_and_aborts_without_submission() {
+async fn schedule_cancel_on_mainnet_asks_first_and_places_with_yes() {
     let env = IsolatedHome::new();
-    let server = mock_twap_server_without_exchange().await;
+    let server = exchange_answering(default_reply()).await;
 
-    for flags in [&["--in", "5m"][..], &["--clear"][..]] {
-        env.command()
-            .env(API_OVERRIDE_ENV, server.uri())
-            .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    for flags in ["--in 5m", "--clear"] {
+        mainnet_command(&env, &server, &format!("orders schedule-cancel {flags}"))
             .write_stdin("n\n")
-            .args(["orders", "schedule-cancel"])
-            .args(flags)
             .assert()
             .code(2)
             .stderr(predicate::str::contains(
@@ -702,174 +256,85 @@ async fn orders_schedule_cancel_mainnet_prompts_and_aborts_without_submission() 
             ))
             .stderr(predicate::str::contains("action cancelled"));
     }
+    assert_nothing_sent(&server).await;
+
+    mainnet_command(&env, &server, "orders schedule-cancel --in 5m --yes")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Mainnet schedule-cancel confirmation required").not());
+    let actions = server.exchange_actions().await;
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["type"], "scheduleCancel");
 }
 
 #[test]
-fn orders_schedule_cancel_requires_yes_without_an_interactive_terminal() {
+fn schedule_cancel_needs_yes_without_an_interactive_terminal() {
     let env = IsolatedHome::new();
 
-    for (agent, flags) in [(false, &["--in", "5m"][..]), (true, &["--clear"][..])] {
+    for (agent, flags) in [(false, "--in 5m"), (true, "--clear")] {
         let mut command = env.command();
-        command.env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY);
         if agent {
             command.env("HYPERLIQUID_AGENT", "1");
         }
-        let output = command
+        let assert = command
             .args(["--format", "json", "orders", "schedule-cancel"])
-            .args(flags)
+            .args(words(flags))
             .assert()
-            .code(13)
-            .get_output()
-            .stdout
-            .clone();
-        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-        assert_eq!(json["category"], "unsupported", "{flags:?}");
-        assert_eq!(json["exit_code"], 13, "{flags:?}");
+            .code(13);
+        let document = json_stdout(&assert);
+        assert_eq!(document["category"], "unsupported", "{flags}");
+        assert_eq!(document["exit_code"], 13, "{flags}");
         assert!(
-            json["error"]
-                .as_str()
-                .unwrap()
-                .contains("without confirmation in non-interactive mode"),
-            "{flags:?}"
+            error_text(&document).contains("without confirmation in non-interactive mode"),
+            "{flags}"
         );
     }
 }
 
 #[tokio::test]
-async fn orders_schedule_cancel_mainnet_yes_bypasses_confirmation_prompt() {
+async fn schedule_cancel_sends_the_time_five_minutes_ahead_or_clears_it() {
     let env = IsolatedHome::new();
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "default"
-        }
-    }))
-    .await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "schedule-cancel", "--in", "5m", "--yes"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("Mainnet schedule-cancel confirmation required").not());
-
-    let actions = exchange_actions(&server).await;
-    assert_eq!(actions.len(), 1);
-    assert_eq!(actions[0]["type"], "scheduleCancel");
-}
-
-#[tokio::test]
-async fn orders_schedule_cancel_outputs_scheduled_time() {
-    let env = IsolatedHome::new();
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "default"
-        }
-    }))
-    .await;
+    let server = exchange_answering(default_reply()).await;
 
     let before = unix_millis();
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "schedule-cancel", "--in", "5m", "--testnet"])
+    testnet_command(&env, &server, "orders schedule-cancel --in 5m")
         .assert()
         .success()
         .stdout(predicate::str::contains("scheduled"))
         .stdout(predicate::str::contains("Scheduled Time"));
     let after = unix_millis();
+    testnet_command(&env, &server, "orders schedule-cancel --clear")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cleared"));
 
-    let requests = server.received_requests().await.unwrap();
-    let exchange_requests: Vec<_> = requests
-        .iter()
-        .filter(|request| request.url.path() == "/exchange")
-        .collect();
-    assert_eq!(exchange_requests.len(), 1);
-    let body: serde_json::Value = serde_json::from_slice(&exchange_requests[0].body).unwrap();
-    assert_eq!(body["action"]["type"], "scheduleCancel");
-    let time = body["action"]["time"]
+    let bodies = server.exchange_bodies().await;
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["action"]["type"], "scheduleCancel");
+    let time = bodies[0]["action"]["time"]
         .as_u64()
         .expect("scheduled time in milliseconds");
     assert!(
         (before + 299_000..=after + 301_000).contains(&time),
         "{time} is not five minutes after the request"
     );
-    assert!(body["vaultAddress"].is_null());
+    assert!(bodies[0]["vaultAddress"].is_null());
+    assert_eq!(bodies[1]["action"]["type"], "scheduleCancel");
+    assert!(bodies[1]["action"]["time"].is_null());
 }
 
 #[tokio::test]
-async fn orders_schedule_cancel_clear_outputs_cleared_status() {
+async fn schedule_cancel_on_behalf_of_a_subaccount_sets_the_vault_address() {
     let env = IsolatedHome::new();
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "default"
-        }
-    }))
-    .await;
+    let server = exchange_answering(default_reply()).await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "schedule-cancel", "--clear", "--testnet"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("cleared"));
+    for (flags, clears) in [("--in 5m", false), ("--clear", true)] {
+        run_json(env.live_json(&server).args(words(&format!(
+            "orders schedule-cancel {flags} --on-behalf-of {SUBACCOUNT}"
+        ))));
 
-    let requests = server.received_requests().await.unwrap();
-    let exchange_requests: Vec<_> = requests
-        .iter()
-        .filter(|request| request.url.path() == "/exchange")
-        .collect();
-    assert_eq!(exchange_requests.len(), 1);
-    let body: serde_json::Value = serde_json::from_slice(&exchange_requests[0].body).unwrap();
-    assert_eq!(body["action"]["type"], "scheduleCancel");
-    assert!(body["action"]["time"].is_null());
-}
-
-#[tokio::test]
-async fn orders_schedule_cancel_on_behalf_sets_vault_address() {
-    let env = IsolatedHome::new();
-    let subaccount = "0x0000000000000000000000000000000000000123";
-
-    for (flags, clears) in [(&["--in", "5m"][..], false), (&["--clear"][..], true)] {
-        let server = mock_trading_server(serde_json::json!({
-            "status": "ok",
-            "response": {
-                "type": "default"
-            }
-        }))
-        .await;
-
-        env.command()
-            .env(API_OVERRIDE_ENV, server.uri())
-            .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-            .args(["orders", "schedule-cancel"])
-            .args(flags)
-            .args(["--on-behalf-of", subaccount, "--testnet"])
-            .assert()
-            .success();
-
-        let requests = server.received_requests().await.unwrap();
-        let exchange = requests
-            .iter()
-            .find(|request| request.url.path() == "/exchange")
-            .expect("expected exchange request");
-        let body: serde_json::Value = serde_json::from_slice(&exchange.body).unwrap();
-        assert_eq!(body["vaultAddress"], subaccount, "{flags:?}");
-        assert_eq!(body["action"]["time"].is_null(), clears, "{flags:?}");
+        let body = server.exchange_bodies().await.pop().unwrap();
+        assert_eq!(body["vaultAddress"], SUBACCOUNT, "{flags}");
+        assert_eq!(body["action"]["time"].is_null(), clears, "{flags}");
     }
-}
-
-#[test]
-fn orders_twap_create_missing_params_exits_2() {
-    let env = IsolatedHome::new();
-    env.command()
-        .args(["orders", "twap-create", "--coin", "BTC", "--side", "buy"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("--size"))
-        .stderr(predicate::str::contains("--duration"));
 }

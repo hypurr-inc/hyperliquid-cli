@@ -9,17 +9,22 @@
 //! Each command is run against a mock that limits every kind of `/info` read it
 //! makes: once (the retry succeeds and the command prints its answer), and
 //! always (the command exits 11). The override probe, the first unscoped
-//! `allMids`, is never limited: it is sent once and not retried.
+//! `allMids`, is never limited: it is sent once and not retried, so a limit on
+//! it is an exit 11 at once. The phases of a command run side by side because
+//! the CLI's backoff is real time.
 
 mod support;
 
+use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, Hip3Dex};
-use support::{IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, std_command, stdout_json};
+use support::orders::answer_info;
+use support::{IsolatedHome, std_command, stdout_json};
 use wiremock::matchers::{method, path};
 use wiremock::{Match, Mock, Request, ResponseTemplate};
 
@@ -152,11 +157,12 @@ impl Case {
     }
 
     fn command(&self, home: &IsolatedHome, fixture: &ExchangeFixture) -> Command {
-        let mut command = home.command_with_server(fixture);
+        let mut command = if self.signed {
+            home.live_command(fixture)
+        } else {
+            home.command_with_server(fixture)
+        };
         command.args(["--format", "json"]).args(self.args);
-        if self.signed {
-            command.env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY);
-        }
         command
     }
 
@@ -165,7 +171,7 @@ impl Case {
         let (home, fixture) = (IsolatedHome::new(), self.fixture().await);
         limit(&fixture, self.kinds, shape, Some(1)).await;
 
-        let output = self.command(&home, &fixture).assert().success();
+        let output = finished(self.command(&home, &fixture)).await.success();
         let answer = stdout_json(&output.get_output().stdout);
         assert!(
             (self.answers)(&answer),
@@ -188,7 +194,7 @@ impl Case {
         let (home, fixture) = (IsolatedHome::new(), self.fixture().await);
         limit(&fixture, self.kinds, shape, None).await;
 
-        let output = self.command(&home, &fixture).assert().code(11);
+        let output = finished(self.command(&home, &fixture)).await.code(11);
         let envelope = stdout_json(&output.get_output().stdout);
         assert_eq!(envelope["exit_code"], 11, "{:?} {shape:?}", self.args);
         assert_eq!(
@@ -206,14 +212,24 @@ impl Case {
         }
     }
 
+    /// The phases are independent processes that mostly wait out the CLI's
+    /// backoff, so they run side by side.
     async fn run_all(&self) {
-        for shape in [Shape::NullBody, Shape::Html, Shape::AddressText] {
-            self.retries(shape).await;
-        }
-        for shape in [Shape::NullBody, Shape::Html] {
-            self.stays_limited(shape).await;
-        }
+        tokio::join!(
+            self.retries(Shape::NullBody),
+            self.retries(Shape::Html),
+            self.retries(Shape::AddressText),
+            self.stays_limited(Shape::NullBody),
+            self.stays_limited(Shape::Html),
+        );
     }
+}
+
+/// Run `command` to completion without holding up the other phases.
+async fn finished(mut command: Command) -> assert_cmd::assert::Assert {
+    tokio::task::spawn_blocking(move || command.assert())
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -431,4 +447,66 @@ async fn book_stays_limited_as_a_rate_limit_not_an_unknown_market() {
     let output = command.assert().code(11);
     let envelope = stdout_json(&output.get_output().stdout);
     assert_eq!(envelope["reason"], "rate_limited");
+}
+
+#[tokio::test]
+async fn a_429_on_the_override_probe_exits_11_not_unreachable() {
+    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    answer_info(
+        &server,
+        json!({}),
+        429,
+        "Too many requests: rate limit exceeded",
+    )
+    .await;
+
+    env.command_with_server(&server)
+        .args(["perps", "list"])
+        .assert()
+        .code(11)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "Too many requests to the Hyperliquid API",
+        ))
+        .stderr(predicate::str::contains("Couldn't reach").not());
+}
+
+#[tokio::test]
+async fn a_structured_rate_limit_error_in_a_200_reply_exits_11() {
+    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    answer_info(
+        &server,
+        json!({}),
+        200,
+        r#"{"status": "err", "response": "rate limit exceeded"}"#,
+    )
+    .await;
+
+    env.command_with_server(&server)
+        .arg("status")
+        .assert()
+        .code(11)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "Too many requests to the Hyperliquid API",
+        ))
+        .stderr(predicate::str::contains("Couldn't reach").not());
+}
+
+#[test]
+fn an_unreachable_override_endpoint_exits_12_not_rate_limited() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+
+    IsolatedHome::new()
+        .command_with_api_url(&url)
+        .args(["perps", "list"])
+        .assert()
+        .code(12)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("127.0.0.1:"))
+        .stderr(predicate::str::contains("Too many requests to the Hyperliquid API").not());
 }
