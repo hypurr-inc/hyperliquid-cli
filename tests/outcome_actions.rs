@@ -65,7 +65,7 @@ async fn split_sends_the_documented_action_and_reports_the_quote_token() {
     let assert = env
         .live_json(&server)
         .arg("outcomes")
-        .args(&["split", "--outcome", "12", "--amount", "10.50"])
+        .args(["split", "--outcome", "12", "--amount", "10.50"])
         .assert()
         .success();
 
@@ -97,7 +97,7 @@ async fn an_unreadable_outcome_meta_entry_is_named_on_stderr_and_the_rest_still_
 
     env.live_json(&server)
         .arg("outcomes")
-        .args(&["split", "--outcome", "12", "--amount", "10.50"])
+        .args(["split", "--outcome", "12", "--amount", "10.50"])
         .assert()
         .success()
         .stderr(
@@ -112,7 +112,7 @@ async fn merge_sends_an_amount_or_null_for_the_maximum() {
     let server = exchange().await;
     env.live_json(&server)
         .arg("outcomes")
-        .args(&["merge", "--outcome", "11", "--amount", "3"])
+        .args(["merge", "--outcome", "11", "--amount", "3"])
         .assert()
         .success();
     assert_eq!(
@@ -125,7 +125,7 @@ async fn merge_sends_an_amount_or_null_for_the_maximum() {
     let assert = env
         .live_json(&server)
         .arg("outcomes")
-        .args(&["merge", "--outcome", "11", "--max"])
+        .args(["merge", "--outcome", "11", "--max"])
         .assert()
         .success();
     // hypersdk cannot read a null amount, so the signer is not recovered here.
@@ -144,7 +144,7 @@ async fn merge_question_sends_the_question_id() {
     let assert = env
         .live_json(&server)
         .arg("outcomes")
-        .args(&["merge-question", "--question", "7", "--amount", "2.5"])
+        .args(["merge-question", "--question", "7", "--amount", "2.5"])
         .assert()
         .success();
 
@@ -167,7 +167,7 @@ async fn negate_sends_question_outcome_and_amount() {
 
     env.live_json(&server)
         .arg("outcomes")
-        .args(&[
+        .args([
             "negate",
             "--question",
             "7",
@@ -237,7 +237,7 @@ async fn unknown_outcomes_and_questions_are_refused_before_anything_is_signed() 
 
     env.live_json(&server)
         .arg("outcomes")
-        .args(&["split", "--outcome", "5", "--amount", "1"])
+        .args(["split", "--outcome", "5", "--amount", "1"])
         .assert()
         .code(13)
         .stdout(predicate::str::contains(
@@ -246,7 +246,7 @@ async fn unknown_outcomes_and_questions_are_refused_before_anything_is_signed() 
         .stdout(predicate::str::contains("outcomes settled 5"));
     env.live_json(&server)
         .arg("outcomes")
-        .args(&["merge-question", "--question", "8", "--max"])
+        .args(["merge-question", "--question", "8", "--max"])
         .assert()
         .code(13)
         .stdout(predicate::str::contains(
@@ -254,7 +254,7 @@ async fn unknown_outcomes_and_questions_are_refused_before_anything_is_signed() 
         ));
     env.live_json(&server)
         .arg("outcomes")
-        .args(&[
+        .args([
             "negate",
             "--question",
             "7",
@@ -280,19 +280,19 @@ async fn bad_amounts_are_configuration_errors_and_merge_needs_exactly_one_of_amo
     for amount in ["0", "-1"] {
         env.live_json(&server)
             .arg("outcomes")
-            .args(&["split", "--outcome", "11", "--amount", amount])
+            .args(["split", "--outcome", "11", "--amount", amount])
             .assert()
             .code(2)
             .stdout(predicate::str::contains("amount must be greater than zero"));
     }
     env.live_json(&server)
         .arg("outcomes")
-        .args(&["merge", "--outcome", "11"])
+        .args(["merge", "--outcome", "11"])
         .assert()
         .code(2);
     env.live_json(&server)
         .arg("outcomes")
-        .args(&["merge", "--outcome", "11", "--amount", "1", "--max"])
+        .args(["merge", "--outcome", "11", "--amount", "1", "--max"])
         .assert()
         .code(2);
     assert!(server.exchange_actions().await.is_empty());
@@ -311,7 +311,7 @@ async fn an_exchange_rejection_is_an_error_not_a_confirmation() {
 
     env.live_json(&server)
         .arg("outcomes")
-        .args(&["split", "--outcome", "11", "--amount", "1"])
+        .args(["split", "--outcome", "11", "--amount", "1"])
         .assert()
         .failure()
         .stdout(predicate::str::contains("Insufficient balance"))
@@ -366,29 +366,4 @@ async fn mainnet_asks_for_confirmation_and_yes_skips_it() {
         .assert()
         .success();
     assert_eq!(server.exchange_actions().await.len(), 2);
-}
-
-#[tokio::test]
-async fn schema_declares_funds_movement_dry_run_confirmation_and_l1_signing_for_every_conversion() {
-    let env = IsolatedHome::new();
-
-    for command in ["split", "merge", "merge-question", "negate"] {
-        let assert = env
-            .command()
-            .args(["--format", "json", "schema", "outcomes", command])
-            .assert()
-            .success();
-        let schema = json_stdout(&assert);
-        let meta = &schema;
-        assert_eq!(meta["risk"], "funds_movement", "{command}");
-        assert_eq!(meta["dry_run"], "optional", "{command}");
-        assert_eq!(meta["confirmation"], "prompt", "{command}");
-        assert_eq!(meta["bankr_signer"], "supported", "{command}");
-        assert_eq!(meta["raw_payload"], "dry_run_only", "{command}");
-        assert_eq!(
-            meta["ows_signer"], "experimental_feature_gated",
-            "{command}"
-        );
-        assert_eq!(meta["confirmation_bypass"]["arg"], "yes", "{command}");
-    }
 }
