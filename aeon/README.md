@@ -3,9 +3,11 @@
 Read-only Hyperliquid monitoring for Aeon, from the team behind the
 [`hyperliquid` CLI](https://github.com/hypurr-inc/hyperliquid-cli).
 
-The skills are plain `node` helpers that read the public `api.hyperliquid.xyz/info`
-endpoint with `fetch`: no binary to install, no key, no `bash`, nothing a read-only
-Aeon run is not allowed to do. The CLI itself stays the tool for execution, with a
+Each skill is a `node` helper that runs the pinned `hyperliquid` CLI release and
+formats its JSON. A read-only Aeon run may not call `hyperliquid` or `bash` itself but
+may run `node`, so the helper downloads the release binary once (SHA-256 verified,
+cached in the temp dir) and starts it as a subprocess with an empty environment: no
+key, no install step for the operator. The CLI stays the tool for execution too, with a
 `--dry-run` preview and an explicit approval.
 
 This pack is deliberately **read-only**. Aeon runs unattended on a schedule, and a
@@ -21,7 +23,7 @@ bin/install-skill-pack hypurr-inc/hyperliquid-cli --path aeon
 | Skill | Schedule | `var` | What it does |
 | --- | --- | --- | --- |
 | `hyperliquid-account-brief` | `0 13 * * *` (disabled) | `0x…` account (required) | Default-dex equity, withdrawable and margin use, open positions across dexes with uPnL and liquidation price, open orders, 24h realized PnL and fees by token. For unified and portfolio-margin accounts it reports the spot USDC balance and margin used instead of equity and withdrawable |
-| `hyperliquid-market-monitor` | `0 */4 * * *` (disabled) | `BTC,ETH move=5 funding=0.01` | Watched perps by 24h move and hourly funding. Notifies only for crossings the previous run did not already report |
+| `hyperliquid-market-monitor` | `0 */4 * * *` (disabled) | `BTC,ETH move=5 funding=0.01` (default-dex perps) | Watched perps by 24h move and hourly funding. Notifies only for crossings the previous run did not already report |
 
 ```yaml
 # aeon.yml
@@ -41,6 +43,7 @@ no secrets.
   the monitor, sends one notification and stops. An unreachable API stays silent and the
   next run retries.
 - **Unknown coins are reported**, so a typo in the watchlist cannot hide.
+- **First run downloads the CLI** (about 10 MB from the GitHub release `PIN` in `hl.mjs`); later runs on the same runner reuse it. The helper exits `3` (`HL_CLI_UNAVAILABLE`) if the download or its checksum fails.
 
 ## What it will not do
 
@@ -58,8 +61,10 @@ aeon/
 └── skills/
     ├── hyperliquid-account-brief/
     │   ├── SKILL.md
+    │   ├── hl.mjs
     │   └── x.mjs
     └── hyperliquid-market-monitor/
         ├── SKILL.md
+        ├── hl.mjs
         └── x.mjs
 ```
