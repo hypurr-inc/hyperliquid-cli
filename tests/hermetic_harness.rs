@@ -12,7 +12,7 @@ use hyperliquid_cli::env;
 use support::exchange::ExchangeFixture;
 use support::{
     CLOSED_PROXY_URL, IsolatedHome, LOOPBACK_NO_PROXY, TEST_ACCOUNT_PASSPHRASE, VALID_PRIVATE_KEY,
-    expected_address, hermetic_command, json_stdout, run_json_failure, rust_files,
+    expected_address, hermetic_command, run_json, run_json_failure, rust_files,
 };
 
 /// The test files, relative to `tests/`, whose code spawns the binary directly.
@@ -126,13 +126,13 @@ async fn a_loopback_mock_server_is_reached_directly() {
     let server = ExchangeFixture::start().await;
     let home = IsolatedHome::new();
 
-    let assert = home
-        .command_with_server(&server)
-        .args(["--format", "json", "mids"])
-        .assert()
-        .success();
+    let mids = run_json(
+        home.json_command()
+            .env(support::API_OVERRIDE_ENV, server.uri())
+            .arg("mids"),
+    );
 
-    assert_eq!(json_stdout(&assert)["BTC"], "50000");
+    assert_eq!(mids["BTC"], "50000");
 }
 
 /// The CLI is pointed at its directories by `HYPERLIQUID_*_DIR` only. These

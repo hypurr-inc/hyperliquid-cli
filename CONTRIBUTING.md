@@ -46,6 +46,13 @@ If command metadata changes, refresh the contract fixtures and review the diff:
 HYPERLIQUID_UPDATE_CONTRACTS=1 task contracts
 ```
 
+`HYPERLIQUID_UPDATE_CONTRACTS=1` is the one switch for every snapshot, so after
+changing an error spec the same variable regenerates `.claude/error-catalog.json`:
+
+```bash
+HYPERLIQUID_UPDATE_CONTRACTS=1 cargo test --lib catalog_file_matches_the_spec_table
+```
+
 ## Pull Requests
 
 Before opening a PR:

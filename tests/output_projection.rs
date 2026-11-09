@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 use support::exchange::ExchangeFixture;
 use support::{API_OVERRIDE_ENV, IsolatedHome, run_json, wire};
 
+const USER: &str = "0x0000000000000000000000000000000000000001";
+
 #[test]
 fn results_only_then_max_results_then_select_apply_to_a_document() {
     let options = JsonRenderOptions::from_cli(Some("coin,price"), true, Some(2));
@@ -114,5 +116,3 @@ async fn max_results_limits_candles_before_they_are_selected() {
 
     assert_eq!(candles, json!([{"timestamp": 1, "close": "105"}]));
 }
-
-const USER: &str = "0x0000000000000000000000000000000000000001";

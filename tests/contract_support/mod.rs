@@ -4,8 +4,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use hyperliquid_cli::command_registry::CommandRegistry;
-use hyperliquid_cli::commands::schema::schema_query;
-use hyperliquid_cli::output::TableData;
 use serde_json::{Value, json};
 
 /// Set to `1` to rewrite the snapshot fixtures instead of checking them. The
@@ -54,9 +52,11 @@ pub fn command_path(schema: &Value) -> String {
         .join(" ")
 }
 
-/// The command schemas exactly as `hyperliquid schema` prints them.
+/// The command schemas, run through the CLI: what `hyperliquid schema` prints.
 pub fn schema_all() -> Vec<Value> {
-    match schema_query(&[]).unwrap().to_json_value() {
+    let mut command = crate::support::json_command();
+    command.arg("schema");
+    match crate::support::run_json(&mut command) {
         Value::Array(schemas) => schemas,
         other => panic!("schema output is not an array: {other}"),
     }

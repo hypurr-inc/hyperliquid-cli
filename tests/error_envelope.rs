@@ -129,6 +129,96 @@ fn a_mistyped_command_suggests_the_fix_and_points_at_its_group_help() {
     assert_eq!(nested["reason"], "unknown_command");
     assert_eq!(nested["data"]["suggestion"], "cancel");
     assert_eq!(nested["next"][0]["command"], "hyperliquid orders --help");
+    assert!(
+        nested["data"]["usage"]
+            .as_str()
+            .is_some_and(|usage| usage.starts_with("Usage: hyperliquid orders")),
+        "{nested}"
+    );
+}
+
+/// The usage envelope's parts for each way an invocation can be malformed:
+/// the clap message as the headline, a suggestion when clap has one, the help
+/// command to run next and the usage line (absent for a rejected value).
+#[test]
+fn a_usage_error_names_its_suggestion_help_command_and_usage_line() {
+    struct Case {
+        args: &'static [&'static str],
+        headline: &'static str,
+        suggestion: Option<&'static str>,
+        help: &'static str,
+        usage: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            args: &["account", "abstraction", "set", "--mode", "unified"],
+            headline: "invalid value 'unified' for '--mode <MODE>'",
+            suggestion: Some("unified-account"),
+            help: "hyperliquid account abstraction set --help",
+            usage: None,
+        },
+        Case {
+            args: &["orders", "scale", "--order-count", "1", "--coin", "BTC"],
+            headline: "unexpected argument '--order-count' found",
+            suggestion: Some("--orders"),
+            help: "hyperliquid orders scale --help",
+            usage: Some("Usage: hyperliquid orders scale"),
+        },
+        Case {
+            args: &["orders", "--bogus"],
+            headline: "unexpected argument '--bogus' found",
+            suggestion: None,
+            help: "hyperliquid orders --help",
+            usage: Some("Usage: hyperliquid orders [OPTIONS] <COMMAND>"),
+        },
+        Case {
+            args: &["perps", "get"],
+            headline: "the following required arguments were not provided:\n  <COIN>",
+            suggestion: None,
+            help: "hyperliquid perps get --help",
+            usage: Some("Usage: hyperliquid perps get [OPTIONS] <COIN>"),
+        },
+        Case {
+            args: &["perps", "get", "BTC", "extra"],
+            headline: "unexpected argument 'extra' found",
+            suggestion: None,
+            help: "hyperliquid perps get --help",
+            usage: Some("Usage: hyperliquid perps get [OPTIONS] <COIN>"),
+        },
+        Case {
+            args: &["--max-results", "0", "perps", "list"],
+            headline: "invalid value '0' for '--max-results <N>': value must be at least 1",
+            suggestion: None,
+            help: "hyperliquid perps list --help",
+            usage: None,
+        },
+    ];
+
+    for case in cases {
+        let json = run_json_failure(json_command().args(case.args), 2);
+        let args = case.args;
+        assert_eq!(json["category"], "usage", "{args:?}");
+        assert_eq!(json["reason"], "invalid_arguments", "{args:?}");
+        assert!(
+            json["error"].as_str().unwrap().starts_with(case.headline),
+            "{args:?}: {json}"
+        );
+        assert_eq!(
+            json["data"]["suggestion"],
+            json!(case.suggestion),
+            "{args:?}"
+        );
+        match case.usage {
+            Some(usage) => assert!(
+                json["data"]["usage"]
+                    .as_str()
+                    .is_some_and(|line| line.starts_with(usage)),
+                "{args:?}: {json}"
+            ),
+            None => assert!(json["data"]["usage"].is_null(), "{args:?}: {json}"),
+        }
+        assert_eq!(json["next"][0]["command"], case.help, "{args:?}");
+    }
 }
 
 #[test]
