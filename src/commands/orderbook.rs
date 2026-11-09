@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::assets::{AssetResolver, Market, canonical_dex};
 use crate::clock;
-use crate::command_spec::{CliCommand, CommandSpec, InputKind, StreamBound, arg};
+use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
 use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -18,7 +18,8 @@ use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
 use crate::output::format::epoch_ms_to_iso;
-use crate::stream::SnapshotWatchArgs;
+use crate::stream_bounds::SnapshotWatchArgs;
+use crate::stream_bounds::StreamBound;
 use crate::ws::{Awaited, BookAggregationArgs, first_matching_message};
 
 const WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(15);

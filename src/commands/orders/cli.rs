@@ -35,14 +35,15 @@ use super::{
 };
 use crate::assets::canonical_dex;
 use crate::command_spec::{
-    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk, StreamBound,
+    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk,
     YES_FOR_AUTOMATION, arg,
 };
 use crate::errors::CliError;
 use crate::input_hardening::{FilePolicy, validate_file_path};
 use crate::invocation::Invocation;
 use crate::margin::MarginPlan;
-use crate::stream::SnapshotWatchArgs;
+use crate::stream_bounds::SnapshotWatchArgs;
+use crate::stream_bounds::StreamBound;
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["orders"], "Manage orders").aliases(&["order"]);
 

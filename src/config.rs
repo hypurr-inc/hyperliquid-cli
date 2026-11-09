@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use hypersdk::Address;
 
+use crate::env::nonblank;
 use crate::errors::CliError;
 use crate::network::Network;
 use crate::private_fs::{self, FileLock, LockError};
@@ -114,12 +115,6 @@ impl BankrLogin {
             ))
         })
     }
-}
-
-/// The value trimmed, or `None` when it is absent or blank: what every
-/// setting layer means by "not set".
-pub(crate) fn nonblank(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 impl std::fmt::Debug for BankrLogin {

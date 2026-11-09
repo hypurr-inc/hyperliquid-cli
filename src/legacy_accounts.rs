@@ -15,9 +15,10 @@ use hypersdk::Address;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
+use crate::env;
 use crate::errors::CliError;
 use crate::resolvers::parse_hex_address;
-use crate::settings::{Settings, env};
+use crate::settings::Settings;
 
 const ENCRYPTION_VERSION: &str = "v1";
 const KEYCHAIN_SERVICE: &str = "hyperliquid-cli";
@@ -531,7 +532,7 @@ mod tests {
     #[test]
     fn removed_key_store_dir_variable_is_rejected() {
         let settings = Settings::detached(
-            crate::settings::EnvSource::fixed([(env::ACCOUNT_KEY_STORE_DIR, "/tmp/keys")]),
+            crate::env::EnvSource::fixed([(env::ACCOUNT_KEY_STORE_DIR, "/tmp/keys")]),
             None,
         );
         let err = EncryptionKeySource::from_settings(&settings).unwrap_err();

@@ -135,8 +135,8 @@ impl TableData for IssueReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::OutputFormat;
-    use crate::output::terminal::Terminal;
+    use crate::terminal::OutputFormat;
+    use crate::terminal::Terminal;
 
     fn person_at_terminal() -> Mode {
         Mode {

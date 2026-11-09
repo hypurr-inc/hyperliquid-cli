@@ -24,12 +24,15 @@ use hypersdk::hypercore::types::Signature as HyperliquidSignature;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::bankr_credentials::KeySource;
 use crate::config::BankrLogin;
+use crate::env;
 use crate::errors::{CliError, network_error};
-use crate::ows::hints::WALLET_LOGIN;
+use crate::hints::wallet::WALLET_LOGIN;
+use crate::network::is_loopback_url;
 use crate::resolvers::parse_hex_address;
 use crate::response_sanitization::Untrusted;
-use crate::settings::{KeySource, Settings, env, is_loopback_url};
+use crate::settings::Settings;
 use crate::signing::payload::{Payload, Signs};
 use crate::signing::signature::Provider;
 
@@ -507,7 +510,8 @@ mod tests {
     fn blank_environment_keys_do_not_shadow_stored_credentials() {
         use crate::config::Config;
         const ADDRESS: &str = "0x0000000000000000000000000000000000000009";
-        use crate::settings::{EnvSource, Settings};
+        use crate::env::EnvSource;
+        use crate::settings::Settings;
 
         let config = Config {
             bankr: BankrLogin::new("bk_from_config", None, ADDRESS.parse().unwrap()),

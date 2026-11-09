@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use crate::settings::{EnvSource, env};
+use crate::env::{self, EnvSource};
 
 const APP_DIR: &str = "hyperliquid";
 

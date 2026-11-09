@@ -12,7 +12,7 @@ use crate::commands::actions;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::signing::{SelectedSigner, Signs, nonce};
+use crate::signing::{SelectedSigner, Signs};
 
 /// A user-signed action: an EIP-712 struct whose JSON is the action body.
 pub(crate) trait UserSigned: SolStruct + Serialize {
@@ -48,7 +48,7 @@ pub(crate) async fn submit<T: UserSigned>(
     build: impl FnOnce(String, u64) -> T,
 ) -> Result<(), CliError> {
     let chain = api.chain();
-    let nonce = nonce::next();
+    let nonce = api.nonces().next();
     let message = build(chain.to_string(), nonce);
     let signature = actions::sign_user_action::<T>(signer, chain, &message)?;
     let mut action =

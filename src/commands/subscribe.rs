@@ -3,15 +3,16 @@ use hypersdk::hypercore::CandleInterval;
 
 use crate::assets::{self, canonical_dex};
 use crate::command_spec::{
-    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, Lifecycle, OwsSupport, Risk,
-    StreamBound, arg,
+    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, Lifecycle, OwsSupport, Risk, arg,
 };
 use crate::commands::orderbook::{
     parse_candle_interval, resolve_market_coin, resolve_perp_coin_or_fetch,
 };
 use crate::errors::CliError;
 use crate::invocation::Invocation;
-use crate::stream::{StreamBoundArgs, SubscribeTarget};
+use crate::stream::SubscribeTarget;
+use crate::stream_bounds::StreamBound;
+use crate::stream_bounds::StreamBoundArgs;
 use crate::ws::{self, BookAggregationArgs};
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["subscribe"], "Stream real-time market and account events")

@@ -9,10 +9,9 @@
 
 use std::time::{Duration, Instant};
 
-use super::{
-    JsonRenderOptions, OutputFormat, Rendered, TableData, colors, format, json_text, render_outcome,
-};
+use super::{JsonRenderOptions, Rendered, TableData, colors, format, json_text, render_outcome};
 use crate::mode::Mode;
+use crate::terminal::OutputFormat;
 
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -132,7 +131,7 @@ mod tests {
     fn the_session_takes_its_format_and_layout_from_the_mode() {
         let mode = Mode {
             format: OutputFormat::Table,
-            terminal: crate::output::terminal::Terminal {
+            terminal: crate::terminal::Terminal {
                 stdout: true,
                 ..Default::default()
             },
@@ -147,7 +146,7 @@ mod tests {
         let piped = Session::new(
             JsonRenderOptions::default(),
             &Mode {
-                terminal: crate::output::terminal::Terminal::default(),
+                terminal: crate::terminal::Terminal::default(),
                 ..mode
             },
         );

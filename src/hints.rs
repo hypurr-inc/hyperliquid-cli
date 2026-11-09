@@ -1,10 +1,12 @@
 //! Commands this CLI suggests to the user for the orders and positions it
 //! places, built in one place so renaming a flag or a command cannot strand
-//! advice that other code wrote out by hand.
+//! advice that other code wrote out by hand. The wallet commands are in
+//! `wallet`. This module imports nothing from the crate, so every layer,
+//! `errors` included, can name a suggested command.
 
 use std::fmt;
 
-use crate::margin::MarginModeArg;
+pub(crate) mod wallet;
 
 /// The command that shows what is live on the exchange.
 pub const CHECK_LIVE_COMMAND: &str = "hyperliquid orders open";
@@ -27,21 +29,17 @@ pub fn on_behalf_of_flag(on_behalf_of: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-/// The `positions update-leverage` command that puts `coin` into `mode` at
+/// The `positions update-leverage` command that puts `coin` into isolated margin when `isolated`, else cross, at
 /// `leverage` for the account a run acts for. `<N>` is what an order passes
 /// when the leverage is the user's to choose.
 #[must_use]
 pub fn update_leverage_command(
     coin: &str,
     leverage: impl fmt::Display,
-    mode: MarginModeArg,
+    isolated: bool,
     on_behalf_of: Option<&str>,
 ) -> String {
-    let isolated = if mode == MarginModeArg::Isolated {
-        " --isolated"
-    } else {
-        ""
-    };
+    let isolated = if isolated { " --isolated" } else { "" };
     format!(
         "positions update-leverage --coin {coin} --leverage {leverage}{isolated}{}",
         on_behalf_of_flag(on_behalf_of)
@@ -102,7 +100,7 @@ mod tests {
             &protect_position_command("ETH", "+10%", "-5%", None),
             &format!(
                 "hyperliquid {}",
-                update_leverage_command("ETH", "<N>", MarginModeArg::Isolated, None)
+                update_leverage_command("ETH", "<N>", true, None)
             ),
         ] {
             assert!(resolves(command), "{command}");
@@ -122,11 +120,11 @@ mod tests {
     #[test]
     fn update_leverage_names_the_mode_and_the_account() {
         assert_eq!(
-            update_leverage_command("BTC", "<N>", MarginModeArg::Cross, None),
+            update_leverage_command("BTC", "<N>", false, None),
             "positions update-leverage --coin BTC --leverage <N>"
         );
         assert_eq!(
-            update_leverage_command("BTC", 5, MarginModeArg::Isolated, Some("v")),
+            update_leverage_command("BTC", 5, true, Some("v")),
             "positions update-leverage --coin BTC --leverage 5 --isolated --on-behalf-of v"
         );
     }

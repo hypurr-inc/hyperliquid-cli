@@ -221,8 +221,8 @@ fn invalid_network_in_config_file_returns_configuration_error() {
 }
 
 mod settings_tests {
+    use hyperliquid_cli::env::EnvSource;
     use hyperliquid_cli::network::Network;
-    use hyperliquid_cli::settings::EnvSource;
 
     #[test]
     fn default_config_path_is_config_json_in_a_hyperliquid_directory() {

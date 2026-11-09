@@ -22,8 +22,8 @@ use crate::commands::rows::{ListRow, Row, Rows};
 use crate::errors::CliError;
 use crate::exchange_reply;
 use crate::hints;
-use crate::output::OutputFormat;
 use crate::response_sanitization::labelled_untrusted_text;
+use crate::terminal::OutputFormat;
 
 pub(super) async fn trailing_stop(
     context: OrderSubmissionContext<'_>,

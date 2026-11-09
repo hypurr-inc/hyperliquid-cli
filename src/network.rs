@@ -2,6 +2,8 @@
 
 use hypersdk::hypercore::{self, Chain, HttpClient, WebSocket};
 
+use std::net::IpAddr;
+
 use crate::errors::CliError;
 
 /// The network a run targets. [`Network::name`] is its one spelling: display,
@@ -135,9 +137,40 @@ impl<'de> serde::Deserialize<'de> for Network {
     }
 }
 
+/// Whether `url` names this machine: `localhost` or a loopback address, IPv4 or
+/// IPv6 (URLs bracket IPv6 hosts).
+#[must_use]
+pub fn is_loopback_url(url: &reqwest::Url) -> bool {
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_urls_are_localhost_and_loopback_addresses_only() {
+        for loopback in ["http://LOCALHOST:1", "http://127.0.0.1:1", "http://[::1]:1"] {
+            assert!(
+                is_loopback_url(&reqwest::Url::parse(loopback).unwrap()),
+                "{loopback}"
+            );
+        }
+        for remote in ["http://[2001:db8::1]:1", "http://127.example.com"] {
+            assert!(
+                !is_loopback_url(&reqwest::Url::parse(remote).unwrap()),
+                "{remote}"
+            );
+        }
+    }
 
     #[test]
     fn every_network_has_one_spelling_everywhere() {

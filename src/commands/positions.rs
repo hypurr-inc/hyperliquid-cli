@@ -12,7 +12,7 @@ use serde::{Serialize, Serializer};
 use crate::assets::canonical_dex;
 use crate::assets::{AssetResolver, PerpAsset};
 use crate::command_spec::{
-    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, StreamBound, arg,
+    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg,
 };
 use crate::commands::actions;
 use crate::commands::rows::{ListRow, MISSING, Row, Rows, or_missing, style_column};
@@ -25,7 +25,8 @@ use crate::invocation::Invocation;
 use crate::margin::{MarginModeArg, isolated_only_market};
 use crate::output;
 use crate::quantity;
-use crate::stream::SnapshotWatchArgs;
+use crate::stream_bounds::SnapshotWatchArgs;
+use crate::stream_bounds::StreamBound;
 
 /// Arguments for `positions update-leverage`.
 #[derive(Args, Debug, Clone)]
@@ -349,7 +350,7 @@ async fn ensure_isolated_position(
     match open_position(inv.remote()?.api(), account, perp).await? {
         None => Err(CliError::Unsupported(format!(
             "{account} has no open {coin} position, and isolated margin belongs to an open isolated position; open one first (set isolated mode with `{}`)",
-            update_leverage_command(&coin, "<N>", MarginModeArg::Isolated, on_behalf_of)
+            update_leverage_command(&coin, "<N>", true, on_behalf_of)
         ))),
         Some(position) if position.position.leverage.leverage_type != LeverageType::Isolated => {
             Err(CliError::Unsupported(format!(
@@ -357,7 +358,7 @@ async fn ensure_isolated_position(
                 update_leverage_command(
                     &coin,
                     position.position.leverage.value,
-                    MarginModeArg::Isolated,
+                    true,
                     on_behalf_of
                 )
             )))
@@ -461,12 +462,7 @@ impl CliCommand for PositionsUpdateLeverage {
             return Err(CliError::Unsupported(format!(
                 "{}, so cross margin is not available; run `{}`",
                 isolated_only_market(&perp),
-                update_leverage_command(
-                    &coin,
-                    args.leverage,
-                    MarginModeArg::Isolated,
-                    args.on_behalf_of.as_deref()
-                )
+                update_leverage_command(&coin, args.leverage, true, args.on_behalf_of.as_deref())
             ))
             .into());
         }

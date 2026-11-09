@@ -6,7 +6,7 @@
 mod support;
 
 use assert_cmd::Command;
-use hyperliquid_cli::settings::env;
+use hyperliquid_cli::env;
 use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::types::ActionRequest;
 use predicates::prelude::*;

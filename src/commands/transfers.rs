@@ -17,7 +17,7 @@ use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::invocation::{Invocation, Remote};
 use crate::quantity;
-use crate::signing::{SelectedSigner, Signs, nonce};
+use crate::signing::{SelectedSigner, Signs};
 use crate::wire::{AddressRole, address};
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
@@ -312,7 +312,7 @@ async fn send(
         "send transfer aborted",
     )?;
 
-    let nonce = nonce::next();
+    let nonce = api.nonces().next();
     let action = Action::UsdSend(
         UsdSend {
             destination,
@@ -360,7 +360,7 @@ async fn spot_send(
         "spot send transfer aborted",
     )?;
 
-    let nonce = nonce::next();
+    let nonce = api.nonces().next();
     let spot_send = SpotSend {
         destination,
         token: token.send_token(),
@@ -498,7 +498,7 @@ impl ResolvedMove {
         form: Option<AgentForm>,
     ) -> Result<(), anyhow::Error> {
         let chain = remote.chain();
-        let nonce = nonce::next();
+        let nonce = remote.api().nonces().next();
         let AssetMove {
             to,
             source,

@@ -2,7 +2,8 @@ mod support;
 
 use futures::stream;
 use hyperliquid_cli::output::JsonRenderOptions;
-use hyperliquid_cli::stream::{StreamBounds, SubscribeTarget, stream_subscription_events};
+use hyperliquid_cli::stream::{SubscribeTarget, stream_subscription_events};
+use hyperliquid_cli::stream_bounds::StreamBounds;
 use hyperliquid_cli::ws::BookAggregationArgs;
 use hypersdk::Address;
 use hypersdk::hypercore::{

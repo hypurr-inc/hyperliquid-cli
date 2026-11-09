@@ -21,9 +21,11 @@ use crate::http_api::ApiClient;
 use crate::input_hardening::{FilePolicy, parse_json_text, read_json_file};
 use crate::mode::Mode;
 use crate::network::Network;
-use crate::output::{Notice, OutputFormat, Session, TableData};
+use crate::output::{Notice, Session, TableData};
 use crate::settings::Settings;
+use crate::signing::nonce::NonceStore;
 use crate::signing::{SelectedSigner, SignerRole};
+use crate::terminal::OutputFormat;
 use crate::wire::InfoRequest;
 
 /// The parsed global flags that shape an invocation.
@@ -246,8 +248,11 @@ impl Invocation {
     /// may pick another network than the run resolved. A person at a terminal
     /// is told when a read is retried.
     pub fn api_client_for(&self, network: Network) -> Result<ApiClient, CliError> {
-        let api = ApiClient::new(network, self.settings.api_base_url_override(network)?)
+        let mut api = ApiClient::new(network, self.settings.api_base_url_override(network)?)
             .with_request_lifetime(self.flags.expires_after);
+        if let Some(mark) = crate::paths::nonce_high_water_file(self.settings.env()) {
+            api = api.with_nonce_store(NonceStore::recorded_at(mark, crate::output::warn));
+        }
         Ok(if self.mode.person_on_stderr() {
             api.on_retry(|| Notice::Retrying.eprint(false))
         } else {
@@ -431,8 +436,8 @@ mod tests {
     use super::*;
     use crate::command_spec::{CliCommand, NoArgs};
     use crate::config::{BankrLogin, Config, ConfigFile};
+    use crate::env::{self, EnvSource};
     use crate::output::JsonRenderOptions;
-    use crate::settings::{EnvSource, env};
     use crate::signing::Signs;
     use hypersdk::Address;
     use tempfile::TempDir;
@@ -466,6 +471,19 @@ mod tests {
     fn invocation(flags: InvocationFlags) -> Invocation {
         let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
         invocation_over(settings, flags, &Probe::SPEC)
+    }
+
+    #[test]
+    fn the_nonce_mark_lives_in_the_data_directory_of_the_runs_own_environment() {
+        let data = TempDir::new().unwrap();
+        let settings = Settings::detached(
+            EnvSource::fixed([(env::DATA_DIR, data.path().to_str().unwrap())]),
+            None,
+        );
+        let inv = invocation_over(settings, InvocationFlags::default(), &Probe::SPEC);
+        let nonce = inv.remote().unwrap().api().nonces().next();
+        let mark = std::fs::read_to_string(data.path().join("nonce-high-water")).unwrap();
+        assert_eq!(mark.trim().parse::<u64>().unwrap(), nonce);
     }
 
     const KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000009";
