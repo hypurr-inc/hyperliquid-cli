@@ -1,35 +1,27 @@
 mod support;
 
-use predicates::prelude::*;
-use serde_json::Value;
-use support::IsolatedHome;
+use serde_json::{Value, json};
+use support::{API_OVERRIDE_ENV, IsolatedHome, mock_market_server, mount_perp_dexs};
 
-#[test]
-fn search_help_lists_type_filter() {
-    IsolatedHome::new()
-        .command()
-        .args(["search", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--type"))
-        .stdout(predicate::str::contains("perp"))
-        .stdout(predicate::str::contains("Examples:"))
-        .stdout(predicate::str::contains("--dry-run"));
-}
+#[tokio::test]
+async fn search_matches_the_query_and_the_type_filter_restricts_the_venue() {
+    let server = mock_market_server().await;
+    mount_perp_dexs(&server, json!([null])).await;
+    let home = IsolatedHome::new();
+    let search = |venue: &str| -> Value {
+        let output = home
+            .command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .args(["--format", "json", "--select", "venue,symbol"])
+            .args(["search", "ETH", "--type", venue])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).unwrap()
+    };
 
-#[test]
-fn schema_search_is_read_only() {
-    let output = IsolatedHome::new()
-        .command()
-        .args(["--format", "json", "schema", "search"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["command"], "hyperliquid search <QUERY>");
-    assert_eq!(json["lifecycle"], "read_only");
-    assert_eq!(json["auth_required"], false);
-    assert_eq!(json["dry_run"], "not_supported");
+    assert_eq!(search("perp"), json!([{"venue": "perp", "symbol": "ETH"}]));
+    assert_eq!(search("spot"), json!([]));
 }

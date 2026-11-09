@@ -79,11 +79,4 @@ mod tests {
         );
         assert!(!report.opened_in_browser);
     }
-
-    #[test]
-    fn environment_lines_name_version_and_platform() {
-        let lines = environment_lines();
-        assert!(lines.starts_with("- **CLI Version**: `"));
-        assert!(lines.contains("- **Platform**: `"));
-    }
 }

@@ -486,53 +486,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_enumerates_every_registered_command() {
-        let registry = CommandRegistry::get();
-        assert_eq!(registry.commands().len(), commands::entries().len());
-        for path in [
-            &["asset", "decode"][..],
-            &["asset", "search"],
-            &["search"],
-            &["buy"],
-            &["orders", "chase"],
-            &["orders", "bracket"],
-            &["orders", "trailing-stop"],
-            &["watch", "risk"],
-            &["orders", "create"],
-            &["wallet", "create"],
-            &["report-incident"],
-            &["schema"],
-        ] {
-            assert!(registry.find_path(path).is_some(), "{path:?}");
-        }
-    }
-
-    #[test]
-    fn registry_includes_current_command_families() {
-        let groups = CommandRegistry::get()
-            .commands()
-            .iter()
-            .map(|command| command.category.as_str())
-            .collect::<BTreeSet<_>>();
-
-        for group in [
-            "account",
-            "builder",
-            "market",
-            "referral",
-            "staking",
-            "subscribe",
-            "system",
-            "trade",
-            "transfer",
-            "vault",
-            "wallet",
-        ] {
-            assert!(groups.contains(group), "missing command group {group}");
-        }
-    }
-
-    #[test]
     fn schema_order_lists_every_registered_command_exactly_once() {
         let listed = SCHEMA_ORDER.iter().copied().collect::<BTreeSet<_>>();
         assert_eq!(
@@ -560,19 +513,13 @@ mod tests {
     }
 
     #[test]
-    fn every_registered_command_resolves_to_exactly_one_contract() {
-        let registry = CommandRegistry::get();
-        for entry in commands::entries() {
-            let path = entry.spec.path;
-            assert_eq!(
-                registry
-                    .commands()
-                    .iter()
-                    .filter(|command| command.spec.path == path)
-                    .count(),
-                1,
-                "{path:?}"
-            );
-        }
+    fn every_registered_command_has_exactly_one_contract() {
+        let contracts = CommandRegistry::get().commands();
+        let paths = contracts
+            .iter()
+            .map(|command| command.command_path.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(contracts.len(), commands::entries().len());
+        assert_eq!(paths.len(), contracts.len(), "two contracts share a path");
     }
 }

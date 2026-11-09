@@ -312,16 +312,13 @@ mod tests {
     }
 
     #[test]
-    fn invocation_carries_the_command_it_runs() {
-        let inv = invocation(InvocationFlags::default());
-        assert_eq!(inv.command_key(), "probe run");
-        assert_eq!(inv.command().path, ["probe", "run"]);
-    }
-
-    #[test]
-    fn payload_is_read_once_when_loaded() {
+    fn payload_is_absent_until_loaded_and_read_only_once() {
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let file = dir.path().join("payload.json");
+        std::fs::write(&file, r#"{"a":1}"#).unwrap();
+        let relative = file.strip_prefix(std::env::current_dir().unwrap()).unwrap();
         let inv = invocation(InvocationFlags {
-            payload_json: Some(r#"{"a":1}"#.to_string()),
+            payload_file: Some(relative.to_str().unwrap().to_string()),
             ..InvocationFlags::default()
         });
         assert!(
@@ -329,16 +326,23 @@ mod tests {
             "nothing is read before load_payload"
         );
         inv.load_payload().unwrap();
-        assert_eq!(inv.payload(), Some(&serde_json::json!({"a": 1})));
+        std::fs::remove_file(&file).unwrap();
         inv.load_payload().unwrap();
         assert_eq!(inv.payload(), Some(&serde_json::json!({"a": 1})));
     }
 
     #[test]
-    fn no_payload_input_leaves_payload_empty() {
-        let inv = invocation(InvocationFlags::default());
+    fn inline_payload_json_is_parsed_and_no_payload_stays_empty() {
+        let inv = invocation(InvocationFlags {
+            payload_json: Some(r#"{"a":1}"#.to_string()),
+            ..InvocationFlags::default()
+        });
         inv.load_payload().unwrap();
-        assert!(inv.payload().is_none());
+        assert_eq!(inv.payload(), Some(&serde_json::json!({"a": 1})));
+
+        let none = invocation(InvocationFlags::default());
+        none.load_payload().unwrap();
+        assert!(none.payload().is_none());
     }
 
     #[test]

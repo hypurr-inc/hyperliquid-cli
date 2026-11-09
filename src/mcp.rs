@@ -407,7 +407,8 @@ mod tests {
         assert!(args.iter().any(|s| s == "--context={\"a\":true}"));
         let args = command_args(cmd, &json!({"context":false})).unwrap();
         assert!(args.iter().any(|s| s == "--context=false"));
-        assert!(command_args(cmd, &json!({"yes":true})).is_err());
+        let err = command_args(contract(&["wallet", "export"]), &json!({"yes":true})).unwrap_err();
+        assert!(err.contains("confirmation bypass"), "{err}");
         assert!(command_args(cmd, &json!({"unknown":true})).is_err());
         assert!(command_args(cmd, &json!([])).is_err());
     }
@@ -415,16 +416,22 @@ mod tests {
     #[test]
     fn default_exposure_is_public_reads_only() {
         for cmd in CommandRegistry::get().commands() {
-            assert_eq!(exposed(cmd, true), cmd.command_path != ["mcp"]);
-            assert_eq!(
-                exposed(cmd, false),
-                cmd.command_path != ["mcp"] && cmd.spec.is_public_read()
-            );
             if exposed(cmd, false) {
                 assert!(!cmd.spec.changes_state(), "{}", cmd.command_key());
                 assert!(!cmd.dangerous, "{}", cmd.command_key());
             }
         }
+        assert!(exposed(contract(&["mids"]), false));
+        for path in [
+            &["orders", "create"][..],
+            &["wallet", "show"],
+            &["positions", "list"],
+        ] {
+            assert!(!exposed(contract(path), false), "{path:?}");
+            assert!(exposed(contract(path), true), "{path:?}");
+        }
+        let mcp = contract(&["mcp"]);
+        assert!(!exposed(mcp, false) && !exposed(mcp, true));
     }
 
     #[cfg(unix)]

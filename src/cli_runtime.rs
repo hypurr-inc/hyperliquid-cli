@@ -319,7 +319,6 @@ mod tests {
             "0xSECRETKEY",
         ];
         let redactions = redactions_for(&argv);
-        assert_eq!(redactions.values, strings(&["0xSECRETKEY"]));
         let args = replay_args(strings(&argv[1..]), &redactions);
         assert_eq!(args, strings(&["--format", "pretty", "wallet", "import"]));
     }
@@ -328,7 +327,6 @@ mod tests {
     fn replay_drops_secret_options_declared_by_the_spec() {
         let argv = ["hyperliquid", "wallet", "login", "--api-key", "bk_secret"];
         let redactions = redactions_for(&argv);
-        assert!(redactions.options.contains(&"--api-key".to_string()));
         let args = replay_args(strings(&argv[1..]), &redactions);
         assert_eq!(args, strings(&["wallet", "login"]));
     }

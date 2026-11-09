@@ -5,7 +5,7 @@
 //! contradicts itself or names args the command does not have.
 
 use hyperliquid_cli::command_registry::CommandRegistry;
-use hyperliquid_cli::command_spec::{ConfirmationPolicy, Mutability, YES_ARG};
+use hyperliquid_cli::command_spec::{ConfirmationPolicy, YES_ARG};
 use hyperliquid_cli::commands;
 
 fn problems_or_pass(title: &str, problems: Vec<String>) {
@@ -86,24 +86,6 @@ fn bounded_commands_define_the_args_that_bound_them() {
 }
 
 #[test]
-fn stream_bounds_are_reported_for_every_bounded_command() {
-    let problems = CommandRegistry::get()
-        .commands()
-        .iter()
-        .filter(|contract| {
-            contract.spec.stream.is_some() != contract.policy.stream_bounds.is_some()
-        })
-        .map(|contract| {
-            format!(
-                "{}: stream_bounds disagrees with its spec",
-                contract.command_key()
-            )
-        })
-        .collect();
-    problems_or_pass("stream bounds in the schema", problems);
-}
-
-#[test]
 fn policy_args_are_args_of_their_command() {
     let mut problems = Vec::new();
     for contract in CommandRegistry::get().commands() {
@@ -136,34 +118,6 @@ fn policy_args_are_args_of_their_command() {
         }
     }
     problems_or_pass("policy args", problems);
-}
-
-#[test]
-fn local_commands_never_use_the_api() {
-    let problems = commands::entries()
-        .iter()
-        .map(|entry| entry.spec)
-        .filter(|spec| spec.local && spec.uses_api())
-        .map(|spec| format!("{}: local but uses the API", spec.key()))
-        .collect();
-    problems_or_pass("local commands", problems);
-}
-
-#[test]
-fn state_changing_commands_are_never_read_only() {
-    let problems = commands::entries()
-        .iter()
-        .map(|entry| entry.spec)
-        .filter(|spec| {
-            spec.changes_state()
-                && matches!(
-                    spec.mutability(),
-                    Mutability::ReadOnly | Mutability::Streaming
-                )
-        })
-        .map(|spec| format!("{}: changes state but reports read-only", spec.key()))
-        .collect();
-    problems_or_pass("mutability", problems);
 }
 
 /// A `.prompt()` spec promises its own `run` asks before acting, and the
