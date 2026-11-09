@@ -3,7 +3,6 @@
 //   network:     --testnet > HYPERLIQUID_NETWORK > config file > mainnet
 
 use assert_cmd::Command;
-#[allow(dead_code)]
 mod support;
 
 use std::fs;

@@ -139,6 +139,18 @@ impl ExchangeFixture {
             .await;
     }
 
+    /// Answer the next `/exchange` request, once, with `response`; mounted
+    /// before [`Self::mount_exchange`] it gives a command a different answer
+    /// for its first action than for the rest.
+    pub async fn mount_exchange_once(&self, response: Value) {
+        Mock::given(method("POST"))
+            .and(path("/exchange"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .up_to_n_times(1)
+            .mount(&self.server)
+            .await;
+    }
+
     /// Answer every `/exchange` request with an order reply carrying `statuses`.
     pub async fn mount_order_statuses(&self, statuses: Vec<Value>) {
         self.mount_exchange(order_reply(statuses)).await;
