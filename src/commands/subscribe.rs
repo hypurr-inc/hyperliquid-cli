@@ -299,7 +299,7 @@ impl CliCommand for SubscribeOrderUpdates {
     .args(&[USER, MAX_EVENTS, IDLE_TIMEOUT_MS]);
 
     async fn run(inv: &Invocation, args: &SubscribeUserArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         stream(inv, SubscribeTarget::order_updates(user), &args.stream).await
     }
 }
@@ -317,7 +317,7 @@ impl CliCommand for SubscribeFills {
     .args(&[USER, SKIP_SNAPSHOT, MAX_EVENTS, IDLE_TIMEOUT_MS]);
 
     async fn run(inv: &Invocation, args: &SubscribeUserSnapshotArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         stream(
             inv,
             SubscribeTarget::fills(user).skipping_snapshot(args.skip_snapshot),
@@ -340,7 +340,7 @@ impl CliCommand for SubscribeUserEvents {
     .args(&[USER, MAX_EVENTS, IDLE_TIMEOUT_MS]);
 
     async fn run(inv: &Invocation, args: &SubscribeUserArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         stream(inv, SubscribeTarget::user_events(user), &args.stream).await
     }
 }
@@ -358,7 +358,7 @@ impl CliCommand for SubscribeUserFundings {
     .args(&[USER, SKIP_SNAPSHOT, MAX_EVENTS, IDLE_TIMEOUT_MS]);
 
     async fn run(inv: &Invocation, args: &SubscribeUserSnapshotArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         stream(
             inv,
             SubscribeTarget::user_fundings(user).skipping_snapshot(args.skip_snapshot),
@@ -381,7 +381,7 @@ impl CliCommand for SubscribeNotifications {
     .args(&[USER, MAX_EVENTS, IDLE_TIMEOUT_MS]);
 
     async fn run(inv: &Invocation, args: &SubscribeUserArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         stream(inv, SubscribeTarget::notifications(user), &args.stream).await
     }
 }
@@ -403,7 +403,7 @@ impl CliCommand for SubscribeTwapStates {
     }
 
     async fn run(inv: &Invocation, args: &SubscribeUserDexArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         let dexs = canonical_dexs(inv, &args.dex).await?;
         stream(inv, SubscribeTarget::twap_states(user, dexs), &args.stream).await
     }
@@ -422,7 +422,7 @@ impl CliCommand for SubscribeTwapSliceFills {
     .args(&[USER, SKIP_SNAPSHOT, MAX_EVENTS, IDLE_TIMEOUT_MS]);
 
     async fn run(inv: &Invocation, args: &SubscribeUserSnapshotArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         stream(
             inv,
             SubscribeTarget::twap_slice_fills(user).skipping_snapshot(args.skip_snapshot),
@@ -452,7 +452,7 @@ impl CliCommand for SubscribeActiveAssetData {
     ]);
 
     async fn run(inv: &Invocation, args: &SubscribeUserAssetArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         let resolver = inv.asset_resolver().await?;
         let coin =
             resolve_perp_coin_or_fetch(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
@@ -482,7 +482,7 @@ impl CliCommand for SubscribeClearinghouseState {
     }
 
     async fn run(inv: &Invocation, args: &SubscribeUserDexArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         let dexs = canonical_dexs(inv, &args.dex).await?;
         stream(
             inv,
@@ -510,7 +510,7 @@ impl CliCommand for SubscribeOpenOrders {
     }
 
     async fn run(inv: &Invocation, args: &SubscribeUserDexArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         let dexs = canonical_dexs(inv, &args.dex).await?;
         stream(inv, SubscribeTarget::open_orders(user, dexs), &args.stream).await
     }
@@ -529,7 +529,7 @@ impl CliCommand for SubscribeSpotState {
     .args(&[USER, MAX_EVENTS, IDLE_TIMEOUT_MS]);
 
     async fn run(inv: &Invocation, args: &SubscribeUserArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.user.as_deref())?;
+        let user = inv.resolve_user(args.user.as_deref()).await?;
         stream(inv, SubscribeTarget::spot_state(user), &args.stream).await
     }
 }
