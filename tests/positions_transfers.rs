@@ -394,20 +394,20 @@ async fn positions_update_margin_outputs_confirmation() {
             "positions",
             "update-margin",
             "--coin",
-            "BTC",
+            "ETH",
             "--amount",
             "1000",
             "--testnet",
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("BTC"))
+        .stdout(predicate::str::contains("ETH"))
         .stdout(predicate::str::contains("1000"))
         .stdout(predicate::str::contains("updated"));
 
     let body = exchange_body(&server).await;
     assert_eq!(body["action"]["type"], "updateIsolatedMargin");
-    assert_eq!(body["action"]["asset"], 0);
+    assert_eq!(body["action"]["asset"], 1);
     assert_eq!(body["action"]["isBuy"], true);
     assert_eq!(body["action"]["ntli"], 1_000_000_000_u64);
     assert!(body["signature"].is_object());
@@ -471,6 +471,40 @@ async fn hip3_positions_server() -> MockServer {
         &server,
         serde_json::json!({"type": "meta"}),
         serde_json::json!({"universe": [market("BTC")], "collateralToken": 0}),
+    )
+    .await;
+    mount_info(
+        &server,
+        serde_json::json!({"type": "clearinghouseState"}),
+        serde_json::json!({
+            "marginSummary": {
+                "accountValue": "100", "totalNtlPos": "10",
+                "totalRawUsd": "100", "totalMarginUsed": "1"
+            },
+            "crossMarginSummary": {
+                "accountValue": "100", "totalNtlPos": "10",
+                "totalRawUsd": "100", "totalMarginUsed": "1"
+            },
+            "crossMaintenanceMarginUsed": "1",
+            "withdrawable": "99",
+            "assetPositions": [{
+                "type": "oneWay",
+                "position": {
+                    "coin": "xyz:XYZ100",
+                    "szi": "1",
+                    "leverage": {"type": "isolated", "value": 3, "rawUsd": "10"},
+                    "entryPx": "10",
+                    "positionValue": "10",
+                    "unrealizedPnl": "0",
+                    "returnOnEquity": "0",
+                    "liquidationPx": null,
+                    "marginUsed": "1",
+                    "maxLeverage": 10,
+                    "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
+                }
+            }],
+            "time": 1700000000000_u64
+        }),
     )
     .await;
     Mock::given(method("POST"))

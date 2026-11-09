@@ -8,8 +8,8 @@ use hypersdk::Address;
 
 use super::args::{
     BatchCreateArgs, BracketArgs, BuySellArgs, CancelAllArgs, CancelArgs, ChaseArgs, CreateArgs,
-    ModifyArgs, OrderSide, OutcomeOrderArgs, ScaleArgs, ScheduleCancelArgs, StatusArgs, TpslArgs,
-    TwapCancelArgs, TwapCreateArgs,
+    MarginModeArg, ModifyArgs, OrderSide, OutcomeOrderArgs, ScaleArgs, ScheduleCancelArgs,
+    StatusArgs, TpslArgs, TwapCancelArgs, TwapCreateArgs,
 };
 use super::bracket::{bracket, bracket_dry_run_plan, validate_bracket_args};
 use super::chase::{chase, chase_dry_run_plan, chase_timeout};
@@ -19,10 +19,10 @@ use super::existing::{
 };
 use super::hip3::{Hip3MarginPlan, plan_hip3_margin_transfers};
 use super::planning::{
-    batch_create_dry_run_plan, create_dry_run_plan, prepare_batch_create_orders,
-    prepare_create_order, prepare_scale_batch, prepare_schedule_cancel_plan,
-    prepare_twap_cancel_plan, prepare_twap_create_plan, resolve_perp, scale_dry_run_plan,
-    schedule_cancel_dry_run_plan, tpsl_dry_run_plan, twap_cancel_dry_run_plan,
+    OrderDryRunPlan, batch_create_dry_run_plan, create_dry_run_plan, fetch_current_margin_mode,
+    prepare_batch_create_orders, prepare_create_order, prepare_scale_batch,
+    prepare_schedule_cancel_plan, prepare_twap_cancel_plan, prepare_twap_create_plan, resolve_perp,
+    scale_dry_run_plan, schedule_cancel_dry_run_plan, tpsl_dry_run_plan, twap_cancel_dry_run_plan,
     twap_create_dry_run_plan,
 };
 use super::prepared::PreparedOrder;
@@ -38,7 +38,7 @@ use super::{
     batch_create, cancel, cancel_all, create, modify, scale, schedule_cancel, tpsl, twap_cancel,
     twap_create,
 };
-use crate::assets::canonical_dex;
+use crate::assets::{PerpAsset, canonical_dex};
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk, StreamBound, arg,
 };
@@ -185,7 +185,7 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
         arg("stop_loss").kind(InputKind::Price).describe("Stop-loss trigger price for a normal-tpsl child order."),
         arg("grouping").describe("Parent-attached TP/SL grouping. orders create requires normal-tpsl when TP/SL children are present."),
         arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.").resource_id("on-behalf-of selector"),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to cross."),
+        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
         arg("builder").kind(InputKind::ProtocolObjectAddress).describe("Builder address to receive the additional order fee. Requires --builder-fee-rate.").resource_id("builder address"),
         arg("builder_fee_rate").describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder.").resource_id("builder fee rate"),
         arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id.").resource_id("cloid"),
@@ -201,7 +201,14 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
         let vault_address_string = vault_address.map(|address| address.to_string());
         let submission = prepare_create_order(client, &resolver, inv.settings(), &spec).await?;
         if inv.dry_run() {
-            let plan = create_dry_run_plan(&submission, args)?;
+            let plan = preview_with_account_margin_mode(
+                inv,
+                vault_address,
+                submission.parent().perp(),
+                args.margin_mode,
+                create_dry_run_plan(&submission, args)?,
+            )
+            .await;
             let would_execute = plan.would_execute();
             let mut details = plan.into_args();
             add_hip3_side_effects(inv, vault_address, &[submission.parent()], &mut details).await?;
@@ -240,7 +247,7 @@ impl CliCommand for OrdersScale {
         arg("tif").describe("Time in force for generated limit orders: gtc, ioc, or alo."),
         arg("reduce_only").kind(InputKind::Boolean),
         arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.").resource_id("on-behalf-of selector"),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to cross."),
+        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
         arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
     ]);
 
@@ -254,7 +261,14 @@ impl CliCommand for OrdersScale {
         let prepared =
             prepare_scale_batch(client, &resolver, inv.settings(), args, &ladder).await?;
         if inv.dry_run() {
-            let plan = scale_dry_run_plan(&prepared, args);
+            let plan = preview_with_account_margin_mode(
+                inv,
+                vault_address,
+                prepared.legs.first().and_then(PreparedOrder::perp),
+                args.margin_mode,
+                scale_dry_run_plan(&prepared, args),
+            )
+            .await;
             return print_dry_run_acting_for(
                 inv,
                 plan.would_execute(),
@@ -361,7 +375,7 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
         arg("grouping"),
         arg("side").describe("Fixed close side. Omit live to infer from the current position."),
         arg("size").kind(InputKind::Amount).describe("Fixed base-asset size. Omit live to use the current position size."),
-        arg("margin_mode").describe("Margin mode intent for perpetual TP/SL orders. Defaults to cross."),
+        arg("margin_mode").describe("Margin mode intent for perpetual TP/SL orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
         arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id.").resource_id("cloid"),
         arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
     ]);
@@ -375,7 +389,14 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
-            let plan = tpsl_dry_run_plan(&perp, &spec, &args.on_behalf_of)?;
+            let plan = preview_with_account_margin_mode(
+                inv,
+                vault_address,
+                Some(&perp),
+                spec.margin_mode,
+                tpsl_dry_run_plan(&perp, &spec, &args.on_behalf_of)?,
+            )
+            .await;
             return print_dry_run_acting_for(
                 inv,
                 plan.would_execute(),
@@ -641,7 +662,7 @@ impl CliCommand for OrdersTwapCreate {
         arg("side"),
         arg("size").kind(InputKind::Amount).describe("Total base-asset size."),
         arg("duration").kind(InputKind::Duration).describe("Whole-minute duration in seconds. Minimum 300."),
-        arg("margin_mode").describe("Require the target perpetual position to already use this margin mode."),
+        arg("margin_mode").describe("Margin mode intent for perpetual TWAP orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
         arg("randomize").kind(InputKind::Boolean).describe("Randomize execution timing and suborder sizes up to ±20%."),
         arg("yes").kind(InputKind::Boolean).describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt."),
     ]);
@@ -655,7 +676,14 @@ impl CliCommand for OrdersTwapCreate {
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
-            let dry_run_plan = twap_create_dry_run_plan(&plan, args);
+            let dry_run_plan = preview_with_account_margin_mode(
+                inv,
+                vault_address,
+                Some(&plan.perp),
+                args.margin_mode,
+                twap_create_dry_run_plan(&plan, args),
+            )
+            .await;
             return print_dry_run_acting_for(
                 inv,
                 dry_run_plan.would_execute(),
@@ -916,7 +944,7 @@ hyperliquid --format json buy --coin BTC --size 0.001 --yes")
         arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
         arg("max_slippage_bps").describe("Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000."),
         arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to cross."),
+        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
         arg("builder").kind(InputKind::ProtocolObjectAddress).describe("Builder address to receive the additional order fee. Requires --builder-fee-rate."),
         arg("builder_fee_rate").describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder."),
         arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id."),
@@ -961,7 +989,7 @@ hyperliquid --format json sell --coin BTC --size 0.001 --yes")
         arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
         arg("max_slippage_bps").describe("Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000."),
         arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to cross."),
+        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
         arg("builder").kind(InputKind::ProtocolObjectAddress).describe("Builder address to receive the additional order fee. Requires --builder-fee-rate."),
         arg("builder_fee_rate").describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder."),
         arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id."),
@@ -1005,7 +1033,7 @@ hyperliquid --format json outcome-buy --coin #10 --size 1 --yes")
         arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
         arg("max_slippage_bps").describe("Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000."),
         arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to cross."),
+        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
         arg("builder").kind(InputKind::ProtocolObjectAddress).describe("Builder address to receive the additional order fee. Requires --builder-fee-rate."),
         arg("builder_fee_rate").describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder."),
         arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id."),
@@ -1050,7 +1078,7 @@ hyperliquid --format json outcome-sell --coin #10 --size 1 --yes")
         arg("reduce_only").kind(InputKind::Boolean).describe("Only reduce an existing perpetual position; spot markets are not supported."),
         arg("max_slippage_bps").describe("Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000."),
         arg("on_behalf_of").kind(InputKind::ActingAccountSelector).describe("Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id."),
-        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to cross."),
+        arg("margin_mode").describe("Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`."),
         arg("builder").kind(InputKind::ProtocolObjectAddress).describe("Builder address to receive the additional order fee. Requires --builder-fee-rate."),
         arg("builder_fee_rate").describe("Builder fee rate percent string, e.g. 0.001%. Requires --builder."),
         arg("cloid").kind(InputKind::Identifier).describe("0x-prefixed 16-byte client order id."),
@@ -1114,6 +1142,38 @@ fn order_submission_context<'a>(
         vault_address,
         requires_approval: spec.prompts_on(remote.network()) && !yes,
     })
+}
+
+/// A dry-run `plan` whose `margin_mode`, when `--margin-mode` is absent, is the
+/// mode the account is set to for the market, read from `activeAssetData`. A
+/// preview is best effort, so the plan keeps its market-rule default when there
+/// is no account to read (no `--on-behalf-of`, no signer), the market is
+/// isolated-only (its rule is the mode), or the read fails.
+async fn preview_with_account_margin_mode(
+    inv: &Invocation,
+    vault_address: Option<Address>,
+    perp: Option<&PerpAsset>,
+    requested: Option<MarginModeArg>,
+    plan: OrderDryRunPlan,
+) -> OrderDryRunPlan {
+    let Some(perp) = perp.filter(|perp| requested.is_none() && perp.margin_rule.allows_cross())
+    else {
+        return plan;
+    };
+    let Some(user) = vault_address.or_else(|| {
+        inv.resolve_signer()
+            .ok()
+            .map(|signer| signer.query_address())
+    }) else {
+        return plan;
+    };
+    let Ok(remote) = inv.remote() else {
+        return plan;
+    };
+    match fetch_current_margin_mode(remote.api(), user, perp).await {
+        Ok(margin_mode) => plan.with_account_margin_mode(margin_mode),
+        Err(_) => plan,
+    }
 }
 
 /// The HIP-3 helper transfers a live run of these orders would make first, as

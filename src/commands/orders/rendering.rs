@@ -3,7 +3,7 @@ use hypersdk::hypercore::BasicOrder;
 use hypersdk::hypercore::types::{OrderResponseStatus, OrderType, TimeInForce};
 use serde::Serialize;
 
-use super::args::TpslGroupingArg;
+use super::args::{MarginModeArg, TpslGroupingArg};
 use super::exchange::{Placement, Rejected, status_error};
 use super::prepared::{PreparedOrder, PreparedTpslLeg};
 use crate::errors::{CliError, NextCommand, partial_results_fields};
@@ -525,6 +525,25 @@ pub(super) fn on_behalf_of_flag(on_behalf_of: Option<&str>) -> String {
     on_behalf_of
         .map(|selector| format!(" --on-behalf-of {selector}"))
         .unwrap_or_default()
+}
+
+/// The `positions update-leverage` command that puts `coin` into `margin_mode`
+/// for the account a run acts for (`on_behalf_of` as [`on_behalf_of_flag`]
+/// renders it); `<N>` is the leverage the user still has to choose.
+pub(super) fn update_leverage_command(
+    coin: &str,
+    margin_mode: MarginModeArg,
+    on_behalf_of: Option<&str>,
+) -> String {
+    let isolated = if margin_mode == MarginModeArg::Isolated {
+        " --isolated"
+    } else {
+        ""
+    };
+    format!(
+        "positions update-leverage --coin {coin} --leverage <N>{isolated}{}",
+        on_behalf_of_flag(on_behalf_of)
+    )
 }
 
 /// The error (exit 15) that follows a printed partial result: `headline`, then

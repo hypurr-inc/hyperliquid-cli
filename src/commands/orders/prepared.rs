@@ -30,7 +30,7 @@ pub(super) struct PreparedOrder {
     pub(super) amount: Option<QuoteAmount>,
     pub(super) warning: Option<String>,
     pub(super) builder: Option<OrderBuilderFee>,
-    /// The margin mode the account's position must already use.
+    /// The margin mode the account must already be set to for this market.
     pub(super) margin_mode: Option<MarginModeArg>,
 }
 

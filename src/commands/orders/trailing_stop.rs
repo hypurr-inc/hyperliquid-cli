@@ -419,6 +419,7 @@ mod tests {
                     dex: None,
                     sz_decimals: 5,
                     collateral: "USDC".to_string(),
+                    margin_rule: crate::assets::MarginRule::CrossOrIsolated,
                 },
                 hip3_perp("testdex", "HYPE", 11_100),
             ],

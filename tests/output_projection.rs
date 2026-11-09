@@ -152,6 +152,7 @@ fn perps_list_projection_selects_requested_fields() {
         sz_decimals: 5,
         collateral: "USDC".to_string(),
         isolated_margin: false,
+        margin_mode: "cross_or_isolated",
         tick_size_at_price_1: Some("1".to_string()),
     }]);
     let rendered = json_session(Some("name,index")).render(&output);

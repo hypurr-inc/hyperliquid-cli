@@ -266,8 +266,8 @@ Canonical top-level aliases accepted by the CLI:
 
 | Command | Description |
 | --- | --- |
-| `perps list [--dex <DEX>]` | List perpetual markets. |
-| `perps get <COIN> [--dex <DEX>]` | Show one perpetual market. |
+| `perps list [--dex <DEX>]` | List perpetual markets. `margin_mode` is `cross_or_isolated`, `isolated_only` (legacy `onlyIsolated` flag), `no_cross` (isolated only, margin removable) or `strict_isolated` (isolated only, margin not removable). |
+| `perps get <COIN> [--dex <DEX>]` | Show one perpetual market, including its `margin_mode`. |
 | `spot list` | List spot markets. |
 | `spot get <PAIR>` | Show one spot pair, for example `PURR/USDC`. |
 | `outcomes list [--limit <N>]` | List active outcome market sides from `outcomeMeta`. |
@@ -347,8 +347,8 @@ Signer and acting-account flags intentionally share the same selector grammar wh
 | `orders twap-cancel <TWAP_ID> --coin <COIN> [--dex <DEX>] [--on-behalf-of <ACCOUNT_SELECTOR>]` | Cancel a TWAP order. |
 | `orders schedule-cancel (--in <DURATION>\|--clear) [--on-behalf-of <ACCOUNT_SELECTOR>] [-y]` | Configure or clear a dead man's switch. Mainnet set and clear flows prompt unless `--yes` is supplied. |
 | `positions list [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | List open positions. `--dex` reads a HIP-3 DEX's account. |
-| `positions update-leverage --coin <COIN> --leverage <N> [--isolated]` | Update leverage. |
-| `positions update-margin --coin <COIN> --amount <AMOUNT>` | Add isolated margin. |
+| `positions update-leverage --coin <COIN> --leverage <N> [--isolated] [--on-behalf-of <ACCOUNT_SELECTOR>]` | Set the leverage and margin mode (cross, or isolated with `--isolated`) for a market. Isolated-only markets refuse cross with exit `13`. |
+| `positions update-margin --coin <COIN> --amount <AMOUNT> [--on-behalf-of <ACCOUNT_SELECTOR>]` | Add (positive) or remove (negative) isolated margin on an open isolated position. Removal is refused on `strict_isolated` markets. |
 | `transfer spot-to-perp --amount <USDC> [-y]` | Move USDC from spot to perp. |
 | `transfer perp-to-spot --amount <USDC> [-y]` | Move USDC from perp to spot. |
 | `transfer send --to <ADDRESS> --amount <USDC> [-y]` | Send USDC to another address. |

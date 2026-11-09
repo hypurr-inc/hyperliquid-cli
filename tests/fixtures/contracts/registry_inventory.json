@@ -89,7 +89,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "List perpetual markets.",
+      "description": "List perpetual markets. margin_mode is cross_or_isolated, isolated_only (legacy onlyIsolated flag), no_cross (isolated only, margin removable) or strict_isolated (isolated only, margin not removable).",
       "dry_run": "not_supported",
       "group": "market",
       "lifecycle": "read_only",
@@ -146,7 +146,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "Get details for a perpetual market.",
+      "description": "Get details for a perpetual market. margin_mode is cross_or_isolated, isolated_only (legacy onlyIsolated flag), no_cross (isolated only, margin removable) or strict_isolated (isolated only, margin not removable).",
       "dry_run": "not_supported",
       "group": "market",
       "lifecycle": "read_only",
@@ -931,7 +931,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Margin mode intent for perpetual orders. Defaults to cross.",
+          "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
           "enum_values": [
             "cross",
             "isolated"
@@ -1170,7 +1170,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Margin mode intent for perpetual orders. Defaults to cross.",
+          "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
           "enum_values": [
             "cross",
             "isolated"
@@ -1409,7 +1409,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Margin mode intent for perpetual orders. Defaults to cross.",
+          "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
           "enum_values": [
             "cross",
             "isolated"
@@ -1648,7 +1648,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Margin mode intent for perpetual orders. Defaults to cross.",
+          "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
           "enum_values": [
             "cross",
             "isolated"
@@ -5313,7 +5313,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Margin mode intent for perpetual orders. Defaults to cross.",
+          "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
           "enum_values": [
             "cross",
             "isolated"
@@ -5549,7 +5549,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Margin mode intent for perpetual orders. Defaults to cross.",
+          "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
           "enum_values": [
             "cross",
             "isolated"
@@ -5788,7 +5788,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Margin mode intent for perpetual TP/SL orders. Defaults to cross.",
+          "description": "Margin mode intent for perpetual TP/SL orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
           "enum_values": [
             "cross",
             "isolated"
@@ -6381,7 +6381,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Require the target perpetual position to already use this margin mode.",
+          "description": "Margin mode intent for perpetual TWAP orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
           "enum_values": [
             "cross",
             "isolated"
@@ -6563,11 +6563,24 @@
         {
           "arg_type": "boolean",
           "default": null,
-          "description": "Use isolated margin mode.",
+          "description": "Use isolated margin mode. Required on isolated-only markets.",
           "enum_values": [],
           "id": "isolated",
           "input_kind": "boolean",
           "long": "isolated",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
+          "enum_values": [],
+          "id": "on_behalf_of",
+          "input_kind": "acting_account_selector",
+          "long": "on-behalf-of",
           "multiple": false,
           "positional_index": null,
           "required": false,
@@ -6587,7 +6600,7 @@
         "supported": false
       },
       "dangerous": true,
-      "description": "Update leverage for a position.",
+      "description": "Set the leverage and margin mode (cross, or isolated with --isolated) the account uses for a perpetual market. Markets that trade isolated only refuse cross.",
       "dry_run": "optional",
       "group": "trade",
       "lifecycle": "live_mutating",
@@ -6620,7 +6633,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Margin amount.",
+          "description": "Margin amount in USDC: positive adds isolated margin, negative removes it.",
           "enum_values": [],
           "id": "amount",
           "input_kind": "amount",
@@ -6628,6 +6641,19 @@
           "multiple": false,
           "positional_index": null,
           "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
+          "enum_values": [],
+          "id": "on_behalf_of",
+          "input_kind": "acting_account_selector",
+          "long": "on-behalf-of",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
           "short": null
         }
       ],
@@ -6644,7 +6670,7 @@
         "supported": false
       },
       "dangerous": true,
-      "description": "Add isolated margin.",
+      "description": "Add or remove isolated margin on an open isolated position: a positive amount adds, a negative amount removes. Removal is refused on strict-isolated markets.",
       "dry_run": "optional",
       "group": "trade",
       "lifecycle": "live_mutating",

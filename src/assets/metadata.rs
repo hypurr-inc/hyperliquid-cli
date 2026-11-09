@@ -11,7 +11,7 @@ use crate::http_api::ApiClient;
 use crate::wire::InfoRequest;
 
 use super::asset_id;
-use super::market::{PerpAsset, SpotAsset};
+use super::market::{MarginRule, PerpAsset, SpotAsset};
 use super::query::{eq_asset_name, normalize_dex, strip_dex_prefix};
 
 const METADATA_TTL: Duration = Duration::from_secs(60);
@@ -73,6 +73,16 @@ impl AssetMetadata {
             name: String,
             #[serde(rename = "szDecimals")]
             sz_decimals: u32,
+            #[serde(rename = "onlyIsolated", default)]
+            only_isolated: bool,
+            #[serde(rename = "marginMode", default)]
+            margin_mode: Option<String>,
+        }
+
+        impl MetaPerp {
+            fn margin_rule(&self) -> MarginRule {
+                MarginRule::from_wire(self.only_isolated, self.margin_mode.as_deref())
+            }
         }
 
         let meta = api
@@ -86,6 +96,7 @@ impl AssetMetadata {
             .into_iter()
             .enumerate()
             .map(|(index, perp)| PerpAsset {
+                margin_rule: perp.margin_rule(),
                 name: perp.name,
                 index,
                 dex: None,
@@ -111,6 +122,7 @@ impl AssetMetadata {
             perps.extend(meta.universe.into_iter().enumerate().map(|(index, perp)| {
                 let name = strip_dex_prefix(&perp.name, &dex.name).to_string();
                 PerpAsset {
+                    margin_rule: perp.margin_rule(),
                     name,
                     index: asset_id::hip3_asset_index(dex_slot, index),
                     dex: Some(dex.name.clone()),
@@ -169,6 +181,7 @@ pub(super) fn perp_asset_from_market(
     };
     Ok(PerpAsset {
         sz_decimals: sz_decimals(market.sz_decimals, &market.name)?,
+        margin_rule: MarginRule::of_market(&market),
         name,
         index: market.index,
         dex,
