@@ -1,7 +1,8 @@
 mod support;
 
+use hyperliquid_cli::env;
 use serde_json::{Value, json};
-use support::IsolatedHome;
+use support::{IsolatedHome, json_stdout};
 
 #[test]
 fn stdio_initialize_list_and_call() {
@@ -18,7 +19,7 @@ fn stdio_initialize_list_and_call() {
     ];
     let output = home
         .command()
-        .env("HYPERLIQUID_NO_UPDATE_CHECK", "1")
+        .env(env::NO_UPDATE_CHECK, "1")
         .arg("mcp")
         .write_stdin(messages.join("\n") + "\n")
         .assert()
@@ -31,6 +32,7 @@ fn stdio_initialize_list_and_call() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    // The notifications get no reply; the unparseable line gets an error with a null id.
     assert_eq!(responses.len(), 6);
     assert_eq!(responses[0]["id"], Value::Null);
     assert!(responses[0].get("id").is_some());
@@ -61,21 +63,19 @@ fn stdio_initialize_list_and_call() {
 fn an_unreadable_mcp_environment_exits_2_before_the_server_starts() {
     let home = IsolatedHome::new();
     for (name, value) in [
-        ("HYPERLIQUID_MCP_TIMEOUT_MS", "soon"),
-        ("HYPERLIQUID_MCP_TIMEOUT_MS", "0"),
-        ("HYPERLIQUID_MCP_ALLOW_UNSAFE", "maybe"),
+        (env::MCP_TIMEOUT_MS, "soon"),
+        (env::MCP_TIMEOUT_MS, "0"),
+        (env::MCP_ALLOW_UNSAFE, "maybe"),
     ] {
-        let output = home
+        let assert = home
             .command()
-            .env("HYPERLIQUID_NO_UPDATE_CHECK", "1")
+            .env(env::NO_UPDATE_CHECK, "1")
             .env(name, value)
             .args(["--format", "json", "mcp"])
             .write_stdin(json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string() + "\n")
             .assert()
-            .code(2)
-            .get_output()
-            .clone();
-        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+            .code(2);
+        let envelope = json_stdout(&assert);
         assert_eq!(envelope["reason"], "invalid_config", "{name}={value}");
         assert!(
             envelope["error"].as_str().unwrap().contains(name),

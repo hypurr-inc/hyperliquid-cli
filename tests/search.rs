@@ -1,26 +1,17 @@
 mod support;
 
-use serde_json::{Value, json};
-use support::API_OVERRIDE_ENV;
-use support::IsolatedHome;
+use serde_json::json;
 use support::exchange::ExchangeFixture;
+use support::reads::read_json;
 
 #[tokio::test]
 async fn search_matches_the_query_and_the_type_filter_restricts_the_venue() {
     let server = ExchangeFixture::start().await;
-    let home = IsolatedHome::new();
-    let search = |venue: &str| -> Value {
-        let output = home
-            .command()
-            .env(API_OVERRIDE_ENV, server.uri())
-            .args(["--format", "json", "--select", "venue,symbol"])
-            .args(["search", "ETH", "--type", venue])
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        serde_json::from_slice(&output).unwrap()
+    let search = |venue: &str| {
+        read_json(
+            &server,
+            &["--select", "venue,symbol", "search", "ETH", "--type", venue],
+        )
     };
 
     assert_eq!(search("perp"), json!([{"venue": "perp", "symbol": "ETH"}]));

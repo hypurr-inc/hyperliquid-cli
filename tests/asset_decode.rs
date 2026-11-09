@@ -1,64 +1,30 @@
 mod support;
 
-use support::stdout_json;
+use serde_json::{Value, json};
+use support::exchange::ExchangeFixture;
+use support::reads::{read, read_json};
+use support::stderr_text;
 
-use serde_json::Value;
-use support::IsolatedHome;
-use wiremock::matchers::{body_partial_json, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
-
-async fn asset_decode_server() -> MockServer {
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "BTC": "50000"
-        })))
-        .mount(&server)
+/// BTC, the spot pair PURR/USDC and one outcome (40) whose Yes side is `#400`.
+async fn metadata_exchange() -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
+    server
+        .override_info(
+            json!({"type": "spotMeta"}),
+            json!({
+                "universe": [{"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}],
+                "tokens": [
+                    {"name": "USDC", "index": 0, "tokenId": "0x00000000000000000000000000000000", "szDecimals": 6, "weiDecimals": 6, "evmContract": null},
+                    {"name": "PURR", "index": 1, "tokenId": "0x00000000000000000000000000000001", "szDecimals": 0, "weiDecimals": 0, "evmContract": null}
+                ]
+            }),
+        )
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "spotMeta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [
-                {"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}
-            ],
-            "tokens": [
-                {"name": "USDC", "index": 0, "tokenId": "0x0", "szDecimals": 6, "weiDecimals": 6, "evmContract": null},
-                {"name": "PURR", "index": 1, "tokenId": "0x1", "szDecimals": 0, "weiDecimals": 0, "evmContract": null}
-            ]
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "meta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [
-                {"name": "BTC", "szDecimals": 5, "maxLeverage": 50, "onlyIsolated": false}
-            ],
-            "collateralToken": 0
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "perpDexs"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "outcomeMeta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "outcomes": [
-                {
+    server
+        .mount_info(
+            json!({"type": "outcomeMeta"}),
+            json!({
+                "outcomes": [{
                     "outcome": 40,
                     "name": "BTC price binary",
                     "description": "class:priceBinary|underlying:BTC|expiry:20260510-0000|targetPrice:100000|period:1d",
@@ -66,58 +32,26 @@ async fn asset_decode_server() -> MockServer {
                         {"name": "Yes", "token": 400},
                         {"name": "No", "token": 401}
                     ]
-                }
-            ],
-            "questions": []
-        })))
-        .mount(&server)
-        .await;
-
-    server
-}
-
-async fn healthcheck_only_server() -> MockServer {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "BTC": "50000"
-        })))
-        .mount(&server)
+                }],
+                "questions": []
+            }),
+        )
         .await;
     server
 }
 
 #[tokio::test]
 async fn asset_decode_resolves_perp_spot_and_outcome_ids() {
-    let env = IsolatedHome::new();
-    let server = asset_decode_server().await;
+    let server = metadata_exchange().await;
 
-    let perp = env
-        .command_with_server(&server)
-        .args(["--format", "json", "asset", "decode", "0"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let perp = stdout_json(&perp);
+    let perp = read_json(&server, &["asset", "decode", "0"]);
     assert_eq!(perp["asset_id"], 0);
     assert_eq!(perp["kind"], "perp");
     assert_eq!(perp["lookup_status"], "metadata_found");
     assert_eq!(perp["cli_input"], "BTC");
     assert_eq!(perp["perp_index"], 0);
 
-    let spot = env
-        .command_with_server(&server)
-        .args(["--format", "json", "asset", "decode", "10000"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let spot = stdout_json(&spot);
+    let spot = read_json(&server, &["asset", "decode", "10000"]);
     assert_eq!(spot["kind"], "spot");
     assert_eq!(spot["lookup_status"], "metadata_found");
     assert_eq!(spot["cli_input"], "PURR/USDC");
@@ -125,15 +59,7 @@ async fn asset_decode_resolves_perp_spot_and_outcome_ids() {
     assert_eq!(spot["base"], "PURR");
     assert_eq!(spot["quote"], "USDC");
 
-    let outcome = env
-        .command_with_server(&server)
-        .args(["--format", "json", "asset", "decode", "100000400"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let outcome = stdout_json(&outcome);
+    let outcome = read_json(&server, &["asset", "decode", "100000400"]);
     assert_eq!(outcome["kind"], "outcome");
     assert_eq!(outcome["lookup_status"], "metadata_found");
     assert_eq!(outcome["coin"], "#400");
@@ -159,34 +85,16 @@ async fn asset_decode_resolves_perp_spot_and_outcome_ids() {
 
 #[tokio::test]
 async fn asset_decode_returns_formula_only_for_unresolved_but_valid_ids() {
-    let env = IsolatedHome::new();
-    let server = asset_decode_server().await;
+    let server = metadata_exchange().await;
 
-    let out = env
-        .command_with_server(&server)
-        .args(["--format", "json", "asset", "decode", "110035"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let hip3 = read_json(&server, &["asset", "decode", "110035"]);
+    assert_eq!(hip3["kind"], "hip3_perp");
+    assert_eq!(hip3["lookup_status"], "formula_only");
+    assert_eq!(hip3["cli_input"], Value::Null);
+    assert_eq!(hip3["dex_slot"], 1);
+    assert_eq!(hip3["perp_index"], 35);
 
-    let json = stdout_json(&out);
-    assert_eq!(json["kind"], "hip3_perp");
-    assert_eq!(json["lookup_status"], "formula_only");
-    assert_eq!(json["cli_input"], Value::Null);
-    assert_eq!(json["dex_slot"], 1);
-    assert_eq!(json["perp_index"], 35);
-
-    let outcome = env
-        .command_with_server(&server)
-        .args(["--format", "json", "asset", "decode", "100000410"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let outcome = stdout_json(&outcome);
+    let outcome = read_json(&server, &["asset", "decode", "100000410"]);
     assert_eq!(outcome["kind"], "outcome");
     assert_eq!(outcome["lookup_status"], "formula_only");
     assert_eq!(outcome["cli_input"], "#410");
@@ -197,32 +105,16 @@ async fn asset_decode_returns_formula_only_for_unresolved_but_valid_ids() {
 
 #[tokio::test]
 async fn asset_decode_metadata_failures_degrade_to_formula_only() {
-    let env = IsolatedHome::new();
-    let server = healthcheck_only_server().await;
+    // Only the override probe is answered: every metadata read fails.
+    let server = ExchangeFixture::probe_only().await;
 
-    let perp = env
-        .command_with_server(&server)
-        .args(["--format", "json", "asset", "decode", "0"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let perp = stdout_json(&perp);
+    let perp = read_json(&server, &["asset", "decode", "0"]);
     assert_eq!(perp["kind"], "perp");
     assert_eq!(perp["lookup_status"], "formula_only");
     assert_eq!(perp["cli_input"], Value::Null);
     assert_eq!(perp["perp_index"], 0);
 
-    let outcome = env
-        .command_with_server(&server)
-        .args(["--format", "json", "asset", "decode", "100000401"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let outcome = stdout_json(&outcome);
+    let outcome = read_json(&server, &["asset", "decode", "100000401"]);
     assert_eq!(outcome["kind"], "outcome");
     assert_eq!(outcome["lookup_status"], "formula_only");
     assert_eq!(outcome["cli_input"], "#401");
@@ -232,89 +124,34 @@ async fn asset_decode_metadata_failures_degrade_to_formula_only() {
 
 #[tokio::test]
 async fn asset_search_finds_symbols_pairs_and_outcome_slugs() {
-    let env = IsolatedHome::new();
-    let server = asset_decode_server().await;
+    let server = metadata_exchange().await;
 
-    let btc = env
-        .command_with_server(&server)
-        .args(["--format", "json", "asset", "search", "BTC", "--limit", "1"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let btc = stdout_json(&btc);
-    let rows = btc.as_array().unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["asset_id"], 0);
-    assert_eq!(rows[0]["kind"], "perp");
-    assert_eq!(rows[0]["cli_input"], "BTC");
+    let btc = read_json(&server, &["asset", "search", "BTC", "--limit", "1"]);
+    assert_eq!(btc.as_array().unwrap().len(), 1);
+    assert_eq!(btc[0]["asset_id"], 0);
+    assert_eq!(btc[0]["kind"], "perp");
+    assert_eq!(btc[0]["cli_input"], "BTC");
 
-    let spot = env
-        .command_with_server(&server)
-        .args([
-            "--format",
-            "json",
-            "asset",
-            "search",
-            "PURR/USDC",
-            "--limit",
-            "1",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let spot = stdout_json(&spot);
-    let rows = spot.as_array().unwrap();
-    assert_eq!(rows[0]["asset_id"], 10000);
-    assert_eq!(rows[0]["kind"], "spot");
-    assert_eq!(rows[0]["cli_input"], "PURR/USDC");
+    let spot = read_json(&server, &["asset", "search", "PURR/USDC", "--limit", "1"]);
+    assert_eq!(spot[0]["asset_id"], 10000);
+    assert_eq!(spot[0]["kind"], "spot");
+    assert_eq!(spot[0]["cli_input"], "PURR/USDC");
 
-    let outcome = env
-        .command_with_server(&server)
-        .args([
-            "--format",
-            "json",
-            "asset",
-            "search",
-            "btc-above-100000-yes-may-10-0000",
-            "--limit",
-            "1",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let outcome = stdout_json(&outcome);
-    let rows = outcome.as_array().unwrap();
-    assert_eq!(rows[0]["asset_id"], 100000400);
-    assert_eq!(rows[0]["kind"], "outcome");
-    assert_eq!(rows[0]["slug"], "btc-above-100000-yes-may-10-0000");
-    assert_eq!(rows[0]["cli_input"], "#400");
+    let slug = "btc-above-100000-yes-may-10-0000";
+    let outcome = read_json(&server, &["asset", "search", slug, "--limit", "1"]);
+    assert_eq!(outcome[0]["asset_id"], 100000400);
+    assert_eq!(outcome[0]["kind"], "outcome");
+    assert_eq!(outcome[0]["slug"], slug);
+    assert_eq!(outcome[0]["cli_input"], "#400");
 }
 
 #[tokio::test]
 async fn asset_search_numeric_query_falls_back_to_decode() {
-    let env = IsolatedHome::new();
-    let server = asset_decode_server().await;
+    let server = metadata_exchange().await;
 
-    let out = env
-        .command_with_server(&server)
-        .args([
-            "--format", "json", "asset", "search", "110035", "--limit", "1",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let rows = read_json(&server, &["asset", "search", "110035", "--limit", "1"]);
 
-    let json = stdout_json(&out);
-    let rows = json.as_array().unwrap();
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.as_array().unwrap().len(), 1);
     assert_eq!(rows[0]["asset_id"], 110035);
     assert_eq!(rows[0]["kind"], "hip3_perp");
     assert_eq!(rows[0]["lookup_status"], "formula_only");
@@ -324,81 +161,53 @@ async fn asset_search_numeric_query_falls_back_to_decode() {
 
 #[tokio::test]
 async fn asset_decode_supports_json_projection_for_agents() {
-    let env = IsolatedHome::new();
-    let server = asset_decode_server().await;
+    let server = metadata_exchange().await;
 
-    let out = env
-        .command_with_server(&server)
-        .args([
-            "--format",
-            "json",
+    let projected = read_json(
+        &server,
+        &[
             "--select",
             "asset_id,kind,cli_input",
             "asset",
             "decode",
             "0",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+        ],
+    );
 
-    let json = stdout_json(&out);
     assert_eq!(
-        json,
-        serde_json::json!({
-            "asset_id": 0,
-            "kind": "perp",
-            "cli_input": "BTC"
-        })
+        projected,
+        json!({"asset_id": 0, "kind": "perp", "cli_input": "BTC"})
     );
 }
 
 #[tokio::test]
 async fn asset_decode_invalid_outcome_side_is_structured_not_a_hard_failure() {
-    let env = IsolatedHome::new();
-    let server = asset_decode_server().await;
+    let server = metadata_exchange().await;
 
-    let out = env
-        .command_with_server(&server)
-        .args(["--format", "json", "asset", "decode", "100000402"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let decoded = read_json(&server, &["asset", "decode", "100000402"]);
 
-    let json = stdout_json(&out);
-    assert_eq!(json["kind"], "outcome");
-    assert_eq!(json["lookup_status"], "invalid_id");
-    assert_eq!(json["cli_input"], Value::Null);
-    assert_eq!(json["encoding"], 402);
-    assert_eq!(json["outcome"], 40);
-    assert_eq!(json["side"], 2);
+    assert_eq!(decoded["kind"], "outcome");
+    assert_eq!(decoded["lookup_status"], "invalid_id");
+    assert_eq!(decoded["cli_input"], Value::Null);
+    assert_eq!(decoded["encoding"], 402);
+    assert_eq!(decoded["outcome"], 40);
+    assert_eq!(decoded["side"], 2);
     assert_eq!(
-        json["reason"],
+        decoded["reason"],
         "only binary outcome sides 0 and 1 are supported"
     );
 }
 
 #[tokio::test]
 async fn asset_search_says_on_stderr_when_metadata_is_unavailable() {
-    let env = IsolatedHome::new();
-    let server = healthcheck_only_server().await;
+    let server = ExchangeFixture::probe_only().await;
 
-    let output = env
-        .command_with_server(&server)
-        .args(["--format", "json", "asset", "search", "110035"])
-        .assert()
-        .success()
-        .get_output()
-        .clone();
+    let assert = read(&server, &["asset", "search", "110035"]).success();
 
-    let rows = stdout_json(&output.stdout);
+    let rows = support::json_stdout(&assert);
     assert_eq!(rows.as_array().unwrap().len(), 1);
     assert_eq!(rows[0]["lookup_status"], "formula_only");
-    let stderr = String::from_utf8(output.stderr).unwrap();
+    let stderr = stderr_text(&assert);
     assert!(stderr.contains("asset metadata unavailable"), "{stderr}");
     assert!(stderr.contains("outcome metadata unavailable"), "{stderr}");
 }

@@ -5,8 +5,8 @@ mod support;
 
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, Hip3Dex};
+use support::reads::read_json;
 use support::wire::{self, MarginRule};
-use support::{IsolatedHome, json_stdout};
 
 async fn exchange() -> ExchangeFixture {
     let server = ExchangeFixture::start_with(vec![Hip3Dex {
@@ -38,24 +38,18 @@ async fn exchange() -> ExchangeFixture {
     server
 }
 
-fn run(env: &IsolatedHome, server: &ExchangeFixture, args: &[&str]) -> Value {
-    let assert = env
-        .command_with_server(server)
-        .args(["--format", "json", "--testnet", "perps"])
-        .args(args)
-        .assert()
-        .success();
-    json_stdout(&assert)
+fn perps(server: &ExchangeFixture, args: &[&str]) -> Value {
+    read_json(server, &[&["perps"], args].concat())
 }
 
-fn modes(rows: &Value) -> Vec<(String, String, bool)> {
+fn modes(rows: &Value) -> Vec<(&str, &str, bool)> {
     rows.as_array()
         .unwrap()
         .iter()
         .map(|row| {
             (
-                row["name"].as_str().unwrap().to_string(),
-                row["margin_mode"].as_str().unwrap().to_string(),
+                row["name"].as_str().unwrap(),
+                row["margin_mode"].as_str().unwrap(),
                 row["isolated_margin"].as_bool().unwrap(),
             )
         })
@@ -64,60 +58,43 @@ fn modes(rows: &Value) -> Vec<(String, String, bool)> {
 
 #[tokio::test]
 async fn list_reports_the_margin_rule_of_every_default_dex_market() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let rows = run(&env, &server, &["list"]);
-
     assert_eq!(
-        modes(&rows),
+        modes(&perps(&server, &["list"])),
         [
-            ("BTC".to_string(), "cross_or_isolated".to_string(), false),
-            ("PUMP".to_string(), "strict_isolated".to_string(), true),
-            ("OLD".to_string(), "isolated_only".to_string(), true),
+            ("BTC", "cross_or_isolated", false),
+            ("PUMP", "strict_isolated", true),
+            ("OLD", "isolated_only", true),
         ]
     );
 }
 
 #[tokio::test]
 async fn list_reports_the_margin_rule_of_every_hip3_market() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let rows = run(&env, &server, &["list", "--dex", "xyz"]);
-
     assert_eq!(
-        modes(&rows),
+        modes(&perps(&server, &["list", "--dex", "xyz"])),
         [
-            ("xyz:HOOD".to_string(), "no_cross".to_string(), true),
-            (
-                "xyz:STRICT".to_string(),
-                "strict_isolated".to_string(),
-                true
-            ),
-            (
-                "xyz:OPEN".to_string(),
-                "cross_or_isolated".to_string(),
-                false
-            ),
+            ("xyz:HOOD", "no_cross", true),
+            ("xyz:STRICT", "strict_isolated", true),
+            ("xyz:OPEN", "cross_or_isolated", false),
         ]
     );
 }
 
 #[tokio::test]
 async fn get_reports_the_margin_rule() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let default_dex = run(&env, &server, &["get", "PUMP"]);
-    assert_eq!(default_dex["margin_mode"], "strict_isolated");
-    assert_eq!(default_dex["isolated_margin"], true);
-
-    let hip3 = run(&env, &server, &["get", "xyz:HOOD"]);
-    assert_eq!(hip3["margin_mode"], "no_cross");
-    assert_eq!(hip3["isolated_margin"], true);
-
-    let flexible = run(&env, &server, &["get", "BTC"]);
-    assert_eq!(flexible["margin_mode"], "cross_or_isolated");
-    assert_eq!(flexible["isolated_margin"], false);
+    for (market, mode, isolated) in [
+        ("PUMP", "strict_isolated", true),
+        ("xyz:HOOD", "no_cross", true),
+        ("BTC", "cross_or_isolated", false),
+    ] {
+        let reported = perps(&server, &["get", market]);
+        assert_eq!(reported["margin_mode"], mode, "{market}");
+        assert_eq!(reported["isolated_margin"], isolated, "{market}");
+    }
 }

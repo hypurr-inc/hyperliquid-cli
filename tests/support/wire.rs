@@ -313,3 +313,23 @@ pub fn stats_vault(
         }
     })
 }
+
+/// An active validator as `validatorSummaries` lists it, with a 4%
+/// commission and one day of stats.
+pub fn validator(address: &str, name: &str) -> Value {
+    json!({
+        "validator": address,
+        "signer": "0x0000000000000000000000000000000000000003",
+        "name": name,
+        "description": "test validator",
+        "nRecentBlocks": 1,
+        "stake": 123456789_u64,
+        "isJailed": false,
+        "unjailableAfter": null,
+        "isActive": true,
+        "commission": "0.04",
+        "stats": [
+            ["day", {"uptimeFraction": "1.0", "predictedApr": "0.025", "nSamples": 1440}]
+        ]
+    })
+}
