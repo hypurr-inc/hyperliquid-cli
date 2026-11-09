@@ -96,7 +96,6 @@ async fn create(
     }
 }
 
-/// Place one order and return the exchange's one status for it.
 async fn place_prepared_single(
     context: OrderSubmissionContext<'_>,
     prepared: &PreparedOrder,
@@ -151,8 +150,7 @@ async fn place_order_batch(
     finish_order_batch(rows, context.inv)
 }
 
-/// Place position-attached TP/SL orders and return each leg's result without
-/// printing anything.
+/// Prints nothing; returns each leg's result.
 async fn place_position_tpsl(
     context: OrderSubmissionContext<'_>,
     perp: &PerpAsset,
@@ -181,8 +179,7 @@ async fn tpsl(
     report_tpsl_batch(legs, context.inv)
 }
 
-/// Place the TP/SL that protects a position opened by another command. Prints
-/// nothing: a rejected leg is returned as the error for the caller to report.
+/// Prints nothing: a rejected leg is returned as the error for the caller to report.
 async fn protect_position(
     context: OrderSubmissionContext<'_>,
     perp: &PerpAsset,
@@ -197,9 +194,8 @@ async fn protect_position(
     }
 }
 
-/// Report a batch where some legs failed. Prints the per-leg result, then
-/// returns the partial-results error (exit 15). When every leg failed there is
-/// no partial result, so the rejection is the error.
+/// Prints the per-leg result, then returns the partial-results error (exit 15). When
+/// every leg failed there is no partial result, so the rejection is the error.
 fn finish_with_failures(
     legs: impl TableData + 'static,
     verb: BatchVerb,
@@ -226,7 +222,6 @@ fn finish_with_failures(
     Err(partial.error().into())
 }
 
-/// Print a batch's legs, or report the legs that failed.
 fn report_legs<T: rendering::LegRow + 'static>(
     legs: Legs<T>,
     verb: BatchVerb,
@@ -289,7 +284,6 @@ async fn cancel(
     Ok(())
 }
 
-/// A single-row result, as the table and the JSON array the order commands print.
 fn rendering_rows<T>(row: T) -> crate::commands::common::rows::Rows<T> {
     crate::commands::common::rows::Rows::new(vec![row])
 }
@@ -373,8 +367,7 @@ async fn modify(
     Ok(())
 }
 
-/// The error for modification `index` of a batch, led by which one it was:
-/// the planner's wording names an order, not its place in the orders file.
+/// The planner's wording names an order, not its place in the orders file.
 fn for_modification(index: usize, error: CliError) -> CliError {
     match error {
         CliError::Configuration(message) => {

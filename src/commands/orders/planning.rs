@@ -69,7 +69,6 @@ pub(super) enum ScheduleCancelPlan {
     Clear,
 }
 
-/// The moment a [`ScheduleCancelPlan::Set`] fires when sent at a given time.
 pub(super) struct ScheduledCancel {
     pub(super) at: chrono::DateTime<Utc>,
     pub(super) in_seconds: u64,
@@ -126,8 +125,6 @@ pub(super) async fn resolve_perp_market(
     }
 }
 
-/// The market `coin` and `dex` name, fetching a HIP-3 market the resolver does
-/// not list yet.
 async fn resolve_tradable_asset(
     client: &ApiClient,
     resolver: &AssetResolver,
@@ -205,8 +202,8 @@ fn mid_key(market: &Market, coin: &str, dex: Option<&str>) -> Result<(String, St
     }
 }
 
-/// The current mid of `market`. `coin` and `dex` are the flags that named it,
-/// for the error that says the mid was not available.
+/// `coin` and `dex` are the flags that named it, for the error that says the mid was
+/// not available.
 pub(super) async fn market_mid_price(
     client: &ApiClient,
     market: &Market,
@@ -278,8 +275,8 @@ pub(super) async fn prepare_order(
     prepare_order_in(client, &market, settings, spec).await
 }
 
-/// Plan one order on an already resolved market. A command that places many
-/// orders on one market resolves it once and plans each order here.
+/// A command that places many orders on one market resolves it once and plans each
+/// order here.
 pub(super) async fn prepare_order_in(
     client: &ApiClient,
     market: &Market,
@@ -291,7 +288,6 @@ pub(super) async fn prepare_order_in(
     plan_order(client, market, spec, builder, margin).await
 }
 
-/// Plan one order, already validated for `market`, with its builder fee.
 async fn plan_order(
     client: &ApiClient,
     market: &Market,
@@ -589,7 +585,6 @@ struct TpslChildren<'a> {
 }
 
 impl TpslChildren<'_> {
-    /// Append the take-profit then the stop-loss leg, for whichever is set.
     /// `cloid` goes to the first leg appended.
     fn push_legs(
         &self,
@@ -646,7 +641,6 @@ fn batch_from_legs(grouping: TpslGroupingArg, legs: Vec<PreparedTpslLeg>) -> Pre
     }
 }
 
-/// Reduce-only TP/SL orders that close `size` of a position on `perp`.
 pub(super) fn position_tpsl_batch(
     perp: &PerpAsset,
     close_side: OrderSide,
@@ -936,8 +930,8 @@ impl<'a> From<&'a CreateArgs> for OrderEcho<'a> {
     }
 }
 
-/// What `submission` previews. `margin` is the margin plan its `margin_mode`
-/// shows: the one it was planned with, or the plan once the account was read.
+/// `margin` is the margin plan its `margin_mode` shows: the one it was planned with,
+/// or the plan once the account was read.
 pub(super) fn create_dry_run_preview(
     submission: &CreateOrderSubmission,
     echo: &OrderEcho<'_>,
@@ -965,7 +959,7 @@ pub(super) fn scale_dry_run_plan(
     prepared: &PreparedOrderBatch,
     margin: Option<&MarginPlan>,
 ) -> OrderDryRunPlan {
-    // A batch on a market with no margin previews cross, as it always has.
+    // A batch on a market with no margin previews cross.
     let mode = margin.map_or(MarginModeArg::Cross, MarginPlan::mode);
     OrderDryRunPlan::new("submit_order_batch", order_batch_dry_run_args(prepared))
         .with_margin_mode(mode)
@@ -1401,7 +1395,6 @@ fn infer_close_side_from_tpsl_prices(
     }
 }
 
-/// `value` must be above zero; `flag` names it in the error.
 fn require_positive(value: Decimal, flag: &'static str) -> Result<(), CliError> {
     if value <= Decimal::ZERO {
         return Err(CliError::Configuration(format!(
@@ -1459,8 +1452,6 @@ pub(super) fn validate_trailing_stop_args(args: &TrailingStopArgs) -> Result<(),
     Ok(())
 }
 
-/// A native trailing stop, planned: the action to send and what the preview,
-/// the approval block and the result row say of it.
 pub(super) struct TrailingStopPlan {
     action: TrailingStop,
     coin: String,

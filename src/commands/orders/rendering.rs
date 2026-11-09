@@ -11,10 +11,9 @@ use crate::errors::{CliError, NextCommand, partial_results_fields};
 use crate::hints::CHECK_LIVE_COMMAND;
 use crate::output::{self, TableData};
 
-/// What the exchange did with one placed order leg. A fill reports the price
-/// and size it filled at; any other status keeps the planned ones. A rejected
-/// leg carries the exchange's error, so one bad leg never hides the legs that
-/// were placed.
+/// A fill reports the price and size it filled at; any other status keeps the planned
+/// ones. A rejected leg carries the exchange's error, so one bad leg never hides the
+/// legs that were placed.
 #[derive(Debug, Clone, Serialize)]
 struct LegOutcome {
     status: Status,
@@ -70,9 +69,7 @@ fn paint_warnings(headers: &[&str], rows: Vec<Vec<String>>) -> Vec<Vec<String>> 
 /// One leg of a batch result: its columns and the error the exchange gave it,
 /// if any. The one description of how a leg table grows its error column.
 pub(super) trait LegRow: Serialize {
-    /// The columns before the error column.
     const HEADERS: &'static [&'static str];
-    /// The error column shows even when no leg failed.
     const ERROR_ALWAYS: bool = false;
 
     fn cells(&self) -> Vec<String>;
@@ -80,7 +77,6 @@ pub(super) trait LegRow: Serialize {
     fn error(&self) -> Option<&Rejected>;
 }
 
-/// The legs of a batch result, as a table and as a JSON array.
 pub(super) struct Legs<T> {
     pub(super) rows: Vec<T>,
 }
@@ -168,7 +164,6 @@ impl OrderConfirmation {
         }
     }
 
-    /// Build the row for a single order; a rejection is an error.
     pub(super) fn from_status(
         prepared: &PreparedOrder,
         status: OrderResponseStatus,
@@ -423,7 +418,6 @@ pub(super) fn single_status(
     }
 }
 
-/// What a batch was doing when some of its legs failed.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum BatchVerb {
     PlaceOrders,
@@ -465,11 +459,9 @@ pub(super) fn partial_results_error(headline: &str, lead: &str, commands: &[Stri
     CliError::PartialResults(format!("{headline}\n\n{lead}\n{commands}"))
 }
 
-/// Per-leg result of a batch where some legs succeeded and some failed.
-///
 /// In JSON it is one object that also carries the standard error keys
-/// ([`partial_results_fields`]), so the caller prints one document and the
-/// top-level error path stays silent for `PartialResults`.
+/// ([`partial_results_fields`]), so the caller prints one document and the top-level
+/// error path stays silent for `PartialResults`.
 pub(super) struct PartialBatchOutput {
     pub(super) legs: Box<dyn TableData>,
     pub(super) succeeded: usize,
@@ -478,7 +470,6 @@ pub(super) struct PartialBatchOutput {
 }
 
 impl PartialBatchOutput {
-    /// Error returned after the result document is printed.
     pub(super) fn error(&self) -> CliError {
         partial_results_error(
             &self.headline,
@@ -546,8 +537,6 @@ impl ListRow for ModifyConfirmation {
     const EMPTY: &'static str = "No order modified.";
 }
 
-/// One modification of a batch: the planned replacement and what the
-/// exchange said of it.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ModifyLeg {
     #[serde(flatten)]

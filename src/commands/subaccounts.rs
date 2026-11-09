@@ -123,8 +123,6 @@ struct SubaccountActionConfirmation {
 }
 
 impl SubaccountActionConfirmation {
-    /// A receipt with the fields every subaccount action reports; the caller
-    /// fills in the ones its action has.
     fn new(
         action: &str,
         status: &str,
@@ -187,8 +185,6 @@ impl ListRow for SubaccountActionConfirmation {
     const EMPTY: &'static str = "No results.";
 }
 
-/// The exchange actions of this module: each is the JSON that is sent and the
-/// source of what the dry run previews of it.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename = "createSubAccount")]
 struct CreateSubaccountAction {
@@ -456,7 +452,6 @@ fn spot_transfer_prompt(subaccount: Address, args: &SpotTransferArgs) -> String 
     }
 }
 
-/// The consent preview: where and as whom the transfer happens.
 fn consent_preview(chain: Chain, signer: &SelectedSigner, subaccount: Address) -> ConsentBlock {
     ConsentBlock::signed(chain, signer.address()).field("Subaccount", subaccount)
 }

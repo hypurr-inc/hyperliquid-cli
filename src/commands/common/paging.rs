@@ -19,13 +19,10 @@ use crate::invocation::Invocation;
 use crate::output::Notice;
 use crate::wire::InfoRequest;
 
-/// `--all` stops after this many requests even if the API still answers full pages.
 const MAX_PAGES: usize = 50;
 
-/// A history endpoint and the page size it truncates at.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Endpoint {
-    /// The `type` of the request, as the operator names it in a notice.
     pub label: &'static str,
     /// Rows per response before the API stops (verified against the live API).
     pub cap: usize,
@@ -51,7 +48,6 @@ pub(crate) const FUNDING_HISTORY: Endpoint = Endpoint {
 /// the same page size as the windowed read.
 pub(crate) const USER_FILLS_RECENT: Endpoint = USER_FILLS_BY_TIME;
 
-/// What lies beyond the rows a read returned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum More {
     Nothing,
@@ -62,19 +58,14 @@ enum More {
     Unwindowed,
 }
 
-/// The rows read, the read that produced them, and what lies beyond them.
 #[derive(Debug)]
 pub(crate) struct Window {
     pub rows: Vec<Value>,
     endpoint: Endpoint,
-    /// Whether the read was asked to page through the whole window.
     all: bool,
     more: More,
 }
 
-/// Read the window starting at `start`: one page, or every page under `all`.
-///
-/// `request` builds the request body for a given start time.
 pub(crate) async fn read_window(
     api: &ApiClient,
     endpoint: Endpoint,
@@ -137,7 +128,6 @@ fn row_time(row: &Value) -> Option<u64> {
     row.get("time").and_then(Value::as_u64)
 }
 
-/// Read a page of an endpoint with no time window (`userFills`).
 pub(crate) async fn read_recent(
     api: &ApiClient,
     endpoint: Endpoint,
@@ -158,9 +148,7 @@ pub(crate) async fn read_recent(
     })
 }
 
-/// Say on stderr that `window` stopped at the API's cap. A person reads one
-/// sentence; a JSON run gets one compact object, so stdout keeps the shape it
-/// always had.
+/// A person reads one sentence; a JSON run gets one compact object.
 pub(crate) fn announce_truncation(inv: &Invocation, window: &Window) {
     let (endpoint, all) = (window.endpoint, window.all);
     let returned = window.rows.len();

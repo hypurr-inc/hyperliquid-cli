@@ -236,7 +236,6 @@ impl TransferActionKind {
 
 const EXCHANGE_DEFAULT_FEE: &str = "not_estimated_exchange_default";
 
-/// What the consent prompt shows about an external transfer.
 struct TransferPreview {
     network: Chain,
     signer: Address,
@@ -376,7 +375,6 @@ async fn spot_send(
     Ok(())
 }
 
-/// The move `transfer send-asset` describes, its flags checked.
 fn asset_move(args: &SendAssetArgs) -> Result<AssetMove, CliError> {
     quantity::require_positive(args.amount, "amount")?;
     let to = destination_address(&args.to)?;
@@ -516,7 +514,6 @@ fn class_transfer_amount(amount: Decimal, subaccount: Option<Address>) -> String
     }
 }
 
-/// `transfer spot-to-perp` and `transfer perp-to-spot`.
 async fn run_class_transfer(
     inv: &Invocation,
     args: &ClassTransferArgs,
@@ -755,8 +752,6 @@ impl CliCommand for TransferSendAsset {
                 "amount": quantity::wire_text(*amount),
                 "from_subaccount": from_subaccount,
             });
-            // An API wallet previews the action it would sign, and the
-            // refusal the live run would give.
             inv.dry_run_signer()?;
             if resolved.mv.agent_form(AgentForm::of(inv))?.is_some() {
                 preview["action_type"] = "agentSendAsset".into();

@@ -40,7 +40,6 @@ pub(super) struct LiveOrder {
     pub oid: Option<u64>,
     pub cloid: Cloid,
     pub asset: CloidAsset,
-    /// The size still open, as of the last read.
     pub open_size: Decimal,
 }
 
@@ -188,10 +187,8 @@ mod tests {
         assert_eq!(order.open_size, Decimal::new(6, 1));
         assert!(!order.is_gone());
 
-        // Nothing changed: nothing left.
         assert_eq!(order.settle(Decimal::new(6, 1)), Decimal::ZERO);
 
-        // Gone: the remaining 0.6 left the book too.
         assert_eq!(order.settle(Decimal::ZERO), Decimal::new(6, 1));
         assert!(order.is_gone());
     }

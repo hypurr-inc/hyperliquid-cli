@@ -143,7 +143,6 @@ impl StakingActionKind {
         }
     }
 
-    /// The action name receipts report.
     fn receipt_action(self) -> &'static str {
         match self {
             Self::Delegate => "delegate",
@@ -235,8 +234,7 @@ pub struct ValidatorStats {
     pub n_samples: u64,
 }
 
-/// A validator as `staking validators` reports it: the exchange's fields plus
-/// the stake in HYPE, with the per-period stats as objects.
+/// The stake is in HYPE, with the per-period stats as objects.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ValidatorRow {
     validator: String,
@@ -332,7 +330,6 @@ impl ListRow for ValidatorRow {
     const EMPTY: &'static str = "No results.";
 }
 
-/// `staking summary`: the delegator summary with its delegations and rewards.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 struct StakingSummaryRow {
     address: String,
@@ -782,7 +779,6 @@ impl CliCommand for StakingHistory {
     }
 }
 
-/// `staking delegate` and `staking undelegate`.
 async fn run_delegation(
     inv: &Invocation,
     args: &DelegateArgs,
@@ -828,7 +824,6 @@ async fn run_deposit(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::
     let agent_action = StakingL1Action::CDeposit2 { wei };
     if inv.dry_run() {
         let mut preview = amount_dry_run_value(inv.remote()?.chain(), args, kind);
-        // A signer the live run would refuse fails the preview too.
         inv.dry_run_signer()?;
         if inv.acts_as_agent() {
             preview["action_type"] = agent_action.type_tag();

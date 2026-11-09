@@ -16,7 +16,7 @@ use crate::output;
 use crate::prompt;
 use crate::signing::SelectedSigner;
 
-/// What the user is asked to approve. It names the error a decline fails with.
+/// It names the error a decline fails with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConsentKind {
     Order,
@@ -254,8 +254,8 @@ pub(super) fn confirm_trailing_stop(
     )
 }
 
-/// Who is asked, and what the approval block tells them about where the action
-/// goes: the network, the signer, the account it acts for, the builder fee.
+/// The network, the signer, the account it acts for and the builder fee that the
+/// approval block shows.
 pub(super) struct ConsentTarget<'a> {
     mode: &'a Mode,
     network: Network,
@@ -314,10 +314,8 @@ impl<'a> ConsentTarget<'a> {
     }
 }
 
-/// Show the consent block on stderr, then ask `question`.
-///
-/// Runs that can't prompt fail with `--yes` as the way to answer before the
-/// block is printed.
+/// Runs that can't prompt fail with `--yes` as the way to answer before the block
+/// is printed.
 pub(super) fn ask_confirmation(
     target: &ConsentTarget<'_>,
     details: &[String],

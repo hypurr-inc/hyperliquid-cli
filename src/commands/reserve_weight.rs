@@ -39,7 +39,6 @@ pub struct ReserveWeightArgs {
     pub yes: bool,
 }
 
-/// The USDC the reservation costs.
 fn cost(weight: u32) -> Decimal {
     Decimal::from(weight) * COST_PER_REQUEST
 }

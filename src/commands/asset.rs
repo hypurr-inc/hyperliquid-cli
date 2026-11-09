@@ -72,7 +72,6 @@ pub struct AssetSearchArgs {
     pub limit: usize,
 }
 
-/// What an asset id's range says it is: the layout's name, as the JSON `kind`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AssetIdKind {
     #[default]
@@ -143,9 +142,8 @@ impl Serialize for LookupStatus {
     }
 }
 
-/// One asset id as `asset decode` and `asset search` print it. Unknown fields
-/// are left out of the JSON; `cli_input` is always present, `null` when no
-/// selector reproduces the id.
+/// Unknown fields are left out of the JSON; `cli_input` is always present, `null`
+/// when no selector reproduces the id.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct DecodedAssetId {
     pub asset_id: u64,
@@ -411,17 +409,16 @@ fn decode_outcome_fields(decoded: &mut DecodedAssetId, encoding: u64) {
     }
 }
 
-/// Metadata only enriches an asset id: when a source is down the command still
-/// answers from the id's own layout. The answer says so on stderr instead of
-/// looking like a complete one.
+/// `None` when the source failed: the answer falls back to the id's own layout and
+/// says so on stderr rather than looking complete.
 fn or_warn<T>(what: &str, loaded: Result<T, CliError>) -> Option<T> {
     loaded
         .map_err(|err| warn(&format!("{what} unavailable, results are limited: {err}")))
         .ok()
 }
 
-/// The outcome sides with the names the exchange sends: `asset search` and
-/// `asset decode` show template outcomes as `template:<id>`.
+/// Names are the ones the exchange sends: `asset search` and `asset decode` show
+/// template outcomes as `template:<id>`.
 async fn load_outcome_rows(api: &ApiClient) -> Option<Vec<OutcomeSideRow>> {
     or_warn(
         "outcome metadata",
@@ -574,8 +571,7 @@ fn fuzzy_search_threshold(query: &str) -> usize {
     if query.len() <= 3 { 1 } else { 2 }
 }
 
-/// The resolver over every HIP-3 market. A dex that failed
-/// to load is named on stderr: its markets are missing from the answer.
+/// A dex that failed to load is named on stderr: its markets are missing from the answer.
 async fn load_resolver(api: &ApiClient) -> Option<AssetResolver> {
     let resolver = or_warn("asset metadata", AssetResolver::load_with_hip3(api).await)?;
     for dex in resolver.unavailable_dexes() {

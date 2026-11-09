@@ -58,8 +58,7 @@ pub(super) fn rejection_error(lead: impl fmt::Display, rejected: &Rejected) -> C
     rejected.classify().into_error_after(lead)
 }
 
-/// [`rejection_error`] for text read straight from a response. `action`
-/// completes "Couldn't ...", such as `cancel order`.
+/// `action` completes "Couldn't ...", such as `cancel order`.
 pub(super) fn status_error(action: &str, text: &str) -> CliError {
     rejection_error(
         format!("Couldn't {action}. Exchange said: "),
@@ -184,9 +183,7 @@ impl Placement {
     }
 }
 
-/// The statuses of an order, cancel or modify response, in request order.
-/// `what` names the action in the error when the exchange answers something
-/// else.
+/// `what` names the action in the error when the exchange answers something else.
 pub(super) fn decode_statuses(
     response: serde_json::Value,
     what: &str,

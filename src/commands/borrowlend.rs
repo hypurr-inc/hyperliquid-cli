@@ -181,8 +181,7 @@ impl ListRow for ReserveRow {
     const EMPTY: &'static str = "No reserve states.";
 }
 
-/// The `borrowLend` exchange action, one JSON object for sending and for the
-/// preview. Verified against the @nktkas/hyperliquid v0.31.0 exchange schema:
+/// Verified against the @nktkas/hyperliquid v0.31.0 exchange schema:
 /// `{ type: "borrowLend", operation, token, amount: null|string }`.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename = "borrowLend")]
@@ -283,7 +282,6 @@ impl TableData for UserBorrowLendOutput {
     }
 }
 
-/// The dry-run preview of `operation` on `token`, `wei` being its wire amount.
 fn action_preview(
     chain: hypersdk::hypercore::Chain,
     operation: BorrowLendOperation,

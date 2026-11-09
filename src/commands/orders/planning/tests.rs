@@ -228,7 +228,6 @@ fn position_tpsl_batch_applies_custom_cloid_to_first_child_leg() {
     assert_eq!(prepared.legs.len(), 2);
     assert_eq!(prepared.legs[0].request.cloid, cloid);
     assert_eq!(prepared.legs[0].leg, TpslLegKind::TakeProfit);
-    // Stop-loss leg (second child) gets default to avoid duplicates
     assert_eq!(prepared.legs[1].request.cloid, Cloid::default());
     assert_eq!(prepared.legs[1].leg, TpslLegKind::StopLoss);
 }

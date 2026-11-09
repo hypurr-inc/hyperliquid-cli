@@ -38,7 +38,6 @@ const SKIP_SNAPSHOT: ArgSpec = arg("skip_snapshot").kind(InputKind::Boolean).des
 const DEX: ArgSpec = arg("dex")
     .describe("Perp dex name (HIP-3); repeat to subscribe to several. Defaults to the first dex.");
 
-/// A public market stream: no account involved.
 const fn market_stream(
     path: &'static [&'static str],
     about: &'static str,

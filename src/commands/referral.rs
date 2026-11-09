@@ -16,9 +16,8 @@ use crate::referral_code::{validate_referral_code, validate_referrer_code};
 use crate::signing::SelectedSigner;
 use crate::wire::InfoRequest;
 
-/// What `/info` `referral` answers. Every field is optional: an account with no
-/// referral activity answers with few of them. A field of the wrong type is an
-/// error, not an absent value.
+/// Every field is optional: an account with no referral activity answers with few of
+/// them. A field of the wrong type is an error, not an absent value.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReferralInfo {
@@ -192,8 +191,6 @@ impl ReferralActionKind {
     }
 }
 
-/// `setReferrer` and `registerReferrer`, which take the same code: one JSON
-/// object for sending and for the preview.
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum ReferrerAction<'a> {
@@ -209,8 +206,6 @@ impl ReferrerAction<'_> {
     }
 }
 
-/// `referral set` and `referral register`: preview under `--dry-run`, otherwise
-/// sign and submit `code`.
 async fn run_code_action(
     inv: &Invocation,
     kind: ReferralActionKind,
@@ -290,21 +285,15 @@ impl CliCommand for ReferralSet {
     async fn run(inv: &Invocation, args: &ReferralSetArgs) -> Result<(), anyhow::Error> {
         let code = match args.code.as_deref() {
             Some(code) => code.to_string(),
-            None => {
-                // `HYPERLIQUID_DEFAULT_REFERRAL_CODE`, the config file
-                // `default_referral_code`, the build-time default, then `TESTNET`
-                // on testnet. On mainnet nothing is assumed.
-                inv.settings()
-                    .default_referral_code(inv.remote()?.network().is_testnet())?
-                    .ok_or_else(|| {
-                        CliError::Unsupported(
-                            format!(
-                                "referral code is required; pass CODE explicitly, set {}, or use --testnet",
-                                env::DEFAULT_REFERRAL_CODE
-                            ),
-                        )
-                    })?
-            }
+            None => inv
+                .settings()
+                .default_referral_code(inv.remote()?.network().is_testnet())?
+                .ok_or_else(|| {
+                    CliError::Unsupported(format!(
+                        "referral code is required; pass CODE explicitly, set {}, or use --testnet",
+                        env::DEFAULT_REFERRAL_CODE
+                    ))
+                })?,
         };
         run_code_action(inv, ReferralActionKind::Set, &code).await
     }

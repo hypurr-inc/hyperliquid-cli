@@ -1,5 +1,3 @@
-//! `orders trailing-stop`: native perpetual trailing stops.
-//!
 //! The exchange tracks the mark price from the moment the stop activates and
 //! fires a market order once the mark retraces from its best level by the
 //! configured percent or price distance. The trigger never moves back. The
@@ -70,7 +68,6 @@ fn print_cancel_hint(oid: u64, on_behalf_of: Option<&str>) {
     );
 }
 
-/// Extract the order id from an `ok` trailing stop response.
 fn parse_trailing_stop_response(response: &serde_json::Value) -> Result<u64, CliError> {
     if let Some(typed) = exchange_reply::typed(response)
         && typed.kind == "trailingStop"

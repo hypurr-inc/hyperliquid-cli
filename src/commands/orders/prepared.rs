@@ -29,11 +29,9 @@ pub(super) fn order_batch(orders: Vec<OrderRequest>, grouping: OrderGrouping) ->
     }
 }
 
-/// A quote-denominated order size, as the user gave it with `--amount`.
 #[derive(Debug, Clone)]
 pub(super) struct QuoteAmount {
     pub(super) value: Decimal,
-    /// The quote asset the amount is in, such as `USDC`.
     pub(super) unit: String,
 }
 
@@ -53,7 +51,6 @@ pub(super) struct PreparedOrder {
     /// the market's rule implies, and what the account is set to. `None` on
     /// a market with no margin.
     pub(super) margin: Option<MarginPlan>,
-    /// The order write priority rate, in 1/100,000,000 of notional.
     pub(super) priority_rate: Option<u32>,
 }
 
@@ -65,7 +62,6 @@ impl PreparedOrder {
         }
     }
 
-    /// This order as an action of its own.
     pub(super) fn batch(&self) -> BatchOrder {
         order_batch(
             vec![self.request.clone()],

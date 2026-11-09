@@ -128,7 +128,6 @@ impl ListRow for PositionActionConfirmation {
     const EMPTY: &'static str = "No results.";
 }
 
-/// Fetch authenticated user's open positions without printing them.
 async fn list_snapshot(
     client: &ApiClient,
     user: Address,
@@ -171,7 +170,6 @@ fn margin_micro_units(amount: Decimal) -> Result<i64, CliError> {
     })
 }
 
-/// Which way a margin change moves isolated margin, from its signed `ntli`.
 fn margin_direction(ntli: i64) -> &'static str {
     if ntli < 0 { "remove" } else { "add" }
 }
@@ -205,7 +203,6 @@ async fn ensure_isolated_position(
     }
 }
 
-/// `--on-behalf-of` as every `positions` action takes it.
 const ON_BEHALF_OF: ArgSpec = arg("on_behalf_of")
     .kind(InputKind::ActingAccountSelector)
     .describe(

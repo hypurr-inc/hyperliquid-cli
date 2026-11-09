@@ -104,7 +104,6 @@ impl Row for AbstractionSetRow {
     }
 }
 
-/// Whose abstraction a change targets, and how the signer signs it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AbstractionPlan {
     user: Address,
@@ -113,8 +112,6 @@ struct AbstractionPlan {
     agent_signed: bool,
 }
 
-/// `form` is how the run's signer signs ([`AgentForm::of`]); `signer` is its
-/// own address.
 fn abstraction_plan(
     form: Option<AgentForm>,
     signer: Address,
@@ -139,8 +136,7 @@ fn abstraction_plan(
     })
 }
 
-/// `userSetAbstraction` may name the signer or one of its subaccounts. Refuse
-/// any other address before the exchange does.
+/// `userSetAbstraction` may name the signer or one of its subaccounts.
 async fn ensure_signer_owns(
     api: &ApiClient,
     signer: Address,

@@ -55,7 +55,6 @@ impl OrderIdentifier {
         }
     }
 
-    /// Whether both name the same order the way the exchange keys it.
     pub(super) fn names_same_order_as(&self, other: &Self) -> bool {
         self.to_status_identifier() == other.to_status_identifier()
     }
@@ -68,7 +67,6 @@ impl OrderIdentifier {
     }
 }
 
-/// One modification of `orders batch-modify`, as the orders file names it.
 #[derive(Debug, Clone)]
 pub(super) struct BatchModifyOrder {
     pub(super) identifier: OrderIdentifier,

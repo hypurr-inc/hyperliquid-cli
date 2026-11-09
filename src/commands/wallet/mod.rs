@@ -1,5 +1,3 @@
-//! Wallet and account management commands.
-//!
 //! OWS (Open Wallet Standard) is the only wallet backend: creation, import,
 //! listing and signing all go through the OWS vault (default `~/.hyperliquid`,
 //! or `HYPERLIQUID_OWS_VAULT_PATH`). The `wallet` and `account` command families
@@ -111,8 +109,6 @@ fn apply_setup_defaults(config: &mut Config, settings: &Settings) -> Vec<String>
     skipped
 }
 
-/// `wallet create|import|import-mnemonic`: the new wallet becomes the default and
-/// the config gains packaged builder/referral defaults it lacks.
 fn adopt_as_default(settings: &Settings) -> ConfigEdit<'_> {
     Box::new(move |config, wallet, _| {
         for warning in apply_setup_defaults(config, settings) {
@@ -168,7 +164,6 @@ fn print_wallet_change_with(
     ));
 }
 
-/// Create a vault wallet and make it the default.
 pub fn create(inv: &Invocation) -> Result<(), anyhow::Error> {
     let store = WalletStore::new(inv.settings());
     let new = store.add(
@@ -180,7 +175,6 @@ pub fn create(inv: &Invocation) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Import a private key into the vault and make it the default.
 pub fn import(inv: &Invocation, private_key: Option<&str>) -> Result<(), anyhow::Error> {
     let private_key = secret_arg_or_prompt(
         private_key,
@@ -199,7 +193,6 @@ pub fn import(inv: &Invocation, private_key: Option<&str>) -> Result<(), anyhow:
     Ok(())
 }
 
-/// Import a BIP-39 mnemonic into the vault and make it the default.
 pub fn import_mnemonic(
     inv: &Invocation,
     mnemonic: Option<&str>,
@@ -272,7 +265,6 @@ pub fn login(inv: &Invocation, args: &WalletLoginArgs) -> Result<(), anyhow::Err
     Ok(())
 }
 
-/// `wallet logout`: forget the stored Bankr key and address.
 pub fn logout(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
     let Some(file) = inv.settings().existing_config_file()? else {
         print_status(inv, "noop", "No Bankr login is stored");
@@ -409,7 +401,6 @@ pub fn account_ls(inv: &Invocation) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Pick one stored wallet by selector, listing the choices when none was given.
 fn choose_wallet(
     inv: &Invocation,
     store: &WalletStore<'_>,
@@ -441,7 +432,6 @@ pub fn account_set_default(inv: &Invocation, selector: Option<&str>) -> Result<(
     Ok(())
 }
 
-/// Delete a wallet from the vault after confirmation.
 pub fn account_remove(
     inv: &Invocation,
     selector: Option<&str>,
@@ -508,8 +498,6 @@ pub fn rename(inv: &Invocation, selector: &str, new_name: &str) -> Result<(), an
     print_wallet_change(inv, "Wallet renamed", &wallet)
 }
 
-/// Export an OWS wallet's secret.
-///
 /// NOTE: This command intentionally outputs plaintext private keys or mnemonics
 /// to stdout, which is an exception to the AGENTS.md rule "Never log, print,
 /// commit, or store plaintext private keys." The export is gated behind an

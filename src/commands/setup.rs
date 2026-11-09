@@ -1,5 +1,3 @@
-//! Guided first-time setup wizard.
-//!
 //! Questions and narration go to stderr; only the final result goes to stdout.
 //! Every answer is collected, and a summary printed, before the first change to
 //! the vault or config.
@@ -139,7 +137,6 @@ fn print_answers_summary(summary: &AnswersSummary<'_>) {
     eprintln!();
 }
 
-/// Print the non-interactive command that repeats this run, when the flags can express it.
 fn print_replay_command(
     replayable: bool,
     default_network: Network,
@@ -248,7 +245,6 @@ fn prompt_builder_defaults(
     Ok(Some((parsed.to_string(), fee)))
 }
 
-/// Decide, before anything changes, whether setup submits the builder approval.
 fn resolve_builder_approval(
     mode: &Mode,
     args: &SetupArgs,
@@ -400,7 +396,6 @@ impl CliCommand for Setup {
         ensure_setup_can_run(inv.requires_approval(args.yes)?, inv.format(), mode)?;
         let settings = inv.settings();
         let store = WalletStore::new(settings);
-        // A broken config is an error before any question is asked.
         settings.config()?;
 
         eprintln!("Welcome to Hyperliquid CLI setup");

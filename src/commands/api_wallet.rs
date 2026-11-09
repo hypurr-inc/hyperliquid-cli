@@ -22,8 +22,6 @@ const MAX_AGENT_EXPIRATION_MS: u64 = 180 * 24 * 60 * 60 * 1000;
 const REVOKE_REPLACEMENT_EXPIRATION_MS: u64 = 60 * 1000;
 const MAX_AGENT_NAME_LEN: usize = 16;
 
-/// Which command is approving an agent: they differ in whether a key is
-/// generated unless an address is given, and in what they tell the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Create,
@@ -40,7 +38,6 @@ impl Operation {
         }
     }
 
-    /// `create` generates a key unless `--agent-address` names one.
     fn generates_by_default(self) -> bool {
         self == Self::Create
     }
@@ -380,8 +377,6 @@ async fn approve_prepared(
     let chain = remote.chain();
 
     if inv.dry_run() {
-        // A preview takes no nonce from the machine-wide sequence: the clock
-        // stands in for the one a live approval would draw.
         let (_, approval_value) = approval_document(chain, &prepared, clock::now_ms())?;
         let master_address = inv.dry_run_signer()?.map(SelectedSigner::address);
         let row = approval_dry_run_row(operation, master_address, &prepared, approval_value);
@@ -425,8 +420,6 @@ async fn approve_prepared(
     Ok(())
 }
 
-/// The `approveAgent` action for `prepared` at `nonce`, and its JSON form as
-/// the receipt and the preview show it.
 fn approval_document(
     chain: Chain,
     prepared: &PreparedAgentApproval,

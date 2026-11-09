@@ -44,7 +44,6 @@ impl Row for InvalidatedNonce {
     }
 }
 
-/// The nonce, once it is one the exchange could hold.
 fn validate_nonce(nonce: u64, now_ms: u64) -> Result<u64, CliError> {
     if nonce <= now_ms.saturating_sub(WINDOW_PAST_MS)
         || nonce >= now_ms.saturating_add(WINDOW_FUTURE_MS)

@@ -7,9 +7,8 @@ use crate::margin::MarginModeArg;
 pub(super) struct OrderDryRunPlan {
     would_execute: &'static str,
     args: serde_json::Value,
-    /// Whether `args` names the acting account (`on_behalf_of`). Every order
-    /// preview does but chase's and bracket's, whose documents have never
-    /// carried the key at their top level.
+    /// Whether `args` names the acting account (`on_behalf_of`). Every order preview does
+    /// but chase's and bracket's, whose documents do not carry the key at their top level.
     names_account: bool,
 }
 
@@ -22,7 +21,6 @@ impl OrderDryRunPlan {
         }
     }
 
-    /// A plan whose args do not name the acting account.
     pub(super) fn unattributed(would_execute: &'static str, args: serde_json::Value) -> Self {
         Self {
             names_account: false,
@@ -30,7 +28,6 @@ impl OrderDryRunPlan {
         }
     }
 
-    /// Name the account the command acts for, as the user selected it.
     pub(super) fn with_account(mut self, on_behalf_of: Option<&str>) -> Self {
         if self.names_account {
             self.insert("on_behalf_of", serde_json::json!(on_behalf_of));
@@ -38,13 +35,11 @@ impl OrderDryRunPlan {
         self
     }
 
-    /// Show `mode` as the margin mode.
     pub(super) fn with_margin_mode(mut self, mode: MarginModeArg) -> Self {
         self.insert("margin_mode", serde_json::json!(mode.to_string()));
         self
     }
 
-    /// Add what a preview read on top of the plan, such as `side_effects`.
     pub(super) fn with_extra(mut self, key: &str, value: serde_json::Value) -> Self {
         self.insert(key, value);
         self

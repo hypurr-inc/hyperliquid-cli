@@ -6,17 +6,15 @@ use serde::Serialize;
 
 use crate::output::{self, TableData};
 
-/// What a missing value shows as in a table cell.
 pub const MISSING: &str = "n/a";
 
-/// One table row. `Self`'s `Serialize` output is its JSON document.
+/// `Self`'s `Serialize` output is its JSON document.
 pub trait Row: Serialize {
     const HEADERS: &'static [&'static str];
 
     fn cells(&self) -> Vec<String>;
 
-    /// [`Self::cells`] with human-facing styling. Style a column through
-    /// [`style_column`], which finds it by header.
+    /// Style a column through [`style_column`], which finds it by header.
     fn pretty_cells(&self) -> Vec<String> {
         self.cells()
     }
@@ -27,8 +25,6 @@ pub trait ListRow: Row {
     const EMPTY: &'static str;
 }
 
-/// Replace the cell under `header` with `style(cell)`.
-///
 /// # Panics
 ///
 /// When `R` has no such header: that is a bug in the row type, found by any
@@ -45,14 +41,12 @@ pub fn style_column<R: Row>(
     cells[column] = style(&cells[column]);
 }
 
-/// The text of an optional cell.
 #[must_use]
 pub fn or_missing(value: Option<impl ToString>) -> String {
     value.map_or_else(|| MISSING.to_string(), |value| value.to_string())
 }
 
-/// Paint the cell under `header` of every row `applies` to, leaving the rows
-/// alone when the table has no such column.
+/// A table without the column leaves the rows alone.
 pub fn paint_column(
     headers: &[&str],
     mut rows: Vec<Vec<String>>,
@@ -72,7 +66,6 @@ pub fn paint_column(
     rows
 }
 
-/// A list of rows: a JSON array and a table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rows<T> {
     rows: Vec<T>,
@@ -107,7 +100,6 @@ impl<T: ListRow> TableData for Rows<T> {
     }
 }
 
-/// One row: a JSON object and a one-row table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct One<T> {
     row: T,
