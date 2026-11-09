@@ -6,22 +6,16 @@ use hypersdk::hypercore::{Chain, PrivateKeySigner};
 use serde::Serialize;
 
 use crate::auth;
+use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
 use crate::commands::actions;
-
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
-use crate::output::{OutputFormat, TableData};
+use crate::output::{OutputFormat, TableData, serialize_row};
 use crate::signing::{SelectedSigner, Signs};
-
-/// Parse a raw address string strictly as an Ethereum 40-hex-character address.
-fn parse_address(raw: &str) -> Result<Address, CliError> {
-    raw.trim()
-        .parse::<Address>()
-        .map_err(|_| CliError::Unsupported(format!("Invalid address: {}", raw.trim())))
-}
+use crate::wire::{AddressRole, address};
 
 const MAX_AGENT_EXPIRATION_MS: u64 = 180 * 24 * 60 * 60 * 1000;
 const REVOKE_REPLACEMENT_EXPIRATION_MS: u64 = 60 * 1000;
@@ -237,7 +231,7 @@ impl TableData for ApiWalletActionOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
+        serialize_row(&self.row)
     }
 }
 
@@ -295,7 +289,7 @@ async fn create(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error
             agent_address: args.agent_address.as_deref(),
             generate: args.generate,
         },
-        actions::nonce_now(),
+        clock::now_ms(),
     )?;
     approve_prepared(inv, Operation::Create, prepared).await
 }
@@ -309,7 +303,7 @@ async fn approve(inv: &Invocation, args: &ApproveArgs) -> Result<(), anyhow::Err
             agent_address: args.agent_address.as_deref(),
             generate: args.generate,
         },
-        actions::nonce_now(),
+        clock::now_ms(),
     )?;
     approve_prepared(inv, Operation::Approve, prepared).await
 }
@@ -337,7 +331,7 @@ async fn list(inv: &Invocation, master_address: Address) -> Result<(), anyhow::E
 }
 
 async fn revoke(inv: &Invocation, args: &RevokeArgs) -> Result<(), anyhow::Error> {
-    let prepared = prepare_revoke_replacement(args, actions::nonce_now())?;
+    let prepared = prepare_revoke_replacement(args, clock::now_ms())?;
     approve_prepared(inv, Operation::Revoke, prepared).await
 }
 
@@ -383,17 +377,12 @@ async fn approve_prepared(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let chain = remote.chain();
-    let nonce = actions::nonce_now();
-    let approval = approval_action(chain, &prepared, nonce);
-    let approval_value =
-        serde_json::to_value(Action::ApproveAgent(approval.clone())).map_err(|err| {
-            CliError::Internal(anyhow::anyhow!(
-                "failed to encode approveAgent action: {err}"
-            ))
-        })?;
 
     if inv.dry_run() {
-        let master_address = inv.preview_signer()?.ok().map(SelectedSigner::address);
+        // A preview takes no nonce from the machine-wide sequence: the clock
+        // stands in for the one a live approval would draw.
+        let (_, approval_value) = approval_document(chain, &prepared, clock::now_ms())?;
+        let master_address = inv.dry_run_signer()?.map(SelectedSigner::address);
         let row = approval_dry_run_row(operation, master_address, &prepared, approval_value);
         print_action_output(inv, row);
         return Ok(());
@@ -402,6 +391,8 @@ async fn approve_prepared(
     ensure_generated_key_projection_is_safe(&prepared, inv)?;
 
     let signer = inv.resolve_signer()?;
+    let nonce = actions::nonce_now();
+    let (approval, approval_value) = approval_document(chain, &prepared, nonce)?;
     actions::send_l1_action_raw(
         remote.api(),
         &signer,
@@ -431,6 +422,22 @@ async fn approve_prepared(
         },
     );
     Ok(())
+}
+
+/// The `approveAgent` action for `prepared` at `nonce`, and its JSON form as
+/// the receipt and the preview show it.
+fn approval_document(
+    chain: Chain,
+    prepared: &PreparedAgentApproval,
+    nonce: u64,
+) -> Result<(ApproveAgent, serde_json::Value), CliError> {
+    let approval = approval_action(chain, prepared, nonce);
+    let value = serde_json::to_value(Action::ApproveAgent(approval.clone())).map_err(|err| {
+        CliError::Internal(anyhow::anyhow!(
+            "failed to encode approveAgent action: {err}"
+        ))
+    })?;
+    Ok((approval, value))
 }
 
 fn approval_dry_run_row(
@@ -490,7 +497,7 @@ fn prepare_agent_approval(
 
     if let Some(agent_address) = input.agent_address {
         return Ok(PreparedAgentApproval {
-            agent_address: parse_address(agent_address)?,
+            agent_address: address(agent_address.trim(), AddressRole::Agent)?,
             generated_private_key: None,
             display_name,
             action_agent_name,

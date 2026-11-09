@@ -9,6 +9,7 @@ use ows_lib::types::WalletInfo;
 
 use crate::config::Config;
 use crate::errors::CliError;
+use crate::ows::hints;
 use crate::ows::vault::{HyperliquidAccount, Vault};
 use crate::settings::{ConfigTransaction, Settings};
 
@@ -146,11 +147,22 @@ impl<'a> WalletStore<'a> {
         match self.vault.delete(&wallet.id) {
             Ok(()) => cause,
             Err(err) => anyhow::anyhow!(
-                "{cause} (and removing the new wallet '{}' from the vault failed: {err}; delete it with `hyperliquid wallet delete {}`)",
+                "{cause} (and removing the new wallet '{}' from the vault failed: {err}; delete it with `{}`)",
                 wallet.name,
-                wallet.id
+                hints::wallet_delete(&wallet.id)
             ),
         }
+    }
+
+    /// How a wallet becomes the default signer in the config: the one place
+    /// that key is written for a wallet.
+    pub fn make_default(config: &mut Config, wallet: &WalletInfo) {
+        config.default_wallet_id = Some(wallet.id.clone());
+    }
+
+    /// A [`ConfigEdit`] that makes the new wallet the default.
+    pub fn set_default_edit() -> ConfigEdit<'static> {
+        Box::new(|config, wallet, _| Self::make_default(config, wallet))
     }
 
     /// Make `wallet` the default signer. A wallet that can't sign for Hyperliquid
@@ -159,7 +171,7 @@ impl<'a> WalletStore<'a> {
     pub fn set_default(&self, wallet: &WalletInfo) -> Result<HyperliquidAccount, anyhow::Error> {
         let account = Vault::hyperliquid_account(wallet)?;
         self.settings
-            .update_config(|config| config.default_wallet_id = Some(wallet.id.clone()))?;
+            .update_config(|config| Self::make_default(config, wallet))?;
         Ok(account)
     }
 
@@ -209,9 +221,7 @@ mod tests {
     }
 
     fn make_default() -> Option<ConfigEdit<'static>> {
-        Some(Box::new(|config, wallet, _| {
-            config.default_wallet_id = Some(wallet.id.clone());
-        }))
+        Some(WalletStore::set_default_edit())
     }
 
     #[test]

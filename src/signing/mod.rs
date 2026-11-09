@@ -8,16 +8,18 @@
 //! [`Signs`] names a payload's kind before it exists, so a command's spec can
 //! state what it signs and [`SelectedSigner::ensure_covers`] can refuse early;
 //! [`Payload::signs`] derives the same kind from a payload, so the early and the
-//! late answer are one rule. Every signature a remote provider returns is
-//! checked, once, against the payload's own digest and the selected address.
+//! late answer are one rule. Both live in the [`payload`] leaf, which the
+//! providers import instead of this module. Every signature a remote provider
+//! returns is checked, once, against the payload's own digest and the selected
+//! address.
 
 pub(crate) mod nonce;
+pub(crate) mod payload;
 pub(crate) mod signature;
 
 use alloy::dyn_abi::TypedData;
 use alloy::primitives::B256;
 use alloy::signers::SignerSync;
-use alloy::sol_types::SolStruct;
 use chrono::{DateTime, Utc};
 use hypersdk::Address;
 use hypersdk::hypercore::signing::agent_signing_hash;
@@ -25,95 +27,27 @@ use hypersdk::hypercore::types::{Action, ActionRequest, Signature};
 use hypersdk::hypercore::{Chain, PrivateKeySigner};
 use ows_lib::types::WalletInfo;
 
+pub(crate) use self::payload::{Payload, USER_SIGNED_PREFIX, expires_after_refusal};
+pub use self::payload::{Signs, ensure_supports_expires_after};
 use self::signature::Provider;
 use crate::bankr::{self, BankrClient, BankrSigner};
 use crate::errors::CliError;
 use crate::ows::signing::{self as ows_signing, OwsSigningConfig};
 use crate::ows::vault::Vault;
 
-/// The prefix of a user-signed action's EIP-712 primary type.
-pub(crate) const USER_SIGNED_PREFIX: &str = "HyperliquidTransaction:";
-
-/// The kind of signature a command asks for, known before anything is signed:
-/// what a [`CommandSpec`](crate::command_spec::CommandSpec) declares and what
-/// each provider answers [`SelectedSigner::ensure_covers`] for.
+/// What a signing key is to the exchange: whether it acts for its own account
+/// or for a master's. An API wallet can trade for its master but not approve
+/// agents or withdraw, and holds no account data of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Signs<'a> {
-    /// An L1 action: trading, margin, vault and subaccount actions.
-    L1Action,
-    /// A user-signed action's EIP-712 document, by struct name.
-    UserSigned(&'a str),
-    /// A user-signed [`Action`] whose document hypersdk does not expose.
-    Digest,
-}
-
-impl Signs<'static> {
-    #[must_use]
-    pub const fn user_signed<T: SolStruct>() -> Self {
-        Self::UserSigned(T::NAME)
-    }
-}
-
-/// The refusal for `expiresAfter` on a user-signed action: its EIP-712 document
-/// has no such field, and the exchange rejects the request field beside it
-/// (<https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#expires-after>).
-pub(crate) fn expires_after_refusal() -> CliError {
-    CliError::Unsupported(
-        "--expires-after applies to L1 actions only (orders, cancels, modifies, leverage, margin, TWAP, vault, subaccount and similar); user-signed actions such as transfers, withdrawals, staking deposits and delegations, API wallet and builder approvals and abstraction changes do not support expiresAfter"
-            .to_string(),
-    )
-}
-
-/// Whether a command that signs `signs` can carry `--expires-after`.
-pub fn ensure_supports_expires_after(signs: Option<Signs<'_>>) -> Result<(), CliError> {
-    match signs {
-        Some(Signs::L1Action) => Ok(()),
-        Some(Signs::UserSigned(_) | Signs::Digest) => Err(expires_after_refusal()),
-        None => Err(CliError::Unsupported(
-            "--expires-after applies to commands that sign an L1 action; this command signs nothing"
-                .to_string(),
-        )),
-    }
-}
-
-pub(crate) enum Payload<'a> {
-    /// An L1 action: its msgpack hash wrapped in the `Agent` struct.
-    Agent { chain: Chain, connection_id: B256 },
-    /// A user-signed action's EIP-712 document.
-    UserSigned(&'a TypedData),
-    /// The EIP-712 digest of a user-signed [`Action`] whose document hypersdk
-    /// does not expose.
-    Digest(B256),
-}
-
-impl Payload<'_> {
-    /// The EIP-712 digest a signature over this payload must recover against.
-    pub(crate) fn digest(&self) -> Result<B256, CliError> {
-        match self {
-            Self::Agent {
-                chain,
-                connection_id,
-            } => Ok(agent_signing_hash(*chain, *connection_id)),
-            Self::UserSigned(typed_data) => typed_data.eip712_signing_hash().map_err(|err| {
-                CliError::Internal(anyhow::anyhow!("failed to hash typed data: {err}"))
-            }),
-            Self::Digest(digest) => Ok(*digest),
-        }
-    }
-
-    /// The kind of signature this payload is, as a command's spec would declare it.
-    pub(crate) fn signs(&self) -> Signs<'_> {
-        match self {
-            Self::Agent { .. } => Signs::L1Action,
-            Self::UserSigned(typed_data) => Signs::UserSigned(
-                typed_data
-                    .primary_type
-                    .strip_prefix(USER_SIGNED_PREFIX)
-                    .unwrap_or(&typed_data.primary_type),
-            ),
-            Self::Digest(_) => Signs::Digest,
-        }
-    }
+pub enum SignerRole {
+    /// Acts for its own account: the exchange answered and it is no API wallet.
+    Master,
+    /// An API wallet signing for `master`, as a stored account records or as
+    /// the exchange reports.
+    Agent { master: Address },
+    /// Nothing proves which. A key that no stored account describes, whose
+    /// role was not asked of the exchange or could not be read.
+    Unverified,
 }
 
 /// How a local key was obtained, which is all `wallet show` needs to say.
@@ -232,11 +166,25 @@ impl SelectedSigner {
         }
     }
 
+    /// What the account store alone says this signer is: a stored account
+    /// whose data lives under another address is an agent of that master.
+    /// Every other signer is [`SignerRole::Unverified`] here; only the
+    /// exchange can say ([`Invocation::signer_role`](crate::invocation::Invocation::signer_role)).
+    /// The one offline definition of an agent wallet, which `master_only` and
+    /// the agent form of an action use.
+    #[must_use]
+    pub fn local_role(&self) -> SignerRole {
+        match self.query_address() {
+            master if master != self.address() => SignerRole::Agent { master },
+            _ => SignerRole::Unverified,
+        }
+    }
+
     /// Whether this signs as an agent wallet for another account, which can
     /// trade for its master but not approve agents or withdraw.
     #[must_use]
     pub fn is_stored_agent(&self) -> bool {
-        self.query_address() != self.address()
+        matches!(self.local_role(), SignerRole::Agent { .. })
     }
 
     #[must_use]
@@ -351,9 +299,11 @@ impl SelectedSigner {
                     connection_id,
                 }
             }
-            _ if expires_after.is_some() => return Err(expires_after_refusal()),
             _ => Payload::Digest(prehash),
         };
+        if expires_after.is_some() {
+            ensure_supports_expires_after(Some(payload.signs()))?;
+        }
         let signature = self.sign(&payload)?;
         let request = ActionRequest {
             action,
@@ -562,7 +512,13 @@ mod tests {
                 )
                 .unwrap_err();
             assert_eq!(err.exit_code(), 13, "{err}");
-            assert!(err.to_string().contains("L1 actions only"), "{err}");
+            assert_eq!(
+                err.to_string(),
+                ensure_supports_expires_after(Some(Signs::Digest))
+                    .unwrap_err()
+                    .to_string(),
+                "the refusal at signing time is the one the spec check gives"
+            );
         }
     }
 
@@ -796,5 +752,22 @@ mod tests {
                 .source
                 .starts_with("Bankr hosted wallet (0x")
         );
+    }
+
+    #[test]
+    fn only_a_stored_account_that_records_a_master_is_known_offline_to_be_an_agent() {
+        let master: Address = "0x0000000000000000000000000000000000000004"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            SelectedSigner::stored_account(key(), "agent".to_string(), master).local_role(),
+            SignerRole::Agent { master }
+        );
+        let own = SelectedSigner::private_key(key());
+        let stored_master = SelectedSigner::stored_account(key(), "m".to_string(), own.address());
+        for signer in [own, stored_master, SelectedSigner::keystore(key())] {
+            assert_eq!(signer.local_role(), SignerRole::Unverified);
+            assert!(!signer.is_stored_agent());
+        }
     }
 }

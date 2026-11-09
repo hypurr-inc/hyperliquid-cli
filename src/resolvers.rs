@@ -9,10 +9,14 @@ pub enum HexAddressError {
     Zero,
 }
 
-/// Parse `value` as a 40-hex-digit address whose `0x` prefix is optional, the
-/// way `Address::from_str` does. Does not trim.
+/// Parse `value` as a 40-hex-digit address whose `0x` (or `0X`) prefix is
+/// optional, the way `Address::from_str` does. Does not trim.
 pub fn parse_hex_address(value: &str, reject_zero: bool) -> Result<Address, HexAddressError> {
-    parse_digits(value.strip_prefix("0x").unwrap_or(value), reject_zero)
+    let digits = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    parse_digits(digits, reject_zero)
 }
 
 /// Parse `value` as a 0x-prefixed 40-hex-digit address. Does not trim.
@@ -91,5 +95,17 @@ mod tests {
             parse_hex_address("0x0000000000000000000000000000000000000000", true),
             Err(HexAddressError::Zero)
         );
+    }
+
+    #[test]
+    fn the_lenient_form_takes_either_prefix_case_like_address_from_str() {
+        let digits = "00000000000000000000000000000000000000ab";
+        for prefixed in [format!("0x{digits}"), format!("0X{digits}")] {
+            assert_eq!(
+                parse_hex_address(&prefixed, true),
+                Ok(digits.parse::<Address>().unwrap()),
+                "{prefixed}"
+            );
+        }
     }
 }

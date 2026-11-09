@@ -78,6 +78,9 @@
 - `outcomes split|merge|merge-question|negate` name unreadable `outcomeMeta` entries on stderr, as `outcomes list` already did, instead of skipping them silently.
 - Outcome descriptions (`key:value|key:value`) are read by one parser for names and for `asset search`/`asset decode`: keys and values are trimmed, an empty value counts as absent and the first occurrence of a key wins. Template names used to keep surrounding spaces and empty values, and `asset` read the last duplicate.
 - `meta` and `perps dexs` read each dex's `meta` with the same decoder as the rest of the CLI: a dex market without `szDecimals` is a decode error (`decode failed while loading HIP-3 perpetual metadata`), where the exchange always sends it.
+- `api-wallet create|approve|revoke --dry-run` no longer draws nonces: a preview used to raise the machine-wide nonce mark and write the data directory. The preview's `approval_action.nonce` is now the clock time.
+- A vault wallet whose Hyperliquid account address is malformed is an error (`ows_malformed_response`) when the default signer is chosen, as it already was in `account ls`; the default signer lookup used to skip such a wallet silently.
+- Builder, protocol (validator, staking-link user, sub-builder) and watched-account addresses accept an uppercase `0X` prefix, as `--account` and `api-wallet --agent-address` always did.
 
 ## 0.18.0 - 2026-11-09
 

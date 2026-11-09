@@ -139,6 +139,35 @@ async fn the_mark_and_its_directory_are_private() {
     assert_eq!(mode(&env.data_dir()), 0o700);
 }
 
+const DRY_RUN_APPROVALS: [&[&str]; 3] = [
+    &["api-wallet", "create", "--dry-run"],
+    &["api-wallet", "approve", "--generate", "--dry-run"],
+    &["api-wallet", "revoke", "--unnamed", "--dry-run"],
+];
+
+#[tokio::test]
+async fn a_dry_run_approval_consumes_no_nonce_and_writes_no_mark() {
+    let env = IsolatedHome::new();
+    let server = exchange().await;
+
+    for args in DRY_RUN_APPROVALS {
+        signed(&env, &server, args).assert().success();
+    }
+
+    assert!(
+        !mark_file(&env).exists(),
+        "a preview must not create the nonce mark"
+    );
+    assert!(server.exchange_bodies().await.is_empty());
+
+    let mark = unix_millis() + 60 * 60 * 1000;
+    write_mark(&env, mark);
+    for args in DRY_RUN_APPROVALS {
+        signed(&env, &server, args).assert().success();
+    }
+    assert_eq!(read_mark(&env), mark, "a preview must not raise the mark");
+}
+
 #[tokio::test]
 async fn an_unwritable_data_directory_still_signs_and_says_so() {
     let env = IsolatedHome::new();
