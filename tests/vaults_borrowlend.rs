@@ -2,12 +2,21 @@ mod support;
 
 use predicates::prelude::*;
 use serde_json::Value;
-use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, mount_all_mids};
+use support::{
+    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address,
+    mount_all_mids,
+};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const VALID_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const VAULT_ADDRESS: &str = "0x0000000000000000000000000000000000000002";
+
+fn assert_signed_by_test_key(json: &Value) {
+    let signer = expected_address(VALID_PRIVATE_KEY);
+    assert_eq!(json["signer"], signer);
+    assert_eq!(json["acting_as"], signer);
+}
 
 async fn mount_override_healthcheck(server: &MockServer) {
     mount_all_mids(server, "51000", "3000").await;
@@ -556,6 +565,21 @@ async fn vault_list_accepts_protocol_and_user_kind_labels() {
     assert_eq!(user_rows[0]["kind"], "parent");
     assert_eq!(user_rows[1]["name"], "Gamma Hedge");
     assert_eq!(user_rows[1]["kind"], "child");
+
+    let parent_output = env
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .args(["--format", "json", "vault", "list", "--kind", "parent"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parent_json: Value = serde_json::from_slice(&parent_output).unwrap();
+    let parent_rows = parent_json.as_array().unwrap();
+    assert_eq!(parent_rows.len(), 1);
+    assert_eq!(parent_rows[0]["name"], "Beta Yield");
+    assert_eq!(parent_rows[0]["kind"], "parent");
 }
 
 #[tokio::test]
@@ -598,6 +622,36 @@ async fn vault_search_rejects_malformed_user_before_network() {
         .stderr(predicate::str::contains(
             "address must be a 0x-prefixed 40-byte hex string",
         ));
+}
+
+#[test]
+fn vault_actions_reject_bad_vault_and_amount_before_auth() {
+    let zero = "0x0000000000000000000000000000000000000000";
+    let cases: [(&str, &str, &str); 3] = [
+        (zero, "1", "zero address"),
+        ("INVALID", "1", "0x-prefixed"),
+        (VAULT_ADDRESS, "0.0000001", "amount"),
+    ];
+
+    for action in ["deposit", "withdraw"] {
+        for (vault, amount, message) in cases {
+            let env = IsolatedHome::new();
+            env.command()
+                .args([
+                    "vault",
+                    action,
+                    "--vault",
+                    vault,
+                    "--amount",
+                    amount,
+                    "--testnet",
+                ])
+                .assert()
+                .code(2)
+                .stdout(predicate::str::is_empty())
+                .stderr(predicate::str::contains(message));
+        }
+    }
 }
 
 #[tokio::test]
@@ -657,6 +711,7 @@ async fn vault_list_table_output_is_uncolored() {
 
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
+        .env("FORCE_COLOR", "1")
         .args(["--format", "table", "vault", "list", "--limit", "1"])
         .assert()
         .success()
@@ -697,13 +752,7 @@ async fn vault_deposit_and_withdraw_submit_vault_transfer_actions() {
     assert_eq!(deposit_json["amount"], "1000");
     assert_eq!(deposit_json["asset"], "USDC");
     assert_eq!(deposit_json["reversibility"], "partially_reversible");
-    assert!(deposit_json["signer"].as_str().unwrap().starts_with("0x"));
-    assert!(
-        deposit_json["acting_as"]
-            .as_str()
-            .unwrap()
-            .starts_with("0x")
-    );
+    assert_signed_by_test_key(&deposit_json);
 
     let withdraw_output = env
         .command()
@@ -733,13 +782,7 @@ async fn vault_deposit_and_withdraw_submit_vault_transfer_actions() {
     assert_eq!(withdraw_json["amount"], "500");
     assert_eq!(withdraw_json["asset"], "USDC");
     assert_eq!(withdraw_json["reversibility"], "partially_reversible");
-    assert!(withdraw_json["signer"].as_str().unwrap().starts_with("0x"));
-    assert!(
-        withdraw_json["acting_as"]
-            .as_str()
-            .unwrap()
-            .starts_with("0x")
-    );
+    assert_signed_by_test_key(&withdraw_json);
 
     let requests = server.received_requests().await.unwrap();
     let actions = requests
@@ -991,8 +1034,7 @@ async fn borrowlend_supply_dry_run_emits_core_writer_preview() {
         "HyperEVM CoreWriter.sendRawAction"
     );
     assert_eq!(json["args"]["verified_shape"]["action_id"], 15);
-    assert!(json["signer"].as_str().unwrap().starts_with("0x"));
-    assert!(json["acting_as"].as_str().unwrap().starts_with("0x"));
+    assert_signed_by_test_key(&json);
     assert!(json["vault_address"].is_null());
 }
 
@@ -1030,8 +1072,7 @@ async fn borrowlend_withdraw_dry_run_supports_max_preview() {
     assert_eq!(json["args"]["network"], "Testnet");
     assert_eq!(json["args"]["wei"], 0);
     assert_eq!(json["args"]["reversibility"], "partially_reversible");
-    assert!(json["signer"].as_str().unwrap().starts_with("0x"));
-    assert!(json["acting_as"].as_str().unwrap().starts_with("0x"));
+    assert_signed_by_test_key(&json);
     assert!(json["vault_address"].is_null());
 }
 
@@ -1092,8 +1133,7 @@ async fn borrowlend_live_actions_submit_verified_exchange_shape() {
     assert_eq!(supply_json["amount"], "5");
     assert_eq!(supply_json["max"], false);
     assert_eq!(supply_json["network"], "Testnet");
-    assert!(supply_json["signer"].as_str().unwrap().starts_with("0x"));
-    assert!(supply_json["acting_as"].as_str().unwrap().starts_with("0x"));
+    assert_signed_by_test_key(&supply_json);
     assert_eq!(supply_json["reversibility"], "partially_reversible");
 
     let withdraw_output = env
@@ -1118,12 +1158,7 @@ async fn borrowlend_live_actions_submit_verified_exchange_shape() {
     assert_eq!(withdraw_json["operation"], "withdraw");
     assert_eq!(withdraw_json["amount"], Value::Null);
     assert_eq!(withdraw_json["max"], true);
-    assert!(
-        withdraw_json["acting_as"]
-            .as_str()
-            .unwrap()
-            .starts_with("0x")
-    );
+    assert_signed_by_test_key(&withdraw_json);
     assert_eq!(withdraw_json["reversibility"], "partially_reversible");
 
     let requests = server.received_requests().await.unwrap();

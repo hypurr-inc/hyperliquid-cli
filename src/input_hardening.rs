@@ -3,9 +3,6 @@
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path};
-use std::sync::LazyLock;
-
-use regex_lite::Regex;
 
 use crate::errors::CliError;
 
@@ -210,11 +207,15 @@ fn file_subject(label: &str) -> String {
     }
 }
 
-fn reject_terminal_control_content(raw: &str, label: &str) -> Result<(), CliError> {
-    if raw
-        .chars()
+/// Whether `text` holds a control character that could drive a terminal.
+/// Newline, carriage return and tab are ordinary whitespace in JSON text.
+fn has_terminal_control(text: &str) -> bool {
+    text.chars()
         .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
-    {
+}
+
+fn reject_terminal_control_content(raw: &str, label: &str) -> Result<(), CliError> {
+    if has_terminal_control(raw) {
         return Err(CliError::Configuration(format!(
             "{label} JSON cannot contain terminal control characters"
         )));
@@ -261,10 +262,7 @@ fn validate_json_limits_inner(
             }
         }
         serde_json::Value::String(value) => {
-            if value
-                .chars()
-                .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
-            {
+            if has_terminal_control(value) {
                 return Err(CliError::Configuration(format!(
                     "{label} JSON cannot contain terminal control characters"
                 )));
@@ -278,35 +276,6 @@ fn validate_json_limits_inner(
         _ => {}
     }
     Ok(())
-}
-
-static PRIVATE_KEY_HEX_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b0x[0-9a-f]{64}\b").expect("private-key redaction regex must compile")
-});
-static BEARER_TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\b(bearer\s+)[^\s,;"'\}\]]+"#)
-        .expect("bearer-token redaction regex must compile")
-});
-static SECRET_FLAG_VALUE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?i)(--(?:private-key|keystore-password|payload-json)(?:=|\s+))(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;\}\]]+)"#,
-    )
-    .expect("secret flag redaction regex must compile")
-});
-static SECRET_LABEL_VALUE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?i)\b((?:private[_-]?key|keystore[_-]?password|password|passphrase|mnemonic|seed|secret|api[_-]?key|access[_-]?token|refresh[_-]?token)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;\}\]]+)"#,
-    )
-    .expect("secret label redaction regex must compile")
-});
-
-pub fn redact_sensitive_text(text: &str) -> String {
-    let redacted = SECRET_FLAG_VALUE_RE.replace_all(text, "$1[redacted]");
-    let redacted = SECRET_LABEL_VALUE_RE.replace_all(&redacted, "$1[redacted]");
-    let redacted = PRIVATE_KEY_HEX_RE.replace_all(&redacted, "[redacted]");
-    BEARER_TOKEN_RE
-        .replace_all(&redacted, "$1[redacted]")
-        .into_owned()
 }
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -402,23 +371,19 @@ mod tests {
     }
 
     #[test]
-    fn redacts_sensitive_patterns_from_plain_text() {
-        let private_key = format!("0x{}", "a".repeat(64));
-        let text = format!(
-            "error --keystore-password hunter2 passphrase='open sesame' Authorization: Bearer abc.def private_key={private_key} token_id=123"
-        );
-
-        let redacted = redact_sensitive_text(&text);
-
-        assert!(!redacted.contains("hunter2"));
-        assert!(!redacted.contains("open sesame"));
-        assert!(!redacted.contains("abc.def"));
-        assert!(!redacted.contains(&private_key));
-        assert!(redacted.contains("--keystore-password [redacted]"));
-        assert!(redacted.contains("passphrase=[redacted]"));
-        assert!(redacted.contains("Bearer [redacted]"));
-        assert!(redacted.contains("private_key=[redacted]"));
-        assert!(redacted.contains("token_id=123"));
+    fn every_secret_arg_a_command_declares_is_redacted_from_a_payload() {
+        let secret_ids: Vec<&str> = crate::command_registry::CommandRegistry::get()
+            .commands()
+            .iter()
+            .flat_map(|contract| contract.spec.args.iter())
+            .filter(|arg| arg.secret)
+            .map(|arg| arg.id)
+            .collect();
+        assert!(!secret_ids.is_empty());
+        for id in secret_ids {
+            let redacted = redact_sensitive_json(serde_json::json!({ id: "value" }));
+            assert_eq!(redacted[id], "[redacted]", "{id} escapes payload redaction");
+        }
     }
 
     #[test]

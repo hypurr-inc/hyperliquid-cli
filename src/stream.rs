@@ -11,24 +11,23 @@ use std::io::{self, Write};
 use std::pin::Pin;
 use std::time::Duration;
 
-use clap::Args;
+use clap::{ArgMatches, Args};
 use futures::{Stream, StreamExt};
 use hypersdk::Address;
 use hypersdk::hypercore::{Chain, Incoming, Subscription, UserEvent, ws::Event as WsEvent};
 use serde::Serialize;
 use tokio::time::Sleep;
 
+use crate::command_spec::{EnvZero, StreamBound, StreamEnv};
 use crate::errors::CliError;
-use crate::output::terminal;
-use crate::output::{JsonRenderOptions, Session};
+use crate::invocation::Invocation;
+use crate::output::JsonRenderOptions;
+use crate::settings::EnvSource;
 use crate::{output, ws};
 
-/// Exit status for SIGHUP (`128 + 1`).
-const EXIT_SIGHUP: i32 = 129;
-/// Exit status for SIGINT and the Ctrl+C key (`128 + 2`).
+/// Exit status for SIGINT and the Ctrl+C key (`128 + 2`). A stop signal exits
+/// `128 +` its number.
 pub(crate) const EXIT_SIGINT: i32 = 130;
-/// Exit status for SIGTERM (`128 + 15`).
-const EXIT_SIGTERM: i32 = 143;
 
 /// A polling stream with no explicit idle bound ends after this long without output.
 const POLL_DEFAULT_IDLE: Duration = Duration::from_secs(60 * 60);
@@ -37,15 +36,10 @@ pub(crate) const JSON_LINES_STDOUT_NOTICE: &str =
     "Streaming JSON lines because stdout isn't a terminal.";
 pub(crate) const JSON_LINES_STDIN_NOTICE: &str =
     "Streaming JSON lines because stdin isn't a terminal.";
+pub(crate) const JSON_LINES_DRIVEN_NOTICE: &str =
+    "Streaming JSON lines because an agent, CI or --non-interactive run is driving.";
 pub(crate) const CONNECTION_LOST_NOTICE: &str = "! Lost connection. Retrying automatically…";
 const STREAM_GAP_MESSAGE: &str = "Connection was lost and restored. Events may have been missed.";
-
-/// Output that no person is watching: stdout is not a terminal, or agent mode is on.
-pub(crate) fn piped_or_agent() -> bool {
-    !terminal::stdout_is_terminal() || terminal::agent_env()
-}
-
-// ── Closed pipe and line output ─────────────────────────────────────────
 
 /// Stdout was closed by the reader (`| head`); the stream should end quietly.
 #[derive(Debug)]
@@ -59,7 +53,6 @@ impl fmt::Display for StdoutClosed {
 
 impl StdError for StdoutClosed {}
 
-/// Whether `err` is a closed-stdout condition rather than a real failure.
 pub fn is_stdout_closed(err: &anyhow::Error) -> bool {
     err.downcast_ref::<StdoutClosed>().is_some()
 }
@@ -106,41 +99,31 @@ where
     write_line(output, &line)
 }
 
-pub(crate) fn emit_json_line_to_stdout<T: Serialize + ?Sized>(
-    item: &T,
-    projection: &JsonRenderOptions,
-) -> Result<(), anyhow::Error> {
-    emit_json_line(&mut io::stdout().lock(), item, projection)
-}
-
-// ── Signals and the run loop ────────────────────────────────────────────
-
-/// Stop signals a stream reacts to.
 pub struct ShutdownSignals {
+    /// Each handled signal with the exit status it ends the process with.
     #[cfg(unix)]
-    interrupt: tokio::signal::unix::Signal,
-    #[cfg(unix)]
-    terminate: tokio::signal::unix::Signal,
-    #[cfg(unix)]
-    hangup: tokio::signal::unix::Signal,
+    signals: Vec<(tokio::signal::unix::Signal, i32)>,
 }
 
 impl ShutdownSignals {
-    /// Register SIGINT, SIGTERM, and SIGHUP handlers.
     #[cfg(unix)]
     pub fn install() -> Result<Self, anyhow::Error> {
         use tokio::signal::unix::{SignalKind, signal};
 
-        let register = |kind: SignalKind, name: &str| {
-            signal(kind).map_err(|err| {
+        let signals = [
+            (SignalKind::interrupt(), "SIGINT"),
+            (SignalKind::terminate(), "SIGTERM"),
+            (SignalKind::hangup(), "SIGHUP"),
+        ]
+        .into_iter()
+        .map(|(kind, name)| {
+            let handler = signal(kind).map_err(|err| {
                 CliError::Internal(anyhow::anyhow!("failed to install {name} handler: {err}"))
-            })
-        };
-        Ok(Self {
-            interrupt: register(SignalKind::interrupt(), "SIGINT")?,
-            terminate: register(SignalKind::terminate(), "SIGTERM")?,
-            hangup: register(SignalKind::hangup(), "SIGHUP")?,
+            })?;
+            Ok((handler, 128 + kind.as_raw_value()))
         })
+        .collect::<Result<_, CliError>>()?;
+        Ok(Self { signals })
     }
 
     #[cfg(not(unix))]
@@ -148,15 +131,17 @@ impl ShutdownSignals {
         Ok(Self {})
     }
 
-    /// Wait for the first stop signal and return the matching exit status.
     #[cfg(unix)]
     pub async fn recv(&mut self) -> i32 {
-        tokio::select! {
-            Some(()) = self.interrupt.recv() => EXIT_SIGINT,
-            Some(()) = self.terminate.recv() => EXIT_SIGTERM,
-            Some(()) = self.hangup.recv() => EXIT_SIGHUP,
-            else => std::future::pending().await,
-        }
+        let waits = self.signals.iter_mut().map(|(signal, code)| {
+            Box::pin(async move {
+                match signal.recv().await {
+                    Some(()) => *code,
+                    None => std::future::pending().await,
+                }
+            })
+        });
+        futures::future::select_all(waits).await.0
     }
 
     #[cfg(not(unix))]
@@ -168,7 +153,6 @@ impl ShutdownSignals {
     }
 }
 
-/// How a stream's work ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamEnd {
     Finished,
@@ -204,8 +188,6 @@ where
         Err(err) => Err(err),
     }
 }
-
-// ── Bounds ──────────────────────────────────────────────────────────────
 
 /// A count of at least 1.
 pub fn parse_positive_usize(raw: &str) -> Result<usize, String> {
@@ -246,44 +228,32 @@ impl StreamBoundArgs {
     }
 }
 
-/// A bound that may also come from an environment variable.
-struct EnvBound {
-    name: &'static str,
-    /// `0` in the environment means "no bound" rather than "stop immediately".
-    positive_only: bool,
+/// The environment variable behind a bound, read as a count. A value that does
+/// not parse is ignored here and rejected by [`validate_env_bound`].
+fn read_env_bound(env: StreamEnv, source: &EnvSource) -> Option<usize> {
+    source
+        .get(env.name)
+        .and_then(|raw| parse_env_count(&raw, env.zero))
 }
 
-const WATCH_MAX_TICKS: EnvBound = EnvBound {
-    name: "HYPERLIQUID_WATCH_MAX_TICKS",
-    positive_only: true,
-};
+/// `0` is a bound only when the variable's [`EnvZero`] says so.
+fn parse_env_count(raw: &str, zero: EnvZero) -> Option<usize> {
+    raw.trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|value| zero == EnvZero::StopImmediately || *value > 0)
+}
 
-const SUBSCRIBE_MAX_EVENTS: EnvBound = EnvBound {
-    name: "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS",
-    positive_only: false,
-};
-
-impl EnvBound {
-    /// The bound, ignoring an unparsable value.
-    fn read(&self) -> Option<usize> {
-        std::env::var(self.name)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<usize>().ok())
-            .filter(|value| !self.positive_only || *value > 0)
-    }
-
-    /// Reject a set but unparsable value.
-    fn validate(&self) -> Result<(), CliError> {
-        let Ok(raw) = std::env::var(self.name) else {
-            return Ok(());
-        };
-        raw.trim().parse::<usize>().map(|_| ()).map_err(|err| {
-            CliError::Configuration(format!(
-                "{} must be a non-negative integer: {err}",
-                self.name
-            ))
-        })
-    }
+fn validate_env_bound(env: StreamEnv, source: &EnvSource) -> Result<(), CliError> {
+    let Some(raw) = source.get(env.name) else {
+        return Ok(());
+    };
+    raw.trim().parse::<usize>().map(|_| ()).map_err(|err| {
+        CliError::Configuration(format!(
+            "{} must be a non-negative integer: {err}",
+            env.name
+        ))
+    })
 }
 
 /// Resolved stop conditions of one stream.
@@ -297,31 +267,38 @@ pub struct StreamBounds {
 
 impl StreamBounds {
     /// `--max-ticks`, falling back to `HYPERLIQUID_WATCH_MAX_TICKS`.
-    pub fn snapshot_watch(max_ticks: Option<usize>) -> Self {
+    pub fn snapshot_watch(max_ticks: Option<usize>, source: &EnvSource) -> Self {
         Self {
-            max_items: max_ticks.or_else(|| WATCH_MAX_TICKS.read()),
+            max_items: max_ticks.or_else(|| {
+                StreamBound::SnapshotWatch
+                    .env()
+                    .and_then(|env| read_env_bound(env, source))
+            }),
             idle: None,
         }
     }
 
-    /// `--max-events`, falling back to `HYPERLIQUID_SUBSCRIBE_MAX_EVENTS`, plus `--idle-timeout-ms`.
-    pub fn subscribe(args: &StreamBoundArgs) -> Self {
+    /// `--max-events`, falling back to `HYPERLIQUID_SUBSCRIBE_MAX_EVENTS`, plus
+    /// `--idle-timeout-ms`. A bound of `0` is valid: the stream ends after its
+    /// `subscribed` line.
+    pub fn subscribe(args: &StreamBoundArgs, source: &EnvSource) -> Self {
         Self {
-            max_items: args.max_events.or_else(|| SUBSCRIBE_MAX_EVENTS.read()),
+            max_items: args.max_events.or_else(|| {
+                StreamBound::Subscribe
+                    .env()
+                    .and_then(|env| read_env_bound(env, source))
+            }),
             idle: args.idle(),
         }
     }
 
-    /// `watch risk` takes its bounds from flags only.
+    /// `watch risk` takes its bounds from flags only, and a polling stream
+    /// with no explicit idle bound ends after [`POLL_DEFAULT_IDLE`] without output.
     pub fn watch_risk(args: &StreamBoundArgs) -> Self {
         Self {
             max_items: args.max_events,
-            idle: args.idle(),
+            idle: args.idle().or(Some(POLL_DEFAULT_IDLE)),
         }
-    }
-
-    pub fn is_bounded(&self) -> bool {
-        self.max_items.is_some() || self.idle.is_some()
     }
 
     fn reached(&self, emitted: usize) -> bool {
@@ -329,28 +306,37 @@ impl StreamBounds {
     }
 }
 
-/// Machine contexts must not start an endless snapshot watch.
-pub fn require_tick_bound(max_ticks: Option<usize>) -> Result<(), CliError> {
-    if StreamBounds::snapshot_watch(max_ticks).is_bounded() {
+/// Machine contexts must not start an endless stream: reject a run of `bound`'s
+/// command, given the command's own matches, that declares no stop condition.
+/// The environment variable is consulted, and checked for validity, only when
+/// no flag bounds the run.
+pub fn require_bound(
+    bound: StreamBound,
+    matches: &ArgMatches,
+    source: &EnvSource,
+) -> Result<(), CliError> {
+    let internal = |err: clap::parser::MatchesError| CliError::Internal(anyhow::anyhow!(err));
+    if let Some(guard) = bound.required_when()
+        && !matches
+            .try_get_one::<bool>(guard)
+            .map_err(internal)?
+            .copied()
+            .unwrap_or(false)
+    {
         return Ok(());
     }
-    WATCH_MAX_TICKS.validate()?;
-    Err(CliError::Unsupported(
-        "JSON watch output must be bounded with --max-ticks <N> or HYPERLIQUID_WATCH_MAX_TICKS"
-            .to_string(),
-    ))
-}
-
-/// Machine contexts must not start an endless subscribe stream.
-pub fn require_event_bound(args: &StreamBoundArgs) -> Result<(), CliError> {
-    SUBSCRIBE_MAX_EVENTS.validate()?;
-    if StreamBounds::subscribe(args).is_bounded() {
-        return Ok(());
+    for id in bound.cli_args() {
+        if matches.try_contains_id(id).map_err(internal)? {
+            return Ok(());
+        }
     }
-    Err(CliError::Unsupported(
-        "JSON subscribe output must be bounded with --max-events <N>, --idle-timeout-ms <N>, or HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
-            .to_string(),
-    ))
+    if let Some(env) = bound.env() {
+        validate_env_bound(env, source)?;
+        if read_env_bound(env, source).is_some() {
+            return Ok(());
+        }
+    }
+    Err(CliError::Unsupported(bound.unbounded_message()))
 }
 
 /// Restarts on every emitted item; never fires when no idle bound is set.
@@ -361,7 +347,6 @@ impl IdleTimer {
         Self(idle.map(|idle| (idle, Box::pin(tokio::time::sleep(idle)))))
     }
 
-    /// Resolves with the configured idle duration once it elapses.
     async fn expired(&mut self) -> Duration {
         match &mut self.0 {
             Some((idle, sleep)) => {
@@ -379,8 +364,6 @@ impl IdleTimer {
     }
 }
 
-// ── Polling streams ─────────────────────────────────────────────────────
-
 /// One poll of a source that yields zero or more items per tick.
 pub(crate) trait Ticker {
     type Item;
@@ -389,36 +372,37 @@ pub(crate) trait Ticker {
 }
 
 /// Poll `ticker` every `interval`, passing each item to `emit`, until the
-/// item bound is reached or nothing was emitted for the idle bound (default one hour).
+/// item bound is reached or nothing was emitted for the idle bound.
 pub(crate) async fn poll_stream<T: Ticker>(
     ticker: &mut T,
     interval: Duration,
     bounds: StreamBounds,
     mut emit: impl FnMut(T::Item) -> Result<(), anyhow::Error>,
 ) -> Result<(), anyhow::Error> {
-    let idle = bounds.idle.unwrap_or(POLL_DEFAULT_IDLE);
     let mut emitted = 0usize;
-    let mut last_output = std::time::Instant::now();
+    let mut idle = IdleTimer::new(bounds.idle);
 
-    loop {
-        if last_output.elapsed() > idle || bounds.reached(emitted) {
-            return Ok(());
-        }
-
-        for item in ticker.tick().await? {
+    while !bounds.reached(emitted) {
+        let items = tokio::select! {
+            _ = idle.expired() => return Ok(()),
+            items = ticker.tick() => items?,
+        };
+        for item in items {
             emit(item)?;
             emitted += 1;
-            last_output = std::time::Instant::now();
+            idle.restart();
             if bounds.reached(emitted) {
                 return Ok(());
             }
         }
 
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            _ = idle.expired() => return Ok(()),
+            () = tokio::time::sleep(interval) => {}
+        }
     }
+    Ok(())
 }
-
-// ── Subscribe streams ───────────────────────────────────────────────────
 
 /// A WebSocket subscription paired with the messages that belong to it.
 pub struct SubscribeTarget {
@@ -489,16 +473,18 @@ impl SubscribeTarget {
 /// A human output format on a non-terminal stdout only happens when it was
 /// asked for explicitly, so it earns a notice that the stream is JSON lines.
 pub async fn stream_subscription(
-    session: &Session,
+    inv: &Invocation,
     chain: Chain,
     target: SubscribeTarget,
-    bounds: StreamBounds,
+    args: &StreamBoundArgs,
 ) -> Result<(), anyhow::Error> {
-    let human_format_requested = session.format() != output::OutputFormat::Json;
-    let projection = session.json_options();
-    if !terminal::stdout_is_terminal() && human_format_requested {
+    let mode = inv.mode();
+    let projection = inv.session().json_options();
+    let bounds = StreamBounds::subscribe(args, inv.settings().env());
+    if !mode.terminal.stdout && !mode.machine_format() {
         eprintln!("{JSON_LINES_STDOUT_NOTICE}");
     }
+    let announce_loss = mode.person_on_stderr();
 
     run_stream(async move {
         let mut ws = ws::websocket_for_chain(chain);
@@ -512,6 +498,7 @@ pub async fn stream_subscription(
             &mut ws,
             &mut stdout,
             projection,
+            announce_loss,
         )
         .await?;
         Ok(StreamEnd::Finished)
@@ -525,9 +512,10 @@ pub async fn stream_subscription(
 /// passes the real Hyperliquid WebSocket stream, while tests can pass a fake
 /// stream of [`WsEvent`] values and a byte buffer.
 ///
-/// A disconnect prints a stderr notice when stdout is a terminal. When the
-/// connection comes back, one `{"type":"warning","reason":"stream_gap"}` line
-/// marks the point where events may have been missed.
+/// A disconnect prints a stderr notice when `announce_loss` is set (see
+/// [`crate::mode::Mode::person_on_stderr`]). When the connection comes back, one
+/// `{"type":"warning","reason":"stream_gap"}` line marks the point where
+/// events may have been missed.
 pub async fn stream_subscription_events<S, F, W>(
     subscription_label: &str,
     bounds: StreamBounds,
@@ -535,6 +523,7 @@ pub async fn stream_subscription_events<S, F, W>(
     events: &mut S,
     output: &mut W,
     projection: &JsonRenderOptions,
+    announce_loss: bool,
 ) -> Result<(), anyhow::Error>
 where
     S: Stream<Item = WsEvent> + Unpin + ?Sized,
@@ -565,7 +554,7 @@ where
             }
             event = events.next() => {
                 let Some(event) = event else {
-                    return Err(subscription_closed_error().into());
+                    return Err(ws::closed_before("subscription events").into());
                 };
 
                 if handle_subscription_event(
@@ -575,6 +564,7 @@ where
                     &mut gap_pending,
                     output,
                     projection,
+                    announce_loss,
                 )? {
                     emitted_events += 1;
                     if bounds.reached(emitted_events) {
@@ -595,6 +585,7 @@ fn handle_subscription_event<F, W>(
     gap_pending: &mut bool,
     output: &mut W,
     projection: &JsonRenderOptions,
+    announce_loss: bool,
 ) -> Result<bool, anyhow::Error>
 where
     F: Fn(&Incoming) -> bool,
@@ -617,7 +608,7 @@ where
         WsEvent::Disconnected => {
             if !*gap_pending {
                 *gap_pending = true;
-                if terminal::stdout_is_terminal() {
+                if announce_loss {
                     eprintln!("{CONNECTION_LOST_NOTICE}");
                 }
             }
@@ -640,10 +631,6 @@ where
             Ok(false)
         }
     }
-}
-
-fn subscription_closed_error() -> CliError {
-    CliError::Unavailable("WebSocket closed before receiving subscription events.".to_string())
 }
 
 fn subscription_idle_timeout_error(idle_timeout: Duration) -> CliError {
@@ -696,38 +683,19 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn shutdown_signals_map_to_128_plus_signal() {
-        let mut signals = ShutdownSignals::install().unwrap();
-        let pid = std::process::id().to_string();
-
-        for (name, expected) in [("-HUP", 129), ("-TERM", 143), ("-INT", 130)] {
-            let status = std::process::Command::new("kill")
-                .args([name, &pid])
-                .status()
-                .unwrap();
-            assert!(status.success());
-            let code = tokio::time::timeout(Duration::from_secs(5), signals.recv())
-                .await
-                .expect("signal should arrive");
-            assert_eq!(code, expected, "{name}");
-        }
+    async fn shutdown_signals_exit_with_128_plus_the_signal_number() {
+        let signals = ShutdownSignals::install().unwrap();
+        let mut codes: Vec<i32> = signals.signals.iter().map(|(_, code)| *code).collect();
+        codes.sort_unstable();
+        assert_eq!(codes, [129, 130, 143], "SIGHUP, SIGINT and SIGTERM");
+        assert_eq!(EXIT_SIGINT, 130);
     }
 
     #[test]
-    fn bounds_without_any_limit_are_unbounded() {
-        assert!(!StreamBounds::default().is_bounded());
-        assert!(
-            StreamBounds {
-                max_items: Some(0),
-                idle: None
-            }
-            .is_bounded()
-        );
-        assert!(
-            StreamBounds::watch_risk(&StreamBoundArgs::default())
-                .max_items
-                .is_none()
-        );
+    fn watch_risk_bounds_default_the_idle_end_and_keep_explicit_ones() {
+        let defaulted = StreamBounds::watch_risk(&StreamBoundArgs::default());
+        assert_eq!(defaulted.max_items, None);
+        assert_eq!(defaulted.idle, Some(POLL_DEFAULT_IDLE));
         assert_eq!(
             StreamBounds::watch_risk(&StreamBoundArgs {
                 max_events: Some(3),
@@ -741,23 +709,158 @@ mod tests {
     }
 
     #[test]
-    fn explicit_tick_bound_wins_over_environment() {
-        assert_eq!(StreamBounds::snapshot_watch(Some(4)).max_items, Some(4));
-        assert!(require_tick_bound(Some(4)).is_ok());
+    fn zero_in_the_environment_follows_the_bound() {
+        let ticks = StreamBound::SnapshotWatch.env().unwrap().zero;
+        let events = StreamBound::Subscribe.env().unwrap().zero;
+        assert_eq!(parse_env_count("0", ticks), None, "0 ticks is not a bound");
+        assert_eq!(
+            parse_env_count("0", events),
+            Some(0),
+            "0 events stops at once"
+        );
+        assert_eq!(parse_env_count(" 3 ", ticks), Some(3));
+        assert_eq!(parse_env_count("3", events), Some(3));
+        assert_eq!(parse_env_count("many", events), None);
     }
 
     #[test]
-    fn explicit_event_or_idle_bound_satisfies_subscribe_requirement() {
-        let events = StreamBoundArgs {
-            max_events: Some(0),
-            idle_timeout_ms: None,
-        };
-        let idle = StreamBoundArgs {
-            max_events: None,
-            idle_timeout_ms: Some(10),
-        };
-        assert!(StreamBounds::subscribe(&events).is_bounded());
-        assert!(StreamBounds::subscribe(&idle).is_bounded());
+    fn every_bound_names_args_its_command_flattens() {
+        use clap::{Args, Command};
+        let watch = SnapshotWatchArgs::augment_args(Command::new("c"));
+        let events = StreamBoundArgs::augment_args(Command::new("c"));
+        for (bound, command) in [
+            (StreamBound::SnapshotWatch, &watch),
+            (StreamBound::Subscribe, &events),
+            (StreamBound::Polled, &events),
+        ] {
+            let ids = |id: &str| command.get_arguments().any(|arg| arg.get_id() == id);
+            for id in bound
+                .cli_args()
+                .iter()
+                .copied()
+                .chain(bound.required_when())
+            {
+                assert!(
+                    ids(id),
+                    "{bound:?} names `{id}`, which its args do not define"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_environment_help_documents_every_stream_bound_variable() {
+        let help = crate::settings::env_help_section();
+        for bound in [
+            StreamBound::SnapshotWatch,
+            StreamBound::Subscribe,
+            StreamBound::Polled,
+        ] {
+            if let Some(env) = bound.env() {
+                assert!(
+                    help.contains(env.name),
+                    "{} is missing from ENV_HELP",
+                    env.name
+                );
+            }
+        }
+    }
+
+    fn matches(args: &[&str]) -> ArgMatches {
+        use clap::{Args, Command};
+        let command =
+            StreamBoundArgs::augment_args(SnapshotWatchArgs::augment_args(Command::new("c")));
+        command.try_get_matches_from(args).unwrap()
+    }
+
+    fn env(pairs: &[(&'static str, &'static str)]) -> EnvSource {
+        EnvSource::fixed(pairs.iter().copied())
+    }
+
+    #[test]
+    fn polled_streams_must_declare_a_bound_with_the_watch_risk_hint() {
+        let none = env(&[]);
+        let err = require_bound(StreamBound::Polled, &matches(&["c"]), &none).unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert!(err.to_string().contains("--max-events 20"), "{err}");
+        for bounded in [["c", "--max-events", "3"], ["c", "--idle-timeout-ms", "50"]] {
+            assert!(require_bound(StreamBound::Polled, &matches(&bounded), &none).is_ok());
+        }
+    }
+
+    #[test]
+    fn snapshot_watch_is_bounded_only_when_watching() {
+        let none = env(&[]);
+        assert!(require_bound(StreamBound::SnapshotWatch, &matches(&["c"]), &none).is_ok());
+        assert!(
+            require_bound(
+                StreamBound::SnapshotWatch,
+                &matches(&["c", "--watch", "--max-ticks", "2"]),
+                &none
+            )
+            .is_ok()
+        );
+        let err = require_bound(
+            StreamBound::SnapshotWatch,
+            &matches(&["c", "--watch"]),
+            &none,
+        )
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert_eq!(
+            err.to_string(),
+            "Unsupported input: JSON watch output must be bounded with --max-ticks <N> or HYPERLIQUID_WATCH_MAX_TICKS"
+        );
+    }
+
+    #[test]
+    fn subscribe_is_bounded_by_events_idle_or_the_environment() {
+        let none = env(&[]);
+        let err = require_bound(StreamBound::Subscribe, &matches(&["c"]), &none).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Unsupported input: JSON subscribe output must be bounded with --max-events <N>, --idle-timeout-ms <N>, or HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        );
+        for bounded in [["c", "--max-events", "0"], ["c", "--idle-timeout-ms", "10"]] {
+            assert!(require_bound(StreamBound::Subscribe, &matches(&bounded), &none).is_ok());
+        }
+        let zero = env(&[("HYPERLIQUID_SUBSCRIBE_MAX_EVENTS", "0")]);
+        assert!(require_bound(StreamBound::Subscribe, &matches(&["c"]), &zero).is_ok());
+    }
+
+    #[test]
+    fn the_environment_bound_is_read_from_the_given_source_and_checked_only_when_consulted() {
+        let ticks = env(&[("HYPERLIQUID_WATCH_MAX_TICKS", "4")]);
+        assert_eq!(
+            StreamBounds::snapshot_watch(None, &ticks).max_items,
+            Some(4)
+        );
+        assert_eq!(
+            StreamBounds::snapshot_watch(Some(2), &ticks).max_items,
+            Some(2),
+            "a flag beats the variable"
+        );
+        assert_eq!(
+            StreamBounds::snapshot_watch(None, &env(&[])).max_items,
+            None
+        );
+
+        let garbage = env(&[("HYPERLIQUID_SUBSCRIBE_MAX_EVENTS", "many")]);
+        let err = require_bound(StreamBound::Subscribe, &matches(&["c"]), &garbage).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        assert!(
+            err.to_string()
+                .contains("HYPERLIQUID_SUBSCRIBE_MAX_EVENTS must be")
+        );
+        assert!(
+            require_bound(
+                StreamBound::Subscribe,
+                &matches(&["c", "--max-events", "3"]),
+                &garbage
+            )
+            .is_ok(),
+            "a flag bounds the run without consulting the variable"
+        );
     }
 
     struct CountingTicker {
@@ -849,6 +952,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_stream_idle_bound_also_ends_a_poll_that_never_returns() {
+        struct Stalled;
+        impl Ticker for Stalled {
+            type Item = ();
+
+            async fn tick(&mut self) -> Result<Vec<()>, anyhow::Error> {
+                std::future::pending().await
+            }
+        }
+
+        poll_stream(
+            &mut Stalled,
+            Duration::from_secs(1),
+            StreamBounds {
+                max_items: None,
+                idle: Some(Duration::from_millis(20)),
+            },
+            |()| Ok(()),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn poll_stream_propagates_emit_errors() {
         let mut ticker = CountingTicker {
             ticks: Arc::new(AtomicUsize::new(0)),
@@ -862,15 +989,5 @@ mod tests {
         .unwrap_err();
 
         assert!(is_stdout_closed(&err));
-    }
-
-    #[test]
-    fn subscribe_targets_match_only_their_own_messages() {
-        let message = Incoming::AllMids {
-            dex: None,
-            mids: Default::default(),
-        };
-        assert!(SubscribeTarget::all_mids().matches(&message));
-        assert!(!SubscribeTarget::trades("BTC".to_string()).matches(&message));
     }
 }

@@ -22,6 +22,24 @@ fn subscribe_schema_exposes_machine_context_stream_bounds() {
 }
 
 #[test]
+fn watch_risk_schema_reports_its_declared_stream_bound() {
+    let schemas = schema_all();
+    let schema = schemas
+        .iter()
+        .find(|schema| schema["command_path"] == json!(["watch", "risk"]))
+        .unwrap();
+
+    assert_eq!(schema["output_contract"], "bounded_ndjson_stream");
+    assert_eq!(schema["stream_bounds"]["required_in_machine_context"], true);
+    assert_eq!(
+        schema["stream_bounds"]["cli_args"],
+        json!(["max_events", "idle_timeout_ms"])
+    );
+    assert_eq!(schema["stream_bounds"]["env"], json!([]));
+    assert!(schema["stream_bounds"].get("required_when").is_none());
+}
+
+#[test]
 fn snapshot_watch_schema_exposes_conditional_stream_bounds() {
     let schemas = schema_all();
     let schema = schemas

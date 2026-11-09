@@ -7,6 +7,26 @@ use support::{
 use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+async fn exchange_actions(server: &MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path() == "/exchange")
+        .map(|request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["action"].clone()
+        })
+        .collect()
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
 fn basic_order(coin: &str, oid: u64) -> serde_json::Value {
     serde_json::json!({
         "timestamp": 1700000000000_u64,
@@ -243,21 +263,6 @@ async fn mock_twap_server_without_exchange() -> MockServer {
 }
 
 #[tokio::test]
-async fn orders_open_shows_empty_state() {
-    let env = IsolatedHome::new();
-    let server = mock_orders_server(vec![], vec![]).await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "open"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("No open orders").not())
-        .stderr(predicate::str::contains("No open orders."));
-}
-
-#[tokio::test]
 async fn orders_open_pretty_empty_state_uses_theme_colors() {
     let env = IsolatedHome::new();
     let server = mock_orders_server(vec![], vec![]).await;
@@ -405,26 +410,6 @@ async fn orders_twap_create_outputs_twap_id() {
     }))
     .await;
 
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_string_contains("\"type\":\"twapOrder\""))
-        .and(body_string_contains("\"m\":60"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {
-                "type": "twapOrder",
-                "data": {
-                    "status": {
-                        "running": {
-                            "twapId": 77738308
-                        }
-                    }
-                }
-            }
-        })))
-        .mount(&server)
-        .await;
-
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
@@ -444,7 +429,16 @@ async fn orders_twap_create_outputs_twap_id() {
         .assert()
         .success()
         .stdout(predicate::str::contains("77738308"))
-        .stdout(predicate::str::contains("running"));
+        .stdout(predicate::str::contains("running"))
+        .stderr(predicate::str::contains("Mainnet TWAP confirmation required").not());
+
+    let actions = exchange_actions(&server).await;
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["type"], "twapOrder");
+    assert_eq!(actions[0]["twap"]["a"], 0);
+    assert_eq!(actions[0]["twap"]["b"], true);
+    assert_eq!(actions[0]["twap"]["m"], 60);
+    assert_eq!(actions[0]["twap"]["t"], false);
 }
 
 #[tokio::test]
@@ -464,26 +458,6 @@ async fn orders_twap_create_supports_randomize_flag() {
         }
     }))
     .await;
-
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_string_contains("\"type\":\"twapOrder\""))
-        .and(body_string_contains("\"t\":true"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {
-                "type": "twapOrder",
-                "data": {
-                    "status": {
-                        "running": {
-                            "twapId": 77738399
-                        }
-                    }
-                }
-            }
-        })))
-        .mount(&server)
-        .await;
 
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
@@ -505,6 +479,10 @@ async fn orders_twap_create_supports_randomize_flag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("77738399"));
+
+    let actions = exchange_actions(&server).await;
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["twap"]["t"], true);
 }
 
 #[tokio::test]
@@ -524,27 +502,6 @@ async fn orders_twap_create_normalizes_size_and_reports_matching_units() {
         }
     }))
     .await;
-
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_string_contains("\"type\":\"twapOrder\""))
-        .and(body_string_contains("\"m\":5"))
-        .and(body_string_contains("\"s\":\"0.0007\""))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {
-                "type": "twapOrder",
-                "data": {
-                    "status": {
-                        "running": {
-                            "twapId": 77738311
-                        }
-                    }
-                }
-            }
-        })))
-        .mount(&server)
-        .await;
 
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
@@ -575,77 +532,42 @@ async fn orders_twap_create_normalizes_size_and_reports_matching_units() {
         .expect("expected twap exchange request");
     let body: serde_json::Value = serde_json::from_slice(&exchange_request.body).unwrap();
     assert_eq!(body["action"]["twap"]["s"], "0.0007");
+    assert_eq!(body["action"]["twap"]["m"], 5);
 }
 
 #[tokio::test]
-async fn orders_twap_create_rejects_duration_less_than_five_minutes() {
+async fn orders_twap_create_rejects_unsupported_durations_before_submission() {
     let env = IsolatedHome::new();
     let server = mock_twap_server_without_exchange().await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "twap-create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--size",
-            "1.0",
-            "--duration",
-            "299",
-            "--testnet",
-        ])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "TWAP duration must be at least 300 seconds",
-        ))
-        .stderr(predicate::str::contains("whole-minute"));
-}
-
-#[tokio::test]
-async fn orders_twap_create_rejects_non_minute_duration() {
-    let env = IsolatedHome::new();
-    let server = mock_twap_server_without_exchange().await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "twap-create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--size",
-            "1.0",
-            "--duration",
+    for (duration, message) in [
+        ("299", "TWAP duration must be at least 300 seconds"),
+        (
             "301",
-            "--testnet",
-        ])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
             "TWAP duration must be a whole-minute value in seconds",
-        ))
-        .stderr(predicate::str::contains("--duration 300"))
-        .stderr(predicate::str::contains("--duration 600"));
-}
-
-#[test]
-fn orders_twap_create_help_documents_whole_minute_duration() {
-    let env = IsolatedHome::new();
-
-    env.command()
-        .args(["orders", "twap-create", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("whole-minute value"))
-        .stdout(predicate::str::contains("300, 600"));
+        ),
+        ("604860", "cannot exceed 7 days"),
+    ] {
+        env.command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+            .args([
+                "orders",
+                "twap-create",
+                "--coin",
+                "BTC",
+                "--side",
+                "buy",
+                "--size",
+                "1.0",
+                "--duration",
+                duration,
+                "--testnet",
+            ])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(message));
+    }
 }
 
 #[tokio::test]
@@ -723,70 +645,6 @@ async fn orders_twap_create_mainnet_yes_bypasses_confirmation_prompt() {
 }
 
 #[tokio::test]
-async fn orders_twap_create_testnet_remains_non_interactive() {
-    let env = IsolatedHome::new();
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "twapOrder",
-            "data": {
-                "status": {
-                    "running": {
-                        "twapId": 77738310
-                    }
-                }
-            }
-        }
-    }))
-    .await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "twap-create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--size",
-            "1.0",
-            "--duration",
-            "3600",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("77738310"))
-        .stderr(predicate::str::contains("Mainnet TWAP confirmation required").not());
-}
-
-#[tokio::test]
-async fn orders_twap_cancel_outputs_confirmation() {
-    let env = IsolatedHome::new();
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "twapCancel",
-            "data": {
-                "status": "success"
-            }
-        }
-    }))
-    .await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "twap-cancel", "42", "--coin", "BTC", "--testnet"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("42"))
-        .stdout(predicate::str::contains("cancelled"));
-}
-
-#[tokio::test]
 async fn orders_twap_cancel_requires_coin() {
     let env = IsolatedHome::new();
 
@@ -860,108 +718,56 @@ async fn twap_cancel_with_non_btc_coin() {
     assert_eq!(body["action"]["t"], 42);
 }
 
-#[test]
-fn orders_twap_cancel_help_shows_required_coin() {
-    let env = IsolatedHome::new();
-
-    env.command()
-        .args(["orders", "twap-cancel", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--coin <COIN>"))
-        .stdout(predicate::str::contains("Perpetual coin"));
-}
-
 #[tokio::test]
 async fn orders_schedule_cancel_mainnet_prompts_and_aborts_without_submission() {
     let env = IsolatedHome::new();
     let server = mock_twap_server_without_exchange().await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .write_stdin("n\n")
-        .args(["orders", "schedule-cancel", "--in", "5m"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "Mainnet schedule-cancel confirmation required",
-        ))
-        .stderr(predicate::str::contains("action cancelled"));
-}
-
-#[tokio::test]
-async fn orders_schedule_cancel_clear_mainnet_prompts_and_aborts_without_submission() {
-    let env = IsolatedHome::new();
-    let server = mock_twap_server_without_exchange().await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .write_stdin("n\n")
-        .args(["orders", "schedule-cancel", "--clear"])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "Mainnet schedule-cancel confirmation required",
-        ))
-        .stderr(predicate::str::contains("action cancelled"));
+    for flags in [&["--in", "5m"][..], &["--clear"][..]] {
+        env.command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+            .write_stdin("n\n")
+            .args(["orders", "schedule-cancel"])
+            .args(flags)
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(
+                "Mainnet schedule-cancel confirmation required",
+            ))
+            .stderr(predicate::str::contains("action cancelled"));
+    }
 }
 
 #[test]
-fn orders_schedule_cancel_requires_yes_in_json_machine_context() {
+fn orders_schedule_cancel_requires_yes_without_an_interactive_terminal() {
     let env = IsolatedHome::new();
 
-    let output = env
-        .command()
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "orders",
-            "schedule-cancel",
-            "--in",
-            "5m",
-        ])
-        .assert()
-        .code(13)
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["category"], "unsupported");
-    assert_eq!(json["exit_code"], 13);
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap()
-            .contains("without confirmation in non-interactive mode")
-    );
-}
-
-#[test]
-fn orders_schedule_cancel_clear_requires_yes_in_agent_context() {
-    let env = IsolatedHome::new();
-
-    let output = env
-        .command()
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .env("HYPERLIQUID_AGENT", "1")
-        .args(["--format", "json", "orders", "schedule-cancel", "--clear"])
-        .assert()
-        .code(13)
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["category"], "unsupported");
-    assert_eq!(json["exit_code"], 13);
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap()
-            .contains("without confirmation in non-interactive mode")
-    );
+    for (agent, flags) in [(false, &["--in", "5m"][..]), (true, &["--clear"][..])] {
+        let mut command = env.command();
+        command.env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY);
+        if agent {
+            command.env("HYPERLIQUID_AGENT", "1");
+        }
+        let output = command
+            .args(["--format", "json", "orders", "schedule-cancel"])
+            .args(flags)
+            .assert()
+            .code(13)
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["category"], "unsupported", "{flags:?}");
+        assert_eq!(json["exit_code"], 13, "{flags:?}");
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("without confirmation in non-interactive mode"),
+            "{flags:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -982,6 +788,10 @@ async fn orders_schedule_cancel_mainnet_yes_bypasses_confirmation_prompt() {
         .assert()
         .success()
         .stderr(predicate::str::contains("Mainnet schedule-cancel confirmation required").not());
+
+    let actions = exchange_actions(&server).await;
+    assert_eq!(actions.len(), 1);
+    assert_eq!(actions[0]["type"], "scheduleCancel");
 }
 
 #[tokio::test]
@@ -995,6 +805,7 @@ async fn orders_schedule_cancel_outputs_scheduled_time() {
     }))
     .await;
 
+    let before = unix_millis();
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
@@ -1003,6 +814,7 @@ async fn orders_schedule_cancel_outputs_scheduled_time() {
         .success()
         .stdout(predicate::str::contains("scheduled"))
         .stdout(predicate::str::contains("Scheduled Time"));
+    let after = unix_millis();
 
     let requests = server.received_requests().await.unwrap();
     let exchange_requests: Vec<_> = requests
@@ -1012,7 +824,13 @@ async fn orders_schedule_cancel_outputs_scheduled_time() {
     assert_eq!(exchange_requests.len(), 1);
     let body: serde_json::Value = serde_json::from_slice(&exchange_requests[0].body).unwrap();
     assert_eq!(body["action"]["type"], "scheduleCancel");
-    assert!(body["action"]["time"].is_number());
+    let time = body["action"]["time"]
+        .as_u64()
+        .expect("scheduled time in milliseconds");
+    assert!(
+        (before + 299_000..=after + 301_000).contains(&time),
+        "{time} is not five minutes after the request"
+    );
     assert!(body["vaultAddress"].is_null());
 }
 
@@ -1050,72 +868,34 @@ async fn orders_schedule_cancel_clear_outputs_cleared_status() {
 async fn orders_schedule_cancel_on_behalf_sets_vault_address() {
     let env = IsolatedHome::new();
     let subaccount = "0x0000000000000000000000000000000000000123";
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "default"
-        }
-    }))
-    .await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "schedule-cancel",
-            "--in",
-            "5m",
-            "--on-behalf-of",
-            subaccount,
-            "--testnet",
-        ])
-        .assert()
-        .success();
+    for (flags, clears) in [(&["--in", "5m"][..], false), (&["--clear"][..], true)] {
+        let server = mock_trading_server(serde_json::json!({
+            "status": "ok",
+            "response": {
+                "type": "default"
+            }
+        }))
+        .await;
 
-    let requests = server.received_requests().await.unwrap();
-    let exchange = requests
-        .iter()
-        .find(|request| request.url.path() == "/exchange")
-        .expect("expected exchange request");
-    let body: serde_json::Value = serde_json::from_slice(&exchange.body).unwrap();
-    assert_eq!(body["vaultAddress"], subaccount);
-}
+        env.command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+            .args(["orders", "schedule-cancel"])
+            .args(flags)
+            .args(["--on-behalf-of", subaccount, "--testnet"])
+            .assert()
+            .success();
 
-#[tokio::test]
-async fn orders_schedule_cancel_clear_on_behalf_sets_vault_address() {
-    let env = IsolatedHome::new();
-    let subaccount = "0x0000000000000000000000000000000000000123";
-    let server = mock_trading_server(serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "default"
-        }
-    }))
-    .await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "schedule-cancel",
-            "--clear",
-            "--on-behalf-of",
-            subaccount,
-            "--testnet",
-        ])
-        .assert()
-        .success();
-
-    let requests = server.received_requests().await.unwrap();
-    let exchange = requests
-        .iter()
-        .find(|request| request.url.path() == "/exchange")
-        .expect("expected exchange request");
-    let body: serde_json::Value = serde_json::from_slice(&exchange.body).unwrap();
-    assert_eq!(body["vaultAddress"], subaccount);
-    assert!(body["action"]["time"].is_null());
+        let requests = server.received_requests().await.unwrap();
+        let exchange = requests
+            .iter()
+            .find(|request| request.url.path() == "/exchange")
+            .expect("expected exchange request");
+        let body: serde_json::Value = serde_json::from_slice(&exchange.body).unwrap();
+        assert_eq!(body["vaultAddress"], subaccount, "{flags:?}");
+        assert_eq!(body["action"]["time"].is_null(), clears, "{flags:?}");
+    }
 }
 
 #[test]

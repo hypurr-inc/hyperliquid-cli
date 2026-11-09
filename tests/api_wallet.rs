@@ -22,6 +22,34 @@ async fn mock_api_wallet_server() -> MockServer {
     server
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn valid_until(agent_name: &str, expected_prefix: &str) -> u64 {
+    agent_name
+        .strip_prefix(expected_prefix)
+        .unwrap_or_else(|| {
+            panic!("agent name {agent_name:?} should start with {expected_prefix:?}")
+        })
+        .parse()
+        .unwrap_or_else(|_| {
+            panic!("agent name {agent_name:?} should end in a millisecond timestamp")
+        })
+}
+
+fn assert_expires_in(expiry_ms: u64, expected_ms: u64) {
+    let tolerance_ms = 120_000;
+    let now = now_ms();
+    assert!(
+        expiry_ms + tolerance_ms >= now + expected_ms && expiry_ms <= now + expected_ms,
+        "expiry {expiry_ms} is not about {expected_ms}ms after now ({now})"
+    );
+}
+
 #[test]
 fn api_wallet_create_dry_run_redacts_generated_private_key() {
     let env = IsolatedHome::new();
@@ -50,21 +78,14 @@ fn api_wallet_create_dry_run_redacts_generated_private_key() {
     assert_eq!(json["status"], "dry_run");
     assert_eq!(json["approval_action"]["type"], "approveAgent");
     assert_eq!(json["name"], "bot-qa");
-    assert!(
-        json["action_agent_name"]
-            .as_str()
-            .unwrap()
-            .contains("valid_until")
-    );
-    assert!(
-        json["approval_action"]["agentAddress"]
-            .as_str()
-            .unwrap()
-            .starts_with("0x")
-    );
-    assert!(json["expires_at"].as_u64().unwrap() > 0);
+    let agent_name = json["action_agent_name"].as_str().unwrap();
+    let expiry = valid_until(agent_name, "bot-qa valid_until ");
+    assert_expires_in(expiry, 30 * 24 * 60 * 60 * 1000);
+    assert_eq!(json["expires_at"].as_u64(), Some(expiry));
+    let agent_address = json["approval_action"]["agentAddress"].as_str().unwrap();
+    assert_eq!(agent_address.len(), 42, "{agent_address}");
+    assert!(agent_address.starts_with("0x"));
     assert!(!stdout.contains("private_key"));
-    assert!(!stdout.contains("generated_private_key"));
 }
 
 #[test]
@@ -148,12 +169,12 @@ async fn api_wallet_create_submits_approve_agent_and_prints_generated_key_once()
     let body: Value = serde_json::from_slice(&exchange.body).unwrap();
     assert_eq!(body["action"]["type"], "approveAgent");
     assert_eq!(body["action"]["hyperliquidChain"], "Mainnet");
-    assert!(
-        body["action"]["agentName"]
-            .as_str()
-            .unwrap()
-            .starts_with("bot-live valid_until ")
+    let expiry = valid_until(
+        body["action"]["agentName"].as_str().unwrap(),
+        "bot-live valid_until ",
     );
+    assert_expires_in(expiry, 24 * 60 * 60 * 1000);
+    assert_eq!(json["expires_at"].as_u64(), Some(expiry));
     assert_eq!(body["action"]["nonce"], body["nonce"]);
     assert!(body["signature"]["r"].as_str().unwrap().starts_with("0x"));
     assert!(!String::from_utf8_lossy(&exchange.body).contains(private_key));
@@ -328,17 +349,17 @@ async fn api_wallet_revoke_submits_short_lived_replacement_payload() {
         .expect("expected revoke replacement exchange request");
     let body: Value = serde_json::from_slice(&exchange.body).unwrap();
     assert_eq!(body["action"]["type"], "approveAgent");
-    assert!(
-        body["action"]["agentName"]
-            .as_str()
-            .unwrap()
-            .starts_with("bot-qa valid_until ")
+    let expiry = valid_until(
+        body["action"]["agentName"].as_str().unwrap(),
+        "bot-qa valid_until ",
     );
-    assert!(
-        body["action"]["agentAddress"]
-            .as_str()
-            .unwrap()
-            .starts_with("0x")
+    assert_expires_in(expiry, 60_000);
+    let replacement = body["action"]["agentAddress"].as_str().unwrap();
+    assert_eq!(replacement.len(), 42, "{replacement}");
+    assert_ne!(
+        replacement.to_ascii_lowercase(),
+        expected_address(VALID_PRIVATE_KEY).to_ascii_lowercase(),
+        "the replacement agent must be a throwaway key, not the master"
     );
 }
 

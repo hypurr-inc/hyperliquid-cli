@@ -1,22 +1,18 @@
-//! Authenticated subaccount workflows.
-
 use clap::{Args, ValueEnum};
 use hypersdk::hypercore::Chain;
 use hypersdk::{Address, Decimal};
-use rust_decimal::prelude::ToPrimitive;
 use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::actions;
-use crate::commands::support::print_signed_dry_run;
+use crate::commands::confirm;
+use crate::commands::rows::{ListRow, Row, Rows};
+use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
-use crate::mode::Mode;
-use crate::output::TableData;
+use crate::quantity::{self, Scale};
 use crate::signing::SelectedSigner;
-
-const USDC_WIRE_SCALE: u64 = 1_000_000;
 
 /// Arguments for `subaccount create`.
 #[derive(Args, Debug, Clone)]
@@ -127,55 +123,44 @@ struct SubaccountActionConfirmation {
     token: Option<String>,
 }
 
-struct SubaccountActionOutput {
-    rows: Vec<SubaccountActionConfirmation>,
-}
+impl Row for SubaccountActionConfirmation {
+    const HEADERS: &'static [&'static str] = &[
+        "Action",
+        "Status",
+        "Network",
+        "Signer",
+        "Acting As",
+        "Reversibility",
+        "Vault Address",
+        "Subaccount",
+        "Name",
+        "Direction",
+        "Amount",
+        "USD Units",
+        "Token",
+    ];
 
-impl TableData for SubaccountActionOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Action",
-            "Status",
-            "Network",
-            "Signer",
-            "Acting As",
-            "Reversibility",
-            "Vault Address",
-            "Subaccount",
-            "Name",
-            "Direction",
-            "Amount",
-            "USD Units",
-            "Token",
+            self.action.clone(),
+            self.status.clone(),
+            self.network.clone(),
+            self.signer.clone(),
+            self.acting_as.clone(),
+            self.reversibility.clone(),
+            self.vault_address.clone().unwrap_or_default(),
+            self.subaccount.clone().unwrap_or_default(),
+            self.name.clone().unwrap_or_default(),
+            self.direction.clone().unwrap_or_default(),
+            self.amount.clone().unwrap_or_default(),
+            self.usd.map(|usd| usd.to_string()).unwrap_or_default(),
+            self.token.clone().unwrap_or_default(),
         ]
     }
+}
 
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.action.clone(),
-                    row.status.clone(),
-                    row.network.clone(),
-                    row.signer.clone(),
-                    row.acting_as.clone(),
-                    row.reversibility.clone(),
-                    row.vault_address.clone().unwrap_or_default(),
-                    row.subaccount.clone().unwrap_or_default(),
-                    row.name.clone().unwrap_or_default(),
-                    row.direction.clone().unwrap_or_default(),
-                    row.amount.clone().unwrap_or_default(),
-                    row.usd.map(|usd| usd.to_string()).unwrap_or_default(),
-                    row.token.clone().unwrap_or_default(),
-                ]
-            })
-            .collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
-    }
+impl ListRow for SubaccountActionConfirmation {
+    const EMPTY: &'static str = "No results.";
 }
 
 #[derive(Debug, Serialize)]
@@ -207,43 +192,43 @@ struct SubaccountSpotTransferAction {
     amount: String,
 }
 
-pub fn validate_create_args(args: &CreateArgs) -> Result<(), CliError> {
-    if args.name.trim().is_empty() {
+/// The subaccount name, trimmed; it must not be empty.
+fn validated_name(args: &CreateArgs) -> Result<&str, CliError> {
+    let name = args.name.trim();
+    if name.is_empty() {
         return Err(CliError::Configuration(
             "subaccount name cannot be empty".to_string(),
         ));
     }
-    Ok(())
+    Ok(name)
 }
 
-pub fn validate_transfer_args(args: &TransferArgs) -> Result<(), CliError> {
-    usdc_to_wire_units(args.amount)?;
-    Ok(())
-}
-
-pub fn validate_spot_transfer_args(args: &SpotTransferArgs) -> Result<(), CliError> {
-    validate_positive_amount(args.amount, "amount")?;
-    if args.token.trim().is_empty() {
+/// The token to transfer, trimmed; the amount must be positive and the token
+/// not empty.
+fn validated_token(args: &SpotTransferArgs) -> Result<&str, CliError> {
+    quantity::require_positive(args.amount, "amount")?;
+    let token = args.token.trim();
+    if token.is_empty() {
         return Err(CliError::Configuration("token cannot be empty".to_string()));
     }
-    Ok(())
+    Ok(token)
 }
 
-pub fn create_dry_run_value(chain: Chain, args: &CreateArgs) -> serde_json::Value {
+fn create_dry_run_value(chain: Chain, name: &str) -> serde_json::Value {
     serde_json::json!({
-        "name": args.name.trim(),
+        "name": name,
         "network": chain.to_string(),
         "reversibility": SubaccountActionKind::Create.reversibility(),
     })
 }
 
-pub fn transfer_dry_run_value(
+fn transfer_dry_run_value(
     chain: Chain,
     subaccount: Address,
+    usd: u64,
     args: &TransferArgs,
-) -> Result<serde_json::Value, CliError> {
-    let usd = usdc_to_wire_units(args.amount)?;
-    Ok(serde_json::json!({
+) -> serde_json::Value {
+    serde_json::json!({
         "subaccount": subaccount.to_string(),
         "amount": args.amount.to_string(),
         "direction": args.direction.to_string(),
@@ -252,55 +237,41 @@ pub fn transfer_dry_run_value(
         "asset": "USDC",
         "network": chain.to_string(),
         "reversibility": SubaccountActionKind::TransferUsdc.reversibility(),
-    }))
+    })
 }
 
-pub fn spot_transfer_dry_run_value(
+fn spot_transfer_dry_run_value(
     chain: Chain,
     subaccount: Address,
+    token: &str,
     args: &SpotTransferArgs,
-) -> Result<serde_json::Value, CliError> {
-    validate_spot_transfer_args(args)?;
-    Ok(serde_json::json!({
+) -> serde_json::Value {
+    serde_json::json!({
         "subaccount": subaccount.to_string(),
-        "token": args.token.trim(),
+        "token": token,
         "amount": args.amount.to_string(),
         "direction": args.direction.to_string(),
         "is_deposit": args.direction.is_deposit(),
-        "asset": args.token.trim(),
+        "asset": token,
         "network": chain.to_string(),
         "reversibility": SubaccountActionKind::TransferSpot.reversibility(),
-    }))
+    })
 }
 
-pub fn usdc_to_wire_units(amount: Decimal) -> Result<u64, CliError> {
-    validate_positive_amount(amount, "amount")?;
-    let scaled = amount
-        .checked_mul(Decimal::from(USDC_WIRE_SCALE))
-        .ok_or_else(|| CliError::Configuration("amount is too large".to_string()))?;
-    let normalized = scaled.normalize();
-    if normalized.scale() != 0 {
-        return Err(CliError::Configuration(
-            "subaccount USDC transfer amount supports at most 6 decimal places".to_string(),
-        ));
-    }
-    normalized
-        .to_u64()
-        .ok_or_else(|| CliError::Configuration("amount is too large".to_string()))
+fn usdc_to_wire_units(amount: Decimal) -> Result<u64, CliError> {
+    quantity::positive(amount, Scale::USDC).map_err(|err| err.config("amount", Scale::USDC))
 }
 
-/// Create a new subaccount signed by the configured master account.
-pub async fn create(
+async fn create(
     inv: &Invocation,
     signer: &SelectedSigner,
-    args: &CreateArgs,
+    name: &str,
 ) -> Result<(), anyhow::Error> {
-    validate_create_args(args)?;
     let remote = inv.remote()?;
     let (api, chain) = (remote.api(), remote.chain());
     let action = CreateSubaccountAction {
         action_type: "createSubAccount",
-        name: args.name.trim().to_string(),
+        name: name.to_string(),
     };
 
     actions::send_raw_l1_json_action(
@@ -326,7 +297,7 @@ pub async fn create(
                 .to_string(),
             vault_address: None,
             subaccount: None,
-            name: Some(args.name.trim().to_string()),
+            name: Some(name.to_string()),
             direction: None,
             amount: None,
             usd: None,
@@ -336,26 +307,22 @@ pub async fn create(
     Ok(())
 }
 
-/// Transfer USDC between the configured master account and a subaccount.
-pub async fn transfer(
+async fn transfer(
     inv: &Invocation,
     signer: &SelectedSigner,
     subaccount: Address,
+    usd: u64,
     args: &TransferArgs,
 ) -> Result<(), anyhow::Error> {
-    validate_transfer_args(args)?;
     let remote = inv.remote()?;
     let (api, chain) = (remote.api(), remote.chain());
-    let usd = usdc_to_wire_units(args.amount)?;
-    if !args.yes {
-        confirm_transfer(
-            inv.mode(),
-            &transfer_prompt(subaccount, args),
-            &consent_preview(chain, signer, subaccount),
-            "subaccount transfer aborted",
-        )?;
-    }
-
+    confirm::unless_yes(
+        args.yes,
+        inv.mode(),
+        &consent_preview(chain, signer, subaccount),
+        &transfer_prompt(subaccount, args),
+        "subaccount transfer aborted",
+    )?;
     let action = SubaccountTransferAction {
         action_type: "subAccountTransfer",
         sub_account_user: subaccount.to_string().to_lowercase(),
@@ -395,31 +362,29 @@ pub async fn transfer(
     Ok(())
 }
 
-/// Transfer a spot token between the configured master account and a subaccount.
-pub async fn spot_transfer(
+async fn spot_transfer(
     inv: &Invocation,
     signer: &SelectedSigner,
     subaccount: Address,
+    token: &str,
     args: &SpotTransferArgs,
 ) -> Result<(), anyhow::Error> {
-    validate_spot_transfer_args(args)?;
     let remote = inv.remote()?;
     let (api, chain) = (remote.api(), remote.chain());
-    if !args.yes {
-        confirm_transfer(
-            inv.mode(),
-            &spot_transfer_prompt(subaccount, args),
-            &consent_preview(chain, signer, subaccount),
-            "subaccount spot transfer aborted",
-        )?;
-    }
+    confirm::unless_yes(
+        args.yes,
+        inv.mode(),
+        &consent_preview(chain, signer, subaccount),
+        &spot_transfer_prompt(subaccount, args),
+        "subaccount spot transfer aborted",
+    )?;
 
     let amount = args.amount.normalize().to_string();
     let action = SubaccountSpotTransferAction {
         action_type: "subAccountSpotTransfer",
         sub_account_user: subaccount.to_string().to_lowercase(),
         is_deposit: args.direction.is_deposit(),
-        token: args.token.trim().to_string(),
+        token: token.to_string(),
         amount: amount.clone(),
     };
     actions::send_raw_l1_json_action(
@@ -449,18 +414,9 @@ pub async fn spot_transfer(
             direction: Some(args.direction.to_string()),
             amount: Some(amount),
             usd: None,
-            token: Some(args.token.trim().to_string()),
+            token: Some(token.to_string()),
         },
     );
-    Ok(())
-}
-
-fn validate_positive_amount(amount: Decimal, name: &'static str) -> Result<(), CliError> {
-    if amount <= Decimal::ZERO {
-        return Err(CliError::Configuration(format!(
-            "{name} must be greater than zero"
-        )));
-    }
     Ok(())
 }
 
@@ -492,26 +448,16 @@ fn spot_transfer_prompt(subaccount: Address, args: &SpotTransferArgs) -> String 
     }
 }
 
-/// Print the consent preview on stderr, then ask `question`.
-fn confirm_transfer(
-    mode: &Mode,
-    question: &str,
-    preview: &[String],
-    abort_message: &'static str,
-) -> Result<(), CliError> {
-    crate::prompt::consent(mode, "--yes", &preview.join("\n"), question, abort_message)
-}
-
-fn consent_preview(chain: Chain, signer: &SelectedSigner, subaccount: Address) -> Vec<String> {
-    vec![
-        format!("Network: {}", chain.to_string().to_lowercase()),
-        format!("Signer: {}", signer.address()),
-        format!("Subaccount: {subaccount}"),
-    ]
+/// The consent preview: where and as whom the transfer happens.
+fn consent_preview(chain: Chain, signer: &SelectedSigner, subaccount: Address) -> String {
+    format!(
+        "Network: {chain}\nSigner: {}\nSubaccount: {subaccount}",
+        signer.address()
+    )
 }
 
 fn print_action(inv: &Invocation, row: SubaccountActionConfirmation) {
-    inv.print(&SubaccountActionOutput { rows: vec![row] });
+    inv.print(&Rows::new(vec![row]));
 }
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["subaccount"], "Manage subaccounts")
@@ -544,8 +490,8 @@ impl CliCommand for SubaccountList {
         .schema_required()]);
 
     async fn run(inv: &Invocation, args: &SubaccountListArgs) -> Result<(), anyhow::Error> {
-        let address = inv.resolve_user(args.address.as_deref())?.to_string();
-        crate::commands::account::subaccounts(inv, &address).await
+        let user = inv.resolve_user(args.address.as_deref())?;
+        crate::commands::account::subaccounts(inv, user).await
     }
 }
 
@@ -565,18 +511,16 @@ impl CliCommand for SubaccountCreate {
         .resource_id("subaccount name")]);
 
     async fn run(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error> {
-        validate_create_args(args)?;
+        let name = validated_name(args)?;
         if inv.dry_run() {
-            return print_signed_dry_run(
+            return print_dry_run(
                 inv,
-                "subaccount create",
                 "create_subaccount",
-                SubaccountActionKind::Create.reversibility(),
-                create_dry_run_value(inv.remote()?.chain(), args),
+                create_dry_run_value(inv.remote()?.chain(), name),
             );
         }
         let resolved = inv.resolve_signer()?;
-        create(inv, &resolved.selected_signer(), args).await
+        create(inv, &resolved, name).await
     }
 }
 
@@ -600,19 +544,17 @@ impl CliCommand for SubaccountTransfer {
     ]);
 
     async fn run(inv: &Invocation, args: &TransferArgs) -> Result<(), anyhow::Error> {
-        validate_transfer_args(args)?;
-        let subaccount = inv.resolve_acting_account(&args.subaccount)?;
+        let usd = usdc_to_wire_units(args.amount)?;
+        let subaccount = inv.resolve_account(&args.subaccount)?;
         if inv.dry_run() {
-            return print_signed_dry_run(
+            return print_dry_run(
                 inv,
-                "subaccount transfer",
                 "subaccount_usdc_transfer",
-                SubaccountActionKind::TransferUsdc.reversibility(),
-                transfer_dry_run_value(inv.remote()?.chain(), subaccount, args)?,
+                transfer_dry_run_value(inv.remote()?.chain(), subaccount, usd, args),
             );
         }
         let resolved = inv.resolve_signer()?;
-        transfer(inv, &resolved.selected_signer(), subaccount, args).await
+        transfer(inv, &resolved, subaccount, usd, args).await
     }
 }
 
@@ -637,56 +579,16 @@ impl CliCommand for SubaccountSpotTransfer {
     ]);
 
     async fn run(inv: &Invocation, args: &SpotTransferArgs) -> Result<(), anyhow::Error> {
-        validate_spot_transfer_args(args)?;
-        let subaccount = inv.resolve_acting_account(&args.subaccount)?;
+        let token = validated_token(args)?;
+        let subaccount = inv.resolve_account(&args.subaccount)?;
         if inv.dry_run() {
-            return print_signed_dry_run(
+            return print_dry_run(
                 inv,
-                "subaccount spot-transfer",
                 "subaccount_spot_transfer",
-                SubaccountActionKind::TransferSpot.reversibility(),
-                spot_transfer_dry_run_value(inv.remote()?.chain(), subaccount, args)?,
+                spot_transfer_dry_run_value(inv.remote()?.chain(), subaccount, token, args),
             );
         }
         let resolved = inv.resolve_signer()?;
-        spot_transfer(inv, &resolved.selected_signer(), subaccount, args).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn usdc_amount_converts_to_six_decimal_wire_units() {
-        assert_eq!(usdc_to_wire_units(Decimal::from(10)).unwrap(), 10_000_000);
-        assert_eq!(usdc_to_wire_units(Decimal::new(1, 6)).unwrap(), 1);
-        assert_eq!(
-            usdc_to_wire_units(Decimal::new(123_456_789, 6)).unwrap(),
-            123_456_789
-        );
-    }
-
-    #[test]
-    fn usdc_amount_rejects_fractional_wire_units() {
-        let err = usdc_to_wire_units(Decimal::new(1, 7)).unwrap_err();
-        assert_eq!(err.exit_code(), 2);
-        assert!(err.to_string().contains("at most 6 decimal places"));
-    }
-
-    #[test]
-    fn subaccount_actions_declare_reversibility() {
-        assert_eq!(
-            SubaccountActionKind::Create.reversibility(),
-            ActionReversibility::Irreversible
-        );
-        assert_eq!(
-            SubaccountActionKind::TransferUsdc.reversibility(),
-            ActionReversibility::PartiallyReversible
-        );
-        assert_eq!(
-            SubaccountActionKind::TransferSpot.reversibility(),
-            ActionReversibility::PartiallyReversible
-        );
+        spot_transfer(inv, &resolved, subaccount, token, args).await
     }
 }

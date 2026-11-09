@@ -1,38 +1,43 @@
 //! The wallet management workflow shared by `wallet`, `account` and `setup`:
 //! vault writes paired with config updates, rollback, naming and default markers.
 //!
-//! Vault failures reach the user as plain messages. Config, lock and
-//! wallet-not-found failures keep their typed errors and exit codes.
+//! Wallet selection and the vault's own operations stay on [`Vault`]; errors keep
+//! their types (`wallet_not_found`, ambiguity, config and lock failures), so each
+//! reaches the user with its own exit code.
 
 use ows_lib::types::WalletInfo;
 
 use crate::config::Config;
 use crate::errors::CliError;
 use crate::ows::vault::{HyperliquidAccount, Vault};
-use crate::settings::Settings;
+use crate::settings::{ConfigTransaction, Settings};
 
-fn vault_failure(err: CliError) -> anyhow::Error {
-    anyhow::anyhow!("{err}")
-}
-
-/// How a new wallet is obtained.
 pub enum NewWallet<'a> {
     Create,
     ImportPrivateKey(&'a str),
     ImportMnemonic(&'a str),
 }
 
-/// The vault name for a new wallet.
 pub enum WalletName<'a> {
     Exact(&'a str),
     /// The first free name among `base`, `base-2`, `base-3`, ...
     Next(&'a str),
 }
 
-/// Edits the config once the wallet exists, under the config lock. Returns the
-/// config keys it wrote.
-pub type ConfigEdit<'a> =
-    Box<dyn FnOnce(&mut Config, &WalletInfo, &HyperliquidAccount) -> Vec<String> + 'a>;
+impl<'a> WalletName<'a> {
+    /// The alias the user gave, trimmed; none or a blank one is `Next(base)`.
+    #[must_use]
+    pub fn from_alias(alias: Option<&'a str>, base: &'a str) -> Self {
+        match crate::config::nonblank(alias) {
+            Some(alias) => Self::Exact(alias),
+            None => Self::Next(base),
+        }
+    }
+}
+
+/// Edits the config once the wallet exists, under the config lock. The config
+/// keys it changes are reported back from the diff, not declared by the edit.
+pub type ConfigEdit<'a> = Box<dyn FnOnce(&mut Config, &WalletInfo, &HyperliquidAccount) + 'a>;
 
 pub struct StoredWallet {
     pub info: WalletInfo,
@@ -40,27 +45,18 @@ pub struct StoredWallet {
     pub config_keys_written: Vec<String>,
 }
 
-pub struct WalletStore {
-    settings: Settings,
+pub struct WalletStore<'a> {
+    settings: &'a Settings,
     vault: Vault,
 }
 
-impl WalletStore {
+impl<'a> WalletStore<'a> {
     #[must_use]
-    pub fn open() -> Self {
-        Self::new(Settings::from_process())
-    }
-
-    /// A store over `settings`, so a caller that already read the config shares the one parse.
-    #[must_use]
-    pub fn new(settings: Settings) -> Self {
-        let vault = Vault::from_settings(&settings);
-        Self { settings, vault }
-    }
-
-    #[must_use]
-    pub fn settings(&self) -> &Settings {
-        &self.settings
+    pub fn new(settings: &'a Settings) -> Self {
+        Self {
+            settings,
+            vault: Vault::from_settings(settings),
+        }
     }
 
     #[must_use]
@@ -68,13 +64,8 @@ impl WalletStore {
         &self.vault
     }
 
-    pub fn list(&self) -> Result<Vec<WalletInfo>, anyhow::Error> {
-        self.vault.list().map_err(vault_failure)
-    }
-
-    /// The first free wallet name among `base`, `base-2`, `base-3`, ...
-    pub fn next_name(&self, base: &str) -> Result<String, anyhow::Error> {
-        let wallets = self.list()?;
+    pub fn next_name(&self, base: &str) -> Result<String, CliError> {
+        let wallets = self.vault.list()?;
         let taken = |name: &str| wallets.iter().any(|wallet| wallet.name == name);
         if !taken(base) {
             return Ok(base.to_string());
@@ -85,33 +76,20 @@ impl WalletStore {
             .expect("an unbounded range always yields a free name"))
     }
 
-    /// Exact name or id match among `wallets`.
-    pub fn find(wallets: Vec<WalletInfo>, selector: &str) -> Result<WalletInfo, CliError> {
-        wallets
-            .into_iter()
-            .find(|wallet| wallet.name == selector || wallet.id == selector)
-            .ok_or_else(|| CliError::Unsupported(format!("wallet '{selector}' not found")))
-    }
-
-    /// Whether the config names this wallet (by id or name) as its default.
     pub fn is_configured_default(&self, wallet: &WalletInfo) -> Result<bool, CliError> {
-        Ok(self
-            .settings
-            .config()?
-            .is_some_and(|config| config.is_default_wallet(&wallet.id, &wallet.name)))
+        Ok(Vault::is_default(
+            self.settings.default_wallet_id()?.as_deref(),
+            wallet,
+        ))
     }
 
     /// Default markers for Hyperliquid-capable `wallets`: the configured default,
     /// or, with none configured, the vault's only wallet, which is what signing uses.
     pub fn default_markers(&self, wallets: &[WalletInfo]) -> Result<Vec<bool>, CliError> {
-        let default_id = self.settings.default_wallet_id()?;
-        Ok(wallets
-            .iter()
-            .map(|wallet| match default_id {
-                Some(id) => id == wallet.id || id == wallet.name,
-                None => wallets.len() == 1,
-            })
-            .collect())
+        Ok(Vault::default_markers(
+            wallets,
+            self.settings.default_wallet_id()?.as_deref(),
+        ))
     }
 
     /// Create or import a wallet and, when `config_edit` is given, record it in
@@ -128,13 +106,8 @@ impl WalletStore {
     ) -> Result<StoredWallet, anyhow::Error> {
         self.vault.warn_if_passphrase_unset();
 
-        let editing = match config_edit {
-            Some(edit) => {
-                let file = self.settings.require_config_file()?;
-                let lock = file.lock()?;
-                let config = self.settings.read_config_fresh()?.unwrap_or_default();
-                Some((file, lock, config, edit))
-            }
+        let editing: Option<(ConfigTransaction<'_>, ConfigEdit<'_>)> = match config_edit {
+            Some(edit) => Some((self.settings.begin_config_update()?, edit)),
             None => None,
         };
 
@@ -146,20 +119,18 @@ impl WalletStore {
             NewWallet::Create => self.vault.create(&name),
             NewWallet::ImportPrivateKey(key) => self.vault.import_private_key(&name, key),
             NewWallet::ImportMnemonic(mnemonic) => self.vault.import_mnemonic(&name, mnemonic),
-        }
-        .map_err(vault_failure)?;
+        }?;
 
         let account = match Vault::hyperliquid_account(&info) {
             Ok(account) => account,
-            Err(err) => return Err(self.roll_back(&info, vault_failure(err))),
+            Err(err) => return Err(self.roll_back(&info, err.into())),
         };
 
         let mut config_keys_written = Vec::new();
-        if let Some((file, _lock, mut config, edit)) = editing {
-            config_keys_written = edit(&mut config, &info, &account);
-            if let Err(err) = file.save(&config) {
-                return Err(self.roll_back(&info, anyhow::anyhow!("failed to save config: {err}")));
-            }
+        if let Some((transaction, edit)) = editing {
+            config_keys_written = transaction
+                .commit(|config| edit(config, &info, &account))
+                .map_err(|err| self.roll_back(&info, err))?;
         }
 
         Ok(StoredWallet {
@@ -182,44 +153,30 @@ impl WalletStore {
         }
     }
 
-    /// Make `wallet` the configured default.
-    pub fn set_default(&self, wallet: &WalletInfo) -> Result<(), anyhow::Error> {
-        let file = self.settings.require_config_file()?;
-        let _lock = file.lock()?;
-        let mut config = self.settings.read_config_fresh()?.unwrap_or_default();
-        config.default_wallet_id = Some(wallet.id.clone());
-        file.save(&config)
+    /// Make `wallet` the default signer. A wallet that can't sign for Hyperliquid
+    /// is refused before the config is touched; the account it would sign as is
+    /// returned.
+    pub fn set_default(&self, wallet: &WalletInfo) -> Result<HyperliquidAccount, anyhow::Error> {
+        let account = Vault::hyperliquid_account(wallet)?;
+        self.settings
+            .update_config(|config| config.default_wallet_id = Some(wallet.id.clone()))?;
+        Ok(account)
     }
 
     /// Delete `wallet` from the vault. When it was the configured default, clear
     /// that reference too.
     pub fn remove(&self, wallet: &WalletInfo, was_default: bool) -> Result<(), anyhow::Error> {
-        self.vault.delete(&wallet.id).map_err(vault_failure)?;
+        self.vault.delete(&wallet.id)?;
         if was_default {
-            let file = self.settings.require_config_file()?;
-            let _lock = file.lock()?;
-            if let Some(mut config) = self.settings.read_config_fresh()? {
-                config.default_wallet_id = None;
-                file.save(&config)?;
-            }
+            self.settings
+                .update_config(|config| config.default_wallet_id = None)?;
         }
         Ok(())
     }
 
-    pub fn rename(&self, selector: &str, new_name: &str) -> Result<WalletInfo, anyhow::Error> {
-        self.vault
-            .rename(selector, new_name)
-            .map_err(vault_failure)?;
-        self.vault.get(new_name).map_err(vault_failure)
-    }
-
-    pub fn export(&self, selector: &str) -> Result<String, anyhow::Error> {
-        self.vault.export(selector).map_err(vault_failure)
-    }
-
-    /// The Hyperliquid account of a stored wallet.
-    pub fn account_of(wallet: &WalletInfo) -> Result<HyperliquidAccount, anyhow::Error> {
-        Vault::hyperliquid_account(wallet).map_err(vault_failure)
+    pub fn rename(&self, selector: &str, new_name: &str) -> Result<WalletInfo, CliError> {
+        self.vault.rename(selector, new_name)?;
+        self.vault.get(new_name)
     }
 }
 
@@ -231,9 +188,9 @@ mod tests {
     use crate::settings::{EnvSource, env};
     use tempfile::TempDir;
 
-    fn store(tmp: &TempDir) -> WalletStore {
+    fn settings(tmp: &TempDir) -> Settings {
         let vault_dir = tmp.path().join("vault");
-        let settings = Settings::new(
+        Settings::new(
             EnvSource::fixed([
                 (env::OWS_VAULT_PATH, vault_dir.to_str().unwrap()),
                 (env::OWS_PASSPHRASE, "test-passphrase"),
@@ -241,9 +198,7 @@ mod tests {
             Some(ConfigFile::at(
                 tmp.path().join("config").join("config.json"),
             )),
-        );
-        let vault = Vault::from_settings(&settings);
-        WalletStore { settings, vault }
+        )
     }
 
     fn saved_config(tmp: &TempDir) -> Config {
@@ -256,14 +211,14 @@ mod tests {
     fn make_default() -> Option<ConfigEdit<'static>> {
         Some(Box::new(|config, wallet, _| {
             config.default_wallet_id = Some(wallet.id.clone());
-            vec!["default_wallet_id".to_string()]
         }))
     }
 
     #[test]
     fn next_name_skips_taken_names() {
         let tmp = TempDir::new().unwrap();
-        let store = store(&tmp);
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
         assert_eq!(store.next_name("wallet").unwrap(), "wallet");
         import_test_wallet(&tmp.path().join("vault"), "wallet");
         import_test_wallet(&tmp.path().join("vault"), "wallet-2");
@@ -273,7 +228,8 @@ mod tests {
     #[test]
     fn add_imports_the_wallet_and_records_the_default() {
         let tmp = TempDir::new().unwrap();
-        let store = store(&tmp);
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
 
         let stored = store
             .add(
@@ -289,13 +245,50 @@ mod tests {
             saved_config(&tmp).default_wallet_id.as_deref(),
             Some(stored.info.id.as_str())
         );
-        assert_eq!(store.list().unwrap().len(), 1);
+        assert_eq!(store.vault().list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn config_keys_written_come_from_what_the_edit_changed() {
+        let tmp = TempDir::new().unwrap();
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
+        let first = store
+            .add(
+                &NewWallet::ImportPrivateKey(KEY),
+                &WalletName::Exact("first"),
+                make_default(),
+            )
+            .unwrap();
+        assert!(
+            first
+                .config_keys_written
+                .contains(&"default_wallet_id".to_string())
+        );
+
+        // The same file again: an edit that sets only a referral code reports
+        // exactly that key, not the keys it left alone.
+        let second = store
+            .add(
+                &NewWallet::Create,
+                &WalletName::Exact("second"),
+                Some(Box::new(|config, _, _| {
+                    config.default_referral_code = Some("CODE".to_string());
+                })),
+            )
+            .unwrap();
+        assert_eq!(second.config_keys_written, ["default_referral_code"]);
+        assert_eq!(
+            saved_config(&tmp).default_wallet_id.as_deref(),
+            Some(first.info.id.as_str())
+        );
     }
 
     #[test]
     fn add_without_an_edit_leaves_the_config_alone() {
         let tmp = TempDir::new().unwrap();
-        let store = store(&tmp);
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
         store
             .add(&NewWallet::Create, &WalletName::Exact("plain"), None)
             .unwrap();
@@ -305,7 +298,8 @@ mod tests {
     #[test]
     fn broken_config_fails_before_a_wallet_exists() {
         let tmp = TempDir::new().unwrap();
-        let store = store(&tmp);
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
         let config_path = tmp.path().join("config").join("config.json");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::write(&config_path, "{not json").unwrap();
@@ -320,21 +314,22 @@ mod tests {
             .unwrap();
 
         assert!(err.to_string().contains("invalid config file"));
-        assert!(store.list().unwrap().is_empty());
+        assert!(store.vault().list().unwrap().is_empty());
     }
 
     #[test]
     fn failed_config_save_rolls_the_wallet_back() {
         let tmp = TempDir::new().unwrap();
-        let store = store(&tmp);
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
         let config_path = tmp.path().join("config").join("config.json");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
         std::fs::write(&config_path, "{}").unwrap();
         // Replacing the file with a directory makes the final rename fail.
-        let edit: ConfigEdit<'_> = Box::new(|_, _, _| {
+        let edit: ConfigEdit<'_> = Box::new(|config, wallet, _| {
+            config.default_wallet_id = Some(wallet.id.clone());
             std::fs::remove_file(&config_path).unwrap();
             std::fs::create_dir(&config_path).unwrap();
-            Vec::new()
         });
 
         let err = store
@@ -346,62 +341,96 @@ mod tests {
             .err()
             .unwrap();
 
-        assert!(err.to_string().contains("failed to save config"));
-        assert!(store.list().unwrap().is_empty());
+        assert!(err.to_string().contains("Failed to write config file"));
+        assert_eq!(crate::errors::from_anyhow(err).exit_code(), 2);
+        assert!(store.vault().list().unwrap().is_empty());
     }
 
     #[test]
-    fn find_matches_exact_name_or_id_only() {
-        let tmp = TempDir::new().unwrap();
-        let wallet = import_test_wallet(tmp.path(), "main");
-        let wallets = vec![wallet.clone()];
+    fn blank_aliases_take_the_next_free_name() {
+        for alias in [None, Some(""), Some("   ")] {
+            assert!(matches!(
+                WalletName::from_alias(alias, "imported"),
+                WalletName::Next("imported")
+            ));
+        }
+        assert!(matches!(
+            WalletName::from_alias(Some("  main "), "imported"),
+            WalletName::Exact("main")
+        ));
+    }
 
+    #[test]
+    fn vault_failures_keep_their_exit_codes() {
+        let tmp = TempDir::new().unwrap();
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
+        import_test_wallet(&tmp.path().join("vault"), "main");
+
+        let err = store.rename("missing", "other").unwrap_err();
+        assert!(matches!(err, CliError::OwsWalletNotFound { .. }), "{err}");
+        assert_eq!(err.exit_code(), 10);
+
+        let err = store
+            .add(
+                &NewWallet::ImportPrivateKey(KEY),
+                &WalletName::Exact("main"),
+                None,
+            )
+            .err()
+            .unwrap();
+        assert_eq!(crate::errors::from_anyhow(err).exit_code(), 13);
+    }
+
+    #[test]
+    fn set_default_refuses_a_wallet_without_a_hyperliquid_account_before_writing() {
+        let tmp = TempDir::new().unwrap();
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
+        let mut wallet = import_test_wallet(&tmp.path().join("vault"), "main");
+
+        let account = store.set_default(&wallet).unwrap();
+        assert_eq!(account.chain_id, "eip155:1");
         assert_eq!(
-            WalletStore::find(wallets.clone(), "main").unwrap().id,
-            wallet.id
+            saved_config(&tmp).default_wallet_id.as_deref(),
+            Some(wallet.id.as_str())
         );
-        assert_eq!(
-            WalletStore::find(wallets.clone(), &wallet.id).unwrap().name,
-            "main"
+
+        std::fs::remove_file(tmp.path().join("config").join("config.json")).unwrap();
+        wallet.accounts.clear();
+        let err = store.set_default(&wallet).unwrap_err();
+        let err = crate::errors::from_anyhow(err);
+        assert!(matches!(err, CliError::OwsNoChainAccount { .. }), "{err}");
+        assert!(
+            !tmp.path().join("config").join("config.json").exists(),
+            "the config must not be written for a wallet that can't sign"
         );
-        let err = WalletStore::find(wallets, "Main").unwrap_err();
-        assert_eq!(err.exit_code(), 13);
-        assert!(err.to_string().contains("wallet 'Main' not found"));
     }
 
     #[test]
     fn default_markers_use_the_config_or_the_only_wallet() {
         let tmp = TempDir::new().unwrap();
-        let store = store(&tmp);
         let vault_dir = tmp.path().join("vault");
         let first = import_test_wallet(&vault_dir, "first");
-        let only = vec![first.clone()];
-        assert_eq!(store.default_markers(&only).unwrap(), [true]);
-
         let second = import_test_wallet(&vault_dir, "second");
-        let both = vec![first.clone(), second];
+        let both = vec![first, second];
+
+        let unconfigured = settings(&tmp);
+        let store = WalletStore::new(&unconfigured);
+        assert_eq!(store.default_markers(&both[..1]).unwrap(), [true]);
         assert_eq!(store.default_markers(&both).unwrap(), [false, false]);
 
-        let config_file = ConfigFile::at(tmp.path().join("config").join("config.json"));
-        config_file
-            .save(&Config {
-                default_wallet_id: Some("second".to_string()),
-                ..Config::default()
-            })
-            .unwrap();
-        let configured = Settings::new(store.settings.env().clone(), Some(config_file));
-        let store = WalletStore {
-            vault: store.vault.clone(),
-            settings: configured,
-        };
+        store.set_default(&both[1]).unwrap();
         assert_eq!(store.default_markers(&both).unwrap(), [false, true]);
         assert!(store.is_configured_default(&both[1]).unwrap());
+        assert!(!store.is_configured_default(&both[0]).unwrap());
     }
 
     #[test]
     fn remove_clears_a_dangling_default() {
         let tmp = TempDir::new().unwrap();
-        let store = store(&tmp);
+        let settings = settings(&tmp);
+        let store = WalletStore::new(&settings);
         let stored = store
             .add(
                 &NewWallet::ImportPrivateKey(KEY),
@@ -412,7 +441,7 @@ mod tests {
 
         store.remove(&stored.info, true).unwrap();
 
-        assert!(store.list().unwrap().is_empty());
+        assert!(store.vault().list().unwrap().is_empty());
         assert_eq!(saved_config(&tmp).default_wallet_id, None);
     }
 }

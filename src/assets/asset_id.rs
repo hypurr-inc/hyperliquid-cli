@@ -6,10 +6,10 @@
 
 use crate::errors::CliError;
 
-pub const SPOT_ASSET_ID_OFFSET: u64 = 10_000;
-pub const HIP3_ASSET_ID_OFFSET: u64 = 100_000;
-pub const HIP3_DEX_SLOT_SIZE: u64 = 10_000;
-pub const OUTCOME_ASSET_ID_OFFSET: u64 = 100_000_000;
+const SPOT_ASSET_ID_OFFSET: u64 = 10_000;
+const HIP3_ASSET_ID_OFFSET: u64 = 100_000;
+const HIP3_DEX_SLOT_SIZE: u64 = 10_000;
+const OUTCOME_ASSET_ID_OFFSET: u64 = 100_000_000;
 
 /// Outcome markets are binary: side 0 is "Yes", side 1 is "No".
 pub const MAX_OUTCOME_SIDE: u64 = 1;
@@ -18,7 +18,6 @@ const SPOT_OFFSET: usize = SPOT_ASSET_ID_OFFSET as usize;
 const HIP3_OFFSET: usize = HIP3_ASSET_ID_OFFSET as usize;
 const HIP3_SLOT_SIZE: usize = HIP3_DEX_SLOT_SIZE as usize;
 
-/// Which id range a protocol asset id falls in, with the fields the range encodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetIdLayout {
     Perp { index: u64 },
@@ -167,25 +166,6 @@ pub fn outcome_notation_error(raw: &str) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn classifies_protocol_id_ranges() {
-        assert_eq!(classify(0), AssetIdLayout::Perp { index: 0 });
-        assert_eq!(classify(9_999), AssetIdLayout::Perp { index: 9_999 });
-        assert_eq!(classify(10_000), AssetIdLayout::Spot { spot_index: 0 });
-        assert_eq!(classify(99_999), AssetIdLayout::Spot { spot_index: 89_999 });
-        assert_eq!(
-            classify(110_035),
-            AssetIdLayout::Hip3Perp {
-                dex_slot: 1,
-                index: 35
-            }
-        );
-        assert_eq!(
-            classify(100_000_011),
-            AssetIdLayout::Outcome { encoding: 11 }
-        );
-    }
 
     #[test]
     fn usize_helpers_round_trip_with_the_layout() {

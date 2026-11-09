@@ -9,10 +9,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 
-use crate::command_registry::{CommandContract, CommandRegistry};
-use crate::command_spec::{Lifecycle, Risk};
+use crate::command_registry::{ArgType, CommandContract, CommandRegistry};
+use crate::command_spec::YES_ARG;
 use crate::commands::schema::schema_query;
 use crate::output::TableData;
+use crate::settings::{EnvSource, env};
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -43,12 +44,12 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
-pub fn run_stdio_server() -> Result<(), anyhow::Error> {
-    let allow_unsafe = crate::output::terminal::env_flag(crate::settings::env::MCP_ALLOW_UNSAFE)
+pub fn run_stdio_server(source: &EnvSource) -> Result<(), anyhow::Error> {
+    let allow_unsafe = crate::output::terminal::env_flag(source, env::MCP_ALLOW_UNSAFE)
         == crate::output::terminal::EnvFlag::On;
     let exe = std::env::current_exe()?;
-    let deadline = std::env::var(crate::settings::env::MCP_TIMEOUT_MS)
-        .ok()
+    let deadline = source
+        .get(env::MCP_TIMEOUT_MS)
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|n| *n > 0)
         .map(std::time::Duration::from_millis)
@@ -250,14 +251,13 @@ pub fn run_stdio_server() -> Result<(), anyhow::Error> {
 
 // Keep discovery and invocation behind the same policy.
 fn exposed(cmd: &CommandContract, allow_unsafe: bool) -> bool {
-    cmd.command_path != ["mcp"]
-        && (allow_unsafe || (cmd.lifecycle == Lifecycle::ReadOnly && cmd.risk == Risk::None))
+    cmd.command_path != ["mcp"] && (allow_unsafe || cmd.spec.is_public_read())
 }
 
 fn command_args(cmd: &CommandContract, args: &Value) -> Result<Vec<String>, String> {
     let map = args.as_object().ok_or("arguments must be an object")?;
     for key in map.keys() {
-        if key == "yes" || cmd.confirmation_bypass_arg() == Some(key.as_str()) {
+        if key == YES_ARG {
             return Err("confirmation bypass arguments are not allowed".into());
         }
         if !cmd.inputs.iter().any(|input| input.id == *key) {
@@ -272,7 +272,7 @@ fn command_args(cmd: &CommandContract, args: &Value) -> Result<Vec<String>, Stri
         let Some(value) = map.get(&input.id).filter(|v| !v.is_null()) else {
             continue;
         };
-        if input.arg_type == "boolean" {
+        if input.arg_type == ArgType::Boolean {
             let enabled = value.as_bool().ok_or("flag must be boolean")?;
             if enabled {
                 result.push(format!(
@@ -407,22 +407,31 @@ mod tests {
         assert!(args.iter().any(|s| s == "--context={\"a\":true}"));
         let args = command_args(cmd, &json!({"context":false})).unwrap();
         assert!(args.iter().any(|s| s == "--context=false"));
-        assert!(command_args(cmd, &json!({"yes":true})).is_err());
+        let err = command_args(contract(&["wallet", "export"]), &json!({"yes":true})).unwrap_err();
+        assert!(err.contains("confirmation bypass"), "{err}");
         assert!(command_args(cmd, &json!({"unknown":true})).is_err());
         assert!(command_args(cmd, &json!([])).is_err());
     }
 
     #[test]
-    fn exposure_uses_lifecycle_and_risk() {
+    fn default_exposure_is_public_reads_only() {
         for cmd in CommandRegistry::get().commands() {
-            assert_eq!(exposed(cmd, true), cmd.command_path != ["mcp"]);
-            assert_eq!(
-                exposed(cmd, false),
-                cmd.command_path != ["mcp"]
-                    && cmd.lifecycle == Lifecycle::ReadOnly
-                    && cmd.risk == Risk::None
-            );
+            if exposed(cmd, false) {
+                assert!(!cmd.spec.changes_state(), "{}", cmd.command_key());
+                assert!(!cmd.dangerous, "{}", cmd.command_key());
+            }
         }
+        assert!(exposed(contract(&["mids"]), false));
+        for path in [
+            &["orders", "create"][..],
+            &["wallet", "show"],
+            &["positions", "list"],
+        ] {
+            assert!(!exposed(contract(path), false), "{path:?}");
+            assert!(exposed(contract(path), true), "{path:?}");
+        }
+        let mcp = contract(&["mcp"]);
+        assert!(!exposed(mcp, false) && !exposed(mcp, true));
     }
 
     #[cfg(unix)]

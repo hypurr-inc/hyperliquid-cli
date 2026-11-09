@@ -1,5 +1,3 @@
-//! Helpers for presenting untrusted protocol/API text to agents and humans.
-
 /// Label applied when raw protocol, exchange, or user-provided text is surfaced in an error.
 pub const UNTRUSTED_LABEL: &str = "[untrusted remote data]";
 
@@ -44,8 +42,9 @@ fn truncate_chars(text: String, max_chars: usize) -> String {
 }
 
 /// Unicode general category `Cf` (format) characters, including every bidi
-/// control and zero-width character.
-fn is_format_char(ch: char) -> bool {
+/// control and zero-width character. Every renderer that hides invisible
+/// characters uses this one table.
+pub fn is_format_char(ch: char) -> bool {
     matches!(
         ch,
         '\u{00AD}'
@@ -85,12 +84,6 @@ impl Untrusted {
     pub fn from_remote(raw: &str) -> Self {
         Self(sanitize_untrusted_text(raw))
     }
-
-    /// The sanitized text without the label.
-    #[must_use]
-    pub fn text(&self) -> &str {
-        &self.0
-    }
 }
 
 impl std::fmt::Display for Untrusted {
@@ -99,7 +92,12 @@ impl std::fmt::Display for Untrusted {
     }
 }
 
-/// Return a consistently labelled representation of untrusted remote text.
+/// Labelled, sanitized remote text for a plain `String` field that is not a
+/// [`CliError`](crate::errors::CliError), such as a result row's `error`.
+/// Errors carry an [`Untrusted`] instead, through
+/// [`CliError::internal_with_remote`](crate::errors::CliError::internal_with_remote),
+/// [`CliError::unsupported_with_remote`](crate::errors::CliError::unsupported_with_remote)
+/// or a [`Rejection`](crate::errors::Rejection).
 #[must_use]
 pub fn labelled_untrusted_text(input: &str) -> String {
     Untrusted::from_remote(input).to_string()
@@ -166,14 +164,6 @@ mod tests {
             labelled_untrusted_text(text),
             "[untrusted remote data] before after link"
         );
-    }
-
-    #[test]
-    fn untrusted_displays_label_and_keeps_sanitized_text() {
-        let untrusted = Untrusted::from_remote("\u{1b}[31mhello\u{1b}[0m\nworld");
-
-        assert_eq!(untrusted.text(), "hello world");
-        assert_eq!(untrusted.to_string(), "[untrusted remote data] hello world");
     }
 }
 

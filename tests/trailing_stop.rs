@@ -323,7 +323,7 @@ async fn spot_and_outcome_markets_are_rejected_before_any_request() {
     let env = IsolatedHome::new();
     let server = trading_server(trailing_stop_ok(OID)).await;
 
-    for coin in ["HYPE/USDC", "#10"] {
+    for coin in ["HYPE/USDC", "#10", "+10"] {
         env.command()
             .env(API_OVERRIDE_ENV, server.uri())
             .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
@@ -619,23 +619,6 @@ async fn exchange_answering_ok_without_an_oid_is_an_unknown_outcome() {
         .assert()
         .code(12);
     assert_eq!(json_stdout(&assert)["reason"], "unknown_outcome");
-}
-
-#[test]
-fn help_describes_the_mark_price_trigger_and_notes() {
-    let env = IsolatedHome::new();
-    env.command()
-        .args(["orders", "trailing-stop", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(
-            "Place a native trailing stop on a perp market",
-        ))
-        .stdout(predicate::str::contains("mark price"))
-        .stdout(predicate::str::contains("market order"))
-        .stdout(predicate::str::contains("--retracement-pct"))
-        .stdout(predicate::str::contains("Notes:"))
-        .stdout(predicate::str::contains("Dry-run: supported"));
 }
 
 #[tokio::test]

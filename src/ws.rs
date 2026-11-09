@@ -1,17 +1,15 @@
-//! Hyperliquid WebSocket construction and one-shot reads.
-
 use std::time::Duration;
 
 use futures::StreamExt;
-use hypersdk::hypercore::{self, Chain, Incoming, Subscription, WebSocket, ws::Event};
+use hypersdk::hypercore::{Chain, Incoming, Subscription, WebSocket, ws::Event};
 
 use crate::errors::CliError;
+use crate::network::Network;
 
+/// A WebSocket for `chain`'s public endpoint, for callers that hold a [`Chain`]
+/// rather than a [`Network`]. The API endpoint override does not apply.
 pub fn websocket_for_chain(chain: Chain) -> WebSocket {
-    match chain {
-        Chain::Mainnet => hypercore::mainnet_ws(),
-        Chain::Testnet => hypercore::testnet_ws(),
-    }
+    Network::from(chain).websocket()
 }
 
 /// What a one-shot WebSocket read is waiting for, as phrased in its errors.
@@ -20,6 +18,11 @@ pub struct Awaited {
     pub closed: &'static str,
     /// Completes "Timed out waiting for Hyperliquid ...".
     pub timed_out: &'static str,
+}
+
+/// The socket ended before it delivered `what` (for example "subscription events").
+pub fn closed_before(what: &str) -> CliError {
+    CliError::Unavailable(format!("WebSocket closed before receiving {what}."))
 }
 
 /// Subscribe on a fresh socket and return the first message `pick` accepts.
@@ -42,10 +45,7 @@ pub async fn first_matching_message<T>(
             }
         }
 
-        Err(CliError::Unavailable(format!(
-            "WebSocket closed before receiving {}.",
-            awaited.closed
-        )))
+        Err(closed_before(awaited.closed))
     })
     .await
     .map_err(|_| {

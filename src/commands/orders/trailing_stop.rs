@@ -4,9 +4,26 @@
 //! fires a market order once the mark retraces from its best level by the
 //! configured percent or price distance. The trigger never moves back.
 
-use hypersdk::hypercore::types::{TrailingStop, TrailingStopRetracement};
+use std::io::{self, Write};
+use std::str::FromStr;
 
-use super::*;
+use clap::Args;
+use hypersdk::Decimal;
+use hypersdk::hypercore::types::{Action, TrailingStop, TrailingStopRetracement};
+use serde::Serialize;
+
+use super::args::OrderSide;
+use super::consent::{ConsentKind, ConsentTarget, ask_confirmation};
+use super::context::OrderSubmissionContext;
+use super::exchange::status_error;
+use super::planning::OrderDryRunPlan;
+use super::rendering::on_behalf_of_flag;
+use super::validation::MarketPrecision;
+use crate::assets::{AssetQuery, PerpAsset, parse_asset_query, qualify_dex_asset};
+use crate::commands::actions;
+use crate::errors::CliError;
+use crate::output::{self, OutputFormat, TableData};
+use crate::response_sanitization::labelled_untrusted_text;
 
 /// Arguments for `orders trailing-stop`.
 #[derive(Args, Debug, Clone)]
@@ -175,20 +192,17 @@ fn retracement_label(retracement: &TrailingStopRetracement) -> String {
 }
 
 pub(crate) fn prepare_trailing_stop_plan(
-    resolver: &AssetResolver,
+    perp: &PerpAsset,
     args: &TrailingStopArgs,
 ) -> Result<TrailingStopPlan, CliError> {
-    validate_trailing_stop_args(args)?;
     let retracement = retracement_from_args(args)?;
-    let query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
-    let perp = resolver.resolve_perp(&query)?;
     let coin = perp.display_name();
-    let size = args.size.round_dp(perp.sz_decimals);
-    if size <= Decimal::ZERO {
-        return Err(CliError::Configuration(format!(
-            "size is too small for {coin}; rounds to zero"
-        )));
-    }
+    let precision = MarketPrecision::of_perp(perp);
+    let size = precision.size(args.size, &coin)?;
+    let activation_px = args
+        .activation_price
+        .map(|price| precision.price(price, &coin))
+        .transpose()?;
     Ok(TrailingStopPlan {
         action: TrailingStop {
             asset: perp.index,
@@ -196,54 +210,36 @@ pub(crate) fn prepare_trailing_stop_plan(
             sz: size,
             reduce_only: args.reduce_only,
             retracement,
-            activation_px: args.activation_price,
+            activation_px,
         },
         coin,
         side: args.side,
         size,
         retracement,
-        activation_px: args.activation_price,
+        activation_px,
     })
 }
 
-/// Build the `--dry-run` plan for `orders trailing-stop`.
-pub fn trailing_stop_dry_run_plan(
-    resolver: &AssetResolver,
-    args: &TrailingStopArgs,
-) -> Result<OrderDryRunPlan, CliError> {
-    let plan = prepare_trailing_stop_plan(resolver, args)?;
-    Ok(OrderDryRunPlan::new(
-        "orders trailing-stop",
-        "trailing_stop",
-        plan.dry_run_args(args),
-    ))
+impl TrailingStopPlan {
+    pub(crate) fn dry_run_plan(&self, args: &TrailingStopArgs) -> OrderDryRunPlan {
+        OrderDryRunPlan::new("trailing_stop", self.dry_run_args(args))
+    }
 }
 
-/// Place a native trailing stop through the signed L1 exchange action.
 pub async fn trailing_stop(
     context: OrderSubmissionContext<'_>,
-    resolver: &AssetResolver,
-    args: &TrailingStopArgs,
-    vault_address: Option<Address>,
+    plan: &TrailingStopPlan,
+    on_behalf_of: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    context.signer.ensure_can_attempt_live_signing()?;
-    let plan = prepare_trailing_stop_plan(resolver, args)?;
-    if context.require_mainnet_confirmation
-        && !args.yes
-        && !confirm_mainnet_trailing_stop(&plan, &ConsentTarget::new(context, vault_address, None))?
-    {
-        return Err(CliError::Configuration(
-            "Mainnet trailing stop confirmation required; trailing stop placement cancelled. Rerun with --yes for deliberate automation."
-                .to_string(),
-        )
-        .into());
-    }
+    context.consent(ConsentKind::TrailingStop, None, |target| {
+        confirm_mainnet_trailing_stop(plan, target)
+    })?;
     let response = actions::send_l1_action_raw(
         context.api,
         context.signer,
         Action::TrailingStop(plan.action.clone()),
         actions::nonce_now(),
-        vault_address,
+        context.vault_address,
         "trailing stop rejected",
     )
     .await?;
@@ -263,22 +259,18 @@ pub async fn trailing_stop(
         }],
     });
     if context.inv.format() == OutputFormat::Pretty {
-        print_cancel_hint(oid, vault_address, args.on_behalf_of.as_deref());
+        print_cancel_hint(oid, on_behalf_of);
     }
     Ok(())
 }
 
-/// Tell a human how to remove the stop they just placed.
-fn print_cancel_hint(oid: u64, vault_address: Option<Address>, on_behalf_of: Option<&str>) {
-    let acting = match (vault_address, on_behalf_of) {
-        (Some(_), Some(selector)) => format!(" --on-behalf-of {selector}"),
-        _ => String::new(),
-    };
+fn print_cancel_hint(oid: u64, on_behalf_of: Option<&str>) {
     let mut stderr = io::stderr();
     // A closed stderr must not turn a placed order into a failure.
     let _ = writeln!(
         stderr,
-        "\nCancel it:\n    hyperliquid orders cancel {oid}{acting}"
+        "\nCancel it:\n    hyperliquid orders cancel {oid}{}",
+        on_behalf_of_flag(on_behalf_of)
     );
 }
 
@@ -296,7 +288,7 @@ fn parse_trailing_stop_response(response: &serde_json::Value) -> Result<u64, Cli
         .or_else(|| response.pointer("/data/status/error"))
         .and_then(serde_json::Value::as_str)
     {
-        return Err(rendering::status_error("place trailing stop", error));
+        return Err(status_error("place trailing stop", error));
     }
     Err(CliError::unknown_outcome(format!(
         "The exchange answered ok without an order ID ({}). Check `hyperliquid orders open` before placing another trailing stop",
@@ -393,7 +385,7 @@ impl TableData for TrailingStopOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 
@@ -401,7 +393,7 @@ impl TableData for TrailingStopOutput {
 mod tests {
     use super::*;
     use crate::assets::test_support::hip3_perp;
-    use crate::assets::{AssetMetadata, PerpAsset, SpotAsset};
+    use crate::assets::{AssetMetadata, AssetResolver, SpotAsset};
     use clap::Parser;
 
     #[derive(Parser)]
@@ -440,6 +432,11 @@ mod tests {
         ))
     }
 
+    fn plan_for(args: &TrailingStopArgs) -> Result<TrailingStopPlan, CliError> {
+        let perp = resolver().resolve_perp(&qualify_dex_asset(args.dex.as_deref(), &args.coin))?;
+        prepare_trailing_stop_plan(&perp, args)
+    }
+
     #[test]
     fn percent_parser_accepts_plain_and_suffixed_values() {
         assert_eq!(parse_retracement_pct("5"), Ok(Decimal::from(5)));
@@ -450,14 +447,6 @@ mod tests {
         );
         assert!(parse_retracement_pct("five").is_err());
         assert!(parse_retracement_pct("%").is_err());
-    }
-
-    #[test]
-    fn exactly_one_retracement_option_is_required_by_the_parser() {
-        assert!(parse(&[]).is_err());
-        assert!(parse(&["--retracement-pct", "5", "--retracement-px", "100"]).is_err());
-        assert!(parse(&["--retracement-pct", "5"]).is_ok());
-        assert!(parse(&["--retracement-px", "100"]).is_ok());
     }
 
     #[test]
@@ -476,32 +465,41 @@ mod tests {
 
     #[test]
     fn price_distances_and_activation_must_be_positive() {
-        for extra in [["--retracement-px", "0"], ["--retracement-px", "-5"]] {
-            let args = parse(&extra).unwrap();
-            assert!(validate_trailing_stop_args(&args).is_err(), "{extra:?}");
-        }
-        let args = parse(&["--retracement-px", "5", "--activation-price", "0"]).unwrap();
-        assert!(validate_trailing_stop_args(&args).is_err());
-        let mut args = parse(&["--retracement-px", "5"]).unwrap();
-        args.size = Decimal::ZERO;
-        assert!(validate_trailing_stop_args(&args).is_err());
-    }
-
-    #[test]
-    fn spot_and_outcome_markets_are_rejected_before_any_lookup() {
-        for coin in ["HYPE/USDC", "#10", "+10"] {
-            let mut args = parse(&["--retracement-pct", "5"]).unwrap();
-            args.coin = coin.to_string();
+        let cases: [(&[&str], Decimal, &str); 4] = [
+            (
+                &["--retracement-px", "0"],
+                Decimal::new(1, 2),
+                "--retracement-px",
+            ),
+            (
+                &["--retracement-px", "-5"],
+                Decimal::new(1, 2),
+                "--retracement-px",
+            ),
+            (
+                &["--retracement-px", "5", "--activation-price", "0"],
+                Decimal::new(1, 2),
+                "--activation-price",
+            ),
+            (&["--retracement-px", "5"], Decimal::ZERO, "--size"),
+        ];
+        for (extra, size, flag) in cases {
+            let mut args = parse(extra).unwrap();
+            args.size = size;
             let err = validate_trailing_stop_args(&args).unwrap_err();
-            assert!(matches!(err, CliError::Configuration(_)), "{coin}: {err}");
-            assert!(err.to_string().contains("perpetual markets only"), "{err}");
+            assert_eq!(err.exit_code(), 2, "{extra:?}");
+            assert!(
+                err.to_string()
+                    .contains(&format!("{flag} must be greater than zero")),
+                "{extra:?}: {err}"
+            );
         }
     }
 
     #[test]
     fn plan_serializes_the_documented_wire_shape() {
         let args = parse(&["--retracement-pct", "5.0", "--reduce-only"]).unwrap();
-        let plan = prepare_trailing_stop_plan(&resolver(), &args).unwrap();
+        let plan = plan_for(&args).unwrap();
         assert_eq!(
             serde_json::to_value(Action::TrailingStop(plan.action.clone())).unwrap(),
             serde_json::json!({
@@ -516,7 +514,7 @@ mod tests {
         );
 
         let args = parse(&["--retracement-px", "150", "--activation-price", "60000.50"]).unwrap();
-        let plan = prepare_trailing_stop_plan(&resolver(), &args).unwrap();
+        let plan = plan_for(&args).unwrap();
         assert_eq!(
             serde_json::to_value(Action::TrailingStop(plan.action.clone())).unwrap(),
             serde_json::json!({
@@ -526,23 +524,23 @@ mod tests {
                 "sz": "0.01",
                 "reduceOnly": false,
                 "retracement": { "px": "150" },
-                "activationPx": "60000.5",
+                "activationPx": "60000",
             })
         );
     }
 
     #[test]
-    fn size_rounds_to_the_market_precision_and_rejects_zero() {
+    fn size_truncates_to_the_market_lot_and_rejects_zero() {
         let mut args = parse(&["--retracement-pct", "5"]).unwrap();
         args.size = Decimal::new(1_234_567, 6);
-        let plan = prepare_trailing_stop_plan(&resolver(), &args).unwrap();
-        assert_eq!(plan.size, Decimal::new(123_457, 5));
+        let plan = plan_for(&args).unwrap();
+        assert_eq!(plan.size, Decimal::new(123_456, 5));
 
         args.size = Decimal::new(1, 8);
-        let err = prepare_trailing_stop_plan(&resolver(), &args)
+        let err = plan_for(&args)
             .err()
-            .expect("size below the lot rounds to zero");
-        assert!(err.to_string().contains("rounds to zero"), "{err}");
+            .expect("size below the lot truncates to zero");
+        assert!(err.to_string().contains("truncates to zero"), "{err}");
     }
 
     #[test]
@@ -550,19 +548,13 @@ mod tests {
         let mut args = parse(&["--retracement-pct", "5"]).unwrap();
         args.coin = "HYPE".to_string();
         args.dex = Some("testdex".to_string());
-        let plan = prepare_trailing_stop_plan(&resolver(), &args).unwrap();
+        let plan = plan_for(&args).unwrap();
         assert_eq!(plan.coin, "testdex:HYPE");
         assert_eq!(plan.action.asset, 11_100);
 
         args.coin = "testdex:HYPE".to_string();
         args.dex = None;
-        assert_eq!(
-            prepare_trailing_stop_plan(&resolver(), &args)
-                .unwrap()
-                .action
-                .asset,
-            11_100
-        );
+        assert_eq!(plan_for(&args).unwrap().action.asset, 11_100);
     }
 
     #[test]

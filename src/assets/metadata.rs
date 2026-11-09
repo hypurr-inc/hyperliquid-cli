@@ -1,38 +1,38 @@
-//! Exchange metadata snapshots: the two loaders (hypersdk, raw `/info`), the
-//! raw spot-meta fallback, the HIP-3 live lookup and the 60 s cache.
-
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use hypersdk::hypercore::{Chain, Dex, HttpClient, PerpMarket, SpotMarket};
+use hypersdk::Decimal;
+use hypersdk::hypercore::{Chain, Dex, HttpClient, PerpMarket, SpotMarket, SpotToken};
 use serde::Deserialize;
 
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
+use crate::wire::InfoRequest;
 
 use super::asset_id;
 use super::market::{PerpAsset, SpotAsset};
-use super::query::eq_asset_name;
+use super::query::{eq_asset_name, normalize_dex, strip_dex_prefix};
 
-/// Metadata cache lifetime for exchange metadata.
-pub const METADATA_TTL: Duration = Duration::from_secs(60);
+const METADATA_TTL: Duration = Duration::from_secs(60);
 
-/// Exchange metadata used by the resolver.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AssetMetadata {
     pub(super) perps: Vec<PerpAsset>,
     pub(super) spots: Vec<SpotAsset>,
+    pub(super) unavailable_dexes: Vec<String>,
 }
 
 impl AssetMetadata {
     #[must_use]
     pub fn from_assets(perps: Vec<PerpAsset>, spots: Vec<SpotAsset>) -> Self {
-        Self { perps, spots }
+        Self {
+            perps,
+            spots,
+            unavailable_dexes: Vec::new(),
+        }
     }
 
-    /// Load default-dex perps and all spot markets through `hypersdk`.
-    ///
     /// HIP-3 markets are not loaded here; they are looked up live on demand.
     pub async fn load(api: &ApiClient) -> Result<Self, CliError> {
         let default_perps = api.sdk().perps().await.map_err(from_sdk)?;
@@ -46,17 +46,20 @@ impl AssetMetadata {
             .map(|market| perp_asset_from_market(market, None))
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Self { perps, spots })
+        Ok(Self {
+            perps,
+            spots,
+            unavailable_dexes: Vec::new(),
+        })
     }
 
-    /// Load default-dex perps, every HIP-3 DEX and all spot markets from the raw
-    /// `/info` endpoints.
-    ///
     /// Used when the `hypersdk` loader cannot decode a network's metadata and by
     /// `asset search`/`asset decode`, which need every HIP-3 market.
     ///
-    /// A HIP-3 DEX whose metadata fails to load is skipped, so it resolves as
-    /// "asset not found" rather than failing the whole load.
+    /// A HIP-3 DEX whose own metadata fails to load does not fail the whole
+    /// load: it is listed in [`Self::unavailable_dexes`], and resolving one of
+    /// its markets reports that failure instead of "asset not found". A failed
+    /// `perpDexs` listing fails the load.
     pub async fn load_raw(api: &ApiClient) -> Result<Self, CliError> {
         #[derive(Deserialize)]
         struct MetaResponse {
@@ -72,16 +75,8 @@ impl AssetMetadata {
             sz_decimals: u32,
         }
 
-        #[derive(Deserialize)]
-        struct RawPerpDex {
-            name: String,
-        }
-
         let meta = api
-            .info::<MetaResponse>(
-                &serde_json::json!({ "type": "meta" }),
-                "loading perpetual metadata",
-            )
+            .info::<MetaResponse>(&InfoRequest::new("meta"), "loading perpetual metadata")
             .await?;
         let spot_meta = load_raw_spot_meta(api).await?;
 
@@ -99,41 +94,30 @@ impl AssetMetadata {
             })
             .collect::<Vec<_>>();
 
-        if let Ok(dexes) = api
-            .info::<Vec<Option<RawPerpDex>>>(
-                &serde_json::json!({ "type": "perpDexs" }),
-                "loading HIP-3 DEX metadata",
-            )
-            .await
-        {
-            for (dex_slot, dex) in dexes.into_iter().enumerate() {
-                let Some(dex) = dex else { continue };
-                let Ok(meta) = api
-                    .info::<MetaResponse>(
-                        &serde_json::json!({ "type": "meta", "dex": dex.name.clone() }),
-                        "loading HIP-3 perpetual metadata",
-                    )
-                    .await
-                else {
-                    continue;
-                };
-                let prefix = format!("{}:", dex.name);
-                let collateral = spot_meta.collateral_name(meta.collateral_token);
-                perps.extend(meta.universe.into_iter().enumerate().map(|(index, perp)| {
-                    let name = perp
-                        .name
-                        .strip_prefix(&prefix)
-                        .unwrap_or(perp.name.as_str())
-                        .to_string();
-                    PerpAsset {
-                        name,
-                        index: asset_id::hip3_asset_index(dex_slot, index),
-                        dex: Some(dex.name.clone()),
-                        sz_decimals: perp.sz_decimals,
-                        collateral: collateral.clone(),
-                    }
-                }));
-            }
+        let mut unavailable_dexes = Vec::new();
+        for (dex_slot, dex) in load_raw_perp_dexes(api).await?.into_iter().enumerate() {
+            let Some(dex) = dex else { continue };
+            let Ok(meta) = api
+                .info::<MetaResponse>(
+                    &InfoRequest::new("meta").field("dex", dex.name.clone()),
+                    "loading HIP-3 perpetual metadata",
+                )
+                .await
+            else {
+                unavailable_dexes.push(dex.name);
+                continue;
+            };
+            let collateral = spot_meta.collateral_name(meta.collateral_token);
+            perps.extend(meta.universe.into_iter().enumerate().map(|(index, perp)| {
+                let name = strip_dex_prefix(&perp.name, &dex.name).to_string();
+                PerpAsset {
+                    name,
+                    index: asset_id::hip3_asset_index(dex_slot, index),
+                    dex: Some(dex.name.clone()),
+                    sz_decimals: perp.sz_decimals,
+                    collateral: collateral.clone(),
+                }
+            }));
         }
 
         let spots = spot_meta
@@ -142,7 +126,11 @@ impl AssetMetadata {
             .map(spot_asset_from_listing)
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Self { perps, spots })
+        Ok(Self {
+            perps,
+            spots,
+            unavailable_dexes,
+        })
     }
 
     #[must_use]
@@ -155,23 +143,10 @@ impl AssetMetadata {
         &self.spots
     }
 
-    pub(super) fn all_candidate_names(&self) -> Vec<String> {
-        self.perps
-            .iter()
-            .map(PerpAsset::display_name)
-            .chain(self.spots.iter().map(|spot| spot.symbol.clone()))
-            .collect()
-    }
-
-    /// Whether `asset` is already listed, by protocol id or by DEX and name.
-    pub(super) fn has_perp(&self, asset: &PerpAsset) -> bool {
-        self.perps.iter().any(|existing| {
-            existing.index == asset.index
-                || (matches!(
-                    (&existing.dex, &asset.dex),
-                    (Some(left), Some(right)) if eq_asset_name(left, right)
-                ) && eq_asset_name(&existing.name, &asset.name))
-        })
+    /// HIP-3 DEXes whose metadata failed to load, so their markets are missing.
+    #[must_use]
+    pub fn unavailable_dexes(&self) -> &[String] {
+        &self.unavailable_dexes
     }
 }
 
@@ -189,10 +164,7 @@ pub(super) fn perp_asset_from_market(
     dex: Option<String>,
 ) -> Result<PerpAsset, CliError> {
     let name = match dex.as_deref() {
-        Some(dex_name) => market
-            .name
-            .strip_prefix(&format!("{dex_name}:"))
-            .map_or_else(|| market.name.clone(), ToString::to_string),
+        Some(dex_name) => strip_dex_prefix(&market.name, dex_name).to_string(),
         None => market.name.clone(),
     };
     Ok(PerpAsset {
@@ -313,11 +285,39 @@ impl RawSpotMeta {
 }
 
 async fn load_raw_spot_meta(api: &ApiClient) -> Result<RawSpotMeta, CliError> {
-    api.info(
-        &serde_json::json!({ "type": "spotMeta" }),
-        "loading raw spot metadata",
-    )
-    .await
+    api.info(&InfoRequest::new("spotMeta"), "loading raw spot metadata")
+        .await
+}
+
+/// One `perpDexs` entry. hypersdk 0.3's `Dex` no longer carries the deployer fee
+/// scale, so the raw response is the only place to read it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RawPerpDex {
+    pub name: String,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub deployer_fee_scale: Option<Decimal>,
+}
+
+/// The raw `perpDexs` list. Slot `n` is the dex at protocol position `n`, so a
+/// removed dex stays in the list as `None`.
+pub(crate) async fn load_raw_perp_dexes(
+    api: &ApiClient,
+) -> Result<Vec<Option<RawPerpDex>>, CliError> {
+    api.info(&InfoRequest::new("perpDexs"), "loading perp DEX metadata")
+        .await
+}
+
+/// The spot token called `name`, ignoring case and surrounding whitespace.
+pub async fn require_spot_token(client: &HttpClient, name: &str) -> Result<SpotToken, CliError> {
+    let name = name.trim();
+    client
+        .spot_tokens()
+        .await
+        .map_err(from_sdk)?
+        .into_iter()
+        .find(|token| eq_asset_name(&token.name, name))
+        .ok_or_else(|| CliError::Unsupported(format!("spot token \"{name}\" not found")))
 }
 
 /// Find a HIP-3 DEX by name, case-insensitively.
@@ -331,6 +331,21 @@ pub(crate) async fn find_perp_dex(client: &HttpClient, dex_name: &str) -> Result
         .ok_or_else(|| CliError::Unsupported(format!("Unknown DEX: {dex_name}")))
 }
 
+/// Validate a `--dex` value against the exchange and return its canonical name.
+///
+/// A blank value is the default dex. An unknown DEX is explicit invalid input:
+/// it fails here instead of reading an empty account or an empty mid map, and
+/// the canonical spelling is what every later request uses.
+pub async fn canonical_dex(
+    client: &HttpClient,
+    dex: Option<&str>,
+) -> Result<Option<String>, CliError> {
+    match normalize_dex(dex) {
+        Some(dex) => Ok(Some(find_perp_dex(client, dex).await?.name().to_string())),
+        None => Ok(None),
+    }
+}
+
 /// Look up one HIP-3 market live, returning the DEX's canonical name with it.
 ///
 /// `Ok(None)` means the DEX exists but lists no such market.
@@ -341,43 +356,30 @@ pub(crate) async fn load_hip3_market(
 ) -> Result<Option<(String, PerpMarket)>, CliError> {
     let dex = find_perp_dex(client, dex_name).await?;
     let canonical_dex_name = dex.name().to_string();
-    let prefix = format!("{canonical_dex_name}:");
     let market = client
         .perps_from(dex)
         .await
         .map_err(from_sdk)?
         .into_iter()
         .find(|market| {
-            let display_token = market.name.strip_prefix(&prefix).unwrap_or(&market.name);
+            let display_token = strip_dex_prefix(&market.name, &canonical_dex_name);
             display_token.eq_ignore_ascii_case(token) || market.name.eq_ignore_ascii_case(token)
         });
     Ok(market.map(|market| (canonical_dex_name, market)))
 }
 
-/// A metadata snapshot with the time it was fetched.
 #[derive(Debug, Clone)]
-pub struct CachedMetadata {
+struct CachedMetadata {
     metadata: AssetMetadata,
     fetched_at: Instant,
 }
 
 impl CachedMetadata {
-    #[must_use]
-    pub fn new(metadata: AssetMetadata, fetched_at: Instant) -> Self {
-        Self {
-            metadata,
-            fetched_at,
-        }
-    }
-
-    /// Return true while the entry is inside the 60-second freshness window.
-    #[must_use]
-    pub fn is_fresh_at(&self, now: Instant) -> bool {
+    fn is_fresh_at(&self, now: Instant) -> bool {
         now.duration_since(self.fetched_at) <= METADATA_TTL
     }
 }
 
-/// Thread-safe 60-second metadata cache keyed by Hyperliquid network.
 #[derive(Debug, Default)]
 pub struct MetadataCache {
     cached: Mutex<Vec<(Chain, CachedMetadata)>>,
@@ -389,7 +391,6 @@ impl MetadataCache {
         Self::default()
     }
 
-    /// Get fresh metadata from cache, or load it through `hypersdk`.
     pub async fn get_or_load(&self, api: &ApiClient) -> Result<AssetMetadata, CliError> {
         let chain = api.chain();
         if let Some(metadata) = self.fresh_metadata_for_chain_at(chain, Instant::now()) {
@@ -404,7 +405,13 @@ impl MetadataCache {
     fn store_for_chain(&self, chain: Chain, metadata: AssetMetadata, fetched_at: Instant) {
         let mut cached = self.cached.lock().expect("metadata cache lock poisoned");
         cached.retain(|(cached_chain, _)| *cached_chain != chain);
-        cached.push((chain, CachedMetadata::new(metadata, fetched_at)));
+        cached.push((
+            chain,
+            CachedMetadata {
+                metadata,
+                fetched_at,
+            },
+        ));
     }
 
     fn fresh_metadata_for_chain_at(&self, chain: Chain, now: Instant) -> Option<AssetMetadata> {

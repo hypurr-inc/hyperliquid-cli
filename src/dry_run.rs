@@ -1,20 +1,14 @@
-//! Stable dry-run envelope and narrow action-plan spike.
+//! The dry-run preview envelope: what a command prints under `--dry-run`.
 //!
-//! Dry-run output remains a public CLI contract. `ActionPlan` is intentionally
-//! small and internal-facing for now; command-family migrations can consume it
-//! later without forcing every signed action through one generic abstraction.
+//! Dry-run output is a public CLI contract. Commands do not build envelopes
+//! themselves; `commands::support::print_dry_run` assembles one from the
+//! invocation (command name, payload, network, signer) and the command's
+//! `would_execute` name and `args`.
 
 use serde::Serialize;
 
 use crate::network::Network;
 use crate::output::TableData;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionKind {
-    SignedExchangeAction,
-    LocalStateMutation,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -36,68 +30,18 @@ impl ActionReversibility {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LiveSubmissionPolicy {
-    DryRunOnly,
-    ValidateConfirmSignSubmit,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ActionPlan {
-    would_execute: String,
-    kind: ActionKind,
-    reversibility: ActionReversibility,
-    live_submission: LiveSubmissionPolicy,
-}
-
-impl ActionPlan {
-    #[must_use]
-    pub fn signed_exchange_action(
-        would_execute: impl Into<String>,
-        reversibility: ActionReversibility,
-        live_submission: LiveSubmissionPolicy,
-    ) -> Self {
-        Self {
-            would_execute: would_execute.into(),
-            kind: ActionKind::SignedExchangeAction,
-            reversibility,
-            live_submission,
-        }
-    }
-
-    #[must_use]
-    pub fn would_execute(&self) -> &str {
-        &self.would_execute
-    }
-
-    #[must_use]
-    pub fn kind(&self) -> ActionKind {
-        self.kind
-    }
-
-    #[must_use]
-    pub fn reversibility(&self) -> ActionReversibility {
-        self.reversibility
-    }
-
-    #[must_use]
-    pub fn live_submission(&self) -> LiveSubmissionPolicy {
-        self.live_submission
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DryRunSigningContext {
-    signer: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DryRunSigning {
+    /// The signing address, or why it could not be resolved without prompting.
+    signer: Result<String, String>,
     acting_as: Option<String>,
     vault_address: Option<String>,
 }
 
-impl DryRunSigningContext {
+impl DryRunSigning {
     #[must_use]
     pub fn new(
-        signer: Option<String>,
+        signer: Result<String, String>,
         acting_as: Option<String>,
         vault_address: Option<String>,
     ) -> Self {
@@ -112,165 +56,90 @@ impl DryRunSigningContext {
 #[derive(Debug, Clone, PartialEq)]
 pub struct DryRunEnvelope {
     command: String,
-    details: serde_json::Value,
-    run_context: Option<DryRunRunContext>,
+    would_execute: String,
+    args: serde_json::Value,
+    payload: Option<serde_json::Value>,
+    signing: Option<DryRunSigning>,
+    network: Option<Network>,
 }
 
 impl DryRunEnvelope {
+    /// `args` is the command's own preview; `Null` leaves the key out.
     #[must_use]
-    pub fn from_details(command: impl Into<String>, details: serde_json::Value) -> Self {
-        Self {
-            command: command.into(),
-            details,
-            run_context: None,
-        }
-    }
-
-    #[must_use]
-    pub fn from_action_plan(
+    pub fn new(
         command: impl Into<String>,
-        plan: &ActionPlan,
+        would_execute: impl Into<String>,
         args: serde_json::Value,
     ) -> Self {
-        Self::from_details(
-            command,
-            serde_json::json!({
-                "would_execute": plan.would_execute(),
-                "args": args,
-            }),
-        )
+        Self {
+            command: command.into(),
+            would_execute: would_execute.into(),
+            args,
+            payload: None,
+            signing: None,
+            network: None,
+        }
     }
 
+    /// The `--payload-json` document, already redacted.
     #[must_use]
     pub fn with_payload(mut self, payload: Option<serde_json::Value>) -> Self {
-        if let Some(payload) = payload {
-            self.details_object_mut()
-                .insert("payload".to_string(), payload);
-        }
+        self.payload = payload;
         self
     }
 
     #[must_use]
-    pub fn with_signing_context(mut self, context: DryRunSigningContext) -> Self {
-        let details = self.details_object_mut();
-        details.insert("signer".to_string(), serde_json::json!(context.signer));
-        details.insert(
-            "acting_as".to_string(),
-            serde_json::json!(context.acting_as),
-        );
-        details.insert(
-            "vault_address".to_string(),
-            serde_json::json!(context.vault_address),
-        );
+    pub fn with_signing(mut self, signing: DryRunSigning) -> Self {
+        self.signing = Some(signing);
         self
     }
 
-    fn details_object_mut(&mut self) -> &mut serde_json::Map<String, serde_json::Value> {
-        if !self.details.is_object() {
-            self.details = serde_json::Value::Object(serde_json::Map::new());
-        }
-        self.details.as_object_mut().expect("details object")
-    }
-}
-
-/// Network and signer facts for this run, added to a dry-run envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DryRunRunContext {
-    network: Network,
-    signer: Option<Result<String, String>>,
-}
-
-impl DryRunRunContext {
-    /// `signer` is `None` for commands that don't sign. For signing commands pass the
-    /// resolved address, or the reason it couldn't be resolved without prompting.
     #[must_use]
-    pub fn new(network: Network, signer: Option<Result<String, String>>) -> Self {
-        Self { network, signer }
-    }
-}
-
-impl DryRunEnvelope {
-    /// Add the run's network and signer to what this envelope prints.
-    #[must_use]
-    pub fn with_run_context(mut self, context: Option<DryRunRunContext>) -> Self {
-        self.run_context = context;
+    pub fn with_network(mut self, network: Option<Network>) -> Self {
+        self.network = network;
         self
     }
 
-    fn merged_object(
-        &self,
-        context: Option<&DryRunRunContext>,
-    ) -> serde_json::Map<String, serde_json::Value> {
+    fn json_object(&self) -> serde_json::Map<String, serde_json::Value> {
         let mut object = serde_json::Map::new();
         object.insert("dry_run".to_string(), serde_json::json!(true));
         object.insert("command".to_string(), serde_json::json!(self.command));
-        if let Some(details) = self.details.as_object() {
-            for (key, value) in details {
-                object.insert(key.clone(), value.clone());
-            }
-        }
-        let Some(context) = context else {
-            return object;
-        };
         object.insert(
-            "network".to_string(),
-            serde_json::json!(context.network.to_string()),
+            "would_execute".to_string(),
+            serde_json::json!(self.would_execute),
         );
-        let signer_known = object.get("signer").is_some_and(|value| !value.is_null());
-        match (&context.signer, signer_known) {
-            (Some(Ok(address)), false) => {
-                object.insert("signer".to_string(), serde_json::json!(address));
-            }
-            (Some(Err(reason)), false) => {
-                object.insert("signer".to_string(), serde_json::Value::Null);
-                object.insert("signer_warning".to_string(), serde_json::json!(reason));
-            }
-            _ => {}
+        if !self.args.is_null() {
+            object.insert("args".to_string(), self.args.clone());
         }
-        object
-    }
-
-    fn rows_for(&self, context: Option<&DryRunRunContext>) -> Vec<Vec<String>> {
-        let object = self.merged_object(context);
-        let text = |key: &str| object.get(key).and_then(serde_json::Value::as_str);
-        let mut rows = vec![
-            vec!["Command".to_string(), self.command.clone()],
-            vec![
-                "Would execute".to_string(),
-                text("would_execute")
-                    .unwrap_or("validate_and_execute")
-                    .to_string(),
-            ],
-        ];
-        match object.get("args") {
-            Some(serde_json::Value::Object(args)) => {
-                for (key, value) in args {
-                    rows.push(vec![field_label(key), display_value(value)]);
+        if let Some(payload) = &self.payload {
+            object.insert("payload".to_string(), payload.clone());
+        }
+        if let Some(signing) = &self.signing {
+            match &signing.signer {
+                Ok(address) => {
+                    object.insert("signer".to_string(), serde_json::json!(address));
+                }
+                Err(reason) => {
+                    object.insert("signer".to_string(), serde_json::Value::Null);
+                    object.insert("signer_warning".to_string(), serde_json::json!(reason));
                 }
             }
-            Some(serde_json::Value::Null) | None => {}
-            Some(other) => rows.push(vec!["Args".to_string(), display_value(other)]),
+            object.insert(
+                "acting_as".to_string(),
+                serde_json::json!(signing.acting_as),
+            );
+            object.insert(
+                "vault_address".to_string(),
+                serde_json::json!(signing.vault_address),
+            );
         }
-        for (key, label) in [
-            ("signer", "Signer"),
-            ("acting_as", "Acting as"),
-            ("vault_address", "Vault"),
-        ] {
-            if let Some(value) = object.get(key)
-                && !value.is_null()
-            {
-                rows.push(vec![label.to_string(), display_value(value)]);
-            } else if key == "signer" && object.contains_key("signer_warning") {
-                rows.push(vec!["Signer".to_string(), "not resolved".to_string()]);
-            }
+        if let Some(network) = self.network {
+            object.insert(
+                "network".to_string(),
+                serde_json::json!(network.to_string()),
+            );
         }
-        if let Some(warning) = text("signer_warning") {
-            rows.push(vec!["Warning".to_string(), warning.to_string()]);
-        }
-        if let Some(network) = text("network") {
-            rows.push(vec!["Network".to_string(), network.to_string()]);
-        }
-        rows
+        object
     }
 }
 
@@ -297,11 +166,45 @@ impl TableData for DryRunEnvelope {
     }
 
     fn rows(&self) -> Vec<Vec<String>> {
-        self.rows_for(self.run_context.as_ref())
+        let mut rows = vec![
+            vec!["Command".to_string(), self.command.clone()],
+            vec!["Would execute".to_string(), self.would_execute.clone()],
+        ];
+        match &self.args {
+            serde_json::Value::Object(args) => {
+                for (key, value) in args {
+                    rows.push(vec![field_label(key), display_value(value)]);
+                }
+            }
+            serde_json::Value::Null => {}
+            other => rows.push(vec!["Args".to_string(), display_value(other)]),
+        }
+        if let Some(signing) = &self.signing {
+            rows.push(vec![
+                "Signer".to_string(),
+                match &signing.signer {
+                    Ok(address) => address.clone(),
+                    Err(_) => "not resolved".to_string(),
+                },
+            ]);
+            if let Some(acting_as) = &signing.acting_as {
+                rows.push(vec!["Acting as".to_string(), acting_as.clone()]);
+            }
+            if let Some(vault) = &signing.vault_address {
+                rows.push(vec!["Vault".to_string(), vault.clone()]);
+            }
+            if let Err(reason) = &signing.signer {
+                rows.push(vec!["Warning".to_string(), reason.clone()]);
+            }
+        }
+        if let Some(network) = self.network {
+            rows.push(vec!["Network".to_string(), network.to_string()]);
+        }
+        rows
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::Value::Object(self.merged_object(self.run_context.as_ref()))
+        serde_json::Value::Object(self.json_object())
     }
 }
 
@@ -309,120 +212,87 @@ impl TableData for DryRunEnvelope {
 mod tests {
     use super::*;
 
-    #[test]
-    fn action_plan_records_precise_live_submission_terms() {
-        let plan = ActionPlan::signed_exchange_action(
-            "create_subaccount",
-            ActionReversibility::Irreversible,
-            LiveSubmissionPolicy::ValidateConfirmSignSubmit,
-        );
-
-        assert_eq!(plan.would_execute(), "create_subaccount");
-        assert_eq!(plan.kind(), ActionKind::SignedExchangeAction);
-        assert_eq!(plan.reversibility(), ActionReversibility::Irreversible);
-        assert_eq!(
-            plan.live_submission(),
-            LiveSubmissionPolicy::ValidateConfirmSignSubmit
-        );
-    }
-
-    #[test]
-    fn action_plan_envelope_preserves_current_public_json_shape() {
-        let plan = ActionPlan::signed_exchange_action(
-            "create_subaccount",
-            ActionReversibility::Irreversible,
-            LiveSubmissionPolicy::ValidateConfirmSignSubmit,
-        );
-        let envelope = DryRunEnvelope::from_action_plan(
-            "subaccount create",
-            &plan,
-            serde_json::json!({"name": "market-maker-1"}),
-        )
-        .with_signing_context(DryRunSigningContext::new(None, None, None));
-
-        assert_eq!(
-            envelope.to_json_value(),
-            serde_json::json!({
-                "dry_run": true,
-                "command": "subaccount create",
-                "would_execute": "create_subaccount",
-                "args": {"name": "market-maker-1"},
-                "signer": null,
-                "acting_as": null,
-                "vault_address": null
-            })
-        );
-    }
-
     fn sample_envelope() -> DryRunEnvelope {
-        let plan = ActionPlan::signed_exchange_action(
-            "place_order",
-            ActionReversibility::PartiallyReversible,
-            LiveSubmissionPolicy::ValidateConfirmSignSubmit,
-        );
-        DryRunEnvelope::from_action_plan(
+        DryRunEnvelope::new(
             "orders create",
-            &plan,
+            "place_order",
             serde_json::json!({"coin": "BTC", "side": "buy", "size": "0.1", "price": null}),
         )
     }
 
     #[test]
-    fn run_context_adds_network_and_resolved_signer() {
-        let context = DryRunRunContext {
-            network: Network::Testnet,
-            signer: Some(Ok("0xabc".to_string())),
-        };
-        let json = serde_json::Value::Object(sample_envelope().merged_object(Some(&context)));
+    fn unsigned_envelope_has_no_signer_keys() {
+        assert_eq!(
+            sample_envelope()
+                .with_network(Some(Network::Mainnet))
+                .to_json_value(),
+            serde_json::json!({
+                "dry_run": true,
+                "command": "orders create",
+                "would_execute": "place_order",
+                "args": {"coin": "BTC", "side": "buy", "size": "0.1", "price": null},
+                "network": "mainnet"
+            })
+        );
+    }
+
+    #[test]
+    fn null_args_are_left_out() {
+        let envelope = DryRunEnvelope::new(
+            "wallet create",
+            "create_and_store_encrypted_wallet",
+            serde_json::Value::Null,
+        );
+        assert_eq!(
+            envelope.to_json_value(),
+            serde_json::json!({
+                "dry_run": true,
+                "command": "wallet create",
+                "would_execute": "create_and_store_encrypted_wallet"
+            })
+        );
+    }
+
+    #[test]
+    fn resolved_signer_names_the_acting_account() {
+        let json = sample_envelope()
+            .with_signing(DryRunSigning::new(
+                Ok("0xabc".to_string()),
+                Some("0xvault".to_string()),
+                Some("0xvault".to_string()),
+            ))
+            .with_network(Some(Network::Testnet))
+            .to_json_value();
 
         assert_eq!(json["network"], "testnet");
         assert_eq!(json["signer"], "0xabc");
+        assert_eq!(json["acting_as"], "0xvault");
+        assert_eq!(json["vault_address"], "0xvault");
         assert!(json.get("signer_warning").is_none());
     }
 
     #[test]
     fn unresolved_signer_is_null_with_warning() {
-        let context = DryRunRunContext {
-            network: Network::Mainnet,
-            signer: Some(Err("no signer configured".to_string())),
-        };
-        let json = serde_json::Value::Object(sample_envelope().merged_object(Some(&context)));
+        let json = sample_envelope()
+            .with_signing(DryRunSigning::new(
+                Err("no signer configured".to_string()),
+                None,
+                None,
+            ))
+            .to_json_value();
 
-        assert_eq!(json["network"], "mainnet");
         assert!(json["signer"].is_null());
         assert_eq!(json["signer_warning"], "no signer configured");
-    }
-
-    #[test]
-    fn existing_signer_is_kept_and_unsigned_commands_get_no_signer_keys() {
-        let envelope = sample_envelope().with_signing_context(DryRunSigningContext::new(
-            Some("0xexisting".to_string()),
-            None,
-            None,
-        ));
-        let signed = DryRunRunContext {
-            network: Network::Mainnet,
-            signer: Some(Ok("0xother".to_string())),
-        };
-        let json = serde_json::Value::Object(envelope.merged_object(Some(&signed)));
-        assert_eq!(json["signer"], "0xexisting");
-
-        let unsigned = DryRunRunContext {
-            network: Network::Mainnet,
-            signer: None,
-        };
-        let json = serde_json::Value::Object(sample_envelope().merged_object(Some(&unsigned)));
-        assert_eq!(json["network"], "mainnet");
-        assert!(json.get("signer").is_none());
+        assert!(json["acting_as"].is_null());
+        assert!(json["vault_address"].is_null());
     }
 
     #[test]
     fn human_rows_list_args_signer_and_network() {
-        let context = DryRunRunContext {
-            network: Network::Testnet,
-            signer: Some(Ok("0xabc".to_string())),
-        };
-        let rows = sample_envelope().rows_for(Some(&context));
+        let rows = sample_envelope()
+            .with_signing(DryRunSigning::new(Ok("0xabc".to_string()), None, None))
+            .with_network(Some(Network::Testnet))
+            .rows();
         let find = |label: &str| {
             rows.iter()
                 .find(|row| row[0] == label)
@@ -437,5 +307,22 @@ mod tests {
         assert_eq!(find("Price").as_deref(), Some("none"));
         assert_eq!(find("Signer").as_deref(), Some("0xabc"));
         assert_eq!(find("Network").as_deref(), Some("testnet"));
+    }
+
+    #[test]
+    fn human_rows_say_when_the_signer_is_unresolved() {
+        let rows = sample_envelope()
+            .with_signing(DryRunSigning::new(
+                Err("Authentication required.".to_string()),
+                None,
+                None,
+            ))
+            .rows();
+
+        assert!(rows.contains(&vec!["Signer".to_string(), "not resolved".to_string()]));
+        assert!(rows.contains(&vec![
+            "Warning".to_string(),
+            "Authentication required.".to_string()
+        ]));
     }
 }

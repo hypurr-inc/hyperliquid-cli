@@ -1,42 +1,72 @@
-//! Whether this invocation may prompt, decided once in `main`.
+//! The interaction context of one run: who, if anyone, is at the other end.
 //!
-//! Commands ask the [`Mode`] they were handed. They never read
-//! `HYPERLIQUID_AGENT`, `CI`, or TTY state for interaction decisions
-//! themselves, so every command agrees.
+//! [`Mode`] is built once at startup from the probed [`Terminal`], the
+//! environment, the flags and the output format. It is the only owner of
+//! agent, CI and terminal state: each question the CLI asks about its
+//! surroundings has exactly one predicate here, so every command and every
+//! pipeline step agrees. Nothing else reads `HYPERLIQUID_AGENT`, `CI` or a TTY
+//! to decide whether to prompt, bound a stream, announce or redraw.
 
 use crate::errors::CliError;
-use crate::output::terminal::{EnvFlag, OutputEnv, env_flag};
+use crate::output::OutputFormat;
+use crate::output::terminal::{EnvFlag, Terminal, env_flag};
+use crate::settings::{EnvSource, env};
 
-/// What decides whether this invocation may prompt, resolved once in `main`.
+/// `--non-interactive`, as named in the error that says why a prompt is off.
+pub const NON_INTERACTIVE_FLAG: &str = "--non-interactive";
+const JSON_OUTPUT: &str = "JSON output";
+const STDIN_PAYLOAD: &str = "stdin is used as the payload";
+
+/// What decides whether this invocation may prompt, announce or redraw.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Mode {
-    /// `--non-interactive` was passed.
-    pub non_interactive_flag: bool,
-    /// The effective output format is JSON (explicit, env, agent, or non-TTY default).
-    pub machine_format: bool,
-    /// Stdin carries a payload (`--payload-file -`), so it can't answer prompts.
-    pub stdin_is_payload: bool,
+    pub terminal: Terminal,
     /// `HYPERLIQUID_AGENT` is on.
     pub agent: bool,
-    /// The process runs under CI.
     pub ci: bool,
+    /// The effective output format (explicit, env, agent, or non-TTY default).
+    pub format: OutputFormat,
+    pub non_interactive_flag: bool,
+    /// Stdin carries a payload (`--payload-file -`), so it can't answer prompts.
+    pub stdin_is_payload: bool,
 }
 
 impl Mode {
+    /// The surroundings: the probed `terminal` and the agent and CI variables
+    /// of `env`. The format and flags join later through [`Self::running`],
+    /// because the format itself depends on these surroundings.
     #[must_use]
-    pub fn new(
+    pub fn new(terminal: Terminal, env: &EnvSource) -> Self {
+        Self {
+            terminal,
+            // An invalid `HYPERLIQUID_AGENT` counts as off here;
+            // [`validate_env`] rejects it.
+            agent: env_flag(env, env::AGENT) == EnvFlag::On,
+            ci: env_flag(env, env::CI).on_unless_off(),
+            ..Self::default()
+        }
+    }
+
+    /// The same surroundings for a run that prints `format` and was given the
+    /// flags `--non-interactive` and `--payload-file -`.
+    #[must_use]
+    pub fn running(
+        self,
+        format: OutputFormat,
         non_interactive_flag: bool,
-        machine_format: bool,
         stdin_is_payload: bool,
-        env: &OutputEnv,
     ) -> Self {
         Self {
+            format,
             non_interactive_flag,
-            machine_format,
             stdin_is_payload,
-            agent: env.agent,
-            ci: env.ci,
+            ..self
         }
+    }
+
+    #[must_use]
+    pub fn machine_format(&self) -> bool {
+        self.format == OutputFormat::Json
     }
 
     /// Whether this invocation may ask the user a question.
@@ -53,18 +83,77 @@ impl Mode {
     #[must_use]
     pub fn prompt_blocker(&self) -> Option<&'static str> {
         if self.non_interactive_flag {
-            Some("--non-interactive")
+            Some(NON_INTERACTIVE_FLAG)
         } else if self.stdin_is_payload {
-            Some("stdin is used as the payload")
-        } else if self.machine_format {
-            Some("JSON output")
+            Some(STDIN_PAYLOAD)
+        } else if self.machine_format() {
+            Some(JSON_OUTPUT)
         } else if self.agent {
-            Some("HYPERLIQUID_AGENT")
+            Some(env::AGENT)
         } else if self.ci {
-            Some("CI")
+            Some(env::CI)
         } else {
             None
         }
+    }
+
+    /// The prompt blockers a person or agent can switch on, for help text.
+    #[must_use]
+    pub fn switchable_blockers() -> String {
+        format!(
+            "{JSON_OUTPUT}, {}, {}, {NON_INTERACTIVE_FLAG}",
+            env::AGENT,
+            env::CI
+        )
+    }
+
+    /// A program, not a person, consumes this run's output: JSON format or an
+    /// agent. Endless streams need an explicit bound and secrets may not arrive
+    /// on the command line. CI alone does not make a context machine-readable.
+    #[must_use]
+    pub fn machine_context(&self) -> bool {
+        self.machine_format() || self.agent
+    }
+
+    /// No person reads this run: a JSON format, an agent or CI.
+    fn unattended(&self) -> bool {
+        self.machine_format() || self.agent || self.ci
+    }
+
+    /// Notices addressed to a person on stderr, such as retry announcements:
+    /// stderr is a terminal and the run could prompt that person.
+    #[must_use]
+    pub fn person_on_stderr(&self) -> bool {
+        self.terminal.stderr && self.can_prompt()
+    }
+
+    /// The "Completed in" footer may print on stderr: a human format, stderr is
+    /// a terminal, and no agent or CI reads the run.
+    #[must_use]
+    pub fn timing_footer(&self) -> bool {
+        !self.unattended() && self.terminal.stderr
+    }
+
+    /// An unprompted notice may interrupt the person at this terminal, for
+    /// example the passive update notice or `--open`: human formats, no agent
+    /// or CI, and both output streams are terminals.
+    #[must_use]
+    pub fn person_at_terminal(&self) -> bool {
+        !self.unattended() && self.terminal.stdout && self.terminal.stderr
+    }
+
+    /// The run may redraw the terminal in place (a live view): stdout is a
+    /// terminal and neither an agent, CI nor `--non-interactive` is driving.
+    #[must_use]
+    pub fn live_display(&self) -> bool {
+        self.terminal.stdout && !self.agent && !self.ci && !self.non_interactive_flag
+    }
+
+    /// The run may take over the whole terminal (the watch TUI): a live
+    /// display that also reads keys from a terminal stdin.
+    #[must_use]
+    pub fn full_screen(&self) -> bool {
+        self.live_display() && self.terminal.stdin
     }
 }
 
@@ -73,8 +162,8 @@ impl Mode {
 /// Unset or empty means `None`. Any value outside `1|true|yes|on|0|false|no|off`
 /// (case-insensitive) is a configuration error naming the variable, so a typo
 /// never silently falls back to the default.
-pub fn env_bool(name: &str) -> Result<Option<bool>, CliError> {
-    flag_value(name, env_flag(name))
+fn env_bool(env: &EnvSource, name: &str) -> Result<Option<bool>, CliError> {
+    flag_value(name, env_flag(env, name))
 }
 
 fn flag_value(name: &str, flag: EnvFlag) -> Result<Option<bool>, CliError> {
@@ -88,10 +177,9 @@ fn flag_value(name: &str, flag: EnvFlag) -> Result<Option<bool>, CliError> {
     }
 }
 
-/// Validate every boolean `HYPERLIQUID_*` mode variable once at startup.
-pub fn validate_env() -> Result<(), CliError> {
-    env_bool("HYPERLIQUID_AGENT")?;
-    env_bool("HYPERLIQUID_NO_UPDATE_CHECK")?;
+pub fn validate_env(source: &EnvSource) -> Result<(), CliError> {
+    env_bool(source, env::AGENT)?;
+    env_bool(source, env::NO_UPDATE_CHECK)?;
     Ok(())
 }
 
@@ -114,6 +202,56 @@ mod tests {
         assert!(err.to_string().contains("HYPERLIQUID_AGENT"));
     }
 
+    fn json() -> Mode {
+        Mode {
+            format: OutputFormat::Json,
+            ..Mode::default()
+        }
+    }
+
+    #[test]
+    fn new_reads_agent_and_ci_from_the_environment_and_keeps_the_terminal() {
+        let terminal = Terminal {
+            stdin: true,
+            stdout: false,
+            stderr: true,
+        };
+        let env = |pairs: &[(&'static str, &'static str)]| {
+            Mode::new(terminal, &EnvSource::fixed(pairs.iter().copied()))
+        };
+        let plain = env(&[]);
+        assert_eq!(plain.terminal, terminal);
+        assert!(!plain.agent && !plain.ci);
+        assert!(env(&[("HYPERLIQUID_AGENT", "1")]).agent);
+        assert!(
+            !env(&[("HYPERLIQUID_AGENT", "banana")]).agent,
+            "an invalid value is rejected by validate_env, not read as on"
+        );
+        assert!(env(&[("CI", "true")]).ci);
+        assert!(!env(&[("CI", "false")]).ci);
+    }
+
+    #[test]
+    fn running_adds_the_format_and_flags_without_touching_the_surroundings() {
+        let surroundings = Mode {
+            agent: true,
+            terminal: Terminal {
+                stdin: true,
+                ..Terminal::default()
+            },
+            ..Mode::default()
+        };
+        let run = surroundings.running(OutputFormat::Json, true, true);
+        assert_eq!(run.format, OutputFormat::Json);
+        assert!(run.machine_format() && run.non_interactive_flag && run.stdin_is_payload);
+        assert!(run.agent && run.terminal.stdin);
+        assert!(
+            !surroundings
+                .running(OutputFormat::Table, false, false)
+                .machine_format()
+        );
+    }
+
     #[test]
     fn prompts_are_blocked_by_the_first_matching_reason() {
         assert!(Mode::default().can_prompt());
@@ -121,15 +259,13 @@ mod tests {
 
         let flagged = Mode {
             non_interactive_flag: true,
-            machine_format: true,
-            ..Mode::default()
+            ..json()
         };
         assert_eq!(flagged.prompt_blocker(), Some("--non-interactive"));
 
         let payload = Mode {
             stdin_is_payload: true,
-            machine_format: true,
-            ..Mode::default()
+            ..json()
         };
         assert_eq!(
             payload.prompt_blocker(),
@@ -137,9 +273,8 @@ mod tests {
         );
 
         let json = Mode {
-            machine_format: true,
             agent: true,
-            ..Mode::default()
+            ..json()
         };
         assert_eq!(json.prompt_blocker(), Some("JSON output"));
 
@@ -155,6 +290,237 @@ mod tests {
             ..Mode::default()
         };
         assert!(!ci.can_prompt());
-        assert_eq!(ci.prompt_blocker(), Some("CI"));
+        assert_eq!(ci.prompt_blocker(), Some(env::CI));
+    }
+
+    #[test]
+    fn help_names_every_switchable_blocker_the_same_way_errors_do() {
+        let help = Mode::switchable_blockers();
+        for reason in [
+            json().prompt_blocker(),
+            Mode {
+                agent: true,
+                ..Mode::default()
+            }
+            .prompt_blocker(),
+            Mode {
+                ci: true,
+                ..Mode::default()
+            }
+            .prompt_blocker(),
+            Mode {
+                non_interactive_flag: true,
+                ..Mode::default()
+            }
+            .prompt_blocker(),
+        ] {
+            let reason = reason.unwrap();
+            assert!(help.contains(reason), "{help} lacks {reason}");
+        }
+    }
+
+    fn terminal() -> Mode {
+        tty(true, true, true)
+    }
+
+    fn tty(stdin: bool, stdout: bool, stderr: bool) -> Mode {
+        Mode {
+            terminal: Terminal {
+                stdin,
+                stdout,
+                stderr,
+            },
+            ..Mode::default()
+        }
+    }
+
+    #[test]
+    fn machine_context_is_json_or_agent_but_not_ci() {
+        assert!(!Mode::default().machine_context());
+        assert!(json().machine_context());
+        assert!(
+            Mode {
+                agent: true,
+                ..Mode::default()
+            }
+            .machine_context()
+        );
+        assert!(
+            !Mode {
+                ci: true,
+                non_interactive_flag: true,
+                ..Mode::default()
+            }
+            .machine_context()
+        );
+    }
+
+    #[test]
+    fn stderr_notices_are_for_a_person_at_a_terminal_who_may_be_prompted() {
+        assert!(terminal().person_on_stderr());
+        for (name, mode) in [
+            ("stderr piped", tty(true, true, false)),
+            (
+                "json",
+                Mode {
+                    format: OutputFormat::Json,
+                    ..terminal()
+                },
+            ),
+            (
+                "agent",
+                Mode {
+                    agent: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "ci",
+                Mode {
+                    ci: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "non-interactive",
+                Mode {
+                    non_interactive_flag: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "payload on stdin",
+                Mode {
+                    stdin_is_payload: true,
+                    ..terminal()
+                },
+            ),
+        ] {
+            assert!(!mode.person_on_stderr(), "{name}");
+        }
+    }
+
+    #[test]
+    fn timing_footer_is_for_human_formats_on_a_stderr_terminal() {
+        assert!(terminal().timing_footer());
+        assert!(
+            Mode {
+                non_interactive_flag: true,
+                ..tty(true, false, true)
+            }
+            .timing_footer(),
+            "only a stderr terminal and a human format matter"
+        );
+        for (name, mode) in [
+            ("stderr piped", tty(true, true, false)),
+            (
+                "json",
+                Mode {
+                    format: OutputFormat::Json,
+                    ..terminal()
+                },
+            ),
+            (
+                "agent",
+                Mode {
+                    agent: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "ci",
+                Mode {
+                    ci: true,
+                    ..terminal()
+                },
+            ),
+        ] {
+            assert!(!mode.timing_footer(), "{name}");
+        }
+    }
+
+    #[test]
+    fn unprompted_notices_need_both_streams_on_a_terminal() {
+        assert!(terminal().person_at_terminal());
+        assert!(
+            Mode {
+                non_interactive_flag: true,
+                ..terminal()
+            }
+            .person_at_terminal(),
+            "--non-interactive only forbids prompts"
+        );
+        for (name, mode) in [
+            ("stdout piped", tty(true, false, true)),
+            ("stderr piped", tty(true, true, false)),
+            (
+                "json",
+                Mode {
+                    format: OutputFormat::Json,
+                    ..terminal()
+                },
+            ),
+            (
+                "agent",
+                Mode {
+                    agent: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "ci",
+                Mode {
+                    ci: true,
+                    ..terminal()
+                },
+            ),
+        ] {
+            assert!(!mode.person_at_terminal(), "{name}");
+        }
+    }
+
+    #[test]
+    fn live_display_needs_a_terminal_stdout_and_no_driver() {
+        assert!(terminal().live_display());
+        for (name, mode) in [
+            ("stdout piped", tty(true, false, true)),
+            (
+                "agent",
+                Mode {
+                    agent: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "ci",
+                Mode {
+                    ci: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "non-interactive",
+                Mode {
+                    non_interactive_flag: true,
+                    ..terminal()
+                },
+            ),
+        ] {
+            assert!(!mode.live_display(), "{name}");
+        }
+    }
+
+    #[test]
+    fn full_screen_is_a_live_display_that_can_also_read_keys() {
+        assert!(terminal().full_screen());
+        assert!(!tty(false, true, true).full_screen());
+        assert!(!tty(true, false, true).full_screen());
+        assert!(
+            !Mode {
+                agent: true,
+                ..terminal()
+            }
+            .full_screen()
+        );
     }
 }

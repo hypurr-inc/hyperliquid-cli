@@ -1,19 +1,10 @@
-use assert_cmd::Command;
+mod support;
+
 use predicates::prelude::*;
 use std::net::TcpListener;
+use support::{API_OVERRIDE_ENV, IsolatedHome};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-const API_OVERRIDE_ENV: &str = "HYPERLIQUID_API_BASE_URL";
-
-fn hyperliquid_command() -> Command {
-    let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    command
-        .env("HYPERLIQUID_FORMAT", "pretty")
-        .env_remove("HYPERLIQUID_PRIVATE_KEY")
-        .env_remove("HYPERLIQUID_NETWORK");
-    command
-}
 
 #[tokio::test]
 async fn cli_exits_11_for_actual_http_429_response() {
@@ -26,7 +17,8 @@ async fn cli_exits_11_for_actual_http_429_response() {
         .mount(&server)
         .await;
 
-    hyperliquid_command()
+    let env = IsolatedHome::new();
+    env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .args(["perps", "list"])
         .assert()
@@ -50,7 +42,8 @@ async fn cli_exits_11_for_structured_rate_limit_error_response() {
         .mount(&server)
         .await;
 
-    hyperliquid_command()
+    let env = IsolatedHome::new();
+    env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .args(["status"])
         .assert()
@@ -68,7 +61,8 @@ fn cli_exits_12_for_unreachable_override_endpoint() {
     let url = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
 
-    hyperliquid_command()
+    let env = IsolatedHome::new();
+    env.command()
         .env(API_OVERRIDE_ENV, url)
         .args(["perps", "list"])
         .assert()

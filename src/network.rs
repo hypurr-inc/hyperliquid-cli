@@ -1,11 +1,12 @@
 //! The Hyperliquid network a run targets.
 
-use hypersdk::hypercore::{Chain, HttpClient};
+use hypersdk::hypercore::{self, Chain, HttpClient, WebSocket};
 
 use crate::errors::CliError;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
+/// The network a run targets. [`Network::name`] is its one spelling: display,
+/// serialization, parsing and the error text all read it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Network {
     #[default]
     Mainnet,
@@ -13,7 +14,17 @@ pub enum Network {
 }
 
 impl Network {
-    pub const VARIANTS: [&'static str; 2] = ["mainnet", "testnet"];
+    const ALL: [Self; 2] = [Self::Mainnet, Self::Testnet];
+    const NAMES: [&'static str; 2] = [Self::ALL[0].name(), Self::ALL[1].name()];
+
+    /// The lowercase name used in config files, `HYPERLIQUID_NETWORK` and JSON.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Mainnet => "mainnet",
+            Self::Testnet => "testnet",
+        }
+    }
 
     #[must_use]
     pub fn from_testnet(testnet: bool) -> Self {
@@ -47,12 +58,13 @@ impl Network {
         }
     }
 
-    /// The public API endpoint, before any loopback test override.
+    /// A WebSocket for this network's public endpoint. The API endpoint
+    /// override does not apply to WebSockets.
     #[must_use]
-    pub fn api_base_url(self) -> &'static str {
+    pub fn websocket(self) -> WebSocket {
         match self {
-            Self::Mainnet => "https://api.hyperliquid.xyz",
-            Self::Testnet => "https://api.hyperliquid-testnet.xyz",
+            Self::Mainnet => hypercore::mainnet_ws(),
+            Self::Testnet => hypercore::testnet_ws(),
         }
     }
 
@@ -60,18 +72,22 @@ impl Network {
     #[must_use]
     pub fn api_url(self) -> reqwest::Url {
         match self {
-            Self::Mainnet => hypersdk::hypercore::mainnet_url(),
-            Self::Testnet => hypersdk::hypercore::testnet_url(),
+            Self::Mainnet => hypercore::mainnet_url(),
+            Self::Testnet => hypercore::testnet_url(),
         }
+    }
+
+    /// The public API endpoint as shown to users, without a trailing slash.
+    #[must_use]
+    pub fn api_base_url(self) -> String {
+        self.api_url().as_str().trim_end_matches('/').to_string()
     }
 
     /// Case-insensitive parse shared by the config file and `HYPERLIQUID_NETWORK`.
     pub fn parse(value: &str) -> Option<Self> {
-        match value.to_lowercase().as_str() {
-            "mainnet" => Some(Self::Mainnet),
-            "testnet" => Some(Self::Testnet),
-            _ => None,
-        }
+        Self::ALL
+            .into_iter()
+            .find(|network| network.name().eq_ignore_ascii_case(value))
     }
 
     /// Parse a setting value, naming `source` in the error.
@@ -84,12 +100,27 @@ impl Network {
     }
 }
 
+impl From<Chain> for Network {
+    fn from(chain: Chain) -> Self {
+        match chain {
+            Chain::Mainnet => Self::Mainnet,
+            Chain::Testnet => Self::Testnet,
+        }
+    }
+}
+
 impl std::fmt::Display for Network {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Mainnet => write!(f, "mainnet"),
-            Self::Testnet => write!(f, "testnet"),
-        }
+        f.write_str(self.name())
+    }
+}
+
+impl serde::Serialize for Network {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.name())
     }
 }
 
@@ -99,9 +130,8 @@ impl<'de> serde::Deserialize<'de> for Network {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Self::parse(&value).ok_or_else(|| {
-            serde::de::Error::unknown_variant(&value.to_lowercase(), &Self::VARIANTS)
-        })
+        Self::parse(&value)
+            .ok_or_else(|| serde::de::Error::unknown_variant(&value.to_lowercase(), &Self::NAMES))
     }
 }
 
@@ -110,23 +140,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_and_default() {
-        assert_eq!(Network::Mainnet.to_string(), "mainnet");
-        assert_eq!(Network::Testnet.to_string(), "testnet");
-        assert_eq!(Network::default(), Network::Mainnet);
+    fn every_network_has_one_spelling_everywhere() {
+        for network in Network::ALL {
+            let name = network.name();
+            assert_eq!(network.to_string(), name);
+            assert_eq!(
+                serde_json::to_string(&network).unwrap(),
+                format!("\"{name}\"")
+            );
+            assert_eq!(Network::parse(&name.to_uppercase()), Some(network));
+            assert_eq!(Network::from(network.chain()), network);
+        }
+        assert_eq!(Network::NAMES, ["mainnet", "testnet"]);
     }
 
     #[test]
-    fn serde_roundtrip_is_lowercase_and_case_insensitive() {
+    fn deserialize_error_lists_the_names() {
+        let err = serde_json::from_str::<Network>("\"Bogus\"").unwrap_err();
         assert_eq!(
-            serde_json::to_string(&Network::Testnet).unwrap(),
-            "\"testnet\""
+            err.to_string(),
+            "unknown variant `bogus`, expected `mainnet` or `testnet`"
         );
+    }
+
+    #[test]
+    fn deserialization_is_case_insensitive() {
         let parsed: Network = serde_json::from_str("\"TESTNET\"").unwrap();
         assert_eq!(parsed, Network::Testnet);
         let parsed: Network = serde_json::from_str("\"Mainnet\"").unwrap();
         assert_eq!(parsed, Network::Mainnet);
-        assert!(serde_json::from_str::<Network>("\"bogus\"").is_err());
     }
 
     #[test]

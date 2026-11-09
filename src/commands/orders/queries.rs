@@ -1,9 +1,17 @@
-use super::*;
+use hypersdk::Address;
+use hypersdk::hypercore::HttpClient;
+use hypersdk::hypercore::types::BasicOrder;
+use serde::{Deserialize, Serialize};
+
+use super::args::StatusArgs;
+use super::cloid::parse_lookup_cloid;
+use super::rendering::OrderListOutput;
 use crate::assets::AssetResolver;
+use crate::errors::{CliError, from_sdk};
 use crate::http_api::ApiClient;
+use crate::invocation::Invocation;
 use crate::output::JsonValueOutput;
 
-/// List authenticated user's open orders.
 pub async fn open(
     inv: &Invocation,
     resolver: &AssetResolver,
@@ -21,21 +29,16 @@ pub async fn open_snapshot(
     user: Address,
     dex: Option<&str>,
 ) -> Result<OrderListOutput, anyhow::Error> {
-    let rows = client
+    let orders = client
         .open_orders(user, dex.map(str::to_string))
         .await
         .map_err(from_sdk)?
         .into_iter()
-        .map(|order| OrderListRow::from(normalize_order_display_coin(resolver, order)))
-        .collect();
+        .map(|order| normalize_order_display_coin(resolver, order));
 
-    Ok(OrderListOutput {
-        rows,
-        empty_message: "No open orders.",
-    })
+    Ok(OrderListOutput::new(orders, "No open orders."))
 }
 
-/// Show a public order status by OID or CLOID.
 pub async fn status(
     inv: &Invocation,
     user: Address,
@@ -77,22 +80,17 @@ struct OrderStatusRequest {
     oid: serde_json::Value,
 }
 
-/// List authenticated user's historical orders.
 pub async fn history(
     inv: &Invocation,
     resolver: &AssetResolver,
     user: Address,
 ) -> Result<(), anyhow::Error> {
-    let rows = historical_orders(inv.remote()?.api(), user)
+    let orders = historical_orders(inv.remote()?.api(), user)
         .await?
         .into_iter()
-        .map(|order| OrderListRow::from(normalize_order_display_coin(resolver, order)))
-        .collect();
+        .map(|order| normalize_order_display_coin(resolver, order));
 
-    inv.print(&OrderListOutput {
-        rows,
-        empty_message: "No historical orders.",
-    });
+    inv.print(&OrderListOutput::new(orders, "No historical orders."));
     Ok(())
 }
 
@@ -138,7 +136,11 @@ fn normalize_order_display_coin(resolver: &AssetResolver, mut order: BasicOrder)
 /// payload is a bare order list the decode fails with a serde error, and the raw
 /// path accepts both shapes.
 fn should_fallback_to_raw_historical_orders(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| cause.is::<serde_json::Error>())
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<serde_json::Error>()
+            .is_some_and(|decode| decode.classify() == serde_json::error::Category::Data)
+    })
 }
 
 async fn historical_orders_raw(
@@ -156,4 +158,27 @@ async fn historical_orders_raw(
         .into_iter()
         .map(HistoricalOrderItem::into_order)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn decode_error(text: &str) -> anyhow::Error {
+        anyhow::Error::from(serde_json::from_str::<Vec<u8>>(text).unwrap_err())
+            .context("[historical_orders] body=...")
+    }
+
+    #[test]
+    fn only_a_shape_mismatch_falls_back_to_the_raw_historical_list() {
+        assert!(should_fallback_to_raw_historical_orders(&decode_error(
+            r#"{"not":"a list"}"#
+        )));
+        assert!(!should_fallback_to_raw_historical_orders(&decode_error(
+            "[1, 2"
+        )));
+        assert!(!should_fallback_to_raw_historical_orders(&anyhow::anyhow!(
+            "connection reset"
+        )));
+    }
 }

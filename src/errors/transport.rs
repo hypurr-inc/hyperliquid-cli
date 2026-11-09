@@ -1,5 +1,3 @@
-//! Naming transport failures: why a request never produced an answer.
-
 use std::time::Duration;
 
 use super::CliError;
@@ -194,34 +192,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn detection_follows_table_order() {
-        assert_eq!(
-            TransportFailure::detect("operation timed out while connection refused"),
-            Some(TransportFailure::Timeout)
-        );
-        assert_eq!(
-            TransportFailure::detect("dns error: failed to lookup address"),
-            Some(TransportFailure::Dns)
-        );
-        assert_eq!(
-            TransportFailure::detect("invalid peer certificate"),
-            Some(TransportFailure::Tls)
-        );
-        assert_eq!(TransportFailure::detect("something else"), None);
+    fn text_failures_name_their_cause_and_earlier_causes_win() {
+        for (text, cause) in [
+            ("operation timed out while connection refused", "Timed out"),
+            ("connect: connection refused", "Connection refused"),
+            ("dns error: failed to lookup address", "DNS lookup failed"),
+            ("connection reset by peer", "Connection reset"),
+            ("invalid peer certificate", "TLS handshake failed"),
+            ("no route to host", "Network is unreachable"),
+            ("error sending request", "Connection failed"),
+        ] {
+            let err = unreachable_from_text(text).unwrap_or_else(|| panic!("{text}"));
+            assert_eq!(
+                err.to_string(),
+                format!("Couldn't reach the Hyperliquid API. {cause}."),
+                "{text}"
+            );
+        }
+        assert!(unreachable_from_text("something else").is_none());
     }
 
     #[test]
-    fn text_failures_map_to_unavailable_without_inspecting_remote_body() {
-        let err = unreachable_from_text("error sending request: dns error").unwrap();
-        assert_eq!(
-            err.to_string(),
-            "Couldn't reach the Hyperliquid API. DNS lookup failed."
-        );
-        let err = unreachable_from_text("error sending request").unwrap();
-        assert_eq!(
-            err.to_string(),
-            "Couldn't reach the Hyperliquid API. Connection failed."
-        );
+    fn remote_body_text_is_never_read_as_a_transport_failure() {
         assert!(unreachable_from_text("HTTP 418 body=connection timed out").is_none());
     }
 

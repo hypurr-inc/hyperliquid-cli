@@ -1,8 +1,9 @@
 use hypersdk::{Address, Decimal};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
+use crate::wire::InfoRequest;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,24 +22,15 @@ pub(crate) struct RawSpotBalance {
     pub entry_ntl: Decimal,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct UserRequest {
-    #[serde(rename = "type")]
-    request_type: &'static str,
-    user: Address,
-}
-
 pub(crate) async fn user_spot_balances_raw(
     api: &ApiClient,
     user: Address,
 ) -> Result<Vec<RawSpotBalance>, CliError> {
-    let request = UserRequest {
-        request_type: "spotClearinghouseState",
-        user,
-    };
     let state = api
-        .info::<RawSpotClearinghouseState>(&request, "loading user spot balances")
+        .info::<RawSpotClearinghouseState>(
+            &InfoRequest::user("spotClearinghouseState", user),
+            "loading user spot balances",
+        )
         .await?;
     Ok(state.balances)
 }

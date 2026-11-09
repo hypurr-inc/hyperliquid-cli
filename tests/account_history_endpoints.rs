@@ -1,6 +1,6 @@
 mod support;
 
-use support::{IsolatedHome, fixture_fill};
+use support::{IsolatedHome, fixture_fill, mount_account_state, mount_common_public_endpoints};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -464,4 +464,125 @@ async fn account_history_endpoints_staking_history_is_exposed() {
     );
     assert_eq!(history[0]["delta"]["type"], "delegate");
     assert_eq!(history[0]["delta"]["amount"], "250000000");
+}
+
+#[tokio::test]
+async fn account_fills_json_exposes_public_fill_fields() {
+    let env = IsolatedHome::new();
+    let server = history_server().await;
+    mount_info(
+        &server,
+        serde_json::json!({"type": "userFills", "user": USER}),
+        serde_json::json!([fixture_fill("BTC", 4242)]),
+    )
+    .await;
+
+    let json = json_stdout(
+        env.command_with_server(&server)
+            .args(["--format", "json", "account", "fills", USER])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    );
+
+    let fill = &json[0];
+    assert_eq!(fill["coin"], "BTC");
+    assert_eq!(fill["price"], "50000");
+    assert_eq!(fill["size"], "0.1");
+    assert_eq!(fill["direction"], "Open Long");
+    assert_eq!(fill["closed_pnl"], "0");
+    assert_eq!(fill["fee"], "0.01");
+    assert_eq!(fill["fee_token"], "USDC");
+    assert_eq!(fill["oid"], 4242);
+    assert_eq!(fill["time"], 1_700_000_000_000_u64);
+}
+
+#[tokio::test]
+async fn account_fills_with_no_rows_print_an_empty_json_array() {
+    let env = IsolatedHome::new();
+    let server = history_server().await;
+    mount_info(
+        &server,
+        serde_json::json!({"type": "userFills", "user": USER}),
+        serde_json::json!([]),
+    )
+    .await;
+
+    let json = json_stdout(
+        env.command_with_server(&server)
+            .args(["--format", "json", "account", "fills", USER])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone(),
+    );
+
+    assert_eq!(json, serde_json::json!([]));
+}
+
+fn stdout_of(command: &mut assert_cmd::Command) -> String {
+    let output = command.assert().success().get_output().stdout.clone();
+    String::from_utf8(output).unwrap()
+}
+
+#[tokio::test]
+async fn account_fills_colour_closed_pnl_only_in_pretty_output() {
+    let env = IsolatedHome::new();
+    let server = history_server().await;
+    let fill = |oid: u64, closed_pnl: &str| {
+        let mut fill = fixture_fill("BTC", oid);
+        fill["closedPnl"] = closed_pnl.into();
+        fill
+    };
+    mount_info(
+        &server,
+        serde_json::json!({"type": "userFills", "user": USER}),
+        serde_json::json!([fill(1, "12.34"), fill(2, "-5.67"), fill(3, "0")]),
+    )
+    .await;
+    let run = |format: &str| {
+        stdout_of(
+            env.command_with_server(&server)
+                .env("FORCE_COLOR", "1")
+                .args(["--format", format, "account", "fills", USER]),
+        )
+    };
+
+    let pretty = run("pretty");
+    assert!(pretty.contains("\u{1b}[32m12.34\u{1b}[0m"), "{pretty}");
+    assert!(pretty.contains("\u{1b}[31m-5.67\u{1b}[0m"), "{pretty}");
+    assert!(!pretty.contains("\u{1b}[32m0\u{1b}[0m"), "{pretty}");
+    assert!(!pretty.contains("\u{1b}[31m0\u{1b}[0m"), "{pretty}");
+
+    for format in ["table", "json"] {
+        let plain = run(format);
+        assert!(plain.contains("12.34"), "{format}: {plain}");
+        assert!(!plain.contains("\u{1b}["), "{format}: {plain}");
+    }
+}
+
+#[tokio::test]
+async fn account_portfolio_colours_position_pnl_only_in_pretty_output() {
+    let env = IsolatedHome::new();
+    let server = MockServer::start().await;
+    mount_common_public_endpoints(&server).await;
+    mount_account_state(&server, vec![], vec![], "1000", "1000", 5).await;
+    let run = |format: &str| {
+        stdout_of(
+            env.command_with_server(&server)
+                .env("FORCE_COLOR", "1")
+                .args(["--format", format, "account", "portfolio", USER]),
+        )
+    };
+
+    let pretty = run("pretty");
+    assert!(pretty.contains("pnl=\u{1b}[32m100\u{1b}[0m"), "{pretty}");
+
+    let table = run("table");
+    assert!(table.contains("pnl=100"), "{table}");
+    assert!(!table.contains("\u{1b}["), "{table}");
+    assert!(!run("json").contains("\u{1b}["));
 }

@@ -49,7 +49,28 @@ async fn mount_resolver_metadata(server: &MockServer) {
         .await;
 }
 
-/// `mids --dex` sends `allMids` with the dex.
+/// A read that names a dex: any request body with a `dex` key.
+struct DexScopedRead;
+
+impl wiremock::Match for DexScopedRead {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        serde_json::from_slice::<Value>(&request.body).is_ok_and(|body| body.get("dex").is_some())
+    }
+}
+
+/// Fails `server.verify()` when any dex-scoped read arrives. An unknown dex
+/// must be refused after the dex list is read and before anything is read from it.
+async fn forbid_dex_scoped_reads(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(DexScopedRead)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .with_priority(1)
+        .expect(0)
+        .mount(server)
+        .await;
+}
+
 #[tokio::test]
 async fn mids_scopes_all_mids_to_a_dex() {
     let env = IsolatedHome::new();
@@ -92,7 +113,6 @@ async fn mids_scopes_all_mids_to_a_dex() {
     server.verify().await;
 }
 
-/// `positions list --dex` scopes `clearinghouseState`.
 #[tokio::test]
 async fn positions_list_scopes_clearinghouse_state_to_a_dex() {
     let env = IsolatedHome::new();
@@ -145,7 +165,6 @@ async fn positions_list_scopes_clearinghouse_state_to_a_dex() {
     server.verify().await;
 }
 
-/// `orders open --dex` scopes `frontendOpenOrders`.
 #[tokio::test]
 async fn orders_open_scopes_frontend_open_orders_to_a_dex() {
     let env = IsolatedHome::new();
@@ -180,7 +199,6 @@ async fn orders_open_scopes_frontend_open_orders_to_a_dex() {
     server.verify().await;
 }
 
-/// A dex portfolio view omits account-wide spot and vault reads.
 #[tokio::test]
 async fn portfolio_dex_view_skips_account_wide_reads() {
     let env = IsolatedHome::new();
@@ -256,7 +274,6 @@ async fn portfolio_dex_view_skips_account_wide_reads() {
     server.verify().await;
 }
 
-/// A blank `--dex` sends no dex field.
 #[tokio::test]
 async fn blank_dex_is_the_default_dex() {
     let env = IsolatedHome::new();
@@ -284,7 +301,6 @@ async fn blank_dex_is_the_default_dex() {
     server.verify().await;
 }
 
-/// A blank `--dex` portfolio keeps spot balances.
 #[tokio::test]
 async fn blank_dex_keeps_account_wide_portfolio_rows() {
     let env = IsolatedHome::new();
@@ -362,13 +378,13 @@ async fn blank_dex_keeps_account_wide_portfolio_rows() {
     server.verify().await;
 }
 
-/// An unknown `--dex` fails before any scoped read.
 #[tokio::test]
 async fn unknown_dex_fails_before_reading() {
     let env = IsolatedHome::new();
     let server = MockServer::start().await;
     mount_override_healthcheck(&server).await;
     mount_resolver_metadata(&server).await;
+    forbid_dex_scoped_reads(&server).await;
 
     env.command_with_server(&server)
         .args(["--format", "json", "mids", "--dex", "nope"])
@@ -379,7 +395,6 @@ async fn unknown_dex_fails_before_reading() {
     server.verify().await;
 }
 
-/// `--dex` is canonicalised before it is sent.
 #[tokio::test]
 async fn dex_is_sent_in_its_canonical_spelling() {
     let env = IsolatedHome::new();
@@ -416,13 +431,13 @@ async fn dex_is_sent_in_its_canonical_spelling() {
     server.verify().await;
 }
 
-/// An unknown `--dex` fails before a watch starts.
 #[tokio::test]
 async fn unknown_dex_fails_before_a_watch_starts() {
     let env = IsolatedHome::new();
     let server = MockServer::start().await;
     mount_override_healthcheck(&server).await;
     mount_resolver_metadata(&server).await;
+    forbid_dex_scoped_reads(&server).await;
 
     env.command_with_server(&server)
         .args([
@@ -465,7 +480,6 @@ async fn unknown_dex_fails_before_a_watch_starts() {
     server.verify().await;
 }
 
-/// `positions list --watch` sends `clearinghouseState` with the canonical dex.
 #[tokio::test]
 async fn positions_watch_sends_the_canonical_dex() {
     let env = IsolatedHome::new();

@@ -14,15 +14,16 @@
 
 - `src/main.rs` — global options and process boot. The commands are not declared here.
 - `src/command_spec.rs` — the one definition of a command: `CliCommand` (clap `Args`, `CommandSpec` policy, `run`), `ArgSpec`, `GroupSpec`, and `Entry`, which erases the type for the clap tree builder.
-- `src/command_registry.rs` — `CommandRegistry`, generated from the clap tree plus each command's `CommandSpec`. `hyperliquid schema`, help notes and the contract fixtures read it; nothing in it is written by hand per command.
+- `src/command_registry.rs` — `CommandRegistry`, generated from the clap tree plus each command's `CommandSpec`. A `CommandContract` serialized is the schema entry `hyperliquid schema` prints (plus its derived `json_schema`); help notes and the contract fixtures read the same value. Nothing in it is written by hand per command except `SCHEMA_ORDER`, which a test keeps complete.
+- `src/mode.rs` — `Mode`, the one reader of agent/CI/TTY state: one named predicate per question (`can_prompt`, `machine_context`, `person_on_stderr`, `person_at_terminal`, `live_display`). Do not probe `HYPERLIQUID_AGENT`, `CI` or a TTY elsewhere to decide how to behave.
 - `src/cli_runtime.rs` — the one pipeline every command runs through: validate, bound streams, payload, dry-run, confirmation, API override, run.
-- `src/cli_shell.rs` — clap tree decoration (registry-derived option help and `Notes:`), usage-error and help rendering, panic hook, output-format resolution.
+- `src/cli_shell.rs` — clap tree decoration (spec-derived option help and `Notes:`), usage-error and help rendering, panic hook, the one output-format precedence rule (`resolve_output_format`).
 - `src/errors/` — `CliError` and its one variant spec table (exit code, category, reason, retryability), the remote-text classifier (`classify`), transport failure naming, JSON envelope and human rendering.
 - `src/output/` — pretty/table/JSON rendering, color theme, JSON projection.
 - `src/commands/` — one module per command domain. A command is a type implementing `CliCommand` next to its `Args`; `commands::entries` (help order) registers it with one line, `commands::groups` lists group names such as `orders`.
 - `src/assets/` — asset names (`AssetQuery`), resolved markets (`Market`), exchange metadata loaders and cache, the HIP-3 live lookup, and the protocol asset-id layout (`asset_id`).
-- `src/http_api.rs` — `ApiClient`, the one HTTP edge to the Hyperliquid API: chain, resolved base URL (loopback override applied once), the `hypersdk` client, typed and raw `/info` reads with the retry policy, single-send `/exchange` posts with unknown-outcome mapping, and the override probe. Nothing else builds API request URLs.
-- `src/auth.rs` — the one signer-selection resolver. `src/settings.rs` — env var names, help-text env section and layered flag/env/config settings. `src/config.rs` — the config file. `src/wallet_store.rs` — vault + config wallet workflow. `src/ows/` — `vault.rs` (wallet lifecycle) and `signing.rs` (signing backend). `src/legacy_accounts.rs` — read-only reader for old `accounts.db`. `src/private_fs.rs` — owner-only file writes and locks. `src/update/` — update notifier and self-updater.
+- `src/http_api.rs` — `ApiClient`, the one HTTP edge to the Hyperliquid API (it knows neither settings nor the terminal: `Invocation` resolves the override and sets the retry observer): chain, resolved base URL (loopback override applied once), the `hypersdk` client, typed and raw `/info` reads with the retry policy, single-send `/exchange` posts with unknown-outcome mapping, and the override probe. Nothing else builds API request URLs.
+- `src/auth.rs` — the one signer-selection resolver and the one account-selector resolver (signing and data lookups). `src/signing/` — `SelectedSigner` and the signing contract: every signature is a `Payload`, each provider (local key, OWS, Bankr) answers which payloads it can sign (`Signs` names a payload's kind before it exists: a command declares it in its spec, `Invocation::resolve_signer` asks the signer before a live run starts, and the schema reports `bankr_signer`), and `signature.rs` canonicalises and recover-checks every provider reply. `src/settings.rs` — the env var table (names, root help, the list the test harness clears), the layered flag/env/config settings, and `Settings::update_config`, the only way to write the config file. `src/config.rs` — the config file format. `src/wallet_store.rs` — vault + config wallet workflow. `src/ows/` — `vault.rs` (wallet lifecycle) and `signing.rs` (signing backend). `src/legacy_accounts.rs` — read-only reader for old `accounts.db`. `src/private_fs.rs` — owner-only file writes and locks. `src/update/` — update notifier and self-updater.
 - `src/stream.rs` — streaming runtime: run until bound/signal/closed pipe, stream bounds (`StreamBoundArgs`, env fallback, validation), NDJSON line emitter with JSON projection, `subscribe` targets.
 - `src/watch.rs` — snapshot watch mode (TUI and NDJSON).
 - `src/ws.rs` — WebSocket construction and one-shot reads.
@@ -83,10 +84,10 @@ Use the mission `services.yaml` commands when working inside a Factory mission.
 - Add unit tests beside focused logic in `src/`.
 - Add CLI behavior tests in `tests/` using `assert_cmd`.
 - Mock Hyperliquid HTTP with `wiremock` when tests need API responses.
-- Use isolated `HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` in tests that touch user state.
+- Spawn the CLI only through `tests/support`: `hermetic_command()` for a bare run, `IsolatedHome::command()` for one that touches user state (it points `HYPERLIQUID_HOME_DIR`, `HYPERLIQUID_CONFIG_DIR` and `HYPERLIQUID_DATA_DIR` at a temp directory and fails the test if the CLI writes elsewhere). `tests/hermetic_harness.rs` fails on a direct `cargo_bin` call.
 - Verify JSON output with `serde_json` or another Rust-native JSON parser.
 - Keep test layers distinct: unit tests own pure logic and private helpers; integration tests own CLI process behavior, prompts, auth boundaries, stdout/stderr routing, and mocked API behavior; QA matrix covers broad installed-binary compatibility.
-- Prefer shared helpers in `tests/support/mod.rs` for isolated command envs, opt-in account/passphrase setup, and common WireMock fixtures, but keep domain-specific mock behavior local when it makes a test's API contract clearer.
+- Prefer shared helpers in `tests/support/` for isolated command envs, opt-in account/passphrase setup, and common WireMock fixtures (`support::exchange::ExchangeFixture` mocks the default dex, spot metadata, `perpDexs`, HIP-3 dexes and the override probe; `IsolatedHome::live_command(&server)` adds the API override and a signing key), but keep domain-specific mock behavior local when it makes a test's API contract clearer.
 
 ## Agent-First Output Contract
 
@@ -99,10 +100,10 @@ hyperliquid --format json --max-results 5 perps list
 hyperliquid --format json schema orders create
 ```
 
-Adding a command: implement `CliCommand` in its domain module (`Args`, `SPEC` with risk, dry-run, confirmation, input kinds and schema descriptions, `run`), add one `Entry::of::<..>()` line to `commands::entries`, and regenerate the contract fixtures with `HYPERLIQUID_UPDATE_CONTRACTS=1 cargo test --test contract_fixtures`.
+Adding a command: implement `CliCommand` in its domain module (`Args`, `SPEC` with risk, dry-run, confirmation, input kinds and schema descriptions, `run`), add one `Entry::of::<..>()` line to `commands::entries`, add its path to `SCHEMA_ORDER` in `src/command_registry.rs` (a test fails when it is missing), and regenerate the contract fixtures with `HYPERLIQUID_UPDATE_CONTRACTS=1 cargo test --test contract_fixtures`. Dry-run previews take the command name from `inv.command_key()`.
 When adding or changing commands, ensure `--select` filters JSON output and `--results-only` remains harmless for commands that already return bare arrays or objects.
 Use `--dry-run` for mutating-command validation when side effects are not intended.
 Effective output format precedence is: explicit `--json` or `--format pretty|table|json`, then `HYPERLIQUID_FORMAT=pretty|table|json`, then agent/non-TTY defaults. `HYPERLIQUID_AGENT=1` and non-TTY stdout default one-shot commands to JSON so agents can parse output even when `--format json` is omitted.
-Watch output in JSON/agent contexts must be bounded with `--max-ticks` or `HYPERLIQUID_WATCH_MAX_TICKS`; subscribe streams should use `--max-events` and/or `--idle-timeout-ms`.
+Watch output in JSON/agent contexts must be bounded with `--max-ticks` or `HYPERLIQUID_WATCH_MAX_TICKS`; subscribe streams should use `--max-events` and/or `--idle-timeout-ms`; `watch risk` takes `--max-events` or `--idle-timeout-ms` only. A command declares its bound once with `.stream(StreamBound::..)`; the pipeline enforces it and the schema reports it as `stream_bounds`.
 Raw payload metadata is exposed as `raw_payload` in schema `x-hyperliquid` metadata. Treat `dry_run_only` as fail-closed for live execution until a command is explicitly allowlisted and tested.
 Remote API/protocol strings surfaced in errors are untrusted data. Keep the `[untrusted remote data]` label and sanitization boundary intact when adding new exchange or HTTP error paths.

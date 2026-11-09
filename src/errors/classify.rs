@@ -43,7 +43,6 @@ fn contains_any(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| lower.contains(phrase))
 }
 
-/// Whether an HTTP status means the server failed rather than the request.
 pub fn is_server_status(status: u16) -> bool {
     (500..600).contains(&status)
 }
@@ -110,8 +109,6 @@ fn code_indicates_rate_limit(code: &str) -> bool {
     )
 }
 
-/// Rate limit or rejected credentials, the two meanings every remote message
-/// source shares.
 fn rate_limit_or_auth(message: &str) -> Option<CliError> {
     if looks_like_rate_limit_text(message) {
         Some(CliError::rate_limited())
@@ -122,24 +119,71 @@ fn rate_limit_or_auth(message: &str) -> Option<CliError> {
     }
 }
 
-/// Map an exchange `status: err` message to a [`CliError`].
+/// What an answered exchange rejection (`status: err` text, or an error inside
+/// an order status) means.
 ///
-/// An answered rejection is never a network problem and its text is never
-/// read as an HTTP status: it is a rate limit, rejected credentials, a
-/// user-state problem (exit 13), or an [`CliError::ExchangeRejected`].
-pub fn from_exchange_rejection(message: &str, context: &'static str) -> CliError {
-    if let Some(known) = rate_limit_or_auth(message) {
-        return known;
+/// It is never a network problem and its text is never read as an HTTP
+/// status. Every command that surfaces an exchange rejection classifies it
+/// here, then picks its own error for the cases that only it can name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Rejection {
+    RateLimited,
+    /// The exchange refused the credentials.
+    AuthRejected(Untrusted),
+    /// The user's account state or the request values caused it, such as
+    /// insufficient margin or a size below the minimum.
+    UserState(Untrusted),
+    /// A refusal the CLI has no narrower meaning for.
+    Other(Untrusted),
+}
+
+pub fn classify_rejection(message: &str) -> Rejection {
+    if looks_like_rate_limit_text(message) {
+        return Rejection::RateLimited;
     }
     let remote = Untrusted::from_remote(message);
-    if contains_any(message, USER_STATE_PHRASES) {
-        CliError::Unsupported(format!("{context}: {remote}"))
+    if contains_any(message, AUTH_PHRASES) {
+        Rejection::AuthRejected(remote)
+    } else if contains_any(message, USER_STATE_PHRASES) {
+        Rejection::UserState(remote)
     } else {
-        CliError::ExchangeRejected { context, remote }
+        Rejection::Other(remote)
     }
 }
 
-/// Rate limit, rejected credentials, or an `HTTP <5xx> body=<text>` failure.
+impl Rejection {
+    /// The default mapping: a rate limit, rejected credentials, a user-state
+    /// problem (exit 13), or [`CliError::ExchangeRejected`], all quoted after
+    /// `context`.
+    #[must_use]
+    pub fn into_error(self, context: &'static str) -> CliError {
+        match self {
+            Self::RateLimited => CliError::rate_limited(),
+            Self::AuthRejected(remote) => CliError::AuthRejected(remote),
+            Self::UserState(remote) => {
+                CliError::unsupported_with_remote(format!("{context}: "), &remote)
+            }
+            Self::Other(remote) => CliError::ExchangeRejected { context, remote },
+        }
+    }
+
+    /// A rate limit or rejected credentials keep their own errors. Any other
+    /// rejection becomes `otherwise(remote)`, for commands that report refusals
+    /// in their own words.
+    #[must_use]
+    pub fn into_error_with(self, otherwise: impl FnOnce(Untrusted) -> CliError) -> CliError {
+        match self {
+            Self::RateLimited => CliError::rate_limited(),
+            Self::AuthRejected(remote) => CliError::AuthRejected(remote),
+            Self::UserState(remote) | Self::Other(remote) => otherwise(remote),
+        }
+    }
+}
+
+pub fn from_exchange_rejection(message: &str, context: &'static str) -> CliError {
+    classify_rejection(message).into_error(context)
+}
+
 fn classify_known(message: &str) -> Option<CliError> {
     rate_limit_or_auth(message).or_else(|| server_error_from_text(message))
 }
@@ -166,7 +210,6 @@ fn server_error_from_text(text: &str) -> Option<CliError> {
     Some(CliError::api_status(code, body))
 }
 
-/// Recover a typed [`CliError`] that travelled through `anyhow`.
 fn recover_typed(err: anyhow::Error) -> Result<CliError, anyhow::Error> {
     err.downcast::<CliError>()
 }
@@ -218,8 +261,6 @@ pub fn from_sdk(err: anyhow::Error) -> CliError {
 mod tests {
     use super::*;
 
-    // ── rate-limit detection ────────────────────────────────────────
-
     #[test]
     fn http_rate_limit_detection_always_accepts_429() {
         assert!(http_response_indicates_rate_limit(
@@ -256,8 +297,6 @@ mod tests {
         ));
     }
 
-    // ── exchange rejections ─────────────────────────────────────────
-
     #[test]
     fn exchange_user_state_rejections_are_not_internal_errors() {
         for message in [
@@ -276,20 +315,13 @@ mod tests {
         ] {
             let err = from_exchange_rejection(message, "exchange action failed");
             assert_eq!(err.exit_code(), 13, "{message}");
-            assert!(err.to_string().contains(message));
+            let text = err.to_string();
+            assert!(
+                text.starts_with("Unsupported input: exchange action failed: "),
+                "{text}"
+            );
+            assert!(text.contains(message), "{text}");
         }
-    }
-
-    #[test]
-    fn signed_exchange_user_state_rejection_names_the_action() {
-        let err = from_exchange_rejection(
-            "User or API Wallet 0x1111111111111111111111111111111111111111 does not exist.",
-            "order placement failed",
-        );
-
-        assert_eq!(err.exit_code(), 13);
-        assert!(err.to_string().contains("order placement failed"));
-        assert!(err.to_string().contains("does not exist"));
     }
 
     #[test]
@@ -355,8 +387,6 @@ mod tests {
             assert!(matches!(err, CliError::AuthRejected(_)));
         }
     }
-
-    // ── SDK errors ──────────────────────────────────────────────────
 
     fn api_error(msg: &str) -> anyhow::Error {
         anyhow::Error::new(hypersdk::hypercore::ApiError(msg.to_string()))
@@ -502,5 +532,44 @@ mod tests {
         let cli_err = from_anyhow(anyhow::anyhow!("boom"));
         assert!(matches!(cli_err, CliError::Internal(_)));
         assert_eq!(cli_err.to_string(), "boom");
+    }
+
+    #[test]
+    fn rejection_classes_follow_the_exchange_text() {
+        assert_eq!(
+            classify_rejection("Rate limit exceeded"),
+            Rejection::RateLimited
+        );
+        assert!(matches!(
+            classify_rejection("Unauthorized"),
+            Rejection::AuthRejected(_)
+        ));
+        assert!(matches!(
+            classify_rejection("Insufficient margin to place order."),
+            Rejection::UserState(_)
+        ));
+        assert!(matches!(
+            classify_rejection("Order has invalid size."),
+            Rejection::Other(_)
+        ));
+    }
+
+    #[test]
+    fn commands_can_word_other_refusals_themselves() {
+        let own = |remote: Untrusted| {
+            CliError::unsupported_with_remote("Couldn't place the order. Exchange said: ", &remote)
+        };
+
+        let refused = classify_rejection("Order has invalid size.").into_error_with(own);
+        assert_eq!(refused.exit_code(), 13);
+        assert_eq!(
+            refused.to_string(),
+            "Unsupported input: Couldn't place the order. Exchange said: [untrusted remote data] Order has invalid size."
+        );
+
+        let limited = classify_rejection("too many requests").into_error_with(own);
+        assert_eq!(limited.exit_code(), 11);
+        let credentials = classify_rejection("Unauthorized").into_error_with(own);
+        assert_eq!(credentials.exit_code(), 10);
     }
 }

@@ -3,7 +3,7 @@
 //! Looping, bounds, signals and line output belong to [`crate::stream`].
 
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use clap::{Args, ValueEnum};
 use hypersdk::hypercore::HttpClient;
@@ -12,15 +12,17 @@ use hypersdk::{Address, Decimal};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::errors::CliError;
+use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, StreamBound, arg};
+use crate::commands::actions::nonce_now;
+use crate::commands::positions::mark_price;
+use crate::commands::rows::{One, Row};
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
-use crate::output::{self, OutputFormat, Session};
+use crate::output::{OutputFormat, Session};
 use crate::stream::{
-    self, StreamBoundArgs, StreamBounds, StreamEnd, Ticker, emit_json_line_to_stdout,
-    write_stdout_line,
+    self, StreamBoundArgs, StreamBounds, StreamEnd, Ticker, emit_json_line, write_stdout_line,
 };
+use crate::wire::{AddressRole, address};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "snake_case")]
@@ -31,26 +33,6 @@ pub enum RiskRule {
     StaleOrder,
     FundingBleed,
     PositionLifecycle,
-}
-
-/// The limits a rule fires at, in the units that rule uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Threshold {
-    /// The rule reports every transition and has no limit.
-    None,
-    /// Margin used, in percent of equity, at or above which the rule fires.
-    MarginUsedPercent(Decimal),
-    /// Distance to liquidation, as a fraction of the mark price, at or below which the rule fires.
-    LiqDistance { critical: Decimal, warning: Decimal },
-    /// Time a position may stay open without a TP/SL order.
-    OpenWithoutTpsl(Duration),
-    /// Time a position must be watched before paid funding is reported.
-    FundingWindow(Duration),
-    /// A resting order older than `age` and at least `mid_distance` (fraction) away from the mid.
-    StaleOrder {
-        age: Duration,
-        mid_distance: Decimal,
-    },
 }
 
 impl RiskRule {
@@ -74,24 +56,22 @@ impl RiskRule {
             RiskRule::PositionLifecycle => "position_lifecycle",
         }
     }
-
-    pub fn default_threshold(self) -> Threshold {
-        match self {
-            RiskRule::LiqProximity => Threshold::LiqDistance {
-                critical: Decimal::new(5, 2),
-                warning: Decimal::new(1, 1),
-            },
-            RiskRule::MarginUsage => Threshold::MarginUsedPercent(Decimal::from(80)),
-            RiskRule::NoTpsl => Threshold::OpenWithoutTpsl(Duration::from_secs(15 * 60)),
-            RiskRule::StaleOrder => Threshold::StaleOrder {
-                age: Duration::from_secs(12 * 60 * 60),
-                mid_distance: Decimal::new(3, 2),
-            },
-            RiskRule::FundingBleed => Threshold::FundingWindow(Duration::from_secs(60 * 60)),
-            RiskRule::PositionLifecycle => Threshold::None,
-        }
-    }
 }
+
+/// Margin used, in percent of equity, at or above which `margin_usage` fires.
+const MARGIN_USED_LIMIT_PERCENT: i64 = 80;
+/// Distance to liquidation, as a fraction of the mark price, at or below which
+/// `liq_proximity` fires as critical and as a warning.
+const LIQ_CRITICAL_DISTANCE: Decimal = Decimal::from_parts(5, 0, 0, false, 2);
+const LIQ_WARNING_DISTANCE: Decimal = Decimal::from_parts(1, 0, 0, false, 1);
+/// Minutes a position may stay open without a TP/SL order.
+const NO_TPSL_AFTER_MINUTES: u64 = 15;
+const NO_TPSL_AFTER: Duration = Duration::from_secs(NO_TPSL_AFTER_MINUTES * 60);
+/// Time a position must be watched before paid funding is reported.
+const FUNDING_BLEED_WINDOW: Duration = Duration::from_secs(60 * 60);
+/// A resting order at least this old and this far from the mid (a fraction) is stale.
+const STALE_ORDER_AGE: Duration = Duration::from_secs(12 * 60 * 60);
+const STALE_ORDER_MID_DISTANCE: Decimal = Decimal::from_parts(3, 0, 0, false, 2);
 
 #[derive(Args, Debug, Clone)]
 #[command(
@@ -169,7 +149,6 @@ impl RiskAlert {
         )
     }
 
-    /// Announces that an account has no open positions.
     fn heartbeat(user: Address) -> Self {
         Self::build(
             "heartbeat",
@@ -193,7 +172,7 @@ impl RiskAlert {
     ) -> Self {
         Self {
             kind,
-            time: now_ms(),
+            time: nonce_now(),
             address: user.to_string(),
             rule: rule.to_string(),
             coin: coin.map(str::to_string),
@@ -204,11 +183,6 @@ impl RiskAlert {
     }
 }
 
-pub fn parse_watch_user(raw: &str) -> Result<Address, CliError> {
-    raw.parse::<Address>()
-        .map_err(|_| CliError::Unsupported(format!("Invalid address: {raw}")))
-}
-
 pub async fn watch_risk(
     inv: &Invocation,
     user: Address,
@@ -217,17 +191,9 @@ pub async fn watch_risk(
     let client = inv.remote()?.api().sdk();
     let session = inv.session();
     let bounds = StreamBounds::watch_risk(&args.stream);
-    if stream::piped_or_agent() && !bounds.is_bounded() {
-        return Err(CliError::Configuration(
-            "watch risk requires --max-events or --idle-timeout-ms in agent mode.\n  \
-             hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20"
-                .to_string(),
-        )
-        .into());
-    }
 
     stream::run_stream(async {
-        let mut watcher = RiskWatcher::new(client, user, args).await;
+        let mut watcher = RiskWatcher::new(client, user, args).await?;
         stream::poll_stream(&mut watcher, args.interval, bounds, |alert| {
             emit_alert(alert, session)
         })
@@ -239,8 +205,12 @@ pub async fn watch_risk(
 
 fn emit_alert(alert: RiskAlert, session: &Session) -> Result<(), anyhow::Error> {
     match session.format() {
-        OutputFormat::Json => emit_json_line_to_stdout(&alert, session.json_options()),
-        _ => write_stdout_line(&session.render(&AlertTable(alert))),
+        OutputFormat::Json => emit_json_line(
+            &mut std::io::stdout().lock(),
+            &alert,
+            session.json_options(),
+        ),
+        _ => write_stdout_line(&session.render(&One::new(alert))),
     }
 }
 
@@ -254,18 +224,22 @@ struct RiskWatcher<'a> {
 }
 
 impl<'a> RiskWatcher<'a> {
-    async fn new(client: &'a HttpClient, user: Address, args: &WatchRiskArgs) -> Self {
+    async fn new(
+        client: &'a HttpClient,
+        user: Address,
+        args: &WatchRiskArgs,
+    ) -> Result<Self, anyhow::Error> {
         // Seed position ages from fill history so positions opened before this
         // watcher started do not wait a full threshold window for age-based rules.
-        let fills = client.user_fills(user).await.unwrap_or_default();
-        Self {
+        let fills = client.user_fills(user).await.map_err(from_sdk)?;
+        Ok(Self {
             client,
             user,
             enabled: enabled_rules(args),
             min_severity: args.min_severity,
             state: RiskEvalState::new(position_open_times(&fills)),
             flat_announced: false,
-        }
+        })
     }
 }
 
@@ -282,8 +256,8 @@ impl Ticker for RiskWatcher<'_> {
             .client
             .open_orders(self.user, None)
             .await
-            .unwrap_or_default();
-        let mids = self.client.all_mids(None).await.unwrap_or_default();
+            .map_err(from_sdk)?;
+        let mids = self.client.all_mids(None).await.map_err(from_sdk)?;
 
         let snapshot = RiskSnapshot {
             positions: &state.asset_positions,
@@ -344,20 +318,12 @@ impl RiskEvalState {
         }
     }
 
-    /// Drop the age and funding clocks of a position that is no longer open.
     fn forget_clocks(&mut self, coin: &str) {
         self.first_seen.remove(coin);
         self.funding_seen.remove(coin);
         self.funding_baseline.remove(coin);
         self.funding_alerted.remove(coin);
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 fn position_open_times(fills: &[Fill]) -> HashMap<String, u64> {
@@ -392,7 +358,7 @@ fn position_open_times(fills: &[Fill]) -> HashMap<String, u64> {
 /// Instant approximating a position open time in ms since epoch.
 fn open_instant(open_times: &HashMap<String, u64>, coin: &str) -> Option<Instant> {
     let ms = *open_times.get(coin)?;
-    let now_ms = now_ms();
+    let now_ms = nonce_now();
     if ms >= now_ms {
         return None;
     }
@@ -407,9 +373,9 @@ fn evaluate_state(
 ) -> Vec<RiskAlert> {
     let mut alerts = Vec::new();
     if enabled.contains(&RiskRule::MarginUsage)
-        && let Threshold::MarginUsedPercent(limit) = RiskRule::MarginUsage.default_threshold()
         && snapshot.equity > Decimal::ZERO
-        && snapshot.margin_used * Decimal::from(100) / snapshot.equity >= limit
+        && snapshot.margin_used * Decimal::from(100) / snapshot.equity
+            >= Decimal::from(MARGIN_USED_LIMIT_PERCENT)
     {
         let pct = snapshot.margin_used * Decimal::from(100) / snapshot.equity;
         alerts.push(RiskAlert::for_rule(
@@ -498,24 +464,18 @@ fn evaluate_state(
             .or_insert_with(|| seeded.unwrap_or_else(Instant::now));
 
         if enabled.contains(&RiskRule::LiqProximity)
-            && let Threshold::LiqDistance { critical, warning } =
-                RiskRule::LiqProximity.default_threshold()
             && let Some(liq) = position.position.liquidation_px
         {
-            let mark = if position.position.abs_size().is_zero() {
-                Decimal::ZERO
-            } else {
-                position.position.position_value / position.position.abs_size()
-            };
+            let mark = mark_price(&position.position);
             if mark > Decimal::ZERO {
                 let distance = if size > Decimal::ZERO {
                     (mark - liq) / mark
                 } else {
                     (liq - mark) / mark
                 };
-                let severity = if distance <= critical {
+                let severity = if distance <= LIQ_CRITICAL_DISTANCE {
                     Some(AlertSeverity::Critical)
-                } else if distance <= warning {
+                } else if distance <= LIQ_WARNING_DISTANCE {
                     Some(AlertSeverity::Warning)
                 } else {
                     None
@@ -533,9 +493,8 @@ fn evaluate_state(
             }
         }
 
-        if enabled.contains(&RiskRule::NoTpsl)
-            && let Threshold::OpenWithoutTpsl(open_for) = RiskRule::NoTpsl.default_threshold()
-        {
+        if enabled.contains(&RiskRule::NoTpsl) {
+            let open_for = NO_TPSL_AFTER;
             let seen = state
                 .first_seen
                 .get(&coin)
@@ -551,15 +510,14 @@ fn evaluate_state(
                     RiskRule::NoTpsl,
                     Some(&coin),
                     AlertSeverity::Warning,
-                    format!("{coin} has been open 15m without TP/SL"),
+                    format!("{coin} has been open {NO_TPSL_AFTER_MINUTES}m without TP/SL"),
                     json!({ "open_for_secs": seen.elapsed().as_secs() }),
                 ));
             }
         }
 
-        if enabled.contains(&RiskRule::FundingBleed)
-            && let Threshold::FundingWindow(window) = RiskRule::FundingBleed.default_threshold()
-        {
+        if enabled.contains(&RiskRule::FundingBleed) {
+            let window = FUNDING_BLEED_WINDOW;
             // Bleed = funding actually paid while watching: the delta of
             // cum_funding.since_open since the position was first observed.
             let paid = position.position.cum_funding.since_open;
@@ -591,21 +549,18 @@ fn evaluate_state(
         }
     }
 
-    if enabled.contains(&RiskRule::StaleOrder)
-        && let Threshold::StaleOrder { age, mid_distance } =
-            RiskRule::StaleOrder.default_threshold()
-    {
-        let now_ms = now_ms();
+    if enabled.contains(&RiskRule::StaleOrder) {
+        let now_ms = nonce_now();
         for order in snapshot.open_orders {
             let age_ms = now_ms.saturating_sub(order.timestamp);
-            if Duration::from_millis(age_ms) < age {
+            if Duration::from_millis(age_ms) < STALE_ORDER_AGE {
                 continue;
             }
             if let Some(mid) = snapshot.mids.get(&order.coin)
                 && *mid > Decimal::ZERO
             {
                 let distance = (order.limit_px - *mid).abs() / *mid;
-                if distance >= mid_distance {
+                if distance >= STALE_ORDER_MID_DISTANCE {
                     alerts.push(RiskAlert::for_rule(
                         user,
                         RiskRule::StaleOrder,
@@ -640,37 +595,34 @@ fn enabled_rules(args: &WatchRiskArgs) -> Vec<RiskRule> {
 
 fn parse_secs(raw: &str) -> Result<Duration, String> {
     let trimmed = raw.trim();
-    if let Some(ms) = trimmed.strip_suffix("ms") {
+    let interval = if let Some(ms) = trimmed.strip_suffix("ms") {
         let value: u64 = ms.parse().map_err(|_| format!("invalid duration {raw}"))?;
-        return Ok(Duration::from_millis(value));
+        Duration::from_millis(value)
+    } else {
+        let seconds = trimmed
+            .strip_suffix('s')
+            .unwrap_or(trimmed)
+            .parse::<u64>()
+            .map_err(|_| format!("invalid duration {raw}"))?;
+        Duration::from_secs(seconds)
+    };
+    if interval.is_zero() {
+        return Err(format!("duration must be greater than zero: {raw}"));
     }
-    let seconds = trimmed
-        .strip_suffix('s')
-        .unwrap_or(trimmed)
-        .parse::<u64>()
-        .map_err(|_| format!("invalid duration {raw}"))?;
-    Ok(Duration::from_secs(seconds))
+    Ok(interval)
 }
 
-struct AlertTable(RiskAlert);
+impl Row for RiskAlert {
+    const HEADERS: &'static [&'static str] = &["Time", "Rule", "Coin", "Severity", "Message"];
 
-impl output::TableData for AlertTable {
-    fn headers(&self) -> Vec<&str> {
-        vec!["Time", "Rule", "Coin", "Severity", "Message"]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.0.time.to_string(),
-            self.0.rule.clone(),
-            self.0.coin.clone().unwrap_or_default(),
-            self.0.severity.as_str().to_string(),
-            self.0.message.clone(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.0).unwrap_or(json!({}))
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.time.to_string(),
+            self.rule.clone(),
+            self.coin.clone().unwrap_or_default(),
+            self.severity.as_str().to_string(),
+            self.message.clone(),
+        ]
     }
 }
 
@@ -694,6 +646,7 @@ Retry: safe. Agent/non-TTY mode requires --max-events or --idle-timeout-ms.\n\
 Examples:\n  \
 hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20\n  \
 hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --idle-timeout-ms 8000")
+    .stream(StreamBound::Polled)
     .args(&[
         arg("user").kind(InputKind::Identifier).resource_id("user"),
         arg("min_severity").describe("Minimum alert severity to emit."),
@@ -706,7 +659,7 @@ hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000
 
     async fn run(inv: &Invocation, args: &WatchRiskArgs) -> Result<(), anyhow::Error> {
         let user = if let Some(raw) = args.user.as_deref() {
-            parse_watch_user(raw)?
+            address(raw, AddressRole::Watched)?
         } else {
             inv.resolve_signer()?.query_address()
         };
@@ -733,12 +686,38 @@ mod tests {
     }
 
     fn user() -> Address {
-        parse_watch_user("0x0000000000000000000000000000000000000001").unwrap()
+        address(
+            "0x0000000000000000000000000000000000000001",
+            AddressRole::Watched,
+        )
+        .unwrap()
     }
 
     #[test]
-    fn parse_watch_user_rejects_invalid_address() {
-        assert!(parse_watch_user("not-an-address").is_err());
+    fn watched_user_takes_a_valid_address_with_or_without_the_0x_prefix() {
+        assert!(address("not-an-address", AddressRole::Watched).is_err());
+        assert!(
+            address(
+                "0000000000000000000000000000000000000001",
+                AddressRole::Watched
+            )
+            .is_ok()
+        );
+        assert!(
+            address(
+                "0x0000000000000000000000000000000000000001",
+                AddressRole::Watched
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn poll_interval_must_be_positive() {
+        assert!(parse_secs("0").is_err());
+        assert!(parse_secs("0ms").is_err());
+        assert_eq!(parse_secs("500ms").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_secs("15s").unwrap(), Duration::from_secs(15));
     }
 
     #[test]
@@ -755,22 +734,6 @@ mod tests {
         for rule in RiskRule::ALL {
             let value = rule.to_possible_value().unwrap();
             assert_eq!(value.get_name(), rule.as_str());
-        }
-    }
-
-    #[test]
-    fn every_rule_has_a_threshold_of_its_own_shape() {
-        for rule in RiskRule::ALL {
-            let matches_shape = matches!(
-                (rule, rule.default_threshold()),
-                (RiskRule::LiqProximity, Threshold::LiqDistance { .. })
-                    | (RiskRule::MarginUsage, Threshold::MarginUsedPercent(_))
-                    | (RiskRule::NoTpsl, Threshold::OpenWithoutTpsl(_))
-                    | (RiskRule::StaleOrder, Threshold::StaleOrder { .. })
-                    | (RiskRule::FundingBleed, Threshold::FundingWindow(_))
-                    | (RiskRule::PositionLifecycle, Threshold::None)
-            );
-            assert!(matches_shape, "{rule:?}");
         }
     }
 

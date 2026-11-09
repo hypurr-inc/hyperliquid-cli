@@ -1,24 +1,7 @@
 mod support;
 
 use predicates::prelude::*;
-use serde_json::Value;
 use support::IsolatedHome;
-
-#[test]
-fn schema_orders_chase_supports_dry_run() {
-    let output = IsolatedHome::new()
-        .command()
-        .args(["--format", "json", "schema", "orders", "chase"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["command"], "hyperliquid orders chase");
-    assert_eq!(json["dry_run"], "optional");
-    assert_eq!(json["confirmation"], "prompt");
-}
 
 #[test]
 fn chase_requires_timeout_in_agent_mode() {
@@ -59,4 +42,32 @@ fn chase_help_mentions_offset_and_timeout() {
         .stdout(predicate::str::contains("--max-chase"))
         .stdout(predicate::str::contains("Examples:"))
         .stdout(predicate::str::contains("--dry-run"));
+}
+
+#[test]
+fn chase_refuses_an_interval_or_timeout_that_is_not_a_whole_positive_duration() {
+    for (flag, value) in [
+        ("--interval", "100ms"),
+        ("--interval", "0s"),
+        ("--timeout", "0s"),
+    ] {
+        IsolatedHome::new()
+            .command()
+            .args([
+                "--dry-run",
+                "--testnet",
+                "orders",
+                "chase",
+                "--coin",
+                "ETH",
+                "--side",
+                "buy",
+                "--size",
+                "0.5",
+                flag,
+                value,
+            ])
+            .assert()
+            .code(2);
+    }
 }

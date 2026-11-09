@@ -5,7 +5,8 @@
 //! contradicts itself or names args the command does not have.
 
 use hyperliquid_cli::command_registry::CommandRegistry;
-use hyperliquid_cli::command_spec::{ConfirmationPolicy, StreamBound};
+use hyperliquid_cli::command_spec::{ConfirmationPolicy, YES_ARG};
+use hyperliquid_cli::commands;
 
 fn problems_or_pass(title: &str, problems: Vec<String>) {
     assert!(
@@ -67,12 +68,15 @@ fn testnet_unprompted_commands_prompt_on_mainnet() {
 fn bounded_commands_define_the_args_that_bound_them() {
     let mut problems = Vec::new();
     for contract in CommandRegistry::get().commands() {
-        let required: &[&str] = match contract.spec.stream {
-            Some(StreamBound::SnapshotWatch) => &["watch", "max_ticks"],
-            Some(StreamBound::Subscribe) => &["max_events", "idle_timeout_ms"],
-            None => &[],
+        let Some(bound) = contract.spec.stream else {
+            continue;
         };
-        for id in required {
+        for id in bound
+            .cli_args()
+            .iter()
+            .copied()
+            .chain(bound.required_when())
+        {
             if contract.input(id).is_none() {
                 problems.push(format!("{}: missing `{id}`", contract.command_key()));
             }
@@ -103,6 +107,66 @@ fn policy_args_are_args_of_their_command() {
                 }
             }
         }
+        for secret in contract.spec.args.iter().filter(|arg| arg.secret) {
+            if contract.input(secret.id).is_none() {
+                problems.push(format!(
+                    "{}: secret arg `{}`",
+                    contract.command_key(),
+                    secret.id
+                ));
+            }
+        }
     }
     problems_or_pass("policy args", problems);
+}
+
+/// A `.prompt()` spec promises its own `run` asks before acting, and the
+/// pipeline refuses to run it where it cannot ask. A command that accepts
+/// `--yes` answers that prompt with the flag. One without it can only be
+/// prompting for a secret it reads at the prompt (`wallet import`), so it must
+/// declare that secret.
+#[test]
+fn prompting_commands_without_yes_prompt_for_a_secret() {
+    let problems = CommandRegistry::get()
+        .commands()
+        .iter()
+        .filter(|contract| {
+            contract.spec.confirmation == ConfirmationPolicy::Prompt
+                && contract.input(YES_ARG).is_none()
+                && !contract.spec.args.iter().any(|arg| arg.secret)
+        })
+        .map(|contract| {
+            format!(
+                "{}: prompts but has neither --{YES_ARG} nor a secret arg to prompt for",
+                contract.command_key()
+            )
+        })
+        .collect();
+    problems_or_pass("prompt policy", problems);
+}
+
+/// A command nested under a prefix needs that prefix to be a group (help text,
+/// `subcommand_required`) or itself a command. A new group is its module's
+/// `GROUP` plus one line in `commands::groups`.
+#[test]
+fn every_nested_command_sits_under_a_declared_group() {
+    let mut problems = Vec::new();
+    for entry in commands::entries() {
+        let path = entry.spec.path;
+        for len in 1..path.len() {
+            let prefix = &path[..len];
+            let declared = commands::groups().iter().any(|group| group.path == prefix)
+                || commands::entries()
+                    .iter()
+                    .any(|other| other.spec.path == prefix);
+            if !declared {
+                problems.push(format!(
+                    "{}: `{}` is neither a group nor a command",
+                    entry.spec.key(),
+                    prefix.join(" ")
+                ));
+            }
+        }
+    }
+    problems_or_pass("command groups", problems);
 }

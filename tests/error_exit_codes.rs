@@ -1,191 +1,19 @@
-// Integration tests for the error system.
-//
-// Verifies:
-// - Exit codes 0, 1, 2, 10, 11, 12, 13, 14, 15
-// - JSON error envelope format {"error": "..."}
-// - Stderr vs stdout error routing
-// - Clap usage errors exit with code 2
-// - Colored error output for pretty/table mode
-// - hypersdk error mapping
+mod support;
 
-use assert_cmd::Command;
 use predicates::prelude::*;
-// ── Exit code 0 — Success ────────────────────────────────────────────────
+use serde_json::Value;
+use support::{IsolatedHome, hermetic_command};
 
-#[test]
-fn test_exit_code_0_success() {
-    // No args = success (prints version info)
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .assert()
-        .success()
-        .code(0);
+const OWS_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
+const OWS_FAIL_CLOSED: &str = "does not have a resolved wallet for live signing";
+
+fn stdout_json(output: &[u8]) -> Value {
+    serde_json::from_slice(output).expect("stdout should be one JSON document")
 }
 
 #[test]
-fn test_exit_code_0_version() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--version")
-        .assert()
-        .success()
-        .code(0)
-        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
-}
-
-#[test]
-fn test_exit_code_0_help() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--help")
-        .assert()
-        .success()
-        .code(0);
-}
-
-// ── Exit code 2 — Usage error (clap) ─────────────────────────────────────
-
-#[test]
-fn test_exit_code_2_usage_error() {
-    // Clap handles invalid format values with exit code 2
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("xml")
-        .assert()
-        .failure()
-        .code(2);
-}
-
-#[test]
-fn test_exit_code_2_invalid_format() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("yaml")
-        .assert()
-        .failure()
-        .code(2)
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["category"], "usage");
-    assert!(json["error"].as_str().unwrap().contains("invalid"));
-}
-
-#[test]
-fn test_exit_code_2_missing_subcommand_arg() {
-    // `perps get` without a coin argument should exit 2 (clap)
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("perps")
-        .arg("get")
-        .assert()
-        .failure()
-        .code(2);
-}
-
-#[test]
-fn test_json_usage_errors_are_structured() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["--format", "json", "wallet", "show", "--bogus"])
-        .assert()
-        .failure()
-        .code(2)
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["category"], "usage");
-    assert_eq!(json["exit_code"], 2);
-    assert!(json["error"].as_str().unwrap().contains("--bogus"));
-}
-
-#[test]
-fn test_non_tty_usage_errors_are_structured_json_by_default() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["wallet", "show", "--bogus"])
-        .assert()
-        .failure()
-        .code(2)
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["category"], "usage");
-    assert_eq!(json["exit_code"], 2);
-    assert!(json["error"].as_str().unwrap().contains("--bogus"));
-}
-
-#[test]
-fn test_explicit_pretty_usage_errors_stay_human_readable() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["--format", "pretty", "wallet", "show", "--bogus"])
-        .assert()
-        .failure()
-        .code(2)
-        .stdout(predicate::str::is_empty())
-        .stderr(predicate::str::contains("--bogus"));
-}
-
-#[test]
-fn test_hyperliquid_agent_usage_errors_are_structured_json() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_AGENT", "1")
-        .args(["wallet", "show", "--bogus"])
-        .assert()
-        .failure()
-        .code(2)
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["category"], "usage");
-    assert_eq!(json["exit_code"], 2);
-}
-
-// ── Pretty mode: errors on stderr ────────────────────────────────────────
-
-// ── Table mode: errors on stderr ─────────────────────────────────────────
-
-// ── Short flag for format ────────────────────────────────────────────────
-
-// ── Clap usage errors have exit code 2 ───────────────────────────────────
-
-#[test]
-fn test_clap_usage_error_exit_2() {
-    // Invalid global flag value should be exit 2
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("invalid")
-        .assert()
-        .failure()
-        .code(2);
-}
-
-#[test]
-fn test_clap_usage_error_has_error_message() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("invalid")
-        .assert()
-        .failure()
-        .stdout(predicate::str::contains("error").or(predicate::str::contains("invalid")));
-}
-
-// ── No args does not error ───────────────────────────────────────────────
-
-#[test]
-fn test_no_args_success() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+fn no_arguments_prints_usage_and_exits_zero() {
+    hermetic_command()
         .assert()
         .success()
         .code(0)
@@ -193,46 +21,134 @@ fn test_no_args_success() {
 }
 
 #[test]
-fn experimental_ows_live_signing_fails_closed_with_unsupported_exit() {
-    let address = "0x0000000000000000000000000000000000000001";
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args([
-            "--format",
-            "json",
-            "--ows-signer",
-            address,
-            "orders",
-            "cancel",
-            "123",
-        ])
+fn version_flag_prints_the_crate_version() {
+    hermetic_command()
+        .arg("--version")
         .assert()
-        .code(13)
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["category"], "unsupported");
-    assert_eq!(json["exit_code"], 13);
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap()
-            .contains("does not have a resolved wallet for live signing")
-    );
+        .code(0)
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
-fn experimental_ows_dry_run_does_not_require_signing() {
-    let address = "0x0000000000000000000000000000000000000001";
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+fn help_flag_exits_zero_with_usage() {
+    hermetic_command()
+        .arg("--help")
+        .assert()
+        .code(0)
+        .stdout(predicate::str::contains("Usage: hyperliquid"));
+}
+
+#[test]
+fn an_unknown_format_value_is_a_usage_error_with_a_json_envelope() {
+    let output = hermetic_command()
+        .args(["--format", "yaml"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json = stdout_json(&output);
+    assert_eq!(json["category"], "usage");
+    assert!(json["error"].as_str().unwrap().contains("invalid"));
+}
+
+#[test]
+fn a_missing_required_argument_exits_with_usage_code() {
+    hermetic_command().args(["perps", "get"]).assert().code(2);
+}
+
+#[test]
+fn non_tty_usage_errors_are_structured_json_by_default() {
+    let output = hermetic_command()
+        .args(["wallet", "show", "--bogus"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json = stdout_json(&output);
+    assert_eq!(json["category"], "usage");
+    assert_eq!(json["exit_code"], 2);
+    assert!(json["error"].as_str().unwrap().contains("--bogus"));
+}
+
+#[test]
+fn explicit_pretty_usage_errors_stay_human_readable() {
+    hermetic_command()
+        .args(["--format", "pretty", "wallet", "show", "--bogus"])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("--bogus"));
+}
+
+#[test]
+fn agent_mode_usage_errors_are_structured_json() {
+    let output = hermetic_command()
+        .env("HYPERLIQUID_AGENT", "1")
+        .args(["wallet", "show", "--bogus"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stdout
+        .clone();
+    let json = stdout_json(&output);
+    assert_eq!(json["category"], "usage");
+    assert_eq!(json["exit_code"], 2);
+}
+
+#[test]
+fn an_ows_signer_without_a_resolved_wallet_fails_closed_before_any_live_action() {
+    let env = IsolatedHome::new();
+    let cases: [&[&str]; 3] = [
+        &["orders", "cancel", "123"],
+        &[
+            "account",
+            "abstraction",
+            "set",
+            "--mode",
+            "disabled",
+            "--yes",
+        ],
+        &[
+            "api-wallet",
+            "approve",
+            "--agent-address",
+            "0x0000000000000000000000000000000000000002",
+            "--name",
+            "ows-smoke",
+        ],
+    ];
+    for command in cases {
+        let output = env
+            .command()
+            .args(["--format", "json", "--ows-signer", OWS_ADDRESS])
+            .args(command)
+            .assert()
+            .code(13)
+            .get_output()
+            .stdout
+            .clone();
+        let json = stdout_json(&output);
+        assert_eq!(json["category"], "unsupported", "{command:?}");
+        assert_eq!(json["exit_code"], 13, "{command:?}");
+        assert!(
+            json["error"].as_str().unwrap().contains(OWS_FAIL_CLOSED),
+            "{command:?}: {json}"
+        );
+    }
+}
+
+#[test]
+fn an_ows_signer_dry_run_does_not_require_signing() {
+    let env = IsolatedHome::new();
+    env.command()
         .args([
             "--format",
             "json",
             "--dry-run",
             "--ows-signer",
-            address,
+            OWS_ADDRESS,
             "orders",
             "cancel",
             "123",
@@ -242,67 +158,16 @@ fn experimental_ows_dry_run_does_not_require_signing() {
 }
 
 #[test]
-fn experimental_ows_user_signed_action_fails_closed_before_submit() {
-    let address = "0x0000000000000000000000000000000000000001";
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+fn a_private_key_flag_with_a_keystore_is_a_usage_error() {
+    hermetic_command()
         .args([
-            "--format",
-            "json",
-            "--ows-signer",
-            address,
-            "account",
-            "abstraction",
-            "set",
-            "--mode",
-            "disabled",
-            "--yes",
+            "--private-key",
+            "0x0000000000000000000000000000000000000000000000000000000000000009",
+            "--keystore",
+            "/keystore.json",
+            "status",
         ])
         .assert()
-        .code(13)
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["category"], "unsupported");
-    assert_eq!(json["exit_code"], 13);
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap()
-            .contains("does not have a resolved wallet for live signing")
-    );
-}
-
-#[test]
-fn experimental_ows_l1_action_fails_closed_before_submit() {
-    let address = "0x0000000000000000000000000000000000000001";
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args([
-            "--format",
-            "json",
-            "--ows-signer",
-            address,
-            "api-wallet",
-            "approve",
-            "--agent-address",
-            "0x0000000000000000000000000000000000000002",
-            "--name",
-            "ows-smoke",
-        ])
-        .assert()
-        .code(13)
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["category"], "unsupported");
-    assert_eq!(json["exit_code"], 13);
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap()
-            .contains("does not have a resolved wallet for live signing")
-    );
+        .code(2)
+        .stdout(predicate::str::contains("cannot be used with"));
 }

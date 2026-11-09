@@ -1,4 +1,4 @@
-//! Authenticated position management commands.
+use std::fmt;
 
 use clap::Args;
 use hypersdk::Address;
@@ -7,24 +7,23 @@ use hypersdk::hypercore::HttpClient;
 use hypersdk::hypercore::Subscription;
 use hypersdk::hypercore::api::UpdateLeverage;
 use hypersdk::hypercore::types::api::UpdateIsolatedMargin;
-use hypersdk::hypercore::types::{Action, AssetPosition, LeverageType};
+use hypersdk::hypercore::types::{Action, AssetPosition, LeverageType, PositionData};
+use serde::{Serialize, Serializer};
 
+use crate::assets::AssetResolver;
+use crate::assets::canonical_dex;
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, StreamBound, arg,
 };
-use crate::commands::support::{
-    canonical_dex, dry_run_signed_details, dry_run_signing_addresses, print_dry_run,
-};
-use crate::signing::SelectedSigner;
-use crate::stream::SnapshotWatchArgs;
-use serde::Serialize;
-
-use crate::assets::AssetResolver;
 use crate::commands::actions;
+use crate::commands::rows::{ListRow, MISSING, Row, Rows, or_missing, style_column};
+use crate::commands::support::print_dry_run;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
-use crate::output::{self, TableData};
+use crate::output;
+use crate::quantity::{self, Scale};
+use crate::stream::SnapshotWatchArgs;
 
 /// Arguments for `positions update-leverage`.
 #[derive(Args, Debug, Clone)]
@@ -54,133 +53,146 @@ pub struct UpdateMarginArgs {
     pub amount: Decimal,
 }
 
+/// A position's leverage mode and multiple, shown as `cross 5x`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Leverage {
+    pub kind: LeverageType,
+    pub value: u32,
+}
+
+impl fmt::Display for Leverage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}x", self.kind, self.value)
+    }
+}
+
+impl Serialize for Leverage {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+/// The mark price a position implies: its value per unit of size.
+pub(crate) fn mark_price(position: &PositionData) -> Decimal {
+    let size = position.abs_size();
+    if size.is_zero() {
+        Decimal::ZERO
+    } else {
+        position.position_value / size
+    }
+}
+
+/// A position as `positions list` and `vault positions` show it.
 #[derive(Debug, Clone, Serialize)]
-struct PositionRow {
-    coin: String,
-    side: String,
+pub(crate) struct PositionRow {
+    pub coin: String,
+    pub side: &'static str,
     #[serde(with = "rust_decimal::serde::str")]
-    size: Decimal,
+    pub size: Decimal,
     #[serde(with = "rust_decimal::serde::str_option")]
-    entry: Option<Decimal>,
+    pub entry: Option<Decimal>,
     #[serde(with = "rust_decimal::serde::str")]
-    mark: Decimal,
+    pub mark: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
-    unrealized_pnl: Decimal,
+    pub unrealized_pnl: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
-    position_value: Decimal,
-    leverage: String,
+    pub position_value: Decimal,
+    pub leverage: Leverage,
     #[serde(with = "rust_decimal::serde::str")]
-    margin_used: Decimal,
-    liquidation_price: Option<String>,
+    pub margin_used: Decimal,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub liquidation_price: Option<Decimal>,
 }
 
 impl From<AssetPosition> for PositionRow {
     fn from(value: AssetPosition) -> Self {
         let position = value.position;
-        let abs_size = position.abs_size();
-        let mark = if abs_size.is_zero() {
-            Decimal::ZERO
-        } else {
-            position.position_value / abs_size
-        };
-        let leverage_mode = match position.leverage.leverage_type {
-            LeverageType::Cross => "cross",
-            LeverageType::Isolated => "isolated",
-        };
-        let side = position.side().to_string();
-
         Self {
+            mark: mark_price(&position),
+            side: position.side(),
+            leverage: Leverage {
+                kind: position.leverage.leverage_type,
+                value: position.leverage.value,
+            },
             coin: position.coin,
-            side,
             size: position.szi,
             entry: position.entry_px,
-            mark,
             unrealized_pnl: position.unrealized_pnl,
             position_value: position.position_value,
-            leverage: format!("{leverage_mode} {}x", position.leverage.value),
             margin_used: position.margin_used,
-            liquidation_price: position.liquidation_px.map(|px| px.to_string()),
+            liquidation_price: position.liquidation_px,
         }
     }
 }
 
-pub struct PositionsOutput {
-    rows: Vec<PositionRow>,
+impl PositionRow {
+    /// The rows of the positions with a nonzero size.
+    pub(crate) fn open(positions: Vec<AssetPosition>) -> Vec<Self> {
+        positions
+            .into_iter()
+            .map(Self::from)
+            .filter(|row| !row.size.is_zero())
+            .collect()
+    }
 }
 
-impl TableData for PositionsOutput {
-    fn headers(&self) -> Vec<&str> {
+impl Row for PositionRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Coin",
+        "Side",
+        "Size",
+        "Entry",
+        "Mark",
+        "Unrealized PnL",
+        "Position Value",
+        "Leverage",
+        "Margin Used",
+        "Liquidation",
+    ];
+
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Coin",
-            "Side",
-            "Size",
-            "Entry",
-            "Mark",
-            "Unrealized PnL",
-            "Position Value",
-            "Leverage",
-            "Margin Used",
-            "Liquidation",
+            self.coin.clone(),
+            self.side.to_string(),
+            self.size.to_string(),
+            or_missing(self.entry),
+            self.mark.to_string(),
+            self.unrealized_pnl.to_string(),
+            self.position_value.to_string(),
+            self.leverage.to_string(),
+            self.margin_used.to_string(),
+            or_missing(self.liquidation_price),
         ]
     }
 
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.coin.clone(),
-                    row.side.clone(),
-                    row.size.to_string(),
-                    row.entry
-                        .map(|entry| entry.to_string())
-                        .unwrap_or_else(|| "n/a".to_string()),
-                    row.mark.to_string(),
-                    row.unrealized_pnl.to_string(),
-                    row.position_value.to_string(),
-                    row.leverage.clone(),
-                    row.margin_used.to_string(),
-                    row.liquidation_price
-                        .clone()
-                        .unwrap_or_else(|| "n/a".to_string()),
-                ]
-            })
-            .collect()
+    /// [`Self::cells`] with the PnL coloured by sign and missing values greyed.
+    fn pretty_cells(&self) -> Vec<String> {
+        let mut cells = self.cells();
+        style_column::<Self>(&mut cells, "Unrealized PnL", |_| {
+            pretty_pnl(self.unrealized_pnl)
+        });
+        for cell in &mut cells {
+            if cell == MISSING {
+                *cell = output::colors::gray(cell);
+            }
+        }
+        cells
     }
+}
 
-    fn pretty_rows(&self) -> Vec<Vec<String>> {
-        self.rows()
-            .into_iter()
-            .map(|mut row| {
-                if row.len() > 5 {
-                    let pnl = self
-                        .rows
-                        .iter()
-                        .find(|position| position.coin == row[0])
-                        .map(|position| position.unrealized_pnl)
-                        .unwrap_or_default();
-                    if pnl > Decimal::ZERO {
-                        row[5] = output::colors::green(&row[5]);
-                    } else if pnl < Decimal::ZERO {
-                        row[5] = output::colors::red(&row[5]);
-                    }
-                }
-                for cell in row.iter_mut() {
-                    if cell == "n/a" {
-                        *cell = output::colors::gray(cell);
-                    }
-                }
-                row
-            })
-            .collect()
-    }
+impl ListRow for PositionRow {
+    const EMPTY: &'static str = "No open positions.";
+}
 
-    fn empty_message(&self) -> Option<&str> {
-        Some("No open positions.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+/// A PnL value, green when positive and red when negative.
+pub(crate) fn pretty_pnl(value: Decimal) -> String {
+    let formatted = value.to_string();
+    if value > Decimal::ZERO {
+        output::colors::green(&formatted)
+    } else if value < Decimal::ZERO {
+        output::colors::red(&formatted)
+    } else {
+        formatted
     }
 }
 
@@ -198,300 +210,66 @@ struct PositionActionConfirmation {
     amount: Option<Decimal>,
 }
 
-struct PositionActionOutput {
-    rows: Vec<PositionActionConfirmation>,
-}
+impl Row for PositionActionConfirmation {
+    const HEADERS: &'static [&'static str] = &[
+        "Coin",
+        "Action",
+        "Status",
+        "Leverage",
+        "Margin Mode",
+        "Amount",
+    ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedUpdateLeverage {
-    coin: String,
-    asset: usize,
-    is_cross: bool,
-    leverage: u32,
-}
-
-impl PreparedUpdateLeverage {
-    #[must_use]
-    pub fn coin(&self) -> &str {
-        &self.coin
-    }
-
-    #[must_use]
-    pub fn asset(&self) -> usize {
-        self.asset
-    }
-
-    #[must_use]
-    pub fn is_cross(&self) -> bool {
-        self.is_cross
-    }
-
-    #[must_use]
-    pub fn leverage(&self) -> u32 {
-        self.leverage
-    }
-
-    #[must_use]
-    pub fn margin_mode(&self) -> &'static str {
-        if self.is_cross { "cross" } else { "isolated" }
-    }
-
-    fn action(&self) -> Action {
-        Action::UpdateLeverage(UpdateLeverage {
-            asset: self.asset,
-            is_cross: self.is_cross,
-            leverage: self.leverage,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PreparedUpdateMargin {
-    coin: String,
-    asset: usize,
-    amount: Decimal,
-    ntli: i64,
-}
-
-impl PreparedUpdateMargin {
-    #[must_use]
-    pub fn coin(&self) -> &str {
-        &self.coin
-    }
-
-    #[must_use]
-    pub fn asset(&self) -> usize {
-        self.asset
-    }
-
-    #[must_use]
-    pub fn amount(&self) -> Decimal {
-        self.amount
-    }
-
-    #[must_use]
-    pub fn ntli(&self) -> i64 {
-        self.ntli
-    }
-
-    fn action(&self) -> Action {
-        Action::UpdateIsolatedMargin(UpdateIsolatedMargin {
-            asset: self.asset,
-            is_buy: true,
-            ntli: self.ntli,
-        })
-    }
-}
-
-#[must_use]
-pub fn update_leverage_dry_run_value(
-    network: impl Into<String>,
-    args: &UpdateLeverageArgs,
-    prepared: &PreparedUpdateLeverage,
-) -> serde_json::Value {
-    serde_json::json!({
-        "coin": args.coin,
-        "resolved_coin": prepared.coin(),
-        "asset": prepared.asset(),
-        "network": network.into(),
-        "leverage": prepared.leverage(),
-        "margin_mode": prepared.margin_mode(),
-        "is_cross": prepared.is_cross(),
-    })
-}
-
-#[must_use]
-pub fn update_margin_dry_run_value(
-    network: impl Into<String>,
-    args: &UpdateMarginArgs,
-    prepared: &PreparedUpdateMargin,
-) -> serde_json::Value {
-    serde_json::json!({
-        "coin": args.coin,
-        "resolved_coin": prepared.coin(),
-        "asset": prepared.asset(),
-        "network": network.into(),
-        "amount": prepared.amount().to_string(),
-        "ntli": prepared.ntli(),
-        "margin_mode": "isolated",
-    })
-}
-
-impl TableData for PositionActionOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Coin",
-            "Action",
-            "Status",
-            "Leverage",
-            "Margin Mode",
-            "Amount",
+            self.coin.clone(),
+            self.action.clone(),
+            self.status.clone(),
+            self.leverage
+                .map(|leverage| leverage.to_string())
+                .unwrap_or_default(),
+            self.margin_mode.clone().unwrap_or_default(),
+            self.amount
+                .map(|amount| amount.to_string())
+                .unwrap_or_default(),
         ]
     }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.coin.clone(),
-                    row.action.clone(),
-                    row.status.clone(),
-                    row.leverage
-                        .map(|leverage| leverage.to_string())
-                        .unwrap_or_default(),
-                    row.margin_mode.clone().unwrap_or_default(),
-                    row.amount
-                        .map(|amount| amount.to_string())
-                        .unwrap_or_default(),
-                ]
-            })
-            .collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
-    }
 }
 
-/// List authenticated user's open positions.
-pub async fn list(inv: &Invocation, user: Address, dex: Option<&str>) -> Result<(), anyhow::Error> {
-    inv.print(&list_snapshot(inv.remote()?.api().sdk(), user, dex).await?);
-    Ok(())
+impl ListRow for PositionActionConfirmation {
+    const EMPTY: &'static str = "No results.";
 }
 
 /// Fetch authenticated user's open positions without printing them.
-pub async fn list_snapshot(
+async fn list_snapshot(
     client: &HttpClient,
     user: Address,
     dex: Option<&str>,
-) -> Result<PositionsOutput, anyhow::Error> {
-    let rows = client
+) -> Result<Rows<PositionRow>, anyhow::Error> {
+    let positions = client
         .clearinghouse_state(user, dex.map(str::to_string))
         .await
         .map_err(from_sdk)?
-        .asset_positions
-        .into_iter()
-        .map(PositionRow::from)
-        .filter(|row| !row.size.is_zero())
-        .collect::<Vec<_>>();
+        .asset_positions;
 
-    Ok(PositionsOutput { rows })
+    Ok(Rows::new(PositionRow::open(positions)))
 }
 
-pub fn prepare_update_leverage(
+/// The perp a `--coin` names: its display name and protocol asset id. A HIP-3
+/// market (`dex:COIN`) is looked up live when the metadata snapshot lacks it,
+/// as orders do.
+async fn resolve_perp_asset(
     resolver: &AssetResolver,
-    args: &UpdateLeverageArgs,
-) -> Result<PreparedUpdateLeverage, CliError> {
-    validate_update_leverage_args(args)?;
-    let (coin, asset) = resolve_perp_asset(resolver, &args.coin)?;
-    Ok(PreparedUpdateLeverage {
-        coin,
-        asset,
-        is_cross: !args.isolated,
-        leverage: args.leverage,
-    })
-}
-
-pub async fn submit_update_leverage(
-    inv: &Invocation,
-    signer: &SelectedSigner,
-    prepared: PreparedUpdateLeverage,
-) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    actions::send_l1_action(
-        remote.api(),
-        signer,
-        prepared.action(),
-        actions::nonce_now(),
-    )
-    .await?;
-    let margin_mode = prepared.margin_mode().to_string();
-    let leverage = prepared.leverage;
-    let coin = prepared.coin;
-
-    inv.print(&PositionActionOutput {
-        rows: vec![PositionActionConfirmation {
-            coin,
-            action: "update-leverage".to_string(),
-            status: "updated".to_string(),
-            leverage: Some(leverage),
-            margin_mode: Some(margin_mode),
-            amount: None,
-        }],
-    });
-    Ok(())
-}
-
-pub fn prepare_update_margin(
-    resolver: &AssetResolver,
-    args: &UpdateMarginArgs,
-) -> Result<PreparedUpdateMargin, CliError> {
-    let ntli = usd_to_micro_units(args.amount, "amount")?;
-    let (coin, asset) = resolve_perp_asset(resolver, &args.coin)?;
-    Ok(PreparedUpdateMargin {
-        coin,
-        asset,
-        amount: args.amount,
-        ntli,
-    })
-}
-
-pub async fn submit_update_margin(
-    inv: &Invocation,
-    signer: &SelectedSigner,
-    prepared: PreparedUpdateMargin,
-) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    actions::send_l1_action(
-        remote.api(),
-        signer,
-        prepared.action(),
-        actions::nonce_now(),
-    )
-    .await?;
-    let amount = prepared.amount;
-    let coin = prepared.coin;
-
-    inv.print(&PositionActionOutput {
-        rows: vec![PositionActionConfirmation {
-            coin,
-            action: "update-margin".to_string(),
-            status: "updated".to_string(),
-            leverage: None,
-            margin_mode: None,
-            amount: Some(amount),
-        }],
-    });
-    Ok(())
-}
-
-pub fn validate_update_leverage_args(args: &UpdateLeverageArgs) -> Result<(), CliError> {
-    if args.leverage == 0 {
-        return Err(CliError::Configuration(
-            "leverage must be greater than zero".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-pub fn validate_update_margin_args(args: &UpdateMarginArgs) -> Result<(), CliError> {
-    usd_to_micro_units(args.amount, "amount").map(|_| ())
-}
-
-fn resolve_perp_asset(resolver: &AssetResolver, coin: &str) -> Result<(String, usize), CliError> {
-    let perp = resolver.resolve_perp(coin)?;
+    client: &HttpClient,
+    coin: &str,
+) -> Result<(String, usize), CliError> {
+    let perp = resolver.resolve_perp_or_fetch(client, coin).await?;
     Ok((perp.display_name(), perp.index))
 }
 
-fn usd_to_micro_units(value: Decimal, name: &'static str) -> Result<i64, CliError> {
-    crate::quantity::scaled_i64(
-        value,
-        1_000_000,
-        CliError::Configuration(format!("{name} must be greater than zero")),
-        CliError::Configuration(format!("{name} supports at most 6 decimal places")),
-        CliError::Configuration(format!("{name} is too large for Hyperliquid micro-units")),
-    )
+/// Margin to add, in USDC micro-units.
+fn margin_micro_units(amount: Decimal) -> Result<i64, CliError> {
+    quantity::positive(amount, Scale::USDC).map_err(|err| err.config("amount", Scale::USDC))
 }
 
 pub const GROUP: GroupSpec =
@@ -519,7 +297,7 @@ impl CliCommand for PositionsList {
     )
     .risk(Risk::AccountState)
     .ows(OwsSupport::ExperimentalFeatureGated)
-    .auth(true)
+    .auth()
     .stream(StreamBound::SnapshotWatch)
     .args(&[
         arg("watch")
@@ -539,7 +317,8 @@ impl CliCommand for PositionsList {
             watch_positions(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
             let user = inv.resolve_signer()?.query_address();
-            list(inv, user, dex.as_deref()).await
+            inv.print(&list_snapshot(client, user, dex.as_deref()).await?);
+            Ok(())
         }
     }
 }
@@ -567,30 +346,48 @@ impl CliCommand for PositionsUpdateLeverage {
     ]);
 
     async fn run(inv: &Invocation, args: &UpdateLeverageArgs) -> Result<(), anyhow::Error> {
-        validate_update_leverage_args(args)?;
         let resolver = inv.trading_resolver().await?;
-        let prepared = prepare_update_leverage(&resolver, args)?;
+        let (coin, asset) =
+            resolve_perp_asset(&resolver, inv.remote()?.api().sdk(), &args.coin).await?;
+        let is_cross = !args.isolated;
+        let margin_mode = if is_cross { "cross" } else { "isolated" };
         if inv.dry_run() {
-            let (signer, acting_as) = dry_run_signing_addresses(inv);
             return print_dry_run(
                 inv,
-                "positions update-leverage",
-                dry_run_signed_details(
-                    inv,
-                    "update_position_leverage",
-                    update_leverage_dry_run_value(
-                        inv.remote()?.network().to_string(),
-                        args,
-                        &prepared,
-                    ),
-                    signer,
-                    acting_as,
-                    None,
-                ),
+                "update_position_leverage",
+                serde_json::json!({
+                    "coin": args.coin,
+                    "resolved_coin": coin,
+                    "asset": asset,
+                    "network": inv.remote()?.network().to_string(),
+                    "leverage": args.leverage,
+                    "margin_mode": margin_mode,
+                    "is_cross": is_cross,
+                }),
             );
         }
         let resolved = inv.resolve_signer()?;
-        submit_update_leverage(inv, &resolved.selected_signer(), prepared).await
+        actions::send_l1_action(
+            inv.remote()?.api(),
+            &resolved,
+            Action::UpdateLeverage(UpdateLeverage {
+                asset,
+                is_cross,
+                leverage: args.leverage,
+            }),
+            actions::nonce_now(),
+        )
+        .await?;
+
+        inv.print(&Rows::new(vec![PositionActionConfirmation {
+            coin,
+            action: "update-leverage".to_string(),
+            status: "updated".to_string(),
+            leverage: Some(args.leverage),
+            margin_mode: Some(margin_mode.to_string()),
+            amount: None,
+        }]));
+        Ok(())
     }
 }
 
@@ -603,7 +400,7 @@ impl CliCommand for PositionsUpdateMargin {
         &["positions", "update-margin"],
         "trade",
         "Update margin for a position",
-        "Add or remove isolated margin.",
+        "Add isolated margin.",
     )
     .args(&[
         arg("coin")
@@ -616,31 +413,47 @@ impl CliCommand for PositionsUpdateMargin {
     ]);
 
     async fn run(inv: &Invocation, args: &UpdateMarginArgs) -> Result<(), anyhow::Error> {
-        validate_update_margin_args(args)?;
+        let ntli = margin_micro_units(args.amount)?;
         let resolver = inv.trading_resolver().await?;
-        let prepared = prepare_update_margin(&resolver, args)?;
+        let (coin, asset) =
+            resolve_perp_asset(&resolver, inv.remote()?.api().sdk(), &args.coin).await?;
         if inv.dry_run() {
-            let (signer, acting_as) = dry_run_signing_addresses(inv);
             return print_dry_run(
                 inv,
-                "positions update-margin",
-                dry_run_signed_details(
-                    inv,
-                    "update_isolated_margin",
-                    update_margin_dry_run_value(
-                        inv.remote()?.network().to_string(),
-                        args,
-                        &prepared,
-                    ),
-                    signer,
-                    acting_as,
-                    None,
-                ),
+                "update_isolated_margin",
+                serde_json::json!({
+                    "coin": args.coin,
+                    "resolved_coin": coin,
+                    "asset": asset,
+                    "network": inv.remote()?.network().to_string(),
+                    "amount": args.amount.to_string(),
+                    "ntli": ntli,
+                    "margin_mode": "isolated",
+                }),
             );
         }
         let resolved = inv.resolve_signer()?;
-        let signer = resolved.selected_signer();
-        submit_update_margin(inv, &signer, prepared).await
+        actions::send_l1_action(
+            inv.remote()?.api(),
+            &resolved,
+            Action::UpdateIsolatedMargin(UpdateIsolatedMargin {
+                asset,
+                is_buy: true,
+                ntli,
+            }),
+            actions::nonce_now(),
+        )
+        .await?;
+
+        inv.print(&Rows::new(vec![PositionActionConfirmation {
+            coin,
+            action: "update-margin".to_string(),
+            status: "updated".to_string(),
+            leverage: None,
+            margin_mode: None,
+            amount: Some(args.amount),
+        }]));
+        Ok(())
     }
 }
 
@@ -656,7 +469,7 @@ async fn watch_positions(
     let dex = dex.map(str::to_string);
 
     crate::watch::run_snapshot_watch(
-        inv.session(),
+        inv,
         "Live positions",
         remote.chain(),
         vec![Subscription::WebData3 { user }],
@@ -673,17 +486,16 @@ async fn watch_positions(
 mod tests {
     use super::*;
 
-    #[test]
-    fn position_rows_compute_mark_from_value_and_abs_size() {
-        let position = serde_json::from_value::<AssetPosition>(serde_json::json!({
+    fn position(szi: &str, pnl: &str) -> AssetPosition {
+        serde_json::from_value::<AssetPosition>(serde_json::json!({
             "type": "oneWay",
             "position": {
                 "coin": "BTC",
-                "szi": "0.1",
+                "szi": szi,
                 "leverage": {"type": "cross", "value": 5},
                 "entryPx": "50000",
                 "positionValue": "5100",
-                "unrealizedPnl": "100",
+                "unrealizedPnl": pnl,
                 "returnOnEquity": "0.1",
                 "liquidationPx": null,
                 "marginUsed": "1000",
@@ -691,17 +503,44 @@ mod tests {
                 "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
             }
         }))
-        .unwrap();
+        .unwrap()
+    }
 
-        let row = PositionRow::from(position);
+    #[test]
+    fn position_rows_compute_mark_from_value_and_abs_size() {
+        let row = PositionRow::from(position("0.1", "100"));
+
         assert_eq!(row.mark, Decimal::from(51_000));
         assert_eq!(row.side, "long");
+        assert_eq!(row.leverage.to_string(), "cross 5x");
+
+        let short = PositionRow::from(position("-0.1", "-20"));
+        assert_eq!(short.mark, Decimal::from(51_000));
+        assert_eq!(short.side, "short");
+    }
+
+    #[test]
+    fn closed_positions_are_not_listed() {
+        let rows = PositionRow::open(vec![position("0", "0"), position("0.1", "100")]);
+
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn position_json_keeps_decimal_strings_and_null_liquidation() {
+        let json = serde_json::to_value(PositionRow::from(position("0.1", "100"))).unwrap();
+
+        assert_eq!(json["entry"], "50000");
+        assert_eq!(json["mark"], "51000");
+        assert_eq!(json["leverage"], "cross 5x");
+        assert!(json["liquidation_price"].is_null());
     }
 
     #[test]
     fn update_margin_amount_must_be_positive_and_micro_unit_exact() {
-        assert!(usd_to_micro_units(Decimal::new(100_123456, 6), "amount").is_ok());
-        assert!(usd_to_micro_units(Decimal::new(1, 7), "amount").is_err());
-        assert!(usd_to_micro_units(Decimal::ZERO, "amount").is_err());
+        assert!(margin_micro_units(Decimal::new(100_123456, 6)).is_ok());
+        assert!(margin_micro_units(Decimal::new(1, 7)).is_err());
+        assert!(margin_micro_units(Decimal::ZERO).is_err());
+        assert!(margin_micro_units(Decimal::MAX).is_err());
     }
 }

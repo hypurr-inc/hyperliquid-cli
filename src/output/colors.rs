@@ -1,5 +1,3 @@
-//! ANSI styling for the CLI color theme.
-//!
 //! Every helper returns plain text unless styling is enabled for the stream it
 //! writes to. Use the top-level helpers for stdout content and the [`stderr`]
 //! set for notices, warnings, prompts, and errors.
@@ -9,7 +7,8 @@
 
 use std::sync::OnceLock;
 
-use super::terminal;
+use super::terminal::{self, Terminal};
+use crate::settings::{EnvSource, env as settings_env};
 
 pub const CYAN: &str = "\x1b[36m";
 pub const GREEN: &str = "\x1b[32m";
@@ -49,7 +48,6 @@ pub fn red(text: &str) -> String {
     styled(stdout_enabled(), RED, text)
 }
 
-/// Muted, secondary text.
 #[must_use]
 pub fn gray(text: &str) -> String {
     styled(stdout_enabled(), GRAY, text)
@@ -60,14 +58,8 @@ pub fn yellow(text: &str) -> String {
     styled(stdout_enabled(), YELLOW, text)
 }
 
-/// Styling helpers for text written to stderr (notices, warnings, prompts, errors).
 pub mod stderr {
-    use super::{GRAY, RED, YELLOW, stderr_enabled, styled};
-
-    #[must_use]
-    pub fn red(text: &str) -> String {
-        styled(stderr_enabled(), RED, text)
-    }
+    use super::{GRAY, YELLOW, stderr_enabled, styled};
 
     #[must_use]
     pub fn gray(text: &str) -> String {
@@ -81,28 +73,52 @@ pub mod stderr {
 }
 
 /// Per-stream color decision: `(stdout, stderr)`.
+///
+/// Process-wide because table cells are styled where they are built, far from
+/// any session. [`init`] sets it once at startup; until then nothing is styled.
 static STREAMS: OnceLock<(bool, bool)> = OnceLock::new();
 
-/// Resolve color once per process. Later calls are ignored.
-pub fn init(no_color_flag: bool) {
-    let _ = STREAMS.set(resolve(no_color_flag));
+/// Resolve color once per process from the run's terminal and environment.
+/// Later calls are ignored.
+pub fn init(no_color_flag: bool, env: &EnvSource, terminal: Terminal) {
+    let _ = STREAMS.set(resolve(no_color_flag, env, terminal));
 }
 
-fn resolve(no_color_flag: bool) -> (bool, bool) {
-    if no_color_flag || std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
+fn resolve(no_color_flag: bool, env: &EnvSource, terminal: Terminal) -> (bool, bool) {
+    let no_color_env = env
+        .get_os(settings_env::NO_COLOR)
+        .is_some_and(|value| !value.is_empty());
+    let dumb = env
+        .get(settings_env::TERM)
+        .is_some_and(|term| term == "dumb");
+    decide(
+        no_color_flag || no_color_env,
+        terminal::env_flag(env, settings_env::FORCE_COLOR),
+        dumb,
+        (terminal.stdout, terminal.stderr),
+    )
+}
+
+/// The `(stdout, stderr)` color decision. `disabled` (`--no-color` or
+/// `NO_COLOR`) beats `force`; a set `FORCE_COLOR` beats terminal detection and
+/// follows the convention for ecosystem variables: any value but an explicit
+/// off one (`0`, `false`, `no`, `off`) forces color, so `FORCE_COLOR=2` works.
+fn decide(
+    disabled: bool,
+    force: terminal::EnvFlag,
+    dumb_terminal: bool,
+    is_terminal: (bool, bool),
+) -> (bool, bool) {
+    if disabled {
         return (false, false);
     }
-    if let Ok(value) = std::env::var("FORCE_COLOR") {
-        let value = value.trim().to_ascii_lowercase();
-        if !value.is_empty() {
-            let on = value != "0" && value != "false";
-            return (on, on);
-        }
+    if force != terminal::EnvFlag::Unset {
+        let on = force.on_unless_off();
+        return (on, on);
     }
-    let dumb = std::env::var("TERM").is_ok_and(|term| term == "dumb");
     (
-        !dumb && terminal::stdout_is_terminal(),
-        !dumb && terminal::stderr_is_terminal(),
+        !dumb_terminal && is_terminal.0,
+        !dumb_terminal && is_terminal.1,
     )
 }
 
@@ -111,20 +127,16 @@ thread_local! {
     static TEST_STREAMS: std::cell::Cell<Option<(bool, bool)>> = const { std::cell::Cell::new(None) };
 }
 
-// Unit tests never inherit the developer's terminal or environment.
-#[cfg(test)]
+/// Unit tests never inherit the developer's terminal or environment: until a
+/// test opts in with [`with_streams_for_test`], nothing is styled.
 fn streams() -> (bool, bool) {
-    TEST_STREAMS
-        .with(|cell| cell.get())
-        .unwrap_or((false, false))
+    #[cfg(test)]
+    if let Some(streams) = TEST_STREAMS.with(std::cell::Cell::get) {
+        return streams;
+    }
+    STREAMS.get().copied().unwrap_or((false, false))
 }
 
-#[cfg(not(test))]
-fn streams() -> (bool, bool) {
-    *STREAMS.get_or_init(|| resolve(false))
-}
-
-/// Run `f` with the given `(stdout, stderr)` color decision on this thread.
 #[cfg(test)]
 pub fn with_streams_for_test<T>(stdout: bool, stderr: bool, f: impl FnOnce() -> T) -> T {
     struct Restore(Option<(bool, bool)>);
@@ -137,13 +149,11 @@ pub fn with_streams_for_test<T>(stdout: bool, stderr: bool, f: impl FnOnce() -> 
     f()
 }
 
-/// Whether styling may be written to stdout.
 #[must_use]
 pub fn stdout_enabled() -> bool {
     streams().0
 }
 
-/// Whether styling may be written to stderr.
 #[must_use]
 pub fn stderr_enabled() -> bool {
     streams().1
@@ -154,27 +164,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn helpers_are_plain_when_disabled() {
-        assert_eq!(cyan("x"), "x");
-        assert_eq!(green("x"), "x");
-        assert_eq!(red("x"), "x");
-        assert_eq!(gray("x"), "x");
-        assert_eq!(yellow("x"), "x");
-        assert_eq!(stderr::red("x"), "x");
-        assert_eq!(stderr::yellow("x"), "x");
-    }
-
-    #[test]
-    fn helpers_style_when_enabled() {
+    fn each_helper_follows_its_own_stream() {
         with_streams_for_test(true, false, || {
             assert_eq!(cyan("x"), paint(CYAN, "x"));
-            assert_eq!(green("x"), paint(GREEN, "x"));
-            assert_eq!(stderr::red("x"), "x");
+            assert_eq!(stderr::gray("x"), "x");
         });
         with_streams_for_test(false, true, || {
             assert_eq!(cyan("x"), "x");
-            assert_eq!(stderr::red("x"), paint(RED, "x"));
-            assert_eq!(stderr::yellow("x"), paint(YELLOW, "x"));
+            assert_eq!(stderr::gray("x"), paint(GRAY, "x"));
         });
+    }
+
+    #[test]
+    fn resolution_reads_the_given_terminal_and_environment() {
+        let tty = Terminal {
+            stdin: true,
+            stdout: true,
+            stderr: false,
+        };
+        let none = EnvSource::fixed::<&str, &str>([]);
+        let with = |name: &'static str| EnvSource::fixed([(name, "1")]);
+        assert_eq!(resolve(false, &none, tty), (true, false));
+        assert_eq!(resolve(true, &none, tty), (false, false));
+        assert_eq!(resolve(false, &with("NO_COLOR"), tty), (false, false));
+        assert_eq!(
+            resolve(false, &with("FORCE_COLOR"), Terminal::default()),
+            (true, true)
+        );
+        assert_eq!(
+            resolve(false, &EnvSource::fixed([("TERM", "dumb")]), tty),
+            (false, false)
+        );
+    }
+
+    #[test]
+    fn force_color_follows_the_shared_flag_parser() {
+        let ttys = (false, false);
+        for on in ["1", "true", "YES", "on", "2", "3"] {
+            let force = terminal::parse_flag(on);
+            assert_eq!(decide(false, force, false, ttys), (true, true), "{on}");
+        }
+        for off in ["0", "false", "no", "OFF"] {
+            let force = terminal::parse_flag(off);
+            assert_eq!(
+                decide(false, force, false, (true, true)),
+                (false, false),
+                "{off}"
+            );
+        }
+    }
+
+    #[test]
+    fn disabling_beats_forcing_and_terminals_decide_the_rest() {
+        let force = terminal::parse_flag("1");
+        assert_eq!(decide(true, force, false, (true, true)), (false, false));
+
+        let unset = terminal::parse_flag("");
+        assert_eq!(decide(false, unset, false, (true, false)), (true, false));
+        assert_eq!(decide(false, unset, true, (true, true)), (false, false));
     }
 }

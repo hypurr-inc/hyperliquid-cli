@@ -1,19 +1,23 @@
-//! Gossip priority auction commands.
-
 use clap::Args;
 use hypersdk::Decimal;
 use hypersdk::hypercore::types::{Action, GossipPriorityBid};
-use rust_decimal::prelude::FromPrimitive;
 use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
 use crate::commands::actions::{nonce_now, send_l1_action_raw};
-use crate::commands::support::{dry_run_details, print_dry_run};
+use crate::commands::rows::{ListRow, MISSING, Row, Rows};
+use crate::commands::support::print_dry_run;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
-use crate::output::TableData;
+use crate::quantity::{self, Scale};
 use crate::signing::SelectedSigner;
+
+/// `maxGas` is in wei of HYPE as the exchange counts it: 1 HYPE is 10^8 wei, the
+/// token's HyperCore `weiDecimals`
+/// (<https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/priority-fees>).
+/// The 1e18 the SDK documents is HyperEVM's scale.
+const HYPE_WEI: Scale = Scale::HYPE_CORE;
 
 /// Arguments for `prio bid`.
 #[derive(Args, Debug, Clone)]
@@ -42,44 +46,32 @@ pub struct PrioritySlotRow {
     previous_winner: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PriorityStatusOutput {
-    rows: Vec<PrioritySlotRow>,
-}
+impl Row for PrioritySlotRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Slot",
+        "Start Time",
+        "Duration",
+        "Start Gas",
+        "Current Gas",
+        "End Gas",
+        "Previous Winner",
+    ];
 
-impl TableData for PriorityStatusOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Slot",
-            "Start Time",
-            "Duration",
-            "Start Gas",
-            "Current Gas",
-            "End Gas",
-            "Previous Winner",
+            self.slot.to_string(),
+            self.start_time_seconds.to_string(),
+            self.duration_seconds.to_string(),
+            self.start_gas.clone(),
+            self.current_gas.clone(),
+            self.end_gas.clone(),
+            self.previous_winner.clone(),
         ]
     }
+}
 
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.slot.to_string(),
-                    row.start_time_seconds.to_string(),
-                    row.duration_seconds.to_string(),
-                    row.start_gas.clone(),
-                    row.current_gas.clone(),
-                    row.end_gas.clone(),
-                    row.previous_winner.clone(),
-                ]
-            })
-            .collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
-    }
+impl ListRow for PrioritySlotRow {
+    const EMPTY: &'static str = "No results.";
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -91,36 +83,25 @@ pub struct PriorityBidRow {
     status: String,
 }
 
-struct PriorityBidOutput {
-    rows: Vec<PriorityBidRow>,
-}
+impl Row for PriorityBidRow {
+    const HEADERS: &'static [&'static str] = &["Slot", "IP", "Max HYPE", "Bid HYPE", "Status"];
 
-impl TableData for PriorityBidOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec!["Slot", "IP", "Max HYPE", "Bid HYPE", "Status"]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.slot.to_string(),
-                    row.ip.clone(),
-                    row.max_hype.clone(),
-                    row.bid_hype.clone(),
-                    row.status.clone(),
-                ]
-            })
-            .collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.slot.to_string(),
+            self.ip.clone(),
+            self.max_hype.clone(),
+            self.bid_hype.clone(),
+            self.status.clone(),
+        ]
     }
 }
 
-pub async fn status(inv: &Invocation) -> Result<(), anyhow::Error> {
+impl ListRow for PriorityBidRow {
+    const EMPTY: &'static str = "No results.";
+}
+
+async fn status(inv: &Invocation) -> Result<(), anyhow::Error> {
     let status = inv
         .remote()?
         .api()
@@ -129,7 +110,7 @@ pub async fn status(inv: &Invocation) -> Result<(), anyhow::Error> {
         .await
         .map_err(from_sdk)?;
 
-    let rows = status
+    let rows: Vec<PrioritySlotRow> = status
         .slots
         .iter()
         .enumerate()
@@ -143,56 +124,40 @@ pub async fn status(inv: &Invocation) -> Result<(), anyhow::Error> {
                 .map_or_else(|| "(no bid)".to_string(), |gas| gas.to_string()),
             end_gas: item
                 .end_gas
-                .map_or_else(|| "-".to_string(), |gas| gas.to_string()),
+                .map_or_else(|| MISSING.to_string(), |gas| gas.to_string()),
             previous_winner: status
                 .prev_winners
                 .get(slot)
                 .and_then(Clone::clone)
-                .unwrap_or_else(|| "-".to_string()),
+                .unwrap_or_else(|| MISSING.to_string()),
         })
         .collect();
 
-    inv.print(&PriorityStatusOutput { rows });
+    inv.print(&Rows::new(rows));
     Ok(())
 }
 
-pub async fn bid(
+/// The bid cap in wei, once the arguments are known good.
+fn validate_bid_args(args: &BidArgs) -> Result<u64, CliError> {
+    if args.ip.trim().is_empty() {
+        return Err(CliError::Configuration(
+            "prio bid requires a non-empty --ip".to_string(),
+        ));
+    }
+    quantity::positive(args.max, HYPE_WEI).map_err(|err| err.config("--max", HYPE_WEI))
+}
+
+async fn bid(
     inv: &Invocation,
     signer: &SelectedSigner,
     args: &BidArgs,
+    max_gas: u64,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let client = remote.api().sdk();
     let api = remote.api();
-    if args.max <= Decimal::ZERO {
-        return Err(
-            CliError::Configuration("prio bid requires --max to be positive".to_string()).into(),
-        );
-    }
-    if args.ip.trim().is_empty() {
-        return Err(
-            CliError::Configuration("prio bid requires a non-empty --ip".to_string()).into(),
-        );
-    }
     let max = args.max;
     let ip = args.ip.as_str();
-    signer.ensure_can_attempt_live_signing()?;
-
-    let decimals = client
-        .spot_tokens()
-        .await
-        .map_err(from_sdk)?
-        .into_iter()
-        .find(|token| token.name == "HYPE")
-        .map(|token| token.wei_decimals as u32)
-        .unwrap_or(18);
-    let max_gas = hype_to_wei_u64(max, decimals, "--max")?;
-    if max_gas == 0 {
-        return Err(CliError::Configuration(
-            "--max is too small for HYPE wei precision".to_string(),
-        )
-        .into());
-    }
 
     let status = client
         .gossip_priority_auction_status()
@@ -203,14 +168,15 @@ pub async fn bid(
         .get(args.slot as usize)
         .ok_or_else(|| CliError::Configuration(format!("invalid priority slot {}", args.slot)))?;
     let current = match slot.current_gas {
-        Some(gas) => hype_to_wei_u64(gas, decimals, "current gas")?,
+        Some(gas) => quantity::non_negative::<u64>(gas, HYPE_WEI)
+            .map_err(|err| err.config("current gas", HYPE_WEI))?,
         None => 0,
     };
 
     if current >= max_gas && current > 0 {
         return Err(CliError::Unsupported(format!(
             "priority bid not submitted: current gas {} is at or above --max {max}",
-            fmt_wei(current, decimals)
+            HYPE_WEI.amount(current)
         ))
         .into());
     }
@@ -235,29 +201,18 @@ pub async fn bid(
         {
             "submitted".to_string()
         }
-        other => format!("submitted with response: {other:?}"),
+        other => format!("submitted with response: {other}"),
     };
 
     let row = PriorityBidRow {
         slot: args.slot,
         ip: ip.to_string(),
         max_hype: max.to_string(),
-        bid_hype: fmt_wei(bid, decimals).to_string(),
+        bid_hype: HYPE_WEI.amount(bid).to_string(),
         status,
     };
-    inv.print(&PriorityBidOutput { rows: vec![row] });
+    inv.print(&Rows::new(vec![row]));
     Ok(())
-}
-
-fn fmt_wei(wei: u64, decimals: u32) -> Decimal {
-    Decimal::from_u64(wei).unwrap_or_default()
-        / Decimal::from_u64(10u64.saturating_pow(decimals)).unwrap_or(Decimal::ONE)
-}
-
-fn hype_to_wei_u64(amount: Decimal, decimals: u32, label: &str) -> Result<u64, CliError> {
-    hypersdk::hyperevm::to_wei(amount, decimals)
-        .try_into()
-        .map_err(|_| CliError::Configuration(format!("{label} is too large")))
 }
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["prio"], "Manage gossip priority bids");
@@ -300,19 +255,16 @@ impl CliCommand for PrioBid {
     ]);
 
     async fn run(inv: &Invocation, args: &BidArgs) -> Result<(), anyhow::Error> {
+        let max_gas = validate_bid_args(args)?;
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "prio bid",
-                dry_run_details(
-                    inv,
-                    "place_priority_auction_bid",
-                    serde_json::json!({"ip": args.ip, "max": args.max.to_string(), "slot": args.slot}),
-                ),
+                "place_priority_auction_bid",
+                serde_json::json!({"ip": args.ip, "max": args.max.to_string(), "slot": args.slot}),
             );
         }
         let resolved = inv.resolve_signer()?;
-        bid(inv, &resolved.selected_signer(), args).await
+        bid(inv, &resolved, args, max_gas).await
     }
 }
 
@@ -321,18 +273,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_output_has_auction_columns() {
-        let output = PriorityStatusOutput { rows: vec![] };
+    fn bid_args_are_validated_before_any_dry_run() {
+        let args = |max: &str, ip: &str| BidArgs {
+            max: max.parse().unwrap(),
+            ip: ip.to_string(),
+            slot: 0,
+        };
 
-        assert!(output.headers().contains(&"Current Gas"));
-        assert!(output.headers().contains(&"Previous Winner"));
+        assert_eq!(
+            validate_bid_args(&args("1", "203.0.113.10")).unwrap(),
+            100_000_000
+        );
+        for (max, ip) in [
+            ("-1", "203.0.113.10"),
+            ("0", "203.0.113.10"),
+            ("1", "  "),
+            // Finer than a wei of HYPE.
+            ("0.000000001", "203.0.113.10"),
+        ] {
+            assert_eq!(
+                validate_bid_args(&args(max, ip)).unwrap_err().exit_code(),
+                2,
+                "{max} {ip:?}"
+            );
+        }
     }
 
     #[test]
-    fn decimal_current_gas_uses_hype_to_wei_conversion() {
-        assert_eq!(
-            hype_to_wei_u64("0.01".parse::<Decimal>().unwrap(), 18, "current gas").unwrap(),
-            10_000_000_000_000_000
-        );
+    fn bid_caps_are_counted_in_hypercore_wei_not_hyperevm_wei() {
+        assert_eq!(HYPE_WEI, Scale::HYPE_CORE);
+        assert_eq!(HYPE_WEI.decimals(), 8);
+        assert_eq!(HYPE_WEI.amount(150_000_000).to_string(), "1.5");
     }
 }

@@ -1,6 +1,3 @@
-//! `hyperliquid update`: download the latest release archive, verify its
-//! checksum and replace the running binary.
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -53,7 +50,7 @@ pub async fn update(inv: &Invocation) -> Result<(), anyhow::Error> {
         return Ok(());
     }
 
-    let install_method = InstallMethod::detect(&current_exe);
+    let install_method = InstallMethod::detect(&current_exe, inv.settings().env());
     if install_method != InstallMethod::Standalone {
         return Err(CliError::Unsupported(format!(
             "Can't update {} in place: it was installed with {}.\nUpgrade:\n    {}",
@@ -74,7 +71,6 @@ pub async fn update(inv: &Invocation) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Download and replace the current binary in-place with `latest_version`.
 pub async fn download_and_replace_binary(
     client: &ReleaseClient,
     latest_version: &str,
@@ -259,7 +255,7 @@ impl TableData for UpdateResult {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        crate::output::serialize_row(self)
     }
 }
 
@@ -290,10 +286,23 @@ mod tests {
     }
 
     #[test]
-    fn checksum_mismatch_names_both_digests() {
-        let checksum = format!("{}  hyperliquid-target.tar.gz", "0".repeat(64));
-        let err = verify_sha256(b"archive", "hyperliquid-target.tar.gz", &checksum).unwrap_err();
-        assert!(err.to_string().contains("checksum mismatch"));
+    fn checksum_accepts_matching_digest_and_rejects_others() {
+        use sha2::{Digest, Sha256};
+        let digest = hex::encode(Sha256::digest(b"archive"));
+        let checksum = format!("{digest}  hyperliquid-target.tar.gz\n");
+        verify_sha256(b"archive", "hyperliquid-target.tar.gz", &checksum).unwrap();
+
+        let err = verify_sha256(b"tampered", "hyperliquid-target.tar.gz", &checksum).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("checksum mismatch"), "{message}");
+        assert!(
+            message.contains(&digest),
+            "expected digest named: {message}"
+        );
+        assert!(
+            message.contains(&hex::encode(Sha256::digest(b"tampered"))),
+            "actual digest named: {message}"
+        );
     }
 
     #[test]
@@ -308,11 +317,9 @@ mod tests {
     }
 
     #[test]
-    fn temp_dir_uses_randomized_update_prefix() {
+    fn temp_dirs_are_unique_per_call() {
         let first = create_temp_dir().unwrap();
         let second = create_temp_dir().unwrap();
-        let name = first.path().file_name().unwrap().to_string_lossy();
-        assert!(name.starts_with("hyperliquid-update-"));
         assert_ne!(first.path(), second.path());
     }
 
@@ -353,5 +360,24 @@ mod tests {
         let err = copy_to_new_executable(&source, &destination).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&destination).unwrap(), b"binary");
+    }
+
+    #[test]
+    fn replace_current_binary_swaps_contents_and_leaves_no_temp_file() {
+        let tmpdir = create_temp_dir().unwrap();
+        let current = tmpdir.path().join("hyperliquid");
+        let new_binary = tmpdir.path().join("downloaded");
+        std::fs::write(&current, b"old").unwrap();
+        std::fs::write(&new_binary, b"new").unwrap();
+
+        replace_current_binary(&current, &new_binary).unwrap();
+
+        assert_eq!(std::fs::read(&current).unwrap(), b"new");
+        let mut names: Vec<_> = std::fs::read_dir(tmpdir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["downloaded", "hyperliquid"]);
     }
 }

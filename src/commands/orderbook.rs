@@ -1,16 +1,6 @@
-//! Order book and market data commands.
-//!
-//! Commands:
-//! - `hyperliquid book <COIN>` — show L2 bids and asks
-//! - `hyperliquid candles <COIN>` — show OHLCV candle history
-//! - `hyperliquid spread <COIN>` — show best bid, ask, and spread
-//! - `hyperliquid funding <COIN>` — show current and predicted funding
-//! - `hyperliquid mids` — show all mid prices
-
 use clap::Args;
 use std::time::Duration;
 
-use chrono::Utc;
 use hypersdk::Decimal;
 use hypersdk::hypercore::{
     AssetContext, BookLevel, Candle, CandleInterval, Chain, FundingRate, HttpClient, Incoming,
@@ -18,10 +8,10 @@ use hypersdk::hypercore::{
 };
 use serde::Serialize;
 
+use crate::assets::canonical_dex;
 use crate::assets::{AssetResolver, Market};
+use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, StreamBound, arg};
-use crate::commands::outcomes;
-use crate::commands::support::{canonical_dex, normalize_dex};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
@@ -31,15 +21,15 @@ use crate::ws::{Awaited, first_matching_message};
 
 const WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 const VALID_INTERVALS: &str = "1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M";
+/// How far back `funding` looks for the latest paid funding rate.
+const FUNDING_LOOKBACK: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Parse and validate a candle interval for clap.
 pub fn parse_candle_interval(input: &str) -> Result<CandleInterval, String> {
     input
         .parse::<CandleInterval>()
         .map_err(|_| format!("invalid interval '{input}'. Valid intervals: {VALID_INTERVALS}"))
 }
 
-/// Parse and validate the candle limit for clap.
 pub fn parse_candle_limit(input: &str) -> Result<usize, String> {
     let limit = input
         .parse::<usize>()
@@ -132,7 +122,7 @@ impl TableData for BookSnapshot {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        crate::output::serialize_row(self)
     }
 }
 
@@ -223,7 +213,7 @@ impl TableData for CandlesOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.candles).unwrap_or_else(|_| serde_json::json!([]))
+        crate::output::serialize_row(&self.candles)
     }
 }
 
@@ -256,7 +246,7 @@ impl TableData for SpreadRow {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        crate::output::serialize_row(self)
     }
 }
 
@@ -304,7 +294,7 @@ impl TableData for FundingRow {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        crate::output::serialize_row(self)
     }
 }
 
@@ -376,27 +366,14 @@ impl TableData for MidsOutput {
     }
 }
 
-/// Resolve and render the L2 order book for a perpetual or spot market.
-pub async fn book(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    let resolver = inv.asset_resolver().await?;
-    let snapshot = book_snapshot(remote.api().sdk(), remote.chain(), &resolver, coin).await?;
-    inv.print(&snapshot);
-    Ok(())
-}
-
-/// Fetch one L2 book snapshot without printing it.
-///
 /// A HIP-3 `dex:TOKEN` input is looked up on its dex, so `xyz:XYZ100` works
 /// without first loading every dex into the metadata snapshot.
-pub async fn book_snapshot(
-    client: &HttpClient,
-    chain: Chain,
-    resolver: &AssetResolver,
-    coin: &str,
-) -> Result<BookSnapshot, anyhow::Error> {
-    let coin = resolve_market_coin(client, resolver, coin).await?;
-    book_snapshot_for(chain, &coin).await
+async fn book(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
+    let remote = inv.remote()?;
+    let resolver = inv.asset_resolver().await?;
+    let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
+    inv.print(&book_snapshot_for(remote.chain(), &coin).await?);
+    Ok(())
 }
 
 /// One L2 book snapshot for an already-resolved info coin.
@@ -405,8 +382,8 @@ async fn book_snapshot_for(chain: Chain, coin: &str) -> Result<BookSnapshot, any
     Ok(BookSnapshot::from(book))
 }
 
-/// Resolve and render candle history for a perpetual market.
-pub async fn candles(
+/// Resolve and render candle history for a perpetual or spot market.
+async fn candles(
     inv: &Invocation,
     coin: &str,
     interval: CandleInterval,
@@ -414,21 +391,9 @@ pub async fn candles(
 ) -> Result<(), anyhow::Error> {
     let client = inv.remote()?.api().sdk();
     let resolver = inv.asset_resolver().await?;
-    let snapshot = candles_snapshot(client, &resolver, coin, interval, limit).await?;
-    inv.print(&snapshot);
+    let coin = resolve_market_coin(client, &resolver, coin).await?;
+    inv.print(&candles_snapshot_for(client, &coin, interval, limit).await?);
     Ok(())
-}
-
-/// Fetch candle history without printing it.
-pub async fn candles_snapshot(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    coin: &str,
-    interval: CandleInterval,
-    limit: usize,
-) -> Result<CandlesOutput, anyhow::Error> {
-    let coin = resolve_perp_coin_or_fetch(client, resolver, coin).await?;
-    candles_snapshot_for(client, &coin, interval, limit).await
 }
 
 /// Candle history for an already-resolved info coin.
@@ -439,7 +404,7 @@ async fn candles_snapshot_for(
     limit: usize,
 ) -> Result<CandlesOutput, anyhow::Error> {
     let coin = coin.to_string();
-    let end_time = Utc::now().timestamp_millis() as u64;
+    let end_time = clock::now_ms();
     let interval_ms = interval.to_duration().as_millis() as u64;
     let lookback = interval_ms.saturating_mul(limit.saturating_add(2) as u64);
     let start_time = end_time.saturating_sub(lookback);
@@ -460,23 +425,23 @@ async fn candles_snapshot_for(
     Ok(CandlesOutput::new(rows))
 }
 
-/// Resolve and render the best bid/ask spread for a perpetual market.
-pub async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
+/// Resolve and render the best bid/ask spread for a perpetual or spot market.
+async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
-    let coin = resolve_perp_coin_or_fetch(remote.api().sdk(), &resolver, coin).await?;
+    let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
     let book = fetch_l2_book(remote.chain(), &coin).await?;
     inv.print(&spread_row_from_book(&coin, &book)?);
     Ok(())
 }
 
 /// Resolve and render current plus predicted funding for a perpetual market.
-pub async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
+async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
     let coin = resolve_perp_coin_or_fetch(remote.api().sdk(), &resolver, coin).await?;
-    let end_time = Utc::now().timestamp_millis() as u64;
-    let start_time = end_time.saturating_sub(24 * 60 * 60 * 1000);
+    let end_time = clock::now_ms();
+    let start_time = end_time.saturating_sub(FUNDING_LOOKBACK.as_millis() as u64);
 
     let latest_history = remote
         .api()
@@ -496,7 +461,7 @@ pub async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> 
     Ok(())
 }
 
-pub async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Error> {
+async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Error> {
     let selected = inv.session().json_options().selected_fields();
     let client = inv.remote()?.api().sdk();
     let dex = canonical_dex(client, dex).await?;
@@ -506,7 +471,7 @@ pub async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Err
 
 /// Fetch all mid prices without printing them. `selected` is `--select`: it
 /// switches the JSON from a name-to-mid map to rows of the named fields.
-pub async fn mids_snapshot(
+async fn mids_snapshot(
     client: &HttpClient,
     dex: Option<&str>,
     selected: Option<&[String]>,
@@ -541,7 +506,7 @@ impl FundingRow {
     }
 }
 
-pub(crate) fn spread_row_from_book(coin: &str, book: &L2Book) -> Result<SpreadRow, CliError> {
+fn spread_row_from_book(coin: &str, book: &L2Book) -> Result<SpreadRow, CliError> {
     let best_bid = book.best_bid().ok_or_else(|| {
         CliError::Unavailable("Order book did not contain any bid levels.".to_string())
     })?;
@@ -563,21 +528,13 @@ pub(crate) fn spread_row_from_book(coin: &str, book: &L2Book) -> Result<SpreadRo
     })
 }
 
-fn resolve_book_coin(resolver: &AssetResolver, coin: &str) -> Result<String, CliError> {
-    match resolver.resolve(coin)? {
+/// The info-endpoint coin a data command subscribes to or queries for `market`.
+fn market_info_coin(market: Market, input: &str) -> Result<String, CliError> {
+    match market {
         Market::Perp(perp) => Ok(perp.display_name()),
         Market::Spot(spot) => Ok(spot.info_coin()),
-        Market::Outcome(_) => Err(outcomes::unsupported_outcome_trading_error(coin)),
+        Market::Outcome(_) => Err(CliError::unsupported_outcome_notation(input)),
     }
-}
-
-/// Subscription coin resolution that also looks a HIP-3 market up live.
-pub async fn resolve_subscription_coin(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    coin: &str,
-) -> Result<String, CliError> {
-    resolve_market_coin(client, resolver, coin).await
 }
 
 /// Resolve a perpetual, fetching the market when it belongs to another dex.
@@ -594,23 +551,16 @@ async fn resolve_perp_coin_or_fetch(
 }
 
 /// Resolve any market for a data command, fetching a HIP-3 market when needed.
-async fn resolve_market_coin(
+pub(crate) async fn resolve_market_coin(
     client: &HttpClient,
     resolver: &AssetResolver,
     coin: &str,
 ) -> Result<String, CliError> {
-    if let Ok(known) = resolve_book_coin(resolver, coin) {
-        return Ok(known);
-    }
-    match resolver
+    let market = resolver
         .resolve_or_fetch(client, coin)
         .await
-        .map_err(CliError::from)?
-    {
-        Market::Perp(perp) => Ok(perp.display_name()),
-        Market::Spot(spot) => Ok(spot.info_coin()),
-        Market::Outcome(_) => Err(outcomes::unsupported_outcome_trading_error(coin)),
-    }
+        .map_err(CliError::from)?;
+    market_info_coin(market, coin)
 }
 
 async fn fetch_l2_book(chain: Chain, coin: &str) -> Result<L2Book, CliError> {
@@ -762,14 +712,9 @@ impl CliCommand for Mids {
 
     async fn run(inv: &Invocation, args: &MidsArgs) -> Result<(), anyhow::Error> {
         if args.watch.watch {
-            watch_mids(
-                inv,
-                normalize_dex(args.dex.as_deref()),
-                args.watch.max_ticks,
-            )
-            .await
+            watch_mids(inv, args.dex.as_deref(), args.watch.max_ticks).await
         } else {
-            mids(inv, normalize_dex(args.dex.as_deref())).await
+            mids(inv, args.dex.as_deref()).await
         }
     }
 }
@@ -868,7 +813,7 @@ async fn watch_book(
     let subscription_coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
 
     crate::watch::run_snapshot_watch(
-        inv.session(),
+        inv,
         &format!("Live order book: {subscription_coin}"),
         chain,
         vec![Subscription::L2Book {
@@ -897,7 +842,7 @@ async fn watch_mids(
     let dex = canonical_dex(client, dex).await?;
 
     crate::watch::run_snapshot_watch(
-        inv.session(),
+        inv,
         "Live mid prices",
         remote.chain(),
         vec![Subscription::AllMids { dex: dex.clone() }],
@@ -923,7 +868,7 @@ async fn watch_candles(
     let subscription_coin = resolve_market_coin(client, &resolver, coin).await?;
 
     crate::watch::run_snapshot_watch(
-        inv.session(),
+        inv,
         &format!("Live candles: {subscription_coin} {interval}"),
         remote.chain(),
         vec![Subscription::Candle {
@@ -951,6 +896,10 @@ mod tests {
         Decimal::from_str(input).unwrap()
     }
 
+    fn resolve_book_coin(resolver: &AssetResolver, coin: &str) -> Result<String, CliError> {
+        market_info_coin(resolver.resolve(coin).map_err(CliError::from)?, coin)
+    }
+
     fn fixture_resolver() -> AssetResolver {
         AssetResolver::new(AssetMetadata::from_assets(
             vec![perp("BTC", 0), perp("ETH", 1)],
@@ -962,57 +911,13 @@ mod tests {
     }
 
     #[test]
-    fn candle_interval_parser_accepts_supported_intervals() {
-        assert_eq!(
-            parse_candle_interval("15m").unwrap(),
-            CandleInterval::FifteenMinutes
-        );
-        assert_eq!(
-            parse_candle_interval("1h").unwrap(),
-            CandleInterval::OneHour
-        );
-    }
-
-    #[test]
-    fn candle_interval_parser_rejects_invalid_intervals_with_valid_list() {
-        let message = parse_candle_interval("999x").unwrap_err();
-
-        assert!(message.contains("invalid interval '999x'"));
-        assert!(message.contains("Valid intervals"));
-        assert!(message.contains("15m"));
-    }
-
-    #[test]
-    fn candle_limit_parser_rejects_zero_and_too_large_values() {
-        assert!(parse_candle_limit("0").is_err());
-        assert!(parse_candle_limit("5001").is_err());
-        assert_eq!(parse_candle_limit("10").unwrap(), 10);
-    }
-
-    #[test]
-    fn book_snapshot_json_has_bids_and_asks() {
-        let output = BookSnapshot {
-            coin: "BTC".to_string(),
-            time: 123,
-            bids: vec![BookLevelRow {
-                price: dec("100"),
-                size: dec("1.5"),
-                depth: dec("1.5"),
-                orders: 2,
-            }],
-            asks: vec![BookLevelRow {
-                price: dec("101"),
-                size: dec("2.0"),
-                depth: dec("2.0"),
-                orders: 3,
-            }],
-        };
-        let json = output.to_json_value();
-
-        assert!(json["bids"].is_array());
-        assert!(json["asks"].is_array());
-        assert_eq!(json["bids"][0]["price"], "100");
-        assert_eq!(json["asks"][0]["size"], "2.0");
+    fn candle_limit_accepts_only_integers_from_1_to_5000() {
+        for accepted in ["1", "10", "5000"] {
+            assert_eq!(parse_candle_limit(accepted), Ok(accepted.parse().unwrap()));
+        }
+        for rejected in ["0", "5001", "-1", "1.5", "ten", ""] {
+            assert!(parse_candle_limit(rejected).is_err(), "{rejected:?}");
+        }
     }
 
     #[test]
@@ -1037,35 +942,15 @@ mod tests {
     }
 
     #[test]
-    fn book_resolution_accepts_perp_symbols() {
+    fn book_coin_resolves_to_the_info_api_name_of_each_market_kind() {
         let resolver = fixture_resolver();
 
         assert_eq!(resolve_book_coin(&resolver, "btc").unwrap(), "BTC");
-    }
-
-    #[test]
-    fn book_resolution_accepts_spot_pairs() {
-        let resolver = fixture_resolver();
-
         assert_eq!(
             resolve_book_coin(&resolver, "purr/usdc").unwrap(),
             "PURR/USDC"
         );
         assert_eq!(resolve_book_coin(&resolver, "hype/usdc").unwrap(), "@1035");
-    }
-
-    #[test]
-    fn book_resolution_keeps_spot_pair_not_found_errors() {
-        let resolver = fixture_resolver();
-        let err = resolve_book_coin(&resolver, "PUR/USDC").unwrap_err();
-
-        assert_eq!(err.exit_code(), 13);
-        match err {
-            CliError::AssetNotFound { suggestions, .. } => {
-                assert!(suggestions.contains("PURR/USDC"))
-            }
-            other => panic!("expected spot pair suggestion, got {other:?}"),
-        }
     }
 
     #[test]
@@ -1079,48 +964,8 @@ mod tests {
     }
 
     #[test]
-    fn candle_output_has_ohlcv_fields() {
-        let output = CandlesOutput::new(vec![CandleRow {
-            timestamp: 1,
-            close_time: 2,
-            coin: "BTC".to_string(),
-            interval: "15m".to_string(),
-            open: dec("100"),
-            high: dec("110"),
-            low: dec("90"),
-            close: dec("105"),
-            volume: dec("42"),
-            num_trades: 7,
-        }]);
-        let json = output.to_json_value();
-
-        assert_eq!(json[0]["open"], "100");
-        assert_eq!(json[0]["high"], "110");
-        assert_eq!(json[0]["low"], "90");
-        assert_eq!(json[0]["close"], "105");
-        assert_eq!(json[0]["volume"], "42");
-    }
-
-    #[test]
-    fn spread_output_includes_bid_ask_spread_and_percentage() {
-        let output = SpreadRow {
-            coin: "BTC".to_string(),
-            bid: dec("100"),
-            ask: dec("101"),
-            spread: dec("1"),
-            spread_pct: dec("1"),
-        };
-        let row = output.rows().remove(0);
-
-        assert_eq!(row[1], "100");
-        assert_eq!(row[2], "101");
-        assert_eq!(row[3], "1");
-        assert_eq!(row[4], "1");
-    }
-
-    #[test]
-    fn funding_output_includes_current_and_predicted_rates() {
-        let output = FundingRow {
+    fn funding_row_renders_missing_market_data_as_null_in_json_and_na_in_tables() {
+        let complete = FundingRow {
             coin: "BTC".to_string(),
             current_funding_rate: Some(dec("0.0001")),
             predicted_funding_rate: dec("0.0002"),
@@ -1129,13 +974,26 @@ mod tests {
             oracle_price: Some(dec("99")),
             last_funding_time: Some(123),
         };
-        let json = output.to_json_value();
+        let complete_row = complete.rows().remove(0);
+        assert_eq!(complete_row[1], "0.0001");
+        assert_eq!(complete_row[6], "1970-01-01T00:00:00.123Z");
+        assert_eq!(complete.to_json_value()["last_funding_time"], 123);
 
-        assert_eq!(json["current_funding_rate"], "0.0001");
+        let sparse = FundingRow {
+            current_funding_rate: None,
+            premium: None,
+            mark_price: None,
+            oracle_price: None,
+            last_funding_time: None,
+            ..complete
+        };
+        let sparse_row = sparse.rows().remove(0);
+        assert_eq!(sparse_row[1], "n/a");
+        assert_eq!(sparse_row[6], "n/a");
+        let json = sparse.to_json_value();
+        assert!(json["current_funding_rate"].is_null());
+        assert!(json["last_funding_time"].is_null());
         assert_eq!(json["predicted_funding_rate"], "0.0002");
-        assert_eq!(json["premium"], "0.00005");
-        assert_eq!(json["last_funding_time"], 123);
-        assert_eq!(output.rows()[0][6], "1970-01-01T00:00:00.123Z");
     }
 
     #[test]

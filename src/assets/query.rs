@@ -1,6 +1,3 @@
-//! Parsing of the asset names users type.
-
-/// Parsed user asset input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetQuery {
     /// Default perpetual market symbol, e.g. `BTC`.
@@ -42,13 +39,29 @@ pub fn parse_asset_query(input: &str) -> AssetQuery {
     }
 }
 
+/// A `--dex` value, or `None` for the default dex: the exchange treats the empty
+/// dex name as the first perp dex, so a blank flag behaves like no flag.
+#[must_use]
+pub fn normalize_dex(dex: Option<&str>) -> Option<&str> {
+    dex.map(str::trim).filter(|dex| !dex.is_empty())
+}
+
 /// Apply a `--dex` flag to a coin: `--dex dex COIN` means `dex:COIN`.
 #[must_use]
 pub fn qualify_dex_asset(dex: Option<&str>, coin: &str) -> String {
-    match dex {
+    match normalize_dex(dex) {
         Some(dex) if !coin.contains(':') => format!("{dex}:{coin}"),
         _ => coin.to_string(),
     }
+}
+
+/// A HIP-3 market name without its `dex:` prefix. Names the exchange lists
+/// carry the prefix; the CLI shows and matches the bare token.
+#[must_use]
+pub(crate) fn strip_dex_prefix<'a>(name: &'a str, dex: &str) -> &'a str {
+    name.strip_prefix(dex)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .unwrap_or(name)
 }
 
 pub(crate) fn eq_asset_name(left: &str, right: &str) -> bool {
@@ -68,6 +81,16 @@ mod tests {
         assert_eq!(qualify_dex_asset(Some("xyz"), "GOLD"), "xyz:GOLD");
         assert_eq!(qualify_dex_asset(Some("xyz"), "abc:GOLD"), "abc:GOLD");
         assert_eq!(qualify_dex_asset(None, "BTC"), "BTC");
+        assert_eq!(qualify_dex_asset(Some(""), "BTC"), "BTC");
+        assert_eq!(qualify_dex_asset(Some(" xyz "), "GOLD"), "xyz:GOLD");
+    }
+
+    #[test]
+    fn dex_prefix_is_stripped_only_when_it_is_that_dexs() {
+        assert_eq!(strip_dex_prefix("xyz:XYZ100", "xyz"), "XYZ100");
+        assert_eq!(strip_dex_prefix("abc:XYZ100", "xyz"), "abc:XYZ100");
+        assert_eq!(strip_dex_prefix("xyzXYZ100", "xyz"), "xyzXYZ100");
+        assert_eq!(strip_dex_prefix("XYZ100", "xyz"), "XYZ100");
     }
 
     #[test]
@@ -84,6 +107,7 @@ mod tests {
                 token: "TOKEN".into()
             }
         );
+        assert_eq!(parse_asset_query("#10"), AssetQuery::Outcome("#10".into()));
         assert_eq!(parse_asset_query("+11"), AssetQuery::Outcome("+11".into()));
     }
 }

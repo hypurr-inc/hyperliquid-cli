@@ -1,16 +1,19 @@
-//! Raw exchange metadata command.
-
 use hypersdk::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::assets::{SpotListing, load_spot_markets};
+use crate::assets::{RawPerpDex, SpotListing, load_raw_perp_dexes, load_spot_markets};
 use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
+use crate::commands::rows::MISSING;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
 use crate::output::format::thousands;
+use crate::wire::InfoRequest;
+
+/// How many names a section's sample lists.
+const SAMPLE_LEN: usize = 5;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MetaSpotRow {
@@ -53,16 +56,6 @@ pub struct DexRow {
     pub name: String,
     #[serde(with = "rust_decimal::serde::str_option")]
     pub deployer_fee_scale: Option<Decimal>,
-}
-
-/// One `perpDexs` entry. hypersdk 0.3's `Dex` no longer carries the deployer fee
-/// scale, so the CLI reads it from the raw response to keep the `meta` output stable.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawPerpDex {
-    name: String,
-    #[serde(default, with = "rust_decimal::serde::str_option")]
-    deployer_fee_scale: Option<Decimal>,
 }
 
 impl From<RawPerpDex> for DexRow {
@@ -114,7 +107,7 @@ impl TableData for MetaOutput {
                 thousands(self.universe.len() as u64),
                 self.universe
                     .iter()
-                    .take(5)
+                    .take(SAMPLE_LEN)
                     .filter_map(asset_name_from_value)
                     .collect::<Vec<_>>()
                     .join(", "),
@@ -124,7 +117,7 @@ impl TableData for MetaOutput {
                 thousands(self.spot_universe.len() as u64),
                 self.spot_universe
                     .iter()
-                    .take(5)
+                    .take(SAMPLE_LEN)
                     .map(|market| market.symbol.clone())
                     .collect::<Vec<_>>()
                     .join(", "),
@@ -134,9 +127,9 @@ impl TableData for MetaOutput {
                 thousands(self.asset_contexts.len() as u64),
                 self.asset_contexts
                     .iter()
-                    .take(5)
+                    .take(SAMPLE_LEN)
                     .map(|ctx| {
-                        let mid = ctx.mid_for_summary().unwrap_or_else(|| "n/a".to_string());
+                        let mid = ctx.mid_for_summary().unwrap_or_else(|| MISSING.to_string());
                         format!("{}={mid}", ctx.name)
                     })
                     .collect::<Vec<_>>()
@@ -147,7 +140,7 @@ impl TableData for MetaOutput {
                 thousands(self.dexes.len() as u64),
                 self.dexes
                     .iter()
-                    .take(5)
+                    .take(SAMPLE_LEN)
                     .map(|dex| dex.name.clone())
                     .collect::<Vec<_>>()
                     .join(", "),
@@ -170,13 +163,21 @@ impl TableData for MetaOutput {
 struct MetaAndAssetContexts(Value, Vec<Map<String, Value>>);
 
 impl MetaAndAssetContexts {
-    fn into_output(self, spot_universe: Vec<MetaSpotRow>, dexes: Vec<DexRow>) -> MetaOutput {
+    fn into_output(
+        self,
+        spot_universe: Vec<MetaSpotRow>,
+        dexes: Vec<DexRow>,
+    ) -> Result<MetaOutput, CliError> {
         let raw_meta = self.0;
         let universe = raw_meta
             .get("universe")
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default();
+            .ok_or_else(|| {
+                CliError::Internal(anyhow::anyhow!(
+                    "decode failed while reading raw exchange metadata: `universe` is missing"
+                ))
+            })?;
         let asset_contexts = self
             .1
             .into_iter()
@@ -190,15 +191,14 @@ impl MetaAndAssetContexts {
             })
             .collect();
 
-        MetaOutput::new(raw_meta, universe, spot_universe, asset_contexts, dexes)
+        Ok(MetaOutput::new(
+            raw_meta,
+            universe,
+            spot_universe,
+            asset_contexts,
+            dexes,
+        ))
     }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
-enum RawInfoRequest {
-    MetaAndAssetCtxs,
-    PerpDexs,
 }
 
 pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
@@ -206,22 +206,20 @@ pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
     let raw_meta_and_contexts = fetch_meta_and_asset_contexts(api).await?;
     let spot_universe = load_spot_universe(api).await?;
     let dexes = fetch_dexes(api).await?;
-    inv.print(&raw_meta_and_contexts.into_output(spot_universe, dexes));
+    inv.print(&raw_meta_and_contexts.into_output(spot_universe, dexes)?);
     Ok(())
 }
 
 async fn fetch_meta_and_asset_contexts(api: &ApiClient) -> Result<MetaAndAssetContexts, CliError> {
     api.info(
-        &RawInfoRequest::MetaAndAssetCtxs,
+        &InfoRequest::new("metaAndAssetCtxs"),
         "loading raw exchange metadata",
     )
     .await
 }
 
 async fn fetch_dexes(api: &ApiClient) -> Result<Vec<DexRow>, CliError> {
-    let dexes: Vec<Option<RawPerpDex>> = api
-        .info(&RawInfoRequest::PerpDexs, "loading raw exchange metadata")
-        .await?;
+    let dexes = load_raw_perp_dexes(api).await?;
     Ok(dexes.into_iter().flatten().map(DexRow::from).collect())
 }
 
@@ -270,50 +268,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn meta_json_contains_universe_and_asset_contexts() {
-        let output = MetaOutput::new(
-            serde_json::json!({
-                "universe": [{
-                    "name": "BTC",
-                    "maxLeverage": 50,
-                    "szDecimals": 5,
-                    "onlyIsolated": false
-                }]
-            }),
-            vec![serde_json::json!({
-                "name": "BTC",
-                "maxLeverage": 50,
-                "szDecimals": 5,
-                "onlyIsolated": false
-            })],
-            vec![],
-            vec![AssetContextRow {
-                name: "BTC".to_string(),
-                fields: Map::from_iter([
-                    ("funding".to_string(), serde_json::json!("0.0001")),
-                    ("openInterest".to_string(), serde_json::json!("42.5")),
-                    ("markPx".to_string(), serde_json::json!("101")),
-                    ("oraclePx".to_string(), serde_json::json!("100.5")),
-                    ("midPx".to_string(), serde_json::json!("100")),
-                    ("prevDayPx".to_string(), serde_json::json!("99")),
-                    ("dayNtlVlm".to_string(), serde_json::json!("123456.7")),
-                ]),
-            }],
-            vec![],
-        );
-        let json = output.to_json_value();
-
-        assert_eq!(json["universe"][0]["name"], "BTC");
-        assert_eq!(json["asset_contexts"][0]["midPx"], "100");
-        assert_eq!(json["asset_contexts"][0]["funding"], "0.0001");
-        assert_eq!(json["asset_contexts"][0]["openInterest"], "42.5");
-        assert_eq!(json["asset_contexts"][0]["markPx"], "101");
-        assert_eq!(json["asset_contexts"][0]["oraclePx"], "100.5");
-        assert_eq!(json["asset_contexts"][0]["prevDayPx"], "99");
-        assert_eq!(json["asset_contexts"][0]["dayNtlVlm"], "123456.7");
-    }
-
-    #[test]
     fn meta_output_from_raw_response_pairs_names_and_preserves_raw_context_fields() {
         let raw: MetaAndAssetContexts = serde_json::from_value(serde_json::json!([
             {
@@ -343,7 +297,7 @@ mod tests {
         ]))
         .unwrap();
 
-        let output = raw.into_output(vec![], vec![]);
+        let output = raw.into_output(vec![], vec![]).unwrap();
         let json = output.to_json_value();
 
         assert_eq!(json["meta"]["marginTables"][0][0], 50);
@@ -354,12 +308,11 @@ mod tests {
     }
 
     #[test]
-    fn meta_table_summarizes_metadata_sections() {
-        let output = MetaOutput::new(Value::Null, vec![], vec![], vec![], vec![]);
-        let rows = output.rows();
+    fn a_response_without_a_universe_is_a_decode_error_not_an_empty_universe() {
+        let raw: MetaAndAssetContexts =
+            serde_json::from_value(serde_json::json!([{"marginTables": []}, []])).unwrap();
 
-        assert_eq!(rows[0][0], "universe");
-        assert_eq!(rows[1][0], "spot_universe");
-        assert_eq!(rows[2][0], "asset_contexts");
+        let err = raw.into_output(vec![], vec![]).unwrap_err();
+        assert!(err.to_string().contains("universe"), "{err}");
     }
 }

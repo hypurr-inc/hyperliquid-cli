@@ -1,28 +1,32 @@
-//! Borrow/lend public market data commands.
-
 use clap::Args;
-use hypersdk::hypercore::HttpClient;
+use hypersdk::hypercore::{HttpClient, SpotToken};
 use hypersdk::{Address, Decimal};
-use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 
+use crate::assets::require_spot_token;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
-use crate::commands::account::OptionalAddressArgs;
 use crate::commands::actions;
+use crate::commands::rows::{ListRow, One, Row, Rows, style_column};
+use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
-use crate::commands::support::print_signed_dry_run;
+use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::{self, TableData};
+use crate::quantity::{self, Scale, ScaleError};
 use crate::signing::SelectedSigner;
+use crate::wire::InfoRequest;
 
 const LIVE_RESERVE_NOTE: &str = "Live reserve state from Hyperliquid API";
 const UNAVAILABLE_RESERVE_NOTE: &str =
     "Reserve state rates unavailable from public Hyperliquid API";
 const CORE_WRITER_ACTION_ID: u32 = 15;
+const REVERSIBILITY: ActionReversibility = ActionReversibility::PartiallyReversible;
+/// Token decimals above this overflow the 64-bit wire amount.
+const MAX_TOKEN_DECIMALS: u32 = 19;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct ReserveRow {
@@ -68,16 +72,11 @@ impl BorrowLendOperation {
         }
     }
 
-    pub fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Supply => "supply",
             Self::Withdraw => "withdraw",
         }
-    }
-
-    #[must_use]
-    pub fn reversibility(self) -> ActionReversibility {
-        ActionReversibility::PartiallyReversible
     }
 }
 
@@ -92,20 +91,6 @@ struct RawReserveState {
     total_supplied: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     total_borrowed: Decimal,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type")]
-enum BorrowLendInfoRequest {
-    #[serde(rename = "allBorrowLendReserveStates")]
-    AllReserveStates,
-    #[serde(rename = "borrowLendReserveState")]
-    ReserveState { token: u32 },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReserveOutput {
-    rows: Vec<ReserveRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -140,9 +125,36 @@ struct BorrowLendActionRow {
     signer: String,
     reversibility: String,
 }
+impl Row for ReserveRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Token",
+        "Supply Rate",
+        "Borrow Rate",
+        "Total Supply",
+        "Total Borrow",
+        "Note",
+    ];
 
-struct BorrowLendActionOutput {
-    row: BorrowLendActionRow,
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.token.clone(),
+            self.supply_rate.to_string(),
+            self.borrow_rate.to_string(),
+            self.total_supply.to_string(),
+            self.total_borrow.to_string(),
+            self.note.clone(),
+        ]
+    }
+
+    fn pretty_cells(&self) -> Vec<String> {
+        let mut cells = self.cells();
+        style_column::<Self>(&mut cells, "Note", output::colors::gray);
+        cells
+    }
+}
+
+impl ListRow for ReserveRow {
+    const EMPTY: &'static str = "No reserve states.";
 }
 
 #[derive(Debug, Serialize)]
@@ -155,50 +167,35 @@ struct BorrowLendExchangeAction {
     amount: Option<String>,
 }
 
-impl TableData for ReserveOutput {
-    fn headers(&self) -> Vec<&str> {
+impl Row for BorrowLendActionRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Status",
+        "Action",
+        "Operation",
+        "Acting As",
+        "Token",
+        "Token Index",
+        "Amount",
+        "Max",
+        "Network",
+        "Signer",
+        "Reversibility",
+    ];
+
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Token",
-            "Supply Rate",
-            "Borrow Rate",
-            "Total Supply",
-            "Total Borrow",
-            "Note",
+            self.status.clone(),
+            self.action.clone(),
+            self.operation.clone(),
+            self.acting_as.clone(),
+            self.token.clone(),
+            self.token_index.to_string(),
+            self.amount.clone().unwrap_or_default(),
+            self.max.to_string(),
+            self.network.clone(),
+            self.signer.clone(),
+            self.reversibility.clone(),
         ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.token.clone(),
-                    row.supply_rate.to_string(),
-                    row.borrow_rate.to_string(),
-                    row.total_supply.to_string(),
-                    row.total_borrow.to_string(),
-                    row.note.clone(),
-                ]
-            })
-            .collect()
-    }
-
-    fn pretty_rows(&self) -> Vec<Vec<String>> {
-        self.rows()
-            .into_iter()
-            .map(|mut row| {
-                row[5] = output::colors::gray(&row[5]);
-                row
-            })
-            .collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No reserve states.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
     }
 }
 
@@ -234,95 +231,49 @@ impl TableData for UserBorrowLendOutput {
     }
 }
 
-impl TableData for BorrowLendActionOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec![
-            "Status",
-            "Action",
-            "Operation",
-            "Acting As",
-            "Token",
-            "Token Index",
-            "Amount",
-            "Max",
-            "Network",
-            "Signer",
-            "Reversibility",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.row.status.clone(),
-            self.row.action.clone(),
-            self.row.operation.clone(),
-            self.row.acting_as.clone(),
-            self.row.token.clone(),
-            self.row.token_index.to_string(),
-            self.row.amount.clone().unwrap_or_default(),
-            self.row.max.to_string(),
-            self.row.network.clone(),
-            self.row.signer.clone(),
-            self.row.reversibility.clone(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
-    }
-}
-
-/// Show reserve states for all borrow/lend tokens.
-pub async fn rates(inv: &Invocation) -> Result<(), anyhow::Error> {
+async fn rates(inv: &Invocation) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let rows = reserve_rows(remote.api()).await?;
-    inv.print(&ReserveOutput { rows });
+    inv.print(&Rows::new(rows));
     Ok(())
 }
 
-/// Show reserve state for a single token.
-pub async fn get(inv: &Invocation, token: &str) -> Result<(), anyhow::Error> {
+async fn get(inv: &Invocation, token: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let token = resolve_spot_token(remote.api().sdk(), token).await?;
+    let token = require_spot_token(remote.api().sdk(), token).await?;
     let row = match live_reserve_row(remote.api(), token.index, token.name.clone()).await {
         Ok(row) => row,
         Err(BorrowLendInfoError::EndpointUnavailable) => unavailable_reserve_row(token),
         Err(BorrowLendInfoError::Cli(err)) => return Err(err.into()),
     };
 
-    inv.print(&ReserveOutput { rows: vec![row] });
+    inv.print(&Rows::new(vec![row]));
     Ok(())
 }
 
-/// Show public borrow/lend state for a user.
-pub async fn user(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
-    let api = inv.remote()?.api();
-    let user = parse_address(address)?;
-    let balances = user_spot_balances_raw(api, user).await?;
-    let positions = balances
+async fn user(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
+    let positions = user_spot_balances_raw(inv.remote()?.api(), user)
+        .await?
         .into_iter()
-        .filter(|balance| balance.token.is_some())
-        .filter(|balance| !balance.total.is_zero() || !balance.hold.is_zero())
-        .map(UserBorrowLendPosition::from)
+        .filter_map(UserBorrowLendPosition::from_balance)
         .collect::<Vec<_>>();
 
     inv.print(&UserBorrowLendOutput {
-        user: address.to_string(),
+        user: user.to_string(),
         positions,
     });
     Ok(())
 }
 
-pub async fn action_preview(
-    api: &ApiClient,
+/// The dry-run preview of `operation` on `token`, `wei` being its wire amount.
+fn action_preview(
+    chain: hypersdk::hypercore::Chain,
     operation: BorrowLendOperation,
     args: &ActionArgs,
-) -> Result<serde_json::Value, CliError> {
-    let chain = api.chain();
-    validate_action_args(operation, args)?;
-    let token = resolve_spot_token(api.sdk(), &args.token).await?;
-    let wei = borrowlend_wei(args, token.wei_decimals)?;
-    Ok(serde_json::json!({
+    token: &SpotToken,
+    wei: u64,
+) -> serde_json::Value {
+    serde_json::json!({
         "operation": operation.as_str(),
         "encoded_operation": operation.encoded(),
         "token": token.name,
@@ -331,7 +282,7 @@ pub async fn action_preview(
         "max": args.max,
         "network": chain.to_string(),
         "wei": wei,
-        "reversibility": operation.reversibility(),
+        "reversibility": REVERSIBILITY,
         "verified_shape": {
             "transport": "HyperEVM CoreWriter.sendRawAction",
             "action_id": CORE_WRITER_ACTION_ID,
@@ -350,20 +301,17 @@ pub async fn action_preview(
             "amount": borrowlend_exchange_amount(args)
         },
         "live_submission": "enabled: wallet-signed /exchange borrowLend action shape verified against @nktkas/hyperliquid v0.31.0"
-    }))
+    })
 }
 
-pub async fn action(
+async fn action(
     inv: &Invocation,
     signer: &SelectedSigner,
     operation: BorrowLendOperation,
     args: &ActionArgs,
+    token: SpotToken,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let client = remote.api().sdk();
-    let chain = remote.chain();
-    validate_action_args(operation, args)?;
-    let token = resolve_spot_token(client, &args.token).await?;
     let amount = borrowlend_exchange_amount(args);
 
     // Verified against @nktkas/hyperliquid v0.31.0 exchange `borrowLend` schema:
@@ -383,28 +331,23 @@ pub async fn action(
     )
     .await?;
 
-    inv.print(&BorrowLendActionOutput {
-        row: BorrowLendActionRow {
-            status: "submitted".to_string(),
-            action: "borrowlend".to_string(),
-            operation: operation.as_str().to_string(),
-            acting_as: signer.query_address().to_string(),
-            token: token.name,
-            token_index: token.index,
-            amount,
-            max: args.max,
-            network: chain.to_string(),
-            signer: signer.address().to_string(),
-            reversibility: (operation.reversibility()).as_str().to_string(),
-        },
-    });
+    inv.print(&One::new(BorrowLendActionRow {
+        status: "submitted".to_string(),
+        action: "borrowlend".to_string(),
+        operation: operation.as_str().to_string(),
+        acting_as: signer.query_address().to_string(),
+        token: token.name,
+        token_index: token.index,
+        amount,
+        max: args.max,
+        network: remote.chain().to_string(),
+        signer: signer.address().to_string(),
+        reversibility: REVERSIBILITY.as_str().to_string(),
+    }));
     Ok(())
 }
 
-pub fn validate_action_args(
-    operation: BorrowLendOperation,
-    args: &ActionArgs,
-) -> Result<(), CliError> {
+fn validate_action_args(operation: BorrowLendOperation, args: &ActionArgs) -> Result<(), CliError> {
     let has_amount = args.amount.is_some();
     if !has_amount && !args.max {
         return Err(CliError::Unsupported(
@@ -415,13 +358,6 @@ pub fn validate_action_args(
         return Err(CliError::Unsupported(
             "borrow/lend supply requires --amount; --max is only supported for withdraw"
                 .to_string(),
-        ));
-    }
-    if let Some(amount) = args.amount
-        && amount <= Decimal::ZERO
-    {
-        return Err(CliError::Unsupported(
-            "borrow/lend amount must be greater than zero".to_string(),
         ));
     }
     Ok(())
@@ -446,9 +382,11 @@ async fn reserve_rows(api: &ApiClient) -> Result<Vec<ReserveRow>, CliError> {
 }
 
 async fn live_reserve_rows(api: &ApiClient) -> Result<Vec<ReserveRow>, BorrowLendInfoError> {
-    let reserve_states =
-        post_info::<Vec<(u32, RawReserveState)>>(api, &BorrowLendInfoRequest::AllReserveStates)
-            .await?;
+    let reserve_states = post_info::<Vec<(u32, RawReserveState)>>(
+        api,
+        &InfoRequest::new("allBorrowLendReserveStates"),
+    )
+    .await?;
     let token_names = token_names_by_index(api.sdk()).await?;
 
     Ok(reserve_states
@@ -472,7 +410,7 @@ async fn live_reserve_row(
 ) -> Result<ReserveRow, BorrowLendInfoError> {
     let reserve_state = post_info::<RawReserveState>(
         api,
-        &BorrowLendInfoRequest::ReserveState { token: token_index },
+        &InfoRequest::new("borrowLendReserveState").field("token", token_index),
     )
     .await?;
     Ok(reserve_state.to_row(token_name, token_index))
@@ -527,19 +465,6 @@ async fn token_names_by_index(
         .collect())
 }
 
-async fn resolve_spot_token(
-    client: &HttpClient,
-    token: &str,
-) -> Result<hypersdk::hypercore::SpotToken, CliError> {
-    client
-        .spot_tokens()
-        .await
-        .map_err(from_sdk)?
-        .into_iter()
-        .find(|spot_token| spot_token.name.eq_ignore_ascii_case(token))
-        .ok_or_else(|| CliError::Unsupported(format!("Borrow/lend token not found: {token}")))
-}
-
 fn borrowlend_wei(args: &ActionArgs, decimals: i64) -> Result<u64, CliError> {
     if args.max {
         return Ok(0);
@@ -564,21 +489,47 @@ fn decimal_to_wei(amount: Decimal, decimals: i64) -> Result<u64, CliError> {
             "token decimals cannot be negative".to_string(),
         ));
     }
-    let decimals = u32::try_from(decimals).map_err(|_| {
-        CliError::Unsupported("token decimals are outside supported bounds".to_string())
-    })?;
-    let multiplier = 10u64.checked_pow(decimals).ok_or_else(|| {
-        CliError::Unsupported("token decimals are outside supported bounds".to_string())
-    })?;
-    let multiplier = Decimal::from(multiplier);
-    let wei = amount * multiplier;
-    if wei.fract() != Decimal::ZERO {
-        return Err(CliError::Unsupported(format!(
-            "amount {amount} has more precision than token supports ({decimals} decimals)"
-        )));
+    let places = u32::try_from(decimals)
+        .ok()
+        .filter(|places| *places <= MAX_TOKEN_DECIMALS)
+        .ok_or_else(|| {
+            CliError::Unsupported("token decimals are outside supported bounds".to_string())
+        })?;
+    quantity::positive(amount, Scale::places(places)).map_err(|err| match err {
+        ScaleError::TooPrecise => CliError::Unsupported(format!(
+            "amount {amount} has more precision than token supports ({places} decimals)"
+        )),
+        ScaleError::TooLarge => {
+            CliError::Unsupported("borrow/lend amount is too large".to_string())
+        }
+        ScaleError::Negative | ScaleError::NotPositive => {
+            CliError::Unsupported("borrow/lend amount must be greater than zero".to_string())
+        }
+    })
+}
+
+impl UserBorrowLendPosition {
+    /// The borrow/lend position a spot balance holds, if it is a token balance
+    /// with anything in it.
+    fn from_balance(balance: RawSpotBalance) -> Option<Self> {
+        let token_index = balance.token?;
+        if balance.total.is_zero() && balance.hold.is_zero() {
+            return None;
+        }
+        let (supplied, borrowed) = if balance.total < Decimal::ZERO {
+            (Decimal::ZERO, -balance.total)
+        } else {
+            (balance.total, Decimal::ZERO)
+        };
+
+        Some(Self {
+            token: balance.coin,
+            token_index,
+            supplied,
+            borrowed,
+            hold: balance.hold,
+        })
     }
-    wei.to_u64()
-        .ok_or_else(|| CliError::Unsupported("borrow/lend amount is too large".to_string()))
 }
 
 #[derive(Debug)]
@@ -595,7 +546,7 @@ impl From<CliError> for BorrowLendInfoError {
 
 async fn post_info<T: for<'de> Deserialize<'de>>(
     api: &ApiClient,
-    request: &BorrowLendInfoRequest,
+    request: &InfoRequest,
 ) -> Result<T, BorrowLendInfoError> {
     let reply = api.info_raw(request).await?;
     if info_request_type_is_unavailable(reply.status().as_u16(), reply.body()) {
@@ -637,32 +588,6 @@ fn structured_unknown_request_error(body: &str) -> bool {
         });
 
     status_is_error && info_request_type_is_unavailable(400, &value.to_string())
-}
-
-impl From<RawSpotBalance> for UserBorrowLendPosition {
-    fn from(balance: RawSpotBalance) -> Self {
-        let (supplied, borrowed) = if balance.total < Decimal::ZERO {
-            (Decimal::ZERO, -balance.total)
-        } else {
-            (balance.total, Decimal::ZERO)
-        };
-
-        Self {
-            token: balance.coin,
-            token_index: balance
-                .token
-                .expect("borrow/lend positions require a token index"),
-            supplied,
-            borrowed,
-            hold: balance.hold,
-        }
-    }
-}
-
-fn parse_address(input: &str) -> Result<Address, CliError> {
-    crate::resolvers::parse_exact_hex_address(input, false).map_err(|_| {
-        CliError::Configuration("address must be a 0x-prefixed 40-byte hex string".to_string())
-    })
 }
 
 pub const GROUP: GroupSpec = GroupSpec::new(
@@ -725,15 +650,10 @@ impl CliCommand for BorrowlendUser {
         "Show borrow and lend state for an address or wallet",
         "Show user borrow/lend state.",
     )
-    .args(&[arg("address")
-        .kind(InputKind::PublicUserSelector)
-        .describe("Ethereum address, wallet name, or wallet id.")
-        .resource_id("account selector")
-        .schema_required()]);
+    .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        let address = inv.resolve_user(args.address.as_deref())?.to_string();
-        user(inv, &address).await
+        user(inv, args.resolve(inv)?).await
     }
 }
 
@@ -788,20 +708,20 @@ async fn borrowlend_action(
     operation: BorrowLendOperation,
     args: &ActionArgs,
 ) -> Result<(), anyhow::Error> {
-    let preview = action_preview(inv.remote()?.api(), operation, args).await?;
+    validate_action_args(operation, args)?;
+    let remote = inv.remote()?;
+    let token = require_spot_token(remote.api().sdk(), &args.token).await?;
+    let wei = borrowlend_wei(args, token.wei_decimals)?;
     if inv.dry_run() {
-        return print_signed_dry_run(
+        return print_dry_run(
             inv,
-            &format!("borrowlend {}", operation.as_str()),
             &format!("{}_borrowlend", operation.as_str()),
-            operation.reversibility(),
-            preview,
+            action_preview(remote.chain(), operation, args, &token, wei),
         );
     }
 
-    let resolved = inv.resolve_signer()?;
-    let signer = resolved.selected_signer();
-    action(inv, &signer, operation, args).await
+    let signer = inv.resolve_signer()?;
+    action(inv, &signer, operation, args, token).await
 }
 
 #[cfg(test)]
@@ -809,15 +729,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_address_rejects_bad_format_as_usage_error() {
-        let err = parse_address("INVALID").unwrap_err();
-        assert_eq!(err.exit_code(), 2);
-    }
-
-    #[test]
     fn decimal_to_wei_respects_token_decimals() {
         assert_eq!(decimal_to_wei(Decimal::new(123, 1), 6).unwrap(), 12_300_000);
         assert!(decimal_to_wei(Decimal::new(1, 7), 6).is_err());
+    }
+
+    #[test]
+    fn decimal_to_wei_rejects_unsupported_token_decimals() {
+        assert!(decimal_to_wei(Decimal::ONE, -1).is_err());
+        assert!(decimal_to_wei(Decimal::ONE, 20).is_err());
+        assert_eq!(
+            decimal_to_wei(Decimal::ONE, 19).unwrap(),
+            10_000_000_000_000_000_000
+        );
     }
 
     #[test]
@@ -850,15 +774,25 @@ mod tests {
         assert!(err.to_string().contains("--max is only supported"));
     }
 
+    fn balance(coin: &str, token: Option<usize>, total: &str, hold: &str) -> RawSpotBalance {
+        RawSpotBalance {
+            coin: coin.to_string(),
+            token,
+            hold: hold.parse().unwrap(),
+            total: total.parse().unwrap(),
+            entry_ntl: Decimal::ZERO,
+        }
+    }
+
     #[test]
-    fn borrowlend_operations_declare_reversibility() {
-        assert_eq!(
-            BorrowLendOperation::Supply.reversibility(),
-            ActionReversibility::PartiallyReversible
-        );
-        assert_eq!(
-            BorrowLendOperation::Withdraw.reversibility(),
-            ActionReversibility::PartiallyReversible
-        );
+    fn positions_come_only_from_non_empty_token_balances() {
+        assert!(UserBorrowLendPosition::from_balance(balance("+100", None, "5", "0")).is_none());
+        assert!(UserBorrowLendPosition::from_balance(balance("USDC", Some(0), "0", "0")).is_none());
+
+        let borrowed =
+            UserBorrowLendPosition::from_balance(balance("USDC", Some(0), "-3", "1")).unwrap();
+        assert_eq!(borrowed.borrowed, Decimal::from(3));
+        assert_eq!(borrowed.supplied, Decimal::ZERO);
+        assert_eq!(borrowed.hold, Decimal::ONE);
     }
 }

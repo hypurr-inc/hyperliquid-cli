@@ -3,10 +3,13 @@
 //! The file is created by `setup` and the wallet commands that choose a default
 //! wallet or write builder/referral defaults (`wallet create|import|import-mnemonic|reset`,
 //! `account add --default|set-default|remove`). A missing file is not an error.
-//! Layering with environment variables and flags happens in [`crate::settings`].
+//! Layering with environment variables and flags, and every read-modify-write of
+//! the file, happens in [`crate::settings`].
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use hypersdk::Address;
 
 use crate::errors::CliError;
 use crate::network::Network;
@@ -41,45 +44,103 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_referral_code: Option<String>,
 
-    /// Bankr API key (`bk_...`) stored by `wallet login`. Never printed.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bankr_api_key: Option<String>,
+    /// What `wallet login` stored for Bankr, flattened into the file's
+    /// `bankr_*` keys.
+    #[serde(flatten)]
+    pub bankr: BankrLogin,
+}
+
+/// The Bankr login `wallet login` stores: one record that is set and cleared as
+/// a whole, so the key, its endpoint and the address Bankr reported for them
+/// never disagree.
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BankrLogin {
+    /// Bankr API key (`bk_...`). Never printed.
+    #[serde(rename = "bankr_api_key", skip_serializing_if = "Option::is_none")]
+    api_key: Option<String>,
 
     /// Bankr API host, when it isn't the public endpoint.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bankr_api_url: Option<String>,
+    #[serde(rename = "bankr_api_url", skip_serializing_if = "Option::is_none")]
+    api_url: Option<String>,
 
     /// EVM address Bankr reported at login, so signer resolution stays offline.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub bankr_address: Option<String>,
+    #[serde(rename = "bankr_address", skip_serializing_if = "Option::is_none")]
+    address: Option<String>,
+}
+
+impl BankrLogin {
+    /// A login for `api_key` at `api_url` (`None` for the public endpoint) that
+    /// Bankr reported `address` for.
+    #[must_use]
+    pub fn new(api_key: &str, api_url: Option<&str>, address: Address) -> Self {
+        Self {
+            api_key: Some(api_key.trim().to_string()),
+            api_url: api_url.map(|url| url.trim().to_string()),
+            address: Some(address.to_string()),
+        }
+        .normalized()
+    }
+
+    /// Hand-edited files may hold padding or blanks; blank means absent.
+    fn normalized(self) -> Self {
+        let clean = |value: Option<String>| nonblank(value.as_deref()).map(str::to_string);
+        Self {
+            api_key: clean(self.api_key),
+            api_url: clean(self.api_url),
+            address: clean(self.address),
+        }
+    }
+
+    /// The stored API key, trimmed; `None` when absent or blank.
+    #[must_use]
+    pub fn api_key(&self) -> Option<&str> {
+        nonblank(self.api_key.as_deref())
+    }
+
+    /// The stored API host, trimmed; `None` for the public endpoint.
+    #[must_use]
+    pub fn api_url(&self) -> Option<&str> {
+        nonblank(self.api_url.as_deref())
+    }
+
+    pub fn address(&self) -> Result<Option<Address>, CliError> {
+        let Some(text) = nonblank(self.address.as_deref()) else {
+            return Ok(None);
+        };
+        text.parse::<Address>().map(Some).map_err(|_| {
+            CliError::Configuration(format!(
+                "invalid bankr_address in the config file: '{text}' is not an EVM address. Run `hyperliquid wallet login` again."
+            ))
+        })
+    }
+}
+
+/// The value trimmed, or `None` when it is absent or blank: what every
+/// setting layer means by "not set".
+pub(crate) fn nonblank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+impl std::fmt::Debug for BankrLogin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BankrLogin")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("api_url", &self.api_url)
+            .field("address", &self.address)
+            .finish()
+    }
 }
 
 impl Config {
-    /// Whether `wallet` (an id or a name) is the configured default wallet.
-    #[must_use]
-    pub fn is_default_wallet(&self, id: &str, name: &str) -> bool {
-        self.default_wallet_id
-            .as_deref()
-            .is_some_and(|default| default == id || default == name)
-    }
-
     #[must_use]
     pub fn has_builder_default(&self) -> bool {
-        let set = |value: &Option<String>| {
-            value
-                .as_deref()
-                .map(str::trim)
-                .is_some_and(|value| !value.is_empty())
-        };
-        set(&self.default_builder_address) || set(&self.default_builder_fee_rate)
+        nonblank(self.default_builder_address.as_deref()).is_some()
+            || nonblank(self.default_builder_fee_rate.as_deref()).is_some()
     }
 
     #[must_use]
     pub fn has_referral_default(&self) -> bool {
-        self.default_referral_code
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|value| !value.is_empty())
+        nonblank(self.default_referral_code.as_deref()).is_some()
     }
 
     pub(crate) fn plaintext_key(&self) -> Option<&str> {
@@ -104,12 +165,7 @@ impl std::fmt::Debug for Config {
             .field("default_builder_address", &self.default_builder_address)
             .field("default_builder_fee_rate", &self.default_builder_fee_rate)
             .field("default_referral_code", &self.default_referral_code)
-            .field(
-                "bankr_api_key",
-                &self.bankr_api_key.as_ref().map(|_| "[redacted]"),
-            )
-            .field("bankr_api_url", &self.bankr_api_url)
-            .field("bankr_address", &self.bankr_address)
+            .field("bankr", &self.bankr)
             .finish()
     }
 }
@@ -128,33 +184,33 @@ impl ConfigFile {
     }
 
     #[must_use]
-    pub fn default_location() -> Option<Self> {
-        crate::paths::config_file().map(Self::at)
-    }
-
-    #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    #[must_use]
-    pub fn exists(&self) -> bool {
-        self.path.exists()
+    /// Whether the file exists. Only a genuinely absent file is `false`; a file
+    /// that can't be inspected (permissions, I/O) is an error, never "absent".
+    pub fn exists(&self) -> Result<bool, CliError> {
+        match std::fs::metadata(&self.path) {
+            Ok(_) => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(CliError::Configuration(format!(
+                "failed to inspect config file {}: {err}",
+                self.path.display()
+            ))),
+        }
     }
 
     /// The raw file text. `Ok(None)` when the file doesn't exist.
     pub fn read_text(&self) -> Result<Option<String>, CliError> {
-        if !self.path.exists() {
-            return Ok(None);
+        match std::fs::read_to_string(&self.path) {
+            Ok(text) => Ok(Some(text)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(CliError::Configuration(format!(
+                "failed to read config file {}: {err}",
+                self.path.display()
+            ))),
         }
-        std::fs::read_to_string(&self.path)
-            .map(Some)
-            .map_err(|err| {
-                CliError::Configuration(format!(
-                    "failed to read config file {}: {err}",
-                    self.path.display()
-                ))
-            })
     }
 
     /// Parse file text as `T`, naming this file in the error.
@@ -202,7 +258,8 @@ impl ConfigFile {
     }
 
     /// Hold the lock for a config read-modify-write so concurrent CLI processes
-    /// can't lose each other's keys. Waits up to 10 seconds.
+    /// can't lose each other's keys. Waits up to 10 seconds. Writing the file
+    /// takes the guard, so a write can't happen without it.
     pub fn lock(&self) -> Result<FileLock, CliError> {
         FileLock::acquire(&self.path, LOCK_WAIT).map_err(|err| match err {
             LockError::Io(err) => CliError::Configuration(format!(
@@ -217,16 +274,19 @@ impl ConfigFile {
     }
 
     /// Replace the file atomically with mode 0600, creating the directory (0700).
-    pub fn save(&self, config: &Config) -> Result<(), anyhow::Error> {
+    pub fn save(&self, config: &Config, _lock: &FileLock) -> Result<(), CliError> {
         let json = serde_json::to_string_pretty(config)
-            .map_err(|err| anyhow::anyhow!("Failed to serialize config: {err}"))?;
+            .map_err(|err| CliError::Configuration(format!("Failed to serialize config: {err}")))?;
         private_fs::write_atomic(&self.path, json.as_bytes()).map_err(|err| {
-            anyhow::anyhow!("Failed to write config file {}: {err}", self.path.display())
+            CliError::Configuration(format!(
+                "Failed to write config file {}: {err}",
+                self.path.display()
+            ))
         })
     }
 
     /// Delete the file. A file that is already gone is success.
-    pub fn remove(&self) -> Result<(), CliError> {
+    pub fn remove(&self, _lock: &FileLock) -> Result<(), CliError> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(()),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -242,6 +302,10 @@ impl ConfigFile {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    fn save(file: &ConfigFile, config: &Config) {
+        file.save(config, &file.lock().unwrap()).unwrap();
+    }
 
     fn file_in(tmp: &TempDir) -> ConfigFile {
         ConfigFile::at(
@@ -261,7 +325,7 @@ mod tests {
             default_wallet_id: Some("wallet-1".to_string()),
             ..Config::default()
         };
-        file.save(&config).unwrap();
+        save(&file, &config);
 
         assert_eq!(file.read().unwrap(), Some(config));
         let text = std::fs::read_to_string(file.path()).unwrap();
@@ -270,12 +334,35 @@ mod tests {
     }
 
     #[test]
+    fn every_field_survives_a_save_and_read() {
+        let tmp = TempDir::new().unwrap();
+        let file = file_in(&tmp);
+        let config = Config {
+            private_key: Some("0xkey".to_string()),
+            network: Network::Testnet,
+            default_wallet_id: Some("wallet".to_string()),
+            default_builder_address: Some("0xbuilder".to_string()),
+            default_builder_fee_rate: Some("0.001%".to_string()),
+            default_referral_code: Some("CODE".to_string()),
+            ..Config::default()
+        };
+        save(&file, &config);
+        assert_eq!(file.read().unwrap(), Some(config));
+    }
+
+    #[test]
+    fn network_names_in_the_file_are_case_insensitive() {
+        let config: Config = serde_json::from_str(r#"{"network":"TESTNET"}"#).unwrap();
+        assert_eq!(config.network, Network::Testnet);
+    }
+
+    #[test]
     fn missing_file_reads_as_none_and_invalid_json_is_a_configuration_error() {
         let tmp = TempDir::new().unwrap();
         let file = file_in(&tmp);
         assert_eq!(file.read().unwrap(), None);
 
-        file.save(&Config::default()).unwrap();
+        save(&file, &Config::default());
         std::fs::write(file.path(), "{not json").unwrap();
         let err = file.read().unwrap_err();
         assert!(matches!(err, CliError::Configuration(_)));
@@ -283,12 +370,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_network_in_file_is_rejected() {
+    fn invalid_network_in_file_is_a_configuration_error_naming_the_value() {
         let tmp = TempDir::new().unwrap();
         let file = file_in(&tmp);
-        file.save(&Config::default()).unwrap();
+        save(&file, &Config::default());
         std::fs::write(file.path(), r#"{"network":"bogus"}"#).unwrap();
-        assert!(file.read().is_err());
+        let err = file.read().unwrap_err();
+        assert!(matches!(err, CliError::Configuration(_)));
+        assert!(err.to_string().contains("bogus"), "{err}");
     }
 
     #[cfg(unix)]
@@ -297,7 +386,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let tmp = TempDir::new().unwrap();
         let file = file_in(&tmp);
-        file.save(&Config::default()).unwrap();
+        save(&file, &Config::default());
 
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(file.path()), 0o600);
@@ -313,27 +402,23 @@ mod tests {
             private_key: Some("0xabc".to_string()),
             ..Config::default()
         };
-        file.save(&config).unwrap();
+        save(&file, &config);
         let lines = file.hygiene_warnings(config.has_plaintext_key());
         assert!(lines[0].contains("stores a plaintext private key"));
         assert!(lines.iter().any(|line| line.contains("wallet import")));
     }
 
     #[test]
-    fn lock_excludes_a_second_holder_until_released() {
+    fn config_lock_excludes_other_lock_holders_until_released() {
         let tmp = TempDir::new().unwrap();
         let file = ConfigFile::at(tmp.path().join("config.json"));
         let first = file.lock().unwrap();
-        let lock_file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(tmp.path().join("config.json.lock"))
-            .unwrap();
         assert!(matches!(
-            lock_file.try_lock(),
-            Err(std::fs::TryLockError::WouldBlock)
+            FileLock::acquire(file.path(), Duration::ZERO),
+            Err(LockError::Busy)
         ));
         drop(first);
-        assert!(lock_file.try_lock().is_ok());
+        FileLock::acquire(file.path(), Duration::from_secs(5)).unwrap();
     }
 
     #[test]
@@ -347,14 +432,45 @@ mod tests {
         assert!(debug.contains("[redacted]"));
     }
 
+    const BANKR_ADDRESS: &str = "0x0000000000000000000000000000000000000009";
+
     #[test]
-    fn default_wallet_matches_id_or_name() {
+    fn bankr_login_keeps_the_flat_bankr_keys_and_redacts_the_key() {
         let config = Config {
-            default_wallet_id: Some("main".to_string()),
+            bankr: BankrLogin::new(
+                "  bk_secret  ",
+                Some(" http://localhost:1 "),
+                BANKR_ADDRESS.parse().unwrap(),
+            ),
             ..Config::default()
         };
-        assert!(config.is_default_wallet("id-1", "main"));
-        assert!(config.is_default_wallet("main", "other"));
-        assert!(!config.is_default_wallet("id-1", "other"));
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["bankr_api_key"], "bk_secret");
+        assert_eq!(json["bankr_api_url"], "http://localhost:1");
+        assert_eq!(json["bankr_address"], BANKR_ADDRESS);
+        assert_eq!(serde_json::from_value::<Config>(json).unwrap(), config);
+        assert!(!format!("{config:?}").contains("bk_secret"));
+    }
+
+    #[test]
+    fn blank_bankr_fields_read_as_absent_and_padding_is_trimmed() {
+        let config: Config = serde_json::from_str(&format!(
+            r#"{{"bankr_api_key":"  ","bankr_api_url":"","bankr_address":"  {BANKR_ADDRESS}  "}}"#
+        ))
+        .unwrap();
+        assert_eq!(config.bankr.api_key(), None);
+        assert_eq!(config.bankr.api_url(), None);
+        assert_eq!(
+            config.bankr.address().unwrap(),
+            Some(BANKR_ADDRESS.parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn a_malformed_bankr_address_names_the_key() {
+        let config: Config =
+            serde_json::from_str(r#"{"bankr_address":"0xnot-an-address"}"#).unwrap();
+        let err = config.bankr.address().unwrap_err();
+        assert!(err.to_string().contains("bankr_address"));
     }
 }

@@ -1,53 +1,159 @@
 {
-  "version": 1,
+  "version": 2,
   "errors": [
     {
       "exit_code": 1,
       "category": "internal",
-      "retryable": false,
+      "reason": "internal_error",
+      "retry": "unknown",
+      "stdout": "envelope",
       "agent_action": "Stop and inspect the message."
     },
     {
+      "exit_code": 1,
+      "category": "internal",
+      "reason": "exchange_rejected",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "The exchange answered and refused the action. Read the labelled remote message and change the request before trying again."
+    },
+    {
       "exit_code": 2,
-      "category": "usage_or_config",
-      "retryable": false,
-      "agent_action": "Fix arguments, configuration, or environment."
+      "category": "configuration",
+      "reason": "invalid_config",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Fix the configuration file, environment variable, or option value named in the message."
+    },
+    {
+      "exit_code": 2,
+      "category": "missing_input",
+      "reason": "missing_input",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Pass the named option or argument; this run can't prompt for it."
+    },
+    {
+      "exit_code": 2,
+      "category": "usage",
+      "reason": "invalid_arguments",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Fix the arguments using `data.usage`; `next` holds the help command."
+    },
+    {
+      "exit_code": 2,
+      "category": "usage",
+      "reason": "unknown_command",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Use a command from `hyperliquid --help`; `data.suggestion` is a hint, not a command to run."
     },
     {
       "exit_code": 10,
       "category": "auth",
-      "retryable": false,
-      "agent_action": "Configure a wallet, account, private key, or keystore."
+      "reason": "auth_required",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Configure a wallet, private key, or keystore; `next` lists the setup commands."
+    },
+    {
+      "exit_code": 10,
+      "category": "auth",
+      "reason": "invalid_auth",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Check the key format, keystore password, or session; a remote service rejected the credentials."
+    },
+    {
+      "exit_code": 10,
+      "category": "auth",
+      "reason": "wallet_not_found",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Pick a wallet that exists in the OWS vault."
+    },
+    {
+      "exit_code": 10,
+      "category": "auth",
+      "reason": "wallet_account_missing",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Use an OWS wallet with a Hyperliquid or EVM account."
     },
     {
       "exit_code": 11,
-      "category": "rate_limit",
-      "retryable": true,
-      "agent_action": "Back off before retrying; prefer streaming over REST polling."
+      "category": "rate_limited",
+      "reason": "rate_limited",
+      "retry": "sometimes",
+      "retry_when": "reads only; a rate-limited mutation is never marked retryable",
+      "stdout": "envelope",
+      "agent_action": "Back off for `retry_after` seconds when present; prefer streaming over REST polling."
     },
     {
       "exit_code": 12,
-      "category": "network_or_unavailable",
-      "retryable": true,
-      "agent_action": "Retry with bounded exponential backoff."
+      "category": "unavailable",
+      "reason": "network_error",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "The API was not reached; retry with bounded exponential backoff."
+    },
+    {
+      "exit_code": 12,
+      "category": "unavailable",
+      "reason": "api_error",
+      "retry": "sometimes",
+      "retry_when": "HTTP 5xx statuses",
+      "stdout": "envelope",
+      "agent_action": "The API answered with a failure status; see `data.http_status`. Retry only when `retryable` is true."
+    },
+    {
+      "exit_code": 12,
+      "category": "unavailable",
+      "reason": "timeout",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "The operation exceeded the requested bound; retry with a longer bound or fewer items."
+    },
+    {
+      "exit_code": 12,
+      "category": "unavailable",
+      "reason": "unknown_outcome",
+      "retry": "never",
+      "stdout": "envelope",
+      "agent_action": "Never resend. Run the `next` commands to see whether the action applied."
     },
     {
       "exit_code": 13,
       "category": "unsupported",
-      "retryable": false,
-      "agent_action": "Correct asset, DEX, address, or unsupported input."
+      "reason": "unsupported_input",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Correct the asset, DEX, address, or value the message names."
     },
     {
-      "exit_code": 14,
-      "category": "stale_data",
-      "retryable": true,
-      "agent_action": "Refresh metadata or retry after market data updates."
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "confirmation_required",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Run the `next` preview. Run the approve command only after a human approves."
+    },
+    {
+      "exit_code": 13,
+      "category": "unsupported",
+      "reason": "asset_not_found",
+      "retry": "unknown",
+      "stdout": "envelope",
+      "agent_action": "Correct the asset name; `data.suggestion` is a hint for a human, never a command to run."
     },
     {
       "exit_code": 15,
       "category": "partial_results",
-      "retryable": false,
-      "agent_action": "Inspect returned partial result details before continuing."
+      "reason": "partial_failure",
+      "retry": "unknown",
+      "stdout": "command_result",
+      "agent_action": "Inspect the per-item results in the single stdout document, then check `next` before acting again."
     }
   ]
 }

@@ -18,14 +18,19 @@ const EVM_CAIP2: &str = "eip155:1";
 
 const HYPERLIQUID_CHAIN_ALIAS: &str = "hyperliquid";
 
+/// A selector that names several wallets: the user must pick by id.
+pub(crate) fn ambiguous_wallet(selector: &str, count: usize) -> CliError {
+    CliError::InvalidAuth(format!(
+        "ows_ambiguous_wallet: OWS wallet selector '{selector}' matched {count} wallets; use the wallet id"
+    ))
+}
+
 fn map_ows_error(err: ows_lib::OwsLibError) -> CliError {
     use ows_lib::OwsLibError;
 
     match err {
         OwsLibError::WalletNotFound(wallet) => CliError::OwsWalletNotFound { wallet },
-        OwsLibError::AmbiguousWallet { name, count } => CliError::InvalidAuth(format!(
-            "ows_ambiguous_wallet: OWS wallet selector '{name}' matched {count} wallets; use the wallet id"
-        )),
+        OwsLibError::AmbiguousWallet { name, count } => ambiguous_wallet(&name, count),
         OwsLibError::WalletNameExists(name) => CliError::Unsupported(format!(
             "ows_wallet_name_exists: a wallet named '{name}' already exists"
         )),

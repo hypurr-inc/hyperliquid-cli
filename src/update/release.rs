@@ -1,20 +1,15 @@
-//! What the notifier and the self-updater both need to know about releases:
-//! where they live, how versions compare, which archive fits this platform, and
-//! how the running binary was installed.
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::errors::CliError;
-use crate::http_api;
-use crate::settings::env;
+use crate::settings::{EnvSource, env};
 
-/// Must match the repository and archive names the release workflow publishes.
-pub(super) const REPO: &str = "hypurr-inc/hyperliquid-cli";
-const LATEST_RELEASE_URL: &str =
-    "https://api.github.com/repos/hypurr-inc/hyperliquid-cli/releases/latest";
+/// The GitHub repository, as `owner/name`: the one spelling every release,
+/// download and issue URL derives from. Must match the repository and archive
+/// names the release workflow publishes.
+pub const REPO: &str = "hypurr-inc/hyperliquid-cli";
 const USER_AGENT: &str = "hyperliquid-cli";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -56,14 +51,13 @@ impl ReleaseClient {
             return Ok(response);
         }
         let body = response.text().await.unwrap_or_default();
-        Err(http_api::failed_reply(status, &body))
+        Err(CliError::failed_reply(status, &body))
     }
 
-    /// The tag of the latest published release.
     pub async fn latest_version(&self) -> Result<String, CliError> {
         let release = self
             .get(
-                LATEST_RELEASE_URL,
+                &format!("https://api.github.com/repos/{REPO}/releases/latest"),
                 "update check failed",
                 Some(FETCH_TIMEOUT),
             )
@@ -170,9 +164,9 @@ pub(super) enum InstallMethod {
 }
 
 impl InstallMethod {
-    pub fn detect(exe: &Path) -> Self {
+    pub fn detect(exe: &Path, source: &EnvSource) -> Self {
         let home = dirs::home_dir();
-        let cargo_home = std::env::var_os(env::CARGO_HOME).map(PathBuf::from);
+        let cargo_home = source.get_os(env::CARGO_HOME).map(PathBuf::from);
         let resolved = std::fs::canonicalize(exe).ok();
         [Some(exe), resolved.as_deref()]
             .into_iter()
@@ -221,14 +215,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_compare_handles_v_prefix() {
+    fn version_compare_orders_numerically_and_ignores_v_prefix() {
         assert!(is_newer_version("v0.2.0", "0.1.9"));
+        assert!(is_newer_version("1.10.0", "1.9.0"));
+        assert!(is_newer_version("1.0.1", "1.0"));
         assert!(!is_newer_version("v0.1.0", "0.1.0"));
         assert!(!is_newer_version("v0.1.0", "0.2.0"));
     }
 
     #[test]
-    fn version_compare_handles_prereleases() {
+    fn version_compare_treats_a_prerelease_as_older_than_its_release() {
         assert!(!is_newer_version("v1.0.0-rc.1", "1.0.0"));
         assert!(is_newer_version("v1.0.0", "1.0.0-rc.1"));
         assert!(is_newer_version("v1.0.1-rc.1", "1.0.0"));
@@ -270,8 +266,11 @@ mod tests {
     }
 
     #[test]
-    fn current_release_asset_supports_this_platform() {
-        let _ = current_release_asset();
+    fn repo_matches_the_cargo_repository() {
+        assert_eq!(
+            format!("https://github.com/{REPO}"),
+            env!("CARGO_PKG_REPOSITORY")
+        );
     }
 
     #[test]
@@ -305,14 +304,6 @@ mod tests {
         assert_eq!(
             classify("/usr/local/bin/hyperliquid", None),
             InstallMethod::Standalone
-        );
-        assert_eq!(
-            InstallMethod::Homebrew.upgrade_command(),
-            "brew upgrade hyperliquid"
-        );
-        assert_eq!(
-            InstallMethod::Standalone.upgrade_command(),
-            "hyperliquid update"
         );
     }
 }

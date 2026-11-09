@@ -1,5 +1,3 @@
-//! Snapshot watch mode.
-//!
 //! Renders snapshots in-place using crossterm's alternate screen for human
 //! formats and emits newline-delimited JSON for `--format json`. Signal,
 //! closed-pipe and bound handling live in [`crate::stream`].
@@ -18,27 +16,28 @@ use futures::StreamExt;
 use hypersdk::hypercore::{Chain, Subscription, WebSocket, ws::Event as WsEvent};
 
 use crate::errors::CliError;
-use crate::output::{self, OutputFormat, Session, TableData, terminal};
+use crate::invocation::Invocation;
+use crate::mode::{Mode, NON_INTERACTIVE_FLAG};
+use crate::output::{self, OutputFormat, Session, TableData};
+use crate::settings::env;
 use crate::stream::{
-    CONNECTION_LOST_NOTICE, EXIT_SIGINT, JSON_LINES_STDIN_NOTICE, JSON_LINES_STDOUT_NOTICE,
-    StreamBounds, StreamEnd, run_stream, write_stdout_line,
+    CONNECTION_LOST_NOTICE, EXIT_SIGINT, JSON_LINES_DRIVEN_NOTICE, JSON_LINES_STDIN_NOTICE,
+    JSON_LINES_STDOUT_NOTICE, StreamBounds, StreamEnd, run_stream, write_stdout_line,
 };
 use crate::ws::websocket_for_chain;
 
 const WATCH_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const KEY_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
+/// What ends the wait between two snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchEvent {
-    Timer,
-    WebSocketMessage,
-    WebSocketClosed,
+    /// Time passed, the socket delivered data or `r` was pressed: take another snapshot.
+    Refresh,
     ConnectionLost,
     ConnectionRestored,
-    KeyRefresh,
-    KeyQuit,
-    KeyInterrupt,
-    Continue,
+    Quit,
+    Interrupt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,19 +112,41 @@ impl WatchOutput for StdoutWatchOutput {
         format: OutputFormat,
         connection_lost: bool,
     ) -> Result<(), anyhow::Error> {
-        render_tui(session, title, data, format, connection_lost).map_err(Into::into)
+        let body = session.render_as(data, format);
+
+        let mut stdout = io::stdout();
+        execute!(stdout, cursor::MoveTo(0, 0), Clear(ClearType::All))?;
+        let (_, height) = terminal_size().unwrap_or((120, 36));
+        let available_body_lines = usize::from(height.saturating_sub(4));
+        let body_lines = body
+            .lines()
+            .take(available_body_lines)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        writeln!(stdout, "{}", output::colors::cyan(title))?;
+        writeln!(
+            stdout,
+            "{}",
+            output::colors::gray(
+                "q/Ctrl-C/Ctrl-D/Esc quit • r refresh • live updates via Hyperliquid WebSocket",
+            )
+        )?;
+        if connection_lost {
+            writeln!(stdout, "{}", output::colors::yellow(CONNECTION_LOST_NOTICE))?;
+        } else {
+            writeln!(stdout)?;
+        }
+        writeln!(stdout, "{body_lines}")?;
+        stdout.flush().map_err(Into::into)
     }
 }
 
 struct RealWatchInput {
     ws: WebSocket,
+    /// The socket has ended; the refresh timer alone keeps the view current.
+    ws_closed: bool,
     read_keys: bool,
-}
-
-impl RealWatchInput {
-    fn new(ws: WebSocket, read_keys: bool) -> Self {
-        Self { ws, read_keys }
-    }
 }
 
 impl WatchInput for RealWatchInput {
@@ -135,22 +156,16 @@ impl WatchInput for RealWatchInput {
 
         loop {
             tokio::select! {
-                _ = &mut refresh_sleep => return Ok(WatchEvent::Timer),
-                event = self.ws.next() => {
-                    return match event {
-                        Some(WsEvent::Message(_)) => Ok(WatchEvent::WebSocketMessage),
-                        Some(WsEvent::Disconnected) => Ok(WatchEvent::ConnectionLost),
-                        Some(WsEvent::Connected) => Ok(WatchEvent::ConnectionRestored),
-                        None => {
-                            tokio::time::sleep(WATCH_REFRESH_INTERVAL).await;
-                            Ok(WatchEvent::WebSocketClosed)
-                        }
-                    };
-                }
+                _ = &mut refresh_sleep => return Ok(WatchEvent::Refresh),
+                event = self.ws.next(), if !self.ws_closed => match event {
+                    Some(WsEvent::Message(_)) => return Ok(WatchEvent::Refresh),
+                    Some(WsEvent::Disconnected) => return Ok(WatchEvent::ConnectionLost),
+                    Some(WsEvent::Connected) => return Ok(WatchEvent::ConnectionRestored),
+                    None => self.ws_closed = true,
+                },
                 _ = tokio::time::sleep(KEY_POLL_INTERVAL), if self.read_keys => {
-                    match try_read_key_event().await? {
-                        Some(key) => return Ok(watch_key_event_action(key)),
-                        None => continue,
+                    if let Some(event) = try_read_key_event().await?.and_then(watch_key_event_action) {
+                        return Ok(event);
                     }
                 }
             }
@@ -158,9 +173,8 @@ impl WatchInput for RealWatchInput {
     }
 }
 
-/// Run a refresh-in-place watch loop for data that can be fetched as snapshots.
 pub async fn run_snapshot_watch<T, F, Fut>(
-    session: &Session,
+    inv: &Invocation,
     title: &str,
     chain: Chain,
     subscriptions: Vec<Subscription>,
@@ -172,24 +186,16 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, anyhow::Error>>,
 {
+    let session = inv.session();
+    let mode = inv.mode();
     let format = session.format();
-    let bounds = StreamBounds::snapshot_watch(max_ticks);
-    let stdin_is_tty = terminal::stdin_is_terminal();
-    let stdout_is_tty = terminal::stdout_is_terminal();
-    let render_mode =
-        snapshot_watch_render_mode(format, bounds.max_items, stdin_is_tty, stdout_is_tty)?;
+    let bounds = StreamBounds::snapshot_watch(max_ticks, inv.settings().env());
+    let render_mode = snapshot_watch_render_mode(mode, bounds.max_items)?;
 
     // A human format that reaches the NDJSON path was asked for explicitly:
     // non-terminal stdout defaults to JSON before this point.
     if render_mode == SnapshotWatchRenderMode::Ndjson && format != OutputFormat::Json {
-        eprintln!(
-            "{}",
-            if stdout_is_tty {
-                JSON_LINES_STDIN_NOTICE
-            } else {
-                JSON_LINES_STDOUT_NOTICE
-            }
-        );
+        eprintln!("{}", json_lines_notice(mode));
     }
 
     run_stream(async move {
@@ -198,8 +204,11 @@ where
             ws.subscribe(subscription);
         }
 
-        let mut input =
-            RealWatchInput::new(ws, matches!(render_mode, SnapshotWatchRenderMode::Tui(_)));
+        let mut input = RealWatchInput {
+            ws,
+            ws_closed: false,
+            read_keys: matches!(render_mode, SnapshotWatchRenderMode::Tui(_)),
+        };
         let mut output = StdoutWatchOutput;
 
         match render_mode {
@@ -257,7 +266,7 @@ where
     loop {
         let snapshot = refresh().await?;
         if format == OutputFormat::Json {
-            output.emit_json(&session.render_json_line(&snapshot)?)?;
+            output.emit_json(&session.render_json_line(&snapshot))?;
         } else {
             output.render_tui(session, title, &snapshot, format, connection_lost)?;
         }
@@ -268,108 +277,82 @@ where
         }
 
         match input.next_event().await? {
-            WatchEvent::KeyQuit => return Ok(StreamEnd::Finished),
-            WatchEvent::KeyInterrupt => return Ok(StreamEnd::Signal(EXIT_SIGINT)),
+            WatchEvent::Quit => return Ok(StreamEnd::Finished),
+            WatchEvent::Interrupt => return Ok(StreamEnd::Signal(EXIT_SIGINT)),
             WatchEvent::ConnectionLost => connection_lost = true,
             WatchEvent::ConnectionRestored => connection_lost = false,
-            WatchEvent::Timer
-            | WatchEvent::WebSocketMessage
-            | WatchEvent::WebSocketClosed
-            | WatchEvent::KeyRefresh
-            | WatchEvent::Continue => {}
+            WatchEvent::Refresh => {}
         }
     }
 }
 
+/// The TUI needs a person at a terminal on both streams; anything else is
+/// NDJSON when bounded and refused when not.
 fn snapshot_watch_render_mode(
-    format: OutputFormat,
+    mode: &Mode,
     max_ticks: Option<usize>,
-    stdin_is_tty: bool,
-    stdout_is_tty: bool,
 ) -> Result<SnapshotWatchRenderMode, CliError> {
-    if format == OutputFormat::Json {
+    if mode.machine_format() {
         return Ok(SnapshotWatchRenderMode::Ndjson);
     }
-
-    if stdin_is_tty && stdout_is_tty {
-        return Ok(SnapshotWatchRenderMode::Tui(format));
+    if mode.full_screen() {
+        return Ok(SnapshotWatchRenderMode::Tui(mode.format));
     }
-
     if max_ticks.is_some() {
         return Ok(SnapshotWatchRenderMode::Ndjson);
     }
-
-    Err(CliError::Unsupported(non_tty_watch_error_message(
-        stdin_is_tty,
-        stdout_is_tty,
-    )))
+    Err(tui_refused(mode))
 }
 
-fn non_tty_watch_error_message(stdin_is_tty: bool, stdout_is_tty: bool) -> String {
-    let reason = match (stdin_is_tty, stdout_is_tty) {
-        (false, false) => "stdin and stdout are not TTYs",
-        (false, true) => "stdin is not a TTY",
-        (true, false) => "stdout is not a TTY",
-        (true, true) => unreachable!("called only for non-TTY watch contexts"),
-    };
-
-    format!(
-        "Non-TTY watch output cannot enter the alternate-screen TUI safely ({reason}). \
-         For scripts/agents, pass --format json and --max-ticks <N> \
-         (or set HYPERLIQUID_WATCH_MAX_TICKS) to receive bounded NDJSON."
-    )
-}
-
-fn render_tui(
-    session: &Session,
-    title: &str,
-    data: &dyn TableData,
-    format: OutputFormat,
-    connection_lost: bool,
-) -> Result<(), io::Error> {
-    let body = match format {
-        OutputFormat::Pretty | OutputFormat::Table => session.render_as(data, format),
-        OutputFormat::Json => unreachable!("JSON watch mode bypasses TUI rendering"),
-    };
-
-    let mut stdout = io::stdout();
-    execute!(stdout, cursor::MoveTo(0, 0), Clear(ClearType::All))?;
-    let (_, height) = terminal_size().unwrap_or((120, 36));
-    let available_body_lines = usize::from(height.saturating_sub(4));
-    let body_lines = body
-        .lines()
-        .take(available_body_lines)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    writeln!(stdout, "{}", output::colors::cyan(title))?;
-    writeln!(
-        stdout,
-        "{}",
-        output::colors::gray(
-            "q/Ctrl-C/Ctrl-D/Esc quit • r refresh • live updates via Hyperliquid WebSocket",
-        )
-    )?;
-    if connection_lost {
-        writeln!(stdout, "{}", output::colors::yellow(CONNECTION_LOST_NOTICE))?;
+/// Why a human format streams NDJSON instead of drawing the TUI.
+fn json_lines_notice(mode: &Mode) -> &'static str {
+    if !mode.terminal.stdout {
+        JSON_LINES_STDOUT_NOTICE
+    } else if !mode.terminal.stdin {
+        JSON_LINES_STDIN_NOTICE
     } else {
-        writeln!(stdout)?;
+        JSON_LINES_DRIVEN_NOTICE
     }
-    writeln!(stdout, "{body_lines}")?;
-    stdout.flush()
 }
 
-fn watch_key_event_action(key: KeyEvent) -> WatchEvent {
+fn tui_refused(mode: &Mode) -> CliError {
+    let (subject, reason) = match (mode.terminal.stdin, mode.terminal.stdout) {
+        (false, false) => (
+            "Non-TTY watch output",
+            "stdin and stdout are not TTYs".to_string(),
+        ),
+        (false, true) => ("Non-TTY watch output", "stdin is not a TTY".to_string()),
+        (true, false) => ("Non-TTY watch output", "stdout is not a TTY".to_string()),
+        (true, true) => (
+            "Watch output of a driven run",
+            format!(
+                "{}, {} or {} is driving this run",
+                env::AGENT,
+                env::CI,
+                NON_INTERACTIVE_FLAG
+            ),
+        ),
+    };
+    CliError::Unsupported(format!(
+        "{subject} cannot enter the alternate-screen TUI safely ({reason}). \
+         For scripts/agents, pass --format json and --max-ticks <N> \
+         (or set {}) to receive bounded NDJSON.",
+        env::WATCH_MAX_TICKS
+    ))
+}
+
+/// The action for a key press; `None` for keys the view does not use.
+fn watch_key_event_action(key: KeyEvent) -> Option<WatchEvent> {
     let has_control = key.modifiers.contains(KeyModifiers::CONTROL);
     let plain_or_shift = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
 
     match key.code {
-        KeyCode::Esc => WatchEvent::KeyQuit,
-        KeyCode::Char('c' | 'C') if has_control => WatchEvent::KeyInterrupt,
-        KeyCode::Char('d' | 'D') if has_control => WatchEvent::KeyQuit,
-        KeyCode::Char('q' | 'Q') if plain_or_shift => WatchEvent::KeyQuit,
-        KeyCode::Char('r' | 'R') if plain_or_shift => WatchEvent::KeyRefresh,
-        _ => WatchEvent::Continue,
+        KeyCode::Esc => Some(WatchEvent::Quit),
+        KeyCode::Char('c' | 'C') if has_control => Some(WatchEvent::Interrupt),
+        KeyCode::Char('d' | 'D') if has_control => Some(WatchEvent::Quit),
+        KeyCode::Char('q' | 'Q') if plain_or_shift => Some(WatchEvent::Quit),
+        KeyCode::Char('r' | 'R') if plain_or_shift => Some(WatchEvent::Refresh),
+        _ => None,
     }
 }
 
@@ -389,6 +372,7 @@ async fn try_read_key_event() -> Result<Option<KeyEvent>, anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::terminal::Terminal;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use std::collections::VecDeque;
     use std::sync::{
@@ -397,97 +381,141 @@ mod tests {
     };
 
     #[test]
-    fn snapshot_watch_render_mode_keeps_tui_for_interactive_terminals() {
-        assert_eq!(
-            snapshot_watch_render_mode(OutputFormat::Pretty, None, true, true).unwrap(),
-            SnapshotWatchRenderMode::Tui(OutputFormat::Pretty)
-        );
-        assert_eq!(
-            snapshot_watch_render_mode(OutputFormat::Table, Some(1), true, true).unwrap(),
-            SnapshotWatchRenderMode::Tui(OutputFormat::Table)
-        );
-    }
-
-    #[test]
-    fn snapshot_watch_render_mode_uses_ndjson_for_json_format() {
-        assert_eq!(
-            snapshot_watch_render_mode(OutputFormat::Json, None, false, false).unwrap(),
-            SnapshotWatchRenderMode::Ndjson
-        );
-    }
-
-    #[test]
-    fn snapshot_watch_render_mode_uses_ndjson_for_bounded_non_tty_watch() {
-        assert_eq!(
-            snapshot_watch_render_mode(OutputFormat::Pretty, Some(1), false, false).unwrap(),
-            SnapshotWatchRenderMode::Ndjson
-        );
-        assert_eq!(
-            snapshot_watch_render_mode(OutputFormat::Table, Some(1), true, false).unwrap(),
-            SnapshotWatchRenderMode::Ndjson
-        );
-    }
-
-    #[test]
-    fn snapshot_watch_render_mode_rejects_unbounded_non_tty_tui() {
-        let error =
-            snapshot_watch_render_mode(OutputFormat::Pretty, None, false, true).unwrap_err();
-
-        assert_eq!(error.exit_code(), 13);
-        let message = error.to_string();
-        assert!(message.contains("Non-TTY"));
-        assert!(message.contains("--format json"));
-        assert!(message.contains("--max-ticks"));
-    }
-
-    #[test]
-    fn watch_key_ctrl_d_and_esc_quit() {
-        for key in [
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    fn render_mode_is_tui_only_for_interactive_terminals_and_ndjson_when_bounded_or_json() {
+        use OutputFormat::{Json, Pretty, Table};
+        use SnapshotWatchRenderMode::{Ndjson, Tui};
+        for (format, max_ticks, stdin_tty, stdout_tty, expected) in [
+            (Pretty, None, true, true, Tui(Pretty)),
+            (Table, Some(1), true, true, Tui(Table)),
+            (Json, None, false, false, Ndjson),
+            (Json, None, true, true, Ndjson),
+            (Pretty, Some(1), false, false, Ndjson),
+            (Table, Some(1), true, false, Ndjson),
+            (Pretty, Some(1), false, true, Ndjson),
         ] {
-            assert_eq!(watch_key_event_action(key), WatchEvent::KeyQuit);
+            assert_eq!(
+                snapshot_watch_render_mode(&mode(format, stdin_tty, stdout_tty), max_ticks)
+                    .unwrap(),
+                expected,
+                "{format:?} ticks={max_ticks:?} stdin={stdin_tty} stdout={stdout_tty}"
+            );
+        }
+    }
+
+    fn mode(format: OutputFormat, stdin: bool, stdout: bool) -> Mode {
+        Mode {
+            format,
+            terminal: Terminal {
+                stdin,
+                stdout,
+                stderr: true,
+            },
+            ..Mode::default()
         }
     }
 
     #[test]
-    fn watch_key_ctrl_c_interrupts() {
-        for code in ['c', 'C'] {
+    fn an_agent_ci_or_non_interactive_run_never_draws_the_tui_even_on_a_terminal() {
+        let on_a_terminal = mode(OutputFormat::Pretty, true, true);
+        for (name, driven) in [
+            (
+                "agent",
+                Mode {
+                    agent: true,
+                    ..on_a_terminal
+                },
+            ),
+            (
+                "ci",
+                Mode {
+                    ci: true,
+                    ..on_a_terminal
+                },
+            ),
+            (
+                "non-interactive",
+                Mode {
+                    non_interactive_flag: true,
+                    ..on_a_terminal
+                },
+            ),
+        ] {
             assert_eq!(
-                watch_key_event_action(KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL)),
-                WatchEvent::KeyInterrupt
+                snapshot_watch_render_mode(&driven, Some(3)).unwrap(),
+                SnapshotWatchRenderMode::Ndjson,
+                "{name}: bounded"
+            );
+            let refused = snapshot_watch_render_mode(&driven, None).unwrap_err();
+            assert_eq!(refused.exit_code(), 13, "{name}: unbounded");
+            let message = refused.to_string();
+            assert!(message.contains("--format json"), "{name}: {message}");
+            assert!(message.contains("is driving this run"), "{name}: {message}");
+            assert_eq!(
+                json_lines_notice(&driven),
+                JSON_LINES_DRIVEN_NOTICE,
+                "{name}"
             );
         }
     }
 
     #[test]
-    fn watch_key_q_and_shift_q_still_quit() {
-        for key in [
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
-        ] {
-            assert_eq!(watch_key_event_action(key), WatchEvent::KeyQuit);
+    fn the_ndjson_notice_names_the_stream_that_is_not_a_terminal() {
+        assert_eq!(
+            json_lines_notice(&mode(OutputFormat::Pretty, true, false)),
+            JSON_LINES_STDOUT_NOTICE
+        );
+        assert_eq!(
+            json_lines_notice(&mode(OutputFormat::Pretty, false, true)),
+            JSON_LINES_STDIN_NOTICE
+        );
+    }
+
+    #[test]
+    fn unbounded_watch_without_both_terminals_is_refused_with_the_json_alternative() {
+        for (stdin_tty, stdout_tty) in [(false, true), (true, false), (false, false)] {
+            let error = snapshot_watch_render_mode(
+                &mode(OutputFormat::Pretty, stdin_tty, stdout_tty),
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.exit_code(),
+                13,
+                "stdin={stdin_tty} stdout={stdout_tty}"
+            );
+            let message = error.to_string();
+            assert!(message.contains("--format json"), "{message}");
+            assert!(message.contains("--max-ticks"), "{message}");
         }
     }
 
     #[test]
-    fn watch_key_preserves_modifiers_for_control_chords() {
-        assert_eq!(
-            watch_key_event_action(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
-            WatchEvent::Continue
-        );
-        assert_eq!(
-            watch_key_event_action(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
-            WatchEvent::Continue
-        );
-        assert_eq!(
-            watch_key_event_action(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
-            WatchEvent::Continue
-        );
-        assert_eq!(
-            watch_key_event_action(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
-            WatchEvent::KeyRefresh
-        );
+    fn watch_keys_quit_interrupt_refresh_and_ignore_everything_else() {
+        let key = |code, modifiers| watch_key_event_action(KeyEvent::new(code, modifiers));
+        let none = KeyModifiers::NONE;
+        let ctrl = KeyModifiers::CONTROL;
+        for (code, modifiers, expected) in [
+            (KeyCode::Esc, none, Some(WatchEvent::Quit)),
+            (KeyCode::Char('d'), ctrl, Some(WatchEvent::Quit)),
+            (KeyCode::Char('q'), none, Some(WatchEvent::Quit)),
+            (
+                KeyCode::Char('Q'),
+                KeyModifiers::SHIFT,
+                Some(WatchEvent::Quit),
+            ),
+            (KeyCode::Char('c'), ctrl, Some(WatchEvent::Interrupt)),
+            (KeyCode::Char('C'), ctrl, Some(WatchEvent::Interrupt)),
+            (KeyCode::Char('r'), none, Some(WatchEvent::Refresh)),
+            (KeyCode::Char('c'), none, None),
+            (KeyCode::Char('d'), none, None),
+            (KeyCode::Char('r'), ctrl, None),
+            (KeyCode::Char('x'), none, None),
+            (KeyCode::Enter, none, None),
+            (KeyCode::Up, none, None),
+            (KeyCode::Tab, none, None),
+        ] {
+            assert_eq!(key(code, modifiers), expected, "{code:?} {modifiers:?}");
+        }
     }
 
     #[derive(Clone)]
@@ -523,7 +551,7 @@ mod tests {
 
     impl WatchInput for ScriptedInput {
         async fn next_event(&mut self) -> Result<WatchEvent, anyhow::Error> {
-            Ok(self.events.pop_front().unwrap_or(WatchEvent::Timer))
+            Ok(self.events.pop_front().unwrap_or(WatchEvent::Refresh))
         }
     }
 
@@ -537,6 +565,7 @@ mod tests {
         title: String,
         format: OutputFormat,
         rows: Vec<Vec<String>>,
+        connection_lost: bool,
     }
 
     impl WatchOutput for CapturingOutput {
@@ -551,12 +580,13 @@ mod tests {
             title: &str,
             data: &dyn TableData,
             format: OutputFormat,
-            _connection_lost: bool,
+            connection_lost: bool,
         ) -> Result<(), anyhow::Error> {
             self.tui_renders.push(TuiRender {
                 title: title.to_string(),
                 format,
                 rows: data.rows(),
+                connection_lost,
             });
             Ok(())
         }
@@ -574,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn watch_json_max_tick_output_emits_expected_snapshots_and_terminates() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::Timer]);
+        let mut input = ScriptedInput::new([WatchEvent::Refresh]);
         let mut output = CapturingOutput::default();
 
         run_snapshot_watch_core(
@@ -595,7 +625,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_tui_render_path_is_test_covered() {
+    async fn human_formats_render_to_the_screen_and_not_as_json_lines() {
         let counter = Arc::new(AtomicUsize::new(0));
         let mut input = ScriptedInput::new([]);
         let mut output = CapturingOutput::default();
@@ -622,7 +652,7 @@ mod tests {
     #[tokio::test]
     async fn watch_q_quits_after_current_snapshot() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::KeyQuit]);
+        let mut input = ScriptedInput::new([WatchEvent::Quit]);
         let mut output = CapturingOutput::default();
 
         run_snapshot_watch_core(
@@ -644,7 +674,7 @@ mod tests {
     #[tokio::test]
     async fn watch_r_refreshes_before_q_quits() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::KeyRefresh, WatchEvent::KeyQuit]);
+        let mut input = ScriptedInput::new([WatchEvent::Refresh, WatchEvent::Quit]);
         let mut output = CapturingOutput::default();
 
         run_snapshot_watch_core(
@@ -665,53 +695,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_websocket_message_triggers_refresh() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::WebSocketMessage]);
-        let mut output = CapturingOutput::default();
-
-        run_snapshot_watch_core(
-            &Session::for_test(OutputFormat::Pretty),
-            "Live TUI",
-            OutputFormat::Pretty,
-            Some(2),
-            counting_refresh(Arc::clone(&counter)),
-            &mut input,
-            &mut output,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
-        assert_eq!(output.tui_renders.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn watch_websocket_close_continues_without_error() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::WebSocketClosed]);
-        let mut output = CapturingOutput::default();
-
-        run_snapshot_watch_core(
-            &Session::for_test(OutputFormat::Pretty),
-            "Live TUI",
-            OutputFormat::Pretty,
-            Some(2),
-            counting_refresh(Arc::clone(&counter)),
-            &mut input,
-            &mut output,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
-        assert_eq!(output.tui_renders.len(), 2);
-    }
-
-    #[tokio::test]
     async fn watch_refresh_error_propagates_clearly() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::KeyRefresh]);
+        let mut input = ScriptedInput::new([WatchEvent::Refresh]);
         let mut output = CapturingOutput::default();
 
         let result = run_snapshot_watch_core(
@@ -747,7 +733,7 @@ mod tests {
     #[tokio::test]
     async fn watch_ctrl_c_key_ends_with_sigint_status() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::KeyInterrupt]);
+        let mut input = ScriptedInput::new([WatchEvent::Interrupt]);
         let mut output = CapturingOutput::default();
 
         let end = run_snapshot_watch_core(
@@ -766,7 +752,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_connection_events_keep_refreshing() {
+    async fn connection_notice_follows_lost_and_restored_events_without_stopping() {
         let counter = Arc::new(AtomicUsize::new(0));
         let mut input =
             ScriptedInput::new([WatchEvent::ConnectionLost, WatchEvent::ConnectionRestored]);
@@ -785,6 +771,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(end, StreamEnd::Finished);
-        assert_eq!(counter.load(Ordering::SeqCst), 3);
+        let lost: Vec<bool> = output
+            .tui_renders
+            .iter()
+            .map(|render| render.connection_lost)
+            .collect();
+        assert_eq!(lost, [false, true, false]);
     }
 }

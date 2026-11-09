@@ -1,45 +1,14 @@
 //! Structured error system for Hyperliquid CLI.
 //!
-//! [`CliError`] is the one error type commands return. [`CliError::spec`] is
-//! the single place that gives each variant its exit code, category, reason
-//! and retryability; everything else (JSON envelope, human rendering, process
-//! exit) reads from it.
-//!
-//! - `classify`: turns remote text and SDK errors into `CliError`s.
-//! - `transport`: names `reqwest` transport failures.
-//! - `recovery`: commands to run next.
-//! - `envelope`: the JSON error document.
-//! - `render`: human output and process exit.
-//!
-//! # Exit Codes
-//!
-//! | Code | Variant             | Meaning                              |
-//! |------|---------------------|--------------------------------------|
-//! | 0    | (success)           | Command completed successfully       |
-//! | 1    | `Internal`          | Unexpected internal error            |
-//! | 1    | `ExchangeRejected`  | Exchange rejected the action         |
-//! | 2    | `Configuration`     | Invalid config or network setting    |
-//! | 2    | `MissingInput`      | Required input missing, can't prompt |
-//! | 2    | (clap usage)        | Invalid arguments (handled by clap)  |
-//! | 10   | `AuthRequired`      | Missing wallet / private key         |
-//! | 10   | `InvalidAuth`       | Bad key format / expired session     |
-//! | 10   | `AuthRejected`      | Remote side rejected the credentials |
-//! | 10   | `OwsWalletNotFound` | OWS wallet missing from the vault    |
-//! | 10   | `OwsNoChainAccount` | OWS wallet has no usable account     |
-//! | 11   | `RateLimited`       | API rate-limit response              |
-//! | 12   | `Unavailable`       | Network / API unreachable            |
-//! | 12   | `ApiStatus`         | API answered with a failure status   |
-//! | 12   | `Timeout`           | Operation exceeded a requested bound |
-//! | 12   | `UnknownOutcome`    | Mutation sent, result unknown        |
-//! | 13   | `Unsupported`       | Invalid asset, bad parameter         |
-//! | 13   | `ConfirmationRequired` | Confirmation needed, can't prompt |
-//! | 13   | `AssetNotFound*`    | Unknown asset                        |
-//! | 15   | `PartialResults`    | Some items failed in a batch         |
+//! [`CliError`] is the one error type commands return. Each variant maps to a
+//! [`spec`] constant that gives it its exit code, category, reason, retry policy
+//! and agent guidance; the JSON envelope and the checked-in `.claude/error-catalog.json` all read from those constants. The
+//! exit-code table lives there and nowhere else.
 
 mod classify;
 mod envelope;
 mod recovery;
-mod render;
+mod spec;
 mod transport;
 
 use thiserror::Error;
@@ -47,21 +16,14 @@ use thiserror::Error;
 use crate::response_sanitization::Untrusted;
 
 pub use classify::{
-    from_anyhow, from_exchange_rejection, from_sdk, http_response_indicates_rate_limit,
-    is_server_status,
+    Rejection, classify_rejection, from_anyhow, from_exchange_rejection, from_sdk,
+    http_response_indicates_rate_limit, is_server_status,
 };
-pub use envelope::ErrorEnvelope;
-pub use recovery::{NextCommand, Recovery};
-pub use render::{
-    ErrorOutput, exit_with_error, print_human_error, print_json_error, render_human_error,
-    set_command_path,
-};
+pub use envelope::{ErrorEnvelope, UsageParts, partial_results_fields};
+pub use recovery::NextCommand;
+pub use spec::StdoutDocument;
 pub use transport::{network_error, transport_cause};
 
-/// CLI error types mapped to structured exit codes.
-///
-/// Use [`CliError::exit_code`] to get the numeric code and the `Display`
-/// implementation for the message.
 #[derive(Error, Debug)]
 pub enum CliError {
     /// Unexpected internal error (exit 1).
@@ -194,64 +156,33 @@ fn api_status_headline(status: u16) -> &'static str {
     }
 }
 
-/// What a variant reports to callers and machine consumers.
-struct Spec {
-    exit_code: i32,
-    category: &'static str,
-    reason: &'static str,
-    retryable: Option<bool>,
-}
-
-impl Spec {
-    const fn new(exit_code: i32, category: &'static str, reason: &'static str) -> Self {
-        Self {
-            exit_code,
-            category,
-            reason,
-            retryable: None,
-        }
-    }
-
-    const fn retryable(mut self, retryable: Option<bool>) -> Self {
-        self.retryable = retryable;
-        self
-    }
-}
-
 impl CliError {
-    /// The one table of per-variant exit code, category, reason and retryability.
-    fn spec(&self) -> Spec {
+    /// The spec constant for this variant: the only place a variant gets its
+    /// exit code, category, reason and retry policy.
+    fn spec(&self) -> &'static spec::Spec {
         match self {
-            Self::Internal(_) => Spec::new(1, "internal", "internal_error"),
-            Self::ExchangeRejected { .. } => Spec::new(1, "internal", "exchange_rejected"),
-            Self::Configuration(_) => Spec::new(2, "configuration", "invalid_config"),
-            Self::MissingInput(_) => Spec::new(2, "missing_input", "missing_input"),
-            Self::AuthRequired => Spec::new(10, "auth", "auth_required"),
-            Self::InvalidAuth(_) | Self::AuthRejected(_) => Spec::new(10, "auth", "invalid_auth"),
-            Self::OwsWalletNotFound { .. } => Spec::new(10, "auth", "wallet_not_found"),
-            Self::OwsNoChainAccount { .. } => Spec::new(10, "auth", "wallet_account_missing"),
-            Self::RateLimited { retryable, .. } => {
-                Spec::new(11, "rate_limited", "rate_limited").retryable(retryable.then_some(true))
-            }
-            Self::Unavailable(_) => Spec::new(12, "unavailable", "network_error"),
-            Self::ApiStatus { status, .. } => Spec::new(12, "unavailable", "api_error")
-                .retryable(classify::is_server_status(*status).then_some(true)),
-            Self::Timeout(_) => Spec::new(12, "unavailable", "timeout"),
-            Self::UnknownOutcome(_) => {
-                Spec::new(12, "unavailable", "unknown_outcome").retryable(Some(false))
-            }
-            Self::Unsupported(_) => Spec::new(13, "unsupported", "unsupported_input"),
-            Self::ConfirmationRequired { .. } => {
-                Spec::new(13, "unsupported", "confirmation_required")
-            }
+            Self::Internal(_) => &spec::INTERNAL,
+            Self::ExchangeRejected { .. } => &spec::EXCHANGE_REJECTED,
+            Self::Configuration(_) => &spec::INVALID_CONFIG,
+            Self::MissingInput(_) => &spec::MISSING_INPUT,
+            Self::AuthRequired => &spec::AUTH_REQUIRED,
+            Self::InvalidAuth(_) | Self::AuthRejected(_) => &spec::INVALID_AUTH,
+            Self::OwsWalletNotFound { .. } => &spec::WALLET_NOT_FOUND,
+            Self::OwsNoChainAccount { .. } => &spec::WALLET_ACCOUNT_MISSING,
+            Self::RateLimited { .. } => &spec::RATE_LIMITED,
+            Self::Unavailable(_) => &spec::NETWORK_ERROR,
+            Self::ApiStatus { .. } => &spec::API_ERROR,
+            Self::Timeout(_) => &spec::TIMEOUT,
+            Self::UnknownOutcome(_) => &spec::UNKNOWN_OUTCOME,
+            Self::Unsupported(_) => &spec::UNSUPPORTED_INPUT,
+            Self::ConfirmationRequired { .. } => &spec::CONFIRMATION_REQUIRED,
             Self::AssetNotFound { .. } | Self::AssetNotFoundNoSuggestion { .. } => {
-                Spec::new(13, "unsupported", "asset_not_found")
+                &spec::ASSET_NOT_FOUND
             }
-            Self::PartialResults(_) => Spec::new(15, "partial_results", "partial_failure"),
+            Self::PartialResults(_) => &spec::PARTIAL_FAILURE,
         }
     }
 
-    /// Process exit code.
     #[must_use]
     pub fn exit_code(&self) -> i32 {
         self.spec().exit_code
@@ -269,10 +200,29 @@ impl CliError {
         self.spec().reason
     }
 
+    /// Who writes the JSON document on stdout when this error ends the run.
+    #[must_use]
+    pub fn stdout_document(&self) -> StdoutDocument {
+        self.spec().stdout
+    }
+
     /// Whether resending is known to be safe and useful. `None` when unknown.
     #[must_use]
     pub fn retryable(&self) -> Option<bool> {
-        self.spec().retryable
+        match self.spec().retry {
+            spec::Retry::Unknown => None,
+            spec::Retry::Never => Some(false),
+            spec::Retry::Sometimes(_) => self.resend_is_safe().then_some(true),
+        }
+    }
+
+    /// The per-error condition behind a [`spec::Retry::Sometimes`] policy.
+    fn resend_is_safe(&self) -> bool {
+        match self {
+            Self::RateLimited { retryable, .. } => *retryable,
+            Self::ApiStatus { status, .. } => classify::is_server_status(*status),
+            _ => false,
+        }
     }
 
     /// Seconds to wait before retrying, from `Retry-After`.
@@ -305,7 +255,6 @@ impl CliError {
         Self::UnknownOutcome(cause)
     }
 
-    /// Build an [`CliError::ApiStatus`] from an HTTP status and response body.
     #[must_use]
     pub fn api_status(status: reqwest::StatusCode, body: &str) -> Self {
         let remote = (!body.trim().is_empty()).then(|| Untrusted::from_remote(body));
@@ -316,10 +265,37 @@ impl CliError {
         }
     }
 
-    /// Build an [`CliError::Internal`] whose message ends with remote text.
+    /// The error for a non-2xx reply from a service the CLI calls once, such as
+    /// the release host: a rate limit, else the failure status.
+    #[must_use]
+    pub fn failed_reply(status: reqwest::StatusCode, body: &str) -> Self {
+        if http_response_indicates_rate_limit(status.as_u16(), body) {
+            Self::rate_limited()
+        } else {
+            Self::api_status(status, body)
+        }
+    }
+
     #[must_use]
     pub fn internal_with_remote(prefix: impl std::fmt::Display, remote: &Untrusted) -> Self {
         Self::Internal(anyhow::anyhow!("{prefix}{remote}"))
+    }
+
+    /// Build an [`CliError::Unsupported`] whose message ends with remote text,
+    /// for a request the remote side refused because of the values sent. The
+    /// text carries the [`UNTRUSTED_LABEL`](crate::response_sanitization::UNTRUSTED_LABEL).
+    #[must_use]
+    pub fn unsupported_with_remote(prefix: impl std::fmt::Display, remote: &Untrusted) -> Self {
+        Self::Unsupported(format!("{prefix}{remote}"))
+    }
+
+    /// Outcome asset notation given to a command that only trades or reads perp
+    /// and spot markets.
+    #[must_use]
+    pub fn unsupported_outcome_notation(raw: &str) -> Self {
+        Self::Unsupported(format!(
+            "outcome asset notation '{raw}' requires an outcome-aware command path; use `hyperliquid outcomes get {raw}` to inspect the encoded HIP-4 asset id. Live limit orders support outcome notation."
+        ))
     }
 
     /// Secondary detail line shown under the headline in human output.
@@ -351,6 +327,16 @@ impl CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_reply_is_a_rate_limit_or_an_api_status() {
+        assert_eq!(
+            CliError::failed_reply(reqwest::StatusCode::TOO_MANY_REQUESTS, "").exit_code(),
+            11
+        );
+        let err = CliError::failed_reply(reqwest::StatusCode::NOT_FOUND, "missing");
+        assert!(matches!(err, CliError::ApiStatus { status: 404, .. }));
+    }
 
     fn every_variant() -> Vec<CliError> {
         vec![
@@ -452,49 +438,6 @@ mod tests {
     }
 
     #[test]
-    fn display_internal_and_configuration() {
-        let err = CliError::Internal(anyhow::anyhow!("db connection failed"));
-        assert!(err.to_string().contains("db connection failed"));
-        let err = CliError::Configuration("invalid HYPERLIQUID_NETWORK".into());
-        assert!(err.to_string().contains("Configuration error"));
-        assert!(err.to_string().contains("HYPERLIQUID_NETWORK"));
-    }
-
-    #[test]
-    fn display_auth_required() {
-        assert_eq!(
-            CliError::AuthRequired.to_string(),
-            "Authentication required."
-        );
-    }
-
-    #[test]
-    fn display_asset_not_found() {
-        let err = CliError::AssetNotFound {
-            asset: "BT".into(),
-            suggestions: "BTC".into(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "Couldn't find asset \"BT\". Did you mean BTC?"
-        );
-        let err = CliError::AssetNotFoundNoSuggestion {
-            asset: "ZZZZZZZZ".into(),
-        };
-        assert_eq!(err.to_string(), "Couldn't find asset \"ZZZZZZZZ\".");
-    }
-
-    #[test]
-    fn display_unavailable_is_complete_copy() {
-        let err =
-            CliError::Unavailable("Couldn't reach api.hyperliquid.xyz. Connection refused.".into());
-        assert_eq!(
-            err.to_string(),
-            "Couldn't reach api.hyperliquid.xyz. Connection refused."
-        );
-    }
-
-    #[test]
     fn display_rate_limited() {
         assert_eq!(
             CliError::rate_limited().to_string(),
@@ -528,24 +471,105 @@ mod tests {
     }
 
     #[test]
-    fn display_copy_has_no_banned_phrasing() {
-        for err in [
-            CliError::rate_limited(),
-            CliError::AuthRequired,
-            CliError::unknown_outcome("The request timed out"),
-            CliError::api_status(reqwest::StatusCode::SERVICE_UNAVAILABLE, "down"),
-        ] {
-            let text = err.to_string();
-            for banned in ["Unable to", "Please", "successfully", "Oops"] {
-                assert!(!text.contains(banned), "{text}");
+    fn every_variant_reports_a_cataloged_spec() {
+        for err in every_variant() {
+            assert!(spec::ALL.contains(&err.spec()), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn catalog_lists_each_reason_once_and_every_listed_spec_is_reachable() {
+        let mut reasons = spec::ALL.iter().map(|spec| spec.reason).collect::<Vec<_>>();
+        reasons.sort_unstable();
+        let listed = reasons.len();
+        reasons.dedup();
+        assert_eq!(reasons.len(), listed, "a reason appears twice in spec::ALL");
+
+        let usage = [&spec::INVALID_ARGUMENTS, &spec::UNKNOWN_COMMAND];
+        let variants = every_variant();
+        for spec in spec::ALL {
+            assert!(
+                usage.contains(spec) || variants.iter().any(|err| err.spec() == *spec),
+                "no error reports {}",
+                spec.reason
+            );
+        }
+    }
+
+    fn catalog_path() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".claude/error-catalog.json")
+    }
+
+    /// `.claude/error-catalog.json` is generated from the spec table. After
+    /// changing a spec, regenerate with
+    /// `HL_UPDATE_ERROR_CATALOG=1 cargo test --lib catalog_file_matches_the_spec_table`.
+    #[test]
+    fn catalog_file_matches_the_spec_table() {
+        let expected = spec::catalog_json();
+        if std::env::var_os("HL_UPDATE_ERROR_CATALOG").is_some() {
+            std::fs::write(catalog_path(), &expected).unwrap();
+        }
+        let checked_in = std::fs::read_to_string(catalog_path()).unwrap();
+        assert_eq!(
+            checked_in, expected,
+            "error-catalog.json drifted from errors::spec; regenerate it with HL_UPDATE_ERROR_CATALOG=1"
+        );
+    }
+
+    /// The `## Error Handling` section of a skill file, up to the next heading.
+    fn error_handling_section(skill: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(skill);
+        let text = std::fs::read_to_string(path).unwrap();
+        let start = text.find("## Error Handling").expect("section exists");
+        let rest = &text[start + 1..];
+        let end = rest.find("\n## ").map_or(rest.len(), |end| end + 1);
+        rest[..end].to_string()
+    }
+
+    #[test]
+    fn skill_files_document_the_catalog_exit_codes_and_reasons() {
+        let mut exit_codes = spec::ALL
+            .iter()
+            .map(|spec| spec.exit_code)
+            .collect::<Vec<_>>();
+        exit_codes.dedup();
+
+        for skill in ["SKILL.md", "skills/hyperliquid-cli/SKILL.md"] {
+            let section = error_handling_section(skill);
+
+            let documented = section
+                .lines()
+                .filter_map(|line| line.strip_prefix("- `"))
+                .filter_map(|line| line.split_once("`:"))
+                .filter_map(|(code, _)| code.parse::<i32>().ok())
+                .collect::<Vec<_>>();
+            assert_eq!(documented, exit_codes, "{skill} exit-code bullets");
+
+            let examples = section
+                .split_once("(for example ")
+                .and_then(|(_, rest)| rest.split_once(')'))
+                .map(|(list, _)| list)
+                .expect("reason examples");
+            for reason in examples.split(", ") {
+                let reason = reason.trim_matches('`');
+                assert!(
+                    spec::ALL.iter().any(|spec| spec.reason == reason),
+                    "{skill} names unknown reason {reason}"
+                );
             }
         }
     }
 
     #[test]
-    fn anyhow_converts_into_internal() {
-        let err = CliError::from(anyhow::anyhow!("something unexpected"));
-        assert_eq!(err.exit_code(), 1);
-        assert!(err.to_string().contains("something unexpected"));
+    fn partial_results_own_their_stdout_document() {
+        assert_eq!(
+            CliError::PartialResults("half".into()).stdout_document(),
+            StdoutDocument::CommandResult
+        );
+        for err in every_variant() {
+            if !matches!(err, CliError::PartialResults(_)) {
+                assert_eq!(err.stdout_document(), StdoutDocument::Envelope, "{err:?}");
+            }
+        }
     }
 }

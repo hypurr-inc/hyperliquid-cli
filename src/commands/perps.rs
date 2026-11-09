@@ -1,21 +1,17 @@
-/// Perpetual market commands.
-///
-/// Commands:
-/// - `hyperliquid perps list` — list all perpetual markets
-/// - `hyperliquid perps get <COIN>` — get details for a specific perpetual market
 use clap::Args;
 use hypersdk::Decimal;
 use hypersdk::hypercore::PerpMarket;
 use serde::Serialize;
 
 use crate::assets::{
-    AssetQuery, find_perp_dex, load_hip3_market, parse_asset_query, qualify_dex_asset,
+    AssetQuery, eq_asset_name, find_perp_dex, load_hip3_market, normalize_dex, parse_asset_query,
+    qualify_dex_asset,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
-use crate::output::TableData;
 
 #[derive(Args, Debug)]
 pub struct PerpsListArgs {
@@ -34,7 +30,6 @@ pub struct PerpsGetArgs {
     pub dex: Option<String>,
 }
 
-/// Renderable perpetual market row.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PerpMarketRow {
     pub name: String,
@@ -63,92 +58,39 @@ impl From<PerpMarket> for PerpMarketRow {
     }
 }
 
-/// Output wrapper for perpetual markets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PerpMarketsOutput {
-    markets: Vec<PerpMarketRow>,
-}
+pub type PerpMarketsOutput = Rows<PerpMarketRow>;
 
-impl PerpMarketsOutput {
-    #[must_use]
-    pub fn new(markets: Vec<PerpMarketRow>) -> Self {
-        Self { markets }
+impl Row for PerpMarketRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Name",
+        "Index",
+        "Max Leverage",
+        "Sz Decimals",
+        "Collateral",
+        "Isolated",
+        "Tick Size @ Price 1",
+    ];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            self.index.to_string(),
+            format!("{}x", self.max_leverage),
+            self.sz_decimals.to_string(),
+            self.collateral.clone(),
+            self.isolated_margin.to_string(),
+            or_missing(self.tick_size_at_price_1.as_deref()),
+        ]
     }
 }
 
-const PERP_MARKET_HEADERS: &[&str] = &[
-    "Name",
-    "Index",
-    "Max Leverage",
-    "Sz Decimals",
-    "Collateral",
-    "Isolated",
-    "Tick Size @ Price 1",
-];
-
-fn perp_market_cells(market: &PerpMarketRow) -> Vec<String> {
-    vec![
-        market.name.clone(),
-        market.index.to_string(),
-        format!("{}x", market.max_leverage),
-        market.sz_decimals.to_string(),
-        market.collateral.clone(),
-        market.isolated_margin.to_string(),
-        market
-            .tick_size_at_price_1
-            .clone()
-            .unwrap_or_else(|| "n/a".to_string()),
-    ]
+impl ListRow for PerpMarketRow {
+    const EMPTY: &'static str = "No perpetual markets.";
 }
 
-impl TableData for PerpMarketsOutput {
-    fn headers(&self) -> Vec<&str> {
-        PERP_MARKET_HEADERS.to_vec()
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.markets.iter().map(perp_market_cells).collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.markets).unwrap_or_else(|_| serde_json::json!([]))
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No perpetual markets.")
-    }
-}
-
-/// Output wrapper for a single perpetual market.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PerpMarketDetailsOutput {
-    market: PerpMarketRow,
-}
-
-impl PerpMarketDetailsOutput {
-    #[must_use]
-    pub fn new(market: PerpMarketRow) -> Self {
-        Self { market }
-    }
-}
-
-impl TableData for PerpMarketDetailsOutput {
-    fn headers(&self) -> Vec<&str> {
-        PERP_MARKET_HEADERS.to_vec()
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![perp_market_cells(&self.market)]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.market).unwrap_or_else(|_| serde_json::json!({}))
-    }
-}
-
-pub async fn list(inv: &Invocation, args: &PerpsListArgs) -> Result<(), anyhow::Error> {
+async fn list(inv: &Invocation, args: &PerpsListArgs) -> Result<(), anyhow::Error> {
     let client = inv.remote()?.api().sdk();
-    let markets = if let Some(dex_name) = args.dex.as_deref() {
+    let markets = if let Some(dex_name) = normalize_dex(args.dex.as_deref()) {
         let dex = find_perp_dex(client, dex_name).await?;
         client.perps_from(dex).await.map_err(from_sdk)?
     } else {
@@ -159,10 +101,8 @@ pub async fn list(inv: &Invocation, args: &PerpsListArgs) -> Result<(), anyhow::
     Ok(())
 }
 
-/// Resolve, fetch, and render one perpetual market.
-pub async fn get(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Error> {
+async fn get(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Error> {
     let client = inv.remote()?.api().sdk();
-    let resolver = inv.asset_resolver().await?;
     let query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
     let market = if let AssetQuery::Hip3 {
         dex: dex_name,
@@ -171,27 +111,34 @@ pub async fn get(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Er
     {
         load_hip3_market(client, &dex_name, &token)
             .await?
-            .map(|(_, market)| PerpMarketRow::from(market))
+            .map(|(_, market)| market)
             .ok_or_else(|| CliError::AssetNotFoundNoSuggestion {
                 asset: query.clone(),
             })?
     } else {
-        let resolved = resolver.resolve_perp(&query).map_err(CliError::from)?;
-        client
+        // The list already holds the market, so a hit needs no resolver. A
+        // miss asks the resolver why, for its suggestion or its outcome-notation
+        // error.
+        let symbol = query.trim();
+        let listed = client
             .perps()
             .await
             .map_err(from_sdk)?
             .into_iter()
-            .find(|market| {
-                market.index == resolved.index || market.name.eq_ignore_ascii_case(&resolved.name)
-            })
-            .map(PerpMarketRow::from)
-            .ok_or_else(|| CliError::AssetNotFoundNoSuggestion {
-                asset: query.clone(),
-            })?
+            .find(|market| eq_asset_name(&market.name, symbol));
+        match listed {
+            Some(market) => market,
+            None => {
+                return Err(match inv.asset_resolver().await?.resolve_perp(&query) {
+                    Err(err) => CliError::from(err),
+                    Ok(_) => CliError::AssetNotFoundNoSuggestion { asset: query },
+                }
+                .into());
+            }
+        }
     };
 
-    inv.print(&PerpMarketDetailsOutput::new(market));
+    inv.print(&One::new(PerpMarketRow::from(market)));
     Ok(())
 }
 
@@ -244,58 +191,5 @@ impl CliCommand for PerpsGet {
 
     async fn run(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Error> {
         get(inv, args).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample_market() -> PerpMarketRow {
-        PerpMarketRow {
-            name: "BTC".to_string(),
-            index: 0,
-            max_leverage: 50,
-            sz_decimals: 5,
-            collateral: "USDC".to_string(),
-            isolated_margin: false,
-            tick_size_at_price_1: Some("1".to_string()),
-        }
-    }
-
-    #[test]
-    fn perps_list_json_has_required_fields() {
-        let output = PerpMarketsOutput::new(vec![sample_market()]);
-        let json = output.to_json_value();
-        let first = &json.as_array().unwrap()[0];
-
-        assert_eq!(first["name"], "BTC");
-        assert_eq!(first["max_leverage"], 50);
-        assert_eq!(first["sz_decimals"], 5);
-        assert_eq!(first["tick_size_at_price_1"], "1");
-        assert!(first.get("tick_size").is_none());
-    }
-
-    #[test]
-    fn perps_list_rows_include_required_columns() {
-        let output = PerpMarketsOutput::new(vec![sample_market()]);
-
-        assert!(output.headers().contains(&"Name"));
-        assert!(output.headers().contains(&"Max Leverage"));
-        assert!(output.headers().contains(&"Sz Decimals"));
-        assert!(output.headers().contains(&"Tick Size @ Price 1"));
-        assert!(!output.headers().contains(&"Tick Size"));
-        assert_eq!(output.rows()[0][0], "BTC");
-        assert_eq!(output.rows()[0][2], "50x");
-    }
-
-    #[test]
-    fn perps_detail_json_is_single_object() {
-        let output = PerpMarketDetailsOutput::new(sample_market());
-        let json = output.to_json_value();
-
-        assert!(json.is_object());
-        assert_eq!(json["name"], "BTC");
-        assert_eq!(json["collateral"], "USDC");
     }
 }

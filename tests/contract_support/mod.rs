@@ -18,12 +18,6 @@ pub fn fixture_path(name: &str) -> PathBuf {
     repo_root().join("tests/fixtures/contracts").join(name)
 }
 
-pub fn read_fixture(name: &str) -> String {
-    let path = fixture_path(name);
-    fs::read_to_string(&path)
-        .unwrap_or_else(|err| panic!("failed to read contract fixture {}: {err}", path.display()))
-}
-
 pub fn assert_json_fixture(name: &str, actual: &Value) {
     let pretty = format!("{}\n", serde_json::to_string_pretty(actual).unwrap());
     let path = fixture_path(name);
@@ -105,7 +99,7 @@ pub fn registry_fixtures() -> Vec<(&'static str, Value)> {
             json!({
                 "command": command.command,
                 "command_path": command.command_path,
-                "group": command.group,
+                "group": command.category,
                 "auth_required": command.auth_required,
                 "dangerous": command.dangerous,
                 "risk": command.risk,
@@ -141,6 +135,7 @@ pub fn registry_fixtures() -> Vec<(&'static str, Value)> {
                 "raw_payload": command.raw_payload,
                 "confirmation": command.confirmation,
                 "ows_signer": command.ows_signer,
+                "bankr_signer": command.bankr_signer,
             })
         })
         .collect::<Vec<_>>();

@@ -4,19 +4,19 @@
 //! linked wallet from `GET /wallet/me`, and asks Bankr to sign Hyperliquid L1
 //! actions as EIP-712 typed data (`POST /wallet/sign`).
 //!
-//! Signing is synchronous in this CLI (every command handler signs through
-//! [`crate::signing::SelectedSigner`]), so each Bankr request runs a fresh
+//! Most signing is synchronous in this CLI (command handlers sign through
+//! [`crate::signing::SelectedSigner`]), so those Bankr requests run on a fresh
 //! current-thread runtime on a scoped thread: the handler's own runtime is never
-//! blocked on a future it would have to poll.
+//! blocked on a future it would have to poll. Async callers await the request.
 //!
-//! Every returned signature is recovered locally against the expected wallet
-//! address before it is used, so a Bankr reply can never sign for a different
-//! account than the one selected.
+//! Bankr signs trading actions and spot-to-perp USDC moves; every other
+//! user-signed action is refused by [`covers`] before a request is sent. The
+//! signature a request returns is recovered against the payload's digest by
+//! the selected signer, so a Bankr reply can never sign for a different account
+//! than the one selected.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
-use alloy::dyn_abi::TypedData;
 use alloy::primitives::B256;
 use hypersdk::Address;
 use hypersdk::hypercore::Chain;
@@ -24,32 +24,18 @@ use hypersdk::hypercore::types::Signature as HyperliquidSignature;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::config::BankrLogin;
 use crate::errors::{CliError, network_error};
 use crate::response_sanitization::Untrusted;
-use crate::settings::Settings;
+use crate::settings::{KeySource, Settings, env, is_loopback_url};
+use crate::signing::signature::Provider;
+use crate::signing::{Payload, Signs};
 
 /// Bankr's public API, used when no other URL is configured.
 pub const DEFAULT_API_URL: &str = "https://api.bankr.bot";
-/// Shared with the Bankr CLI itself.
-pub const API_KEY_ENV: &str = "BANKR_API_KEY";
-/// Overrides the API host, chiefly for a local test server.
-pub const API_URL_ENV: &str = "BANKR_API_URL";
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const LOGIN_HINT: &str = "hyperliquid wallet login";
-const KEY_HINT: &str = "Set BANKR_API_KEY, or run `hyperliquid wallet login` to store a bk_... key from https://bankr.bot/api-keys.";
 
-/// Where the API key came from, which decides whether a stored address belongs
-/// to it: a key from the environment or the Bankr CLI is not the wallet that
-/// `wallet login` recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeySource {
-    Environment,
-    Config,
-    BankrCli,
-}
-
-/// One resolved set of Bankr credentials.
 #[derive(Clone)]
 pub struct BankrClient {
     http: reqwest::Client,
@@ -66,48 +52,16 @@ impl std::fmt::Debug for BankrClient {
     }
 }
 
-/// The wallet Bankr reports for an API key.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BankrWallet {
-    pub address: Address,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub solana_address: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub social_accounts: Vec<BankrSocial>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub referral_code: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub club_active: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct BankrSocial {
-    pub platform: String,
-    pub username: String,
-}
-
 #[derive(Deserialize)]
 struct WalletMeResponse {
     #[serde(default)]
     wallets: Vec<WalletEntry>,
-    #[serde(default)]
-    social_accounts: Vec<BankrSocial>,
-    #[serde(default)]
-    ref_code: Option<String>,
-    #[serde(default)]
-    bankr_club: Option<BankrClub>,
 }
 
 #[derive(Deserialize)]
 struct WalletEntry {
     chain: String,
     address: String,
-}
-
-#[derive(Deserialize)]
-struct BankrClub {
-    #[serde(default)]
-    active: bool,
 }
 
 #[derive(Serialize)]
@@ -117,55 +71,103 @@ struct SignRequest<'a> {
     typed_data: &'a Value,
 }
 
-/// Typed data in the two shapes one signature needs: the JSON document that goes
-/// to Bankr, and the parsed form used to hash and verify it. The parsed form is
-/// always produced from the document, so a signature can't be checked against a
-/// different message than the one that was sent.
-#[derive(Debug, Clone)]
-pub struct BankrTypedData {
-    document: Value,
-    typed: TypedData,
+/// The user-signed actions Bankr signs, by EIP-712 struct name: a spot↔perp
+/// USDC move. Every other user-signed action (withdrawals, sends, staking,
+/// approvals, multisig) is refused before a request is sent.
+const SIGNED_USER_ACTIONS: &[&str] = &["UsdClassTransfer"];
+
+/// Whether Bankr signs `signs`: trading actions and the user-signed actions in
+/// [`SIGNED_USER_ACTIONS`]. A command's spec and a payload about to be signed
+/// both ask this, so they can never disagree.
+#[must_use]
+pub fn covers(signs: Signs<'_>) -> bool {
+    match signs {
+        Signs::L1Action => true,
+        Signs::UserSigned(name) => SIGNED_USER_ACTIONS.contains(&name),
+        Signs::Digest => false,
+    }
 }
 
-impl BankrTypedData {
-    /// Parse the JSON document that will be posted, so hashing and verification
-    /// always run over the message Bankr was asked to sign.
-    pub fn parse(document: Value) -> Result<Self, CliError> {
-        let typed = serde_json::from_value(document.clone())
-            .map_err(|err| CliError::Internal(anyhow::anyhow!("invalid typed data: {err}")))?;
-        Ok(Self { document, typed })
+/// The refusal for a signature Bankr does not cover, before a request is sent.
+pub fn ensure_covers(signs: Signs<'_>) -> Result<(), CliError> {
+    if covers(signs) {
+        Ok(())
+    } else {
+        Err(not_covered())
     }
+}
 
-    /// A document built from typed data hypersdk produced, with the domain chain
-    /// id written as the decimal number `eth_signTypedData_v4` clients expect.
-    pub fn from_typed(typed_data: &TypedData) -> Result<Self, CliError> {
-        let mut document = serde_json::to_value(typed_data).map_err(|err| {
-            CliError::Internal(anyhow::anyhow!("failed to encode typed data: {err}"))
-        })?;
-        if let Some(chain_id) = document
-            .get_mut("domain")
-            .and_then(|domain| domain.get_mut("chainId"))
-            && let Some(text) = chain_id.as_str()
-            && let Some(decimal) = text
-                .strip_prefix("0x")
-                .and_then(|hex| u64::from_str_radix(hex, 16).ok())
-        {
-            *chain_id = Value::from(decimal);
+fn not_covered() -> CliError {
+    CliError::Unsupported(
+        "Bankr signs trading actions (orders, cancels, modifies, leverage, margin, trailing stops, TWAP, vault and subaccount actions) and spot-to-perp USDC moves; this action needs a user-signed payload Bankr does not cover, so use a local key or an OWS wallet for it"
+            .to_string(),
+    )
+}
+
+/// The typed-data document Bankr is asked to sign for `payload`, or the refusal
+/// for a payload it does not cover.
+pub(crate) fn document(payload: &Payload<'_>) -> Result<Value, CliError> {
+    ensure_covers(payload.signs())?;
+    match payload {
+        Payload::Agent {
+            chain,
+            connection_id,
+        } => Ok(agent_document(*chain, *connection_id)),
+        Payload::UserSigned(typed_data) => {
+            let mut document = serde_json::to_value(typed_data).map_err(|err| {
+                CliError::Internal(anyhow::anyhow!("failed to encode typed data: {err}"))
+            })?;
+            decimal_chain_id(&mut document);
+            Ok(document)
         }
-        Self::parse(document)
+        Payload::Digest(_) => Err(not_covered()),
     }
+}
 
-    /// The JSON document sent as `typedData`.
+/// Write the domain chain id as the decimal number `eth_signTypedData_v4`
+/// clients expect; hypersdk serializes it as hex text.
+fn decimal_chain_id(document: &mut Value) {
+    if let Some(chain_id) = document
+        .get_mut("domain")
+        .and_then(|domain| domain.get_mut("chainId"))
+        && let Some(text) = chain_id.as_str()
+        && let Some(decimal) = text
+            .strip_prefix("0x")
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+    {
+        *chain_id = Value::from(decimal);
+    }
+}
+
+/// A Bankr hosted wallet: the key stays with Bankr and every signature is an
+/// API call.
+#[derive(Debug, Clone)]
+pub struct BankrSigner {
+    client: BankrClient,
+    address: Address,
+}
+
+impl BankrSigner {
     #[must_use]
-    pub fn document(&self) -> &Value {
-        &self.document
+    pub fn new(client: BankrClient, address: Address) -> Self {
+        Self { client, address }
     }
 
-    /// The EIP-712 digest a signature must recover against.
-    pub fn signing_hash(&self) -> Result<B256, CliError> {
-        self.typed
-            .eip712_signing_hash()
-            .map_err(|err| CliError::Internal(anyhow::anyhow!("failed to hash typed data: {err}")))
+    #[must_use]
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    /// Sign from synchronous code, on a scoped runtime thread.
+    pub(crate) fn sign(&self, payload: &Payload<'_>) -> Result<HyperliquidSignature, CliError> {
+        block_on(self.sign_async(payload))
+    }
+
+    pub(crate) async fn sign_async(
+        &self,
+        payload: &Payload<'_>,
+    ) -> Result<HyperliquidSignature, CliError> {
+        self.client.sign(&document(payload)?, self.address).await
     }
 }
 
@@ -185,58 +187,32 @@ struct SignResponse {
 
 impl BankrClient {
     /// A client for `api_url` (already validated) and `api_key`.
-    #[must_use]
-    pub fn new(api_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        Self {
-            http: reqwest::Client::builder()
-                .user_agent(concat!("hyperliquid-cli/", env!("CARGO_PKG_VERSION")))
-                .timeout(REQUEST_TIMEOUT)
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .unwrap_or_else(|_| {
-                    reqwest::Client::builder()
-                        .redirect(reqwest::redirect::Policy::none())
-                        .build()
-                        .expect("failed to build Bankr HTTP client")
-                }),
+    pub fn new(api_url: impl Into<String>, api_key: impl Into<String>) -> Result<Self, CliError> {
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("hyperliquid-cli/", env!("CARGO_PKG_VERSION")))
+            .timeout(REQUEST_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|err| {
+                CliError::Internal(anyhow::anyhow!(
+                    "failed to build the Bankr HTTP client: {err}"
+                ))
+            })?;
+        Ok(Self {
+            http,
             api_url: api_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
-        }
+        })
     }
 
-    /// Credentials for this run: `BANKR_API_KEY` first, then this CLI's config,
-    /// then the Bankr CLI's own `~/.bankr/config.json`, so an existing login works
-    /// without repeating it. `BANKR_API_URL` overrides the host in every case.
+    /// The client for this run's credentials (see [`Settings::bankr_credentials`]),
+    /// and where they came from.
     pub fn from_settings(settings: &Settings) -> Result<(Self, KeySource), CliError> {
-        let env_url = settings.env().get_trimmed(API_URL_ENV);
-        let stored_url = settings
-            .config()?
-            .and_then(|config| config.bankr_api_url.clone())
-            .map(|url| url.trim().to_string())
-            .filter(|url| !url.is_empty());
-
-        let (api_key, file_url, source) = if let Some(key) = settings.env().get_trimmed(API_KEY_ENV)
-        {
-            (key, stored_url, KeySource::Environment)
-        } else if let Some(key) = settings
-            .config()?
-            .and_then(|config| config.bankr_api_key.clone())
-            .map(|key| key.trim().to_string())
-            .filter(|key| !key.is_empty())
-        {
-            (key, stored_url, KeySource::Config)
-        } else if let Some((key, url)) = bankr_cli_credentials() {
-            (key, url.or(stored_url), KeySource::BankrCli)
-        } else {
-            return Err(CliError::AuthRequired);
-        };
-
-        let api_url = validate_api_url(
-            &env_url
-                .or(file_url)
-                .unwrap_or_else(|| DEFAULT_API_URL.to_string()),
-        )?;
-        Ok((Self::new(api_url, api_key), source))
+        let credentials = settings
+            .bankr_credentials()?
+            .ok_or(CliError::AuthRequired)?;
+        let api_url = validate_api_url(credentials.api_url.as_deref().unwrap_or(DEFAULT_API_URL))?;
+        Ok((Self::new(api_url, credentials.api_key)?, credentials.source))
     }
 
     #[must_use]
@@ -244,8 +220,8 @@ impl BankrClient {
         &self.api_url
     }
 
-    /// The wallet linked to this API key.
-    pub async fn wallet(&self) -> Result<BankrWallet, CliError> {
+    /// The EVM address of the wallet linked to this API key.
+    pub async fn wallet(&self) -> Result<Address, CliError> {
         let response = self
             .http
             .get(format!("{}/wallet/me", self.api_url))
@@ -255,45 +231,33 @@ impl BankrClient {
             .map_err(|err| network_error(&err, Some(REQUEST_TIMEOUT)))?;
 
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = read_body(response).await?;
         if !status.is_success() {
             return Err(credential_error(status, &body));
         }
         let me: WalletMeResponse = serde_json::from_str(&body).map_err(|err| {
             CliError::Unavailable(format!("bankr returned an unreadable wallet reply: {err}"))
         })?;
-        let address = me
-            .wallets
+        me.wallets
             .iter()
             .find(|wallet| wallet.chain.eq_ignore_ascii_case("evm"))
             .and_then(|wallet| wallet.address.parse::<Address>().ok())
             .ok_or_else(|| {
                 CliError::Unavailable("bankr has no EVM wallet linked to this API key".to_string())
-            })?;
-
-        Ok(BankrWallet {
-            address,
-            solana_address: me
-                .wallets
-                .iter()
-                .find(|wallet| wallet.chain.eq_ignore_ascii_case("solana"))
-                .map(|wallet| wallet.address.clone()),
-            social_accounts: me.social_accounts,
-            referral_code: me.ref_code,
-            club_active: me.bankr_club.map(|club| club.active),
-        })
+            })
     }
 
-    /// Sign `typed_data` with `eth_signTypedData_v4` and return the Hyperliquid
-    /// signature, after checking it recovers to `expected`.
-    pub async fn sign(
+    /// Sign `document` with `eth_signTypedData_v4` and return the Hyperliquid
+    /// signature. A reply that names a signer other than `expected` is refused;
+    /// the caller recovers the signature against the digest it asked for.
+    async fn sign(
         &self,
-        typed_data: &BankrTypedData,
+        document: &Value,
         expected: Address,
     ) -> Result<HyperliquidSignature, CliError> {
         let body = SignRequest {
             signature_type: "eth_signTypedData_v4",
-            typed_data: typed_data.document(),
+            typed_data: document,
         };
         let response = self
             .http
@@ -305,7 +269,7 @@ impl BankrClient {
             .map_err(|err| network_error(&err, Some(REQUEST_TIMEOUT)))?;
 
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let text = read_body(response).await?;
         if !status.is_success() {
             return Err(credential_error(status, &text));
         }
@@ -328,52 +292,34 @@ impl BankrClient {
             && let Ok(signer) = signer.parse::<Address>()
             && signer != expected
         {
-            return Err(CliError::InvalidAuth(format!(
-                "bankr_signer_mismatch: bankr signed with {signer}, expected {expected}"
-            )));
+            return Err(Provider::BANKR
+                .signer_mismatch(format!("bankr signed with {signer}, expected {expected}")));
         }
         let signature = signed
             .signature
             .as_deref()
             .ok_or_else(|| CliError::InvalidAuth("bankr returned no signature".to_string()))?;
-        let signature = parse_signature(signature)?;
-
-        let alloy_signature: alloy::primitives::Signature = signature.into();
-        let signing_hash = typed_data.signing_hash()?;
-        let recovered = alloy_signature
-            .recover_address_from_prehash(&signing_hash)
-            .map_err(|err| {
-                CliError::InvalidAuth(format!(
-                    "bankr_malformed_response: failed to recover bankr signer: {err}"
-                ))
-            })?;
-        if recovered != expected {
-            return Err(CliError::InvalidAuth(format!(
-                "bankr_signer_mismatch: bankr signature recovered {recovered}, expected {expected}"
-            )));
-        }
-        Ok(signature)
+        Provider::BANKR.parse_signature(signature, None)
     }
 
-    /// Run a Bankr request from synchronous signing code.
-    pub fn blocking_wallet(&self) -> Result<BankrWallet, CliError> {
+    pub fn blocking_wallet(&self) -> Result<Address, CliError> {
         block_on(self.wallet())
     }
+}
 
-    pub fn blocking_sign(
-        &self,
-        typed_data: &BankrTypedData,
-        expected: Address,
-    ) -> Result<HyperliquidSignature, CliError> {
-        block_on(self.sign(typed_data, expected))
-    }
+/// The reply body. A body that fails to arrive is a transport failure, not an
+/// empty reply.
+async fn read_body(response: reqwest::Response) -> Result<String, CliError> {
+    response
+        .text()
+        .await
+        .map_err(|err| network_error(&err, Some(REQUEST_TIMEOUT)))
 }
 
 /// The typed data Hyperliquid signs for an L1 action that carries no user-signed
 /// schema: the msgpack hash wrapped in the `Agent` struct.
-#[must_use]
-pub fn agent_typed_data(chain: Chain, connection_id: B256) -> BankrTypedData {
-    let value = json!({
+fn agent_document(chain: Chain, connection_id: B256) -> Value {
+    json!({
         "types": {
             "EIP712Domain": [
                 {"name": "name", "type": "string"},
@@ -397,8 +343,13 @@ pub fn agent_typed_data(chain: Chain, connection_id: B256) -> BankrTypedData {
             "source": if chain.is_mainnet() { "a" } else { "b" },
             "connectionId": format!("{connection_id:#x}"),
         },
-    });
-    BankrTypedData::parse(value).expect("the Agent typed data is a fixed, valid document")
+    })
+}
+
+/// The endpoint `wallet login` recorded, normalised, so a cached address is only
+/// reused for the API that produced it.
+pub fn login_endpoint(login: &BankrLogin) -> Result<String, CliError> {
+    validate_api_url(login.api_url().unwrap_or(DEFAULT_API_URL))
 }
 
 /// Accept a Bankr API base URL: HTTPS anywhere, HTTP only on loopback (a local
@@ -406,18 +357,9 @@ pub fn agent_typed_data(chain: Chain, connection_id: B256) -> BankrTypedData {
 pub fn validate_api_url(raw: &str) -> Result<String, CliError> {
     let url = reqwest::Url::parse(raw.trim())
         .map_err(|err| CliError::Configuration(format!("invalid Bankr API URL '{raw}': {err}")))?;
-    let host = url
-        .host_str()
-        .unwrap_or_default()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    let loopback = host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
     match url.scheme() {
         "https" => {}
-        "http" if loopback => {}
+        "http" if is_loopback_url(&url) => {}
         "http" => {
             return Err(CliError::Configuration(format!(
                 "invalid Bankr API URL '{raw}': plain HTTP is only allowed for a loopback host, so the API key is never sent in the clear"
@@ -430,69 +372,6 @@ pub fn validate_api_url(raw: &str) -> Result<String, CliError> {
         }
     }
     Ok(url.as_str().trim_end_matches('/').to_string())
-}
-
-/// The typed data Hyperliquid signs for a spot↔perp USDC move.
-///
-/// This action has its own schema instead of the `Agent` wrapper, so it is built
-/// here and checked against [`hypersdk::hypercore::types::Action::prehash`]
-/// before anything is signed.
-#[must_use]
-pub fn usd_class_transfer_typed_data(
-    chain: Chain,
-    amount: &str,
-    to_perp: bool,
-    nonce: u64,
-) -> BankrTypedData {
-    let chain_id = if chain.is_mainnet() { 42161 } else { 421_614 };
-    let value = json!({
-        "types": {
-            "EIP712Domain": [
-                {"name": "name", "type": "string"},
-                {"name": "version", "type": "string"},
-                {"name": "chainId", "type": "uint256"},
-                {"name": "verifyingContract", "type": "address"},
-            ],
-            "HyperliquidTransaction:UsdClassTransfer": [
-                {"name": "hyperliquidChain", "type": "string"},
-                {"name": "amount", "type": "string"},
-                {"name": "toPerp", "type": "bool"},
-                {"name": "nonce", "type": "uint64"},
-            ],
-        },
-        "primaryType": "HyperliquidTransaction:UsdClassTransfer",
-        "domain": {
-            "name": "HyperliquidSignTransaction",
-            "version": "1",
-            "chainId": chain_id,
-            "verifyingContract": "0x0000000000000000000000000000000000000000",
-        },
-        "message": {
-            "hyperliquidChain": if chain.is_mainnet() { "Mainnet" } else { "Testnet" },
-            "amount": amount,
-            "toPerp": to_perp,
-            "nonce": nonce,
-        },
-    });
-    BankrTypedData::parse(value).expect("the UsdClassTransfer typed data is a fixed document")
-}
-
-/// Read the key the Bankr CLI stores, when it exists.
-fn bankr_cli_credentials() -> Option<(String, Option<String>)> {
-    let path: PathBuf = crate::paths::home_dir()?.join(".bankr").join("config.json");
-    let text = std::fs::read_to_string(path).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    let key = value.get("apiKey")?.as_str()?.trim();
-    if key.is_empty() {
-        return None;
-    }
-    let url = value
-        .get("apiUrl")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .map(str::to_string);
-    Some((key.to_string(), url))
 }
 
 /// A `401`/`403` is a credential problem; anything else is the API failing.
@@ -509,48 +388,14 @@ fn credential_error(status: reqwest::StatusCode, body: &str) -> CliError {
         .unwrap_or_else(|| "no reason given".to_string());
     match status.as_u16() {
         401 | 403 => CliError::InvalidAuth(format!(
-            "bankr rejected the API key ({}): {}. {KEY_HINT}",
+            "bankr rejected the API key ({}): {}. Set {}, or run `hyperliquid wallet login` to store a bk_... key from https://bankr.bot/api-keys.",
             status.as_u16(),
-            Untrusted::from_remote(&message)
+            Untrusted::from_remote(&message),
+            env::BANKR_API_KEY
         )),
         429 => CliError::rate_limited(),
         _ => CliError::api_status(status, body),
     }
-}
-
-/// Canonical `0x<r><s><v>` with `v` as 27 or 28.
-fn parse_signature(signature: &str) -> Result<HyperliquidSignature, CliError> {
-    let signature = signature.trim();
-    if !signature.is_ascii() {
-        return Err(CliError::InvalidAuth(
-            "bankr_malformed_response: signature is not ASCII hex".to_string(),
-        ));
-    }
-    let hex = signature.strip_prefix("0x").unwrap_or(signature);
-    let canonical = match hex.len() {
-        130 => {
-            let v = u8::from_str_radix(&hex[128..130], 16).map_err(|err| {
-                CliError::InvalidAuth(format!("bankr returned an invalid recovery byte: {err}"))
-            })?;
-            let v = if v >= 27 { v } else { v + 27 };
-            format!("0x{}{v:02x}", &hex[..128])
-        }
-        128 => {
-            return Err(CliError::InvalidAuth(
-                "bankr_malformed_response: signature has no recovery byte".to_string(),
-            ));
-        }
-        len => {
-            return Err(CliError::InvalidAuth(format!(
-                "bankr_malformed_response: unexpected signature length {len} hex chars; expected 130"
-            )));
-        }
-    };
-    canonical.parse::<HyperliquidSignature>().map_err(|err| {
-        CliError::InvalidAuth(format!(
-            "bankr_malformed_response: failed to parse bankr signature: {err}"
-        ))
-    })
 }
 
 /// Run `future` to completion on a fresh current-thread runtime, in its own
@@ -574,27 +419,27 @@ where
     })
 }
 
-/// The login hint shown when nothing is linked.
-#[must_use]
-pub fn login_hint() -> &'static str {
-    LOGIN_HINT
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::response_sanitization::UNTRUSTED_LABEL;
+    use alloy::dyn_abi::TypedData;
     use hypersdk::hypercore::types::{Action, ScheduleCancel};
 
+    fn typed(document: &Value) -> TypedData {
+        serde_json::from_value(document.clone()).unwrap()
+    }
+
     #[test]
-    fn agent_typed_data_matches_the_hash_hypersdk_signs() {
+    fn agent_document_matches_the_hash_hypersdk_signs() {
         let action = Action::ScheduleCancel(ScheduleCancel { time: None });
         let nonce = 1_700_000_000_000_u64;
         for chain in [Chain::Mainnet, Chain::Testnet] {
             let connection_id = action.hash(nonce, None, None).unwrap();
-            let typed_data = agent_typed_data(chain, connection_id);
             assert_eq!(
-                typed_data.signing_hash().unwrap(),
+                typed(&agent_document(chain, connection_id))
+                    .eip712_signing_hash()
+                    .unwrap(),
                 action.prehash(nonce, None, None, chain).unwrap(),
                 "the Agent wrapper must hash exactly like hypersdk's own signing path"
             );
@@ -602,12 +447,10 @@ mod tests {
     }
 
     #[test]
-    fn agent_typed_data_uses_the_chain_source_byte() {
+    fn agent_document_uses_the_chain_source_byte() {
         let connection_id = B256::repeat_byte(0x11);
-        let mainnet = agent_typed_data(Chain::Mainnet, connection_id);
-        let testnet = agent_typed_data(Chain::Testnet, connection_id);
-        let mainnet = mainnet.document();
-        let testnet = testnet.document();
+        let mainnet = agent_document(Chain::Mainnet, connection_id);
+        let testnet = agent_document(Chain::Testnet, connection_id);
         assert_eq!(mainnet["message"]["source"], "a");
         assert_eq!(testnet["message"]["source"], "b");
         assert_eq!(
@@ -620,7 +463,7 @@ mod tests {
     fn documents_are_sent_in_the_form_they_are_verified_in() {
         // A hypersdk-shaped document (hex chain id) must hash identically after
         // the decimal normalisation the Bankr request uses.
-        let value = serde_json::json!({
+        let original = typed(&serde_json::json!({
             "types": {
                 "EIP712Domain": [
                     {"name": "name", "type": "string"},
@@ -628,64 +471,45 @@ mod tests {
                     {"name": "chainId", "type": "uint256"},
                     {"name": "verifyingContract", "type": "address"},
                 ],
-                "Agent": [
-                    {"name": "source", "type": "string"},
-                    {"name": "connectionId", "type": "bytes32"},
+                "HyperliquidTransaction:UsdClassTransfer": [
+                    {"name": "amount", "type": "string"},
                 ],
             },
-            "primaryType": "Agent",
+            "primaryType": "HyperliquidTransaction:UsdClassTransfer",
             "domain": {
                 "name": "Exchange",
                 "version": "1",
                 "chainId": "0x539",
                 "verifyingContract": "0x0000000000000000000000000000000000000000",
             },
-            "message": {"source": "a", "connectionId": format!("{:#x}", B256::repeat_byte(7))},
-        });
-        let original: TypedData = serde_json::from_value(value).unwrap();
-        let normalized = BankrTypedData::from_typed(&original).unwrap();
-        assert_eq!(normalized.document()["domain"]["chainId"], 1337);
+            "message": {"amount": "7"},
+        }));
+        let sent = document(&Payload::UserSigned(&original)).unwrap();
+        assert_eq!(sent["domain"]["chainId"], 1337);
         assert_eq!(
-            normalized.signing_hash().unwrap(),
+            typed(&sent).eip712_signing_hash().unwrap(),
             original.eip712_signing_hash().unwrap()
         );
     }
 
     #[test]
-    fn usd_class_transfer_document_matches_the_hash_hypersdk_signs() {
-        use hypersdk::hypercore::types::{Action, UsdClassTransferAction};
-
-        for chain in [Chain::Mainnet, Chain::Testnet] {
-            for to_perp in [true, false] {
-                let nonce = 1_700_000_000_123_u64;
-                let action = Action::UsdClassTransfer(UsdClassTransferAction {
-                    signature_chain_id: chain.arbitrum_id().to_string(),
-                    hyperliquid_chain: chain,
-                    amount: "12.5".to_string(),
-                    to_perp,
-                    nonce,
-                });
-                let typed = usd_class_transfer_typed_data(chain, "12.5", to_perp, nonce);
-                assert_eq!(
-                    typed.signing_hash().unwrap(),
-                    action.prehash(nonce, None, None, chain).unwrap(),
-                    "spot-to-perp {to_perp} on {chain:?} must hash like hypersdk"
-                );
-            }
-        }
+    fn payloads_bankr_does_not_cover_are_refused_before_a_document_exists() {
+        let err = document(&Payload::Digest(B256::ZERO)).unwrap_err();
+        assert_eq!(err.exit_code(), 13);
     }
 
     #[test]
     fn blank_environment_keys_do_not_shadow_stored_credentials() {
         use crate::config::Config;
+        const ADDRESS: &str = "0x0000000000000000000000000000000000000009";
         use crate::settings::{EnvSource, Settings};
 
         let config = Config {
-            bankr_api_key: Some("bk_from_config".to_string()),
+            bankr: BankrLogin::new("bk_from_config", None, ADDRESS.parse().unwrap()),
             ..Config::default()
         };
         let settings = Settings::detached(
-            EnvSource::fixed([(API_KEY_ENV, "   "), (API_URL_ENV, "  ")]),
+            EnvSource::fixed([(env::BANKR_API_KEY, "   "), (env::BANKR_API_URL, "  ")]),
             Some(config),
         );
         let (client, source) = BankrClient::from_settings(&settings).unwrap();
@@ -693,7 +517,10 @@ mod tests {
         assert_eq!(client.api_url(), DEFAULT_API_URL);
 
         // A padded key is selected trimmed, so authentication sees the key itself.
-        let padded = Settings::detached(EnvSource::fixed([(API_KEY_ENV, "  bk_padded  ")]), None);
+        let padded = Settings::detached(
+            EnvSource::fixed([(env::BANKR_API_KEY, "  bk_padded  ")]),
+            None,
+        );
         let (_, source) = BankrClient::from_settings(&padded).unwrap();
         assert_eq!(source, KeySource::Environment);
     }
@@ -708,19 +535,12 @@ mod tests {
         assert!(validate_api_url("http://127.0.0.1:8080").is_ok());
         assert!(validate_api_url("http://localhost:8080").is_ok());
         assert!(validate_api_url("http://[::1]:8080").is_ok());
+        assert!(validate_api_url("http://[2001:db8::1]:8080").is_err());
 
         for rejected in ["http://api.bankr.bot", "ftp://127.0.0.1", "not a url", ""] {
             let err = validate_api_url(rejected).unwrap_err();
             assert_eq!(err.exit_code(), 2, "{rejected}");
         }
-    }
-
-    #[test]
-    fn non_ascii_signatures_are_refused_without_slicing() {
-        let err = parse_signature("0xé").unwrap_err();
-        assert!(err.to_string().contains("not ASCII"), "{err}");
-        let err = parse_signature(&format!("0x{}é", "11".repeat(65))).unwrap_err();
-        assert!(err.to_string().contains("not ASCII"), "{err}");
     }
 
     #[test]
@@ -730,19 +550,6 @@ mod tests {
         assert!(!text.contains('\u{1b}'), "{text}");
         assert!(text.starts_with(UNTRUSTED_LABEL), "{text}");
         assert!(text.chars().count() < hostile.chars().count());
-    }
-
-    #[test]
-    fn signature_parsing_canonicalizes_raw_recovery_ids() {
-        let rs = "11".repeat(64);
-        let raw = parse_signature(&format!("0x{rs}01")).unwrap();
-        let canonical = parse_signature(&format!("0x{rs}1c")).unwrap();
-        assert_eq!(
-            serde_json::to_value(raw).unwrap(),
-            serde_json::to_value(canonical).unwrap()
-        );
-        assert!(parse_signature(&rs).is_err(), "no recovery byte is refused");
-        assert!(parse_signature("0x1234").is_err());
     }
 
     #[test]

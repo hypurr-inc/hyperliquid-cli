@@ -1,7 +1,24 @@
+use std::fmt;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
-use super::validation::parse_relative_duration;
-use super::*;
+use clap::{Args, ValueEnum};
+use hypersdk::Decimal;
+use hypersdk::hypercore::types::{OrderGrouping, TimeInForce, TpSl};
+use serde::{Deserialize, Serialize};
+
+use crate::errors::CliError;
+
+/// Default maximum time to track a resting order or ALO chase quote (5 minutes).
+pub(super) const DEFAULT_TRACKING_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// [`DEFAULT_TRACKING_TIMEOUT`] as a clap default value.
+const DEFAULT_TRACKING_TIMEOUT_TEXT: &str = "300s";
+
+pub(super) const DEFAULT_MARKET_ORDER_SLIPPAGE_BPS: u16 = 500;
+pub(super) const MIN_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1;
+pub(super) const MAX_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1_000;
 
 /// Arguments for `orders create`.
 #[derive(Args, Debug, Clone)]
@@ -461,18 +478,23 @@ impl fmt::Display for CreateOrderType {
 
 impl CreateOrderType {
     pub(super) fn is_trigger(self) -> bool {
-        self.tpsl().is_some()
+        matches!(
+            self,
+            Self::StopLoss | Self::TakeProfit | Self::StopLimit | Self::TakeLimit
+        )
     }
 
-    pub(super) fn uses_implicit_reduce_only(self) -> bool {
-        matches!(self, Self::StopLoss | Self::TakeProfit)
+    pub(super) fn market_trigger(tpsl: TpSl) -> Self {
+        match tpsl {
+            TpSl::Tp => Self::TakeProfit,
+            TpSl::Sl => Self::StopLoss,
+        }
     }
 
-    pub(super) fn tpsl(self) -> Option<TpSl> {
-        match self {
-            Self::StopLoss | Self::StopLimit => Some(TpSl::Sl),
-            Self::TakeProfit | Self::TakeLimit => Some(TpSl::Tp),
-            Self::Limit | Self::Market => None,
+    pub(super) fn limit_trigger(tpsl: TpSl) -> Self {
+        match tpsl {
+            TpSl::Tp => Self::TakeLimit,
+            TpSl::Sl => Self::StopLimit,
         }
     }
 }
@@ -507,59 +529,51 @@ impl fmt::Display for TifArg {
 }
 
 /// CLI-facing `orders create` TP/SL grouping values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CreateTpslGroupingArg {
     NormalTpsl,
 }
 
-impl fmt::Display for CreateTpslGroupingArg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NormalTpsl => write!(f, "normal-tpsl"),
-        }
-    }
-}
-
 /// CLI-facing `orders tpsl` TP/SL grouping values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum PositionTpslGroupingArg {
     PositionTpsl,
 }
 
-impl PositionTpslGroupingArg {
-    pub(super) fn wire_value(self) -> &'static str {
-        match self {
-            Self::PositionTpsl => "positionTpsl",
-        }
-    }
-}
-
-impl fmt::Display for PositionTpslGroupingArg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PositionTpsl => write!(f, "position-tpsl"),
-        }
-    }
-}
-
-/// Internal TP/SL grouping values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+/// How an order batch groups its TP/SL legs. The two CLI enums above are the
+/// values each command accepts; this is the one place that names a grouping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TpslGroupingArg {
     NormalTpsl,
     PositionTpsl,
 }
 
-impl TpslGroupingArg {
-    pub(super) fn to_sdk(self) -> OrderGrouping {
-        match self {
-            Self::NormalTpsl => OrderGrouping::NormalTpsl,
-            Self::PositionTpsl => OrderGrouping::PositionTpsl,
+impl From<CreateTpslGroupingArg> for TpslGroupingArg {
+    fn from(value: CreateTpslGroupingArg) -> Self {
+        match value {
+            CreateTpslGroupingArg::NormalTpsl => Self::NormalTpsl,
         }
     }
+}
 
+impl From<PositionTpslGroupingArg> for TpslGroupingArg {
+    fn from(value: PositionTpslGroupingArg) -> Self {
+        match value {
+            PositionTpslGroupingArg::PositionTpsl => Self::PositionTpsl,
+        }
+    }
+}
+
+impl From<TpslGroupingArg> for OrderGrouping {
+    fn from(value: TpslGroupingArg) -> Self {
+        match value {
+            TpslGroupingArg::NormalTpsl => Self::NormalTpsl,
+            TpslGroupingArg::PositionTpsl => Self::PositionTpsl,
+        }
+    }
+}
+
+impl TpslGroupingArg {
     pub(super) fn wire_value(self) -> &'static str {
         match self {
             Self::NormalTpsl => "normalTpsl",
@@ -577,19 +591,16 @@ impl fmt::Display for TpslGroupingArg {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// One leg of `orders batch-create`, read from the orders file by `parse_batch_leg`.
+#[derive(Debug, Clone)]
 pub struct BatchCreateOrder {
     pub(super) coin: String,
-    #[serde(default)]
     pub(super) dex: Option<String>,
     pub(super) side: OrderSide,
     pub(super) price: Decimal,
     pub(super) size: Decimal,
-    #[serde(default)]
     pub(super) tif: Option<TifArg>,
-    #[serde(default)]
     pub(super) reduce_only: bool,
-    #[serde(default)]
     pub(super) cloid: Option<String>,
 }
 
@@ -652,6 +663,36 @@ pub fn parse_trigger_price_spec(raw: &str) -> Result<TriggerPriceSpec, String> {
         return Err("trigger price must be greater than zero".to_string());
     }
     Ok(TriggerPriceSpec::Absolute(price))
+}
+pub(crate) fn parse_relative_duration(input: &str) -> Result<Duration, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("duration cannot be empty".to_string());
+    }
+
+    let (number_part, multiplier, unit_name) = match trimmed.chars().last().unwrap() {
+        's' | 'S' => (&trimmed[..trimmed.len() - 1], 1_u64, "seconds"),
+        'm' | 'M' => (&trimmed[..trimmed.len() - 1], 60_u64, "minutes"),
+        'h' | 'H' => (&trimmed[..trimmed.len() - 1], 60 * 60, "hours"),
+        'd' | 'D' => (&trimmed[..trimmed.len() - 1], 24 * 60 * 60, "days"),
+        ch if ch.is_ascii_digit() => (trimmed, 1_u64, "seconds"),
+        _ => {
+            return Err(
+                "duration must be a positive integer with optional s/m/h/d suffix".to_string(),
+            );
+        }
+    };
+
+    let value = number_part
+        .parse::<u64>()
+        .map_err(|_| format!("duration {unit_name} must be a positive integer"))?;
+    if value == 0 {
+        return Err("duration must be greater than zero".to_string());
+    }
+    value
+        .checked_mul(multiplier)
+        .map(Duration::from_secs)
+        .ok_or_else(|| "duration is too large".to_string())
 }
 
 #[cfg(test)]
@@ -867,7 +908,7 @@ pub struct BracketArgs {
     pub take_profit: TriggerPriceSpec,
     #[arg(long, allow_hyphen_values = true, value_parser = parse_trigger_price_spec)]
     pub stop_loss: TriggerPriceSpec,
-    #[arg(long, default_value = "300s", value_parser = parse_relative_duration)]
+    #[arg(long, default_value = DEFAULT_TRACKING_TIMEOUT_TEXT, value_parser = parse_relative_duration)]
     pub entry_timeout: Duration,
     #[arg(long)]
     pub on_behalf_of: Option<String>,
@@ -881,4 +922,39 @@ pub struct BracketArgs {
     pub max_slippage_bps: u16,
     #[arg(short = 'y', long)]
     pub yes: bool,
+}
+
+#[cfg(test)]
+mod duration_tests {
+    use super::*;
+
+    #[test]
+    fn a_relative_duration_is_a_positive_whole_number_of_seconds_or_more() {
+        for (input, expected) in [
+            ("30", 30),
+            ("30s", 30),
+            ("5m", 300),
+            ("2h", 7_200),
+            ("1d", 86_400),
+        ] {
+            assert_eq!(
+                parse_relative_duration(input),
+                Ok(Duration::from_secs(expected)),
+                "{input}"
+            );
+        }
+        // Zero and sub-second values cannot reach a command: a zero timeout or a
+        // sub-second requote interval is refused here, not defended against later.
+        for input in ["0", "0s", "100ms", "1.5s", "", "s"] {
+            assert!(parse_relative_duration(input).is_err(), "{input}");
+        }
+    }
+
+    #[test]
+    fn the_tracking_timeout_default_text_is_the_default_timeout() {
+        assert_eq!(
+            parse_relative_duration(DEFAULT_TRACKING_TIMEOUT_TEXT),
+            Ok(DEFAULT_TRACKING_TIMEOUT)
+        );
+    }
 }

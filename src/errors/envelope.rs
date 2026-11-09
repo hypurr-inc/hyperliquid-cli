@@ -1,5 +1,4 @@
-//! JSON error envelope.
-
+use super::spec::{self, Spec};
 use super::{CliError, NextCommand};
 
 /// A JSON-serializable error envelope.
@@ -25,6 +24,20 @@ pub struct ErrorEnvelope {
 }
 
 impl ErrorEnvelope {
+    /// The core keys for `spec` with `error` as the headline and nothing optional.
+    fn core(spec: &Spec, error: String) -> Self {
+        Self {
+            error,
+            category: spec.category,
+            exit_code: spec.exit_code,
+            reason: spec.reason,
+            retryable: None,
+            retry_after: None,
+            next: Vec::new(),
+            data: serde_json::Map::new(),
+        }
+    }
+
     /// Create from a [`CliError`], using its Display representation as the headline.
     pub fn from_cli_error(err: &CliError) -> Self {
         let mut data = serde_json::Map::new();
@@ -42,111 +55,91 @@ impl ErrorEnvelope {
             .map(|recovery| recovery.commands)
             .unwrap_or_default();
         Self {
-            error: err.to_string(),
-            category: err.category(),
-            exit_code: err.exit_code(),
-            reason: err.reason(),
             retryable: err.retryable(),
             retry_after: err.retry_after(),
             next,
             data,
+            ..Self::core(err.spec(), err.to_string())
         }
     }
 
-    /// Create from raw clap usage-error text.
+    /// Create from a command-line usage error.
     ///
-    /// `error` keeps the headline (and clap's tip line, if any). The `Usage:`
-    /// block and the `For more information` line move to `data.usage`; a
-    /// "similar ... exists" tip also fills `data.suggestion`; a `See all
-    /// options:` pointer becomes the `next` help command.
-    pub fn usage(message: impl Into<String>) -> Self {
-        let raw = message.into();
-        let parsed = parse_clap_text(&raw);
+    /// `error` is the headline (with clap's tip line, if any); the usage line
+    /// goes to `data.usage`, a suggestion to `data.suggestion`, and the help
+    /// pointer becomes the `next` command.
+    pub fn usage(parts: UsageParts) -> Self {
         let mut data = serde_json::Map::new();
-        if let Some(usage) = parsed.usage {
+        if let Some(usage) = parts.usage {
             data.insert("usage".into(), usage.into());
         }
-        if let Some(suggestion) = parsed.suggestion {
+        if let Some(suggestion) = parts.suggestion {
             data.insert("suggestion".into(), suggestion.into());
         }
-        let reason = if parsed.headline.contains("unrecognized subcommand") {
-            "unknown_command"
+        let spec = if parts.unknown_command {
+            &spec::UNKNOWN_COMMAND
         } else {
-            "invalid_arguments"
+            &spec::INVALID_ARGUMENTS
         };
         Self {
-            error: parsed.headline,
-            category: "usage",
-            exit_code: 2,
-            reason,
-            retryable: None,
-            retry_after: None,
-            next: parsed
-                .help_command
-                .map(|command| vec![NextCommand::new(command)])
-                .unwrap_or_default(),
+            next: vec![NextCommand::new(parts.help_command)],
             data,
+            ..Self::core(spec, parts.headline)
         }
     }
 
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| {
-            r#"{"error":"serialization failed","category":"internal","exit_code":1,"reason":"internal_error"}"#.to_string()
+            let internal = &spec::INTERNAL;
+            format!(
+                r#"{{"error":"serialization failed","category":"{}","exit_code":{},"reason":"{}"}}"#,
+                internal.category, internal.exit_code, internal.reason
+            )
         })
     }
 }
 
-struct ClapText {
-    headline: String,
-    usage: Option<String>,
-    suggestion: Option<String>,
-    help_command: Option<String>,
+/// The envelope keys (`error`, `category`, `exit_code`, `reason`, and `next`
+/// when non-empty) for a batch that partly failed, to merge into the one JSON
+/// document the command prints itself.
+///
+/// [`CliError::PartialResults`] ends the run with exit code 15 and prints no
+/// envelope of its own ([`StdoutDocument::CommandResult`](super::StdoutDocument)),
+/// so the command's document must carry these keys. `headline` is the
+/// document's `error` text, without the `Partial results:` prefix of the
+/// error's `Display`; `next` is the commands that show what is live.
+#[must_use]
+pub fn partial_results_fields(
+    headline: impl Into<String>,
+    next: Vec<NextCommand>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let envelope = ErrorEnvelope {
+        next,
+        ..ErrorEnvelope::core(&spec::PARTIAL_FAILURE, headline.into())
+    };
+    match serde_json::to_value(envelope) {
+        Ok(serde_json::Value::Object(fields)) => fields,
+        other => unreachable!("an error envelope serializes to an object, got {other:?}"),
+    }
 }
 
-fn parse_clap_text(raw: &str) -> ClapText {
-    let text = raw.trim();
-    let text = text.strip_prefix("error: ").unwrap_or(text);
-    let mut kept = Vec::new();
-    let mut usage = Vec::new();
-    let mut suggestion = None;
-    let mut help_command = None;
-    for paragraph in text.split("\n\n") {
-        let paragraph = paragraph.trim();
-        if paragraph.is_empty() {
-            continue;
-        }
-        if paragraph.starts_with("Usage:") || paragraph.starts_with("For more information") {
-            usage.push(paragraph);
-            continue;
-        }
-        if let Some(command) = paragraph.strip_prefix("See all options:") {
-            help_command = Some(command.trim().to_string());
-            continue;
-        }
-        if suggestion.is_none()
-            && let Some(tip) = paragraph.strip_prefix("tip: a similar")
-        {
-            suggestion = tip.split('\'').nth(1).map(str::to_string);
-        }
-        kept.push(paragraph);
-    }
-    let headline = if kept.is_empty() {
-        text.to_string()
-    } else {
-        kept.join("\n")
-    };
-    ClapText {
-        headline,
-        usage: (!usage.is_empty()).then(|| usage.join("\n\n")),
-        suggestion,
-        help_command,
-    }
+/// What a command-line usage error says, as the envelope carries it. Built by
+/// the shell from what clap reported: no text is parsed back out of a message
+/// written for people.
+pub struct UsageParts {
+    /// The message, and clap's tip line when it has one.
+    pub headline: String,
+    pub usage: Option<String>,
+    pub suggestion: Option<String>,
+    /// The command that prints the full options of the command that was reached.
+    pub help_command: String,
+    /// The first word of the command line named no command.
+    pub unknown_command: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::response_sanitization::Untrusted;
 
     fn envelope_value(err: &CliError) -> serde_json::Value {
         serde_json::from_str(&ErrorEnvelope::from_cli_error(err).to_json()).unwrap()
@@ -160,48 +153,6 @@ mod tests {
             json,
             r#"{"error":"something went wrong","category":"internal","exit_code":1,"reason":"internal_error"}"#
         );
-    }
-
-    #[test]
-    fn envelope_from_cli_error_carries_message() {
-        let json = ErrorEnvelope::from_cli_error(&CliError::rate_limited()).to_json();
-        assert!(json.contains("\"error\""));
-        assert!(json.contains("Too many requests"));
-    }
-
-    #[test]
-    fn envelope_reasons_are_stable_per_variant() {
-        let cases: Vec<(CliError, &str)> = vec![
-            (CliError::Internal(anyhow::anyhow!("x")), "internal_error"),
-            (
-                CliError::ExchangeRejected {
-                    context: "order rejected",
-                    remote: Untrusted::from_remote("x"),
-                },
-                "exchange_rejected",
-            ),
-            (CliError::Configuration("x".into()), "invalid_config"),
-            (CliError::MissingInput("x".into()), "missing_input"),
-            (CliError::AuthRequired, "auth_required"),
-            (CliError::InvalidAuth("x".into()), "invalid_auth"),
-            (CliError::rate_limited(), "rate_limited"),
-            (CliError::Unavailable("x".into()), "network_error"),
-            (
-                CliError::api_status(reqwest::StatusCode::BAD_GATEWAY, ""),
-                "api_error",
-            ),
-            (CliError::Timeout("x".into()), "timeout"),
-            (CliError::unknown_outcome("x"), "unknown_outcome"),
-            (CliError::Unsupported("x".into()), "unsupported_input"),
-            (
-                CliError::AssetNotFoundNoSuggestion { asset: "X".into() },
-                "asset_not_found",
-            ),
-            (CliError::PartialResults("x".into()), "partial_failure"),
-        ];
-        for (err, reason) in cases {
-            assert_eq!(envelope_value(&err)["reason"], reason, "{err:?}");
-        }
     }
 
     #[test]
@@ -305,11 +256,22 @@ mod tests {
         assert_eq!(value["exit_code"], 12);
     }
 
+    fn usage_parts() -> UsageParts {
+        UsageParts {
+            headline:
+                "unexpected argument '--bogus' found\ntip: a similar argument exists: '--format'"
+                    .into(),
+            usage: Some("Usage: hyperliquid wallet show [OPTIONS]".into()),
+            suggestion: Some("--format".into()),
+            help_command: "hyperliquid wallet show --help".into(),
+            unknown_command: false,
+        }
+    }
+
     #[test]
     fn envelope_usage_moves_usage_block_into_data() {
-        let raw = "error: unexpected argument '--bogus' found\n\n  tip: a similar argument exists: '--format'\n\nUsage: hyperliquid wallet show [OPTIONS]\n\nFor more information, try '--help'.\n";
         let value: serde_json::Value =
-            serde_json::from_str(&ErrorEnvelope::usage(raw).to_json()).unwrap();
+            serde_json::from_str(&ErrorEnvelope::usage(usage_parts()).to_json()).unwrap();
 
         assert_eq!(
             value["error"],
@@ -320,19 +282,59 @@ mod tests {
         assert_eq!(value["reason"], "invalid_arguments");
         assert_eq!(
             value["data"]["usage"],
-            "Usage: hyperliquid wallet show [OPTIONS]\n\nFor more information, try '--help'."
+            "Usage: hyperliquid wallet show [OPTIONS]"
         );
         assert_eq!(value["data"]["suggestion"], "--format");
+        assert_eq!(
+            value["next"][0]["command"],
+            "hyperliquid wallet show --help"
+        );
     }
 
     #[test]
     fn envelope_usage_unknown_subcommand_reason() {
-        let raw = "error: unrecognized subcommand 'ordres'\n\n  tip: a similar subcommand exists: 'orders'\n\nUsage: hyperliquid [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n";
-        let value: serde_json::Value =
-            serde_json::from_str(&ErrorEnvelope::usage(raw).to_json()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(
+            &ErrorEnvelope::usage(UsageParts {
+                unknown_command: true,
+                ..usage_parts()
+            })
+            .to_json(),
+        )
+        .unwrap();
 
         assert_eq!(value["reason"], "unknown_command");
-        assert_eq!(value["data"]["suggestion"], "orders");
-        assert!(!value["error"].as_str().unwrap().starts_with("error:"));
+        assert_eq!(value["exit_code"], 2);
+    }
+
+    #[test]
+    fn partial_results_fields_are_the_envelope_keys_of_a_command_document() {
+        let fields = partial_results_fields(
+            "2 of 3 orders failed",
+            vec![NextCommand::new("hyperliquid orders open")],
+        );
+
+        assert_eq!(
+            serde_json::Value::Object(fields),
+            serde_json::json!({
+                "error": "2 of 3 orders failed",
+                "category": "partial_results",
+                "exit_code": 15,
+                "reason": "partial_failure",
+                "next": [{"command": "hyperliquid orders open"}],
+            })
+        );
+
+        let err = CliError::PartialResults("x".into());
+        let envelope = envelope_value(&err);
+        let fields = partial_results_fields("x", Vec::new());
+        for key in ["category", "exit_code", "reason"] {
+            assert_eq!(fields[key], envelope[key], "{key} follows the error's spec");
+        }
+    }
+
+    #[test]
+    fn partial_results_fields_omit_next_when_there_is_nothing_to_run() {
+        let fields = partial_results_fields("half done", Vec::new());
+        assert!(!fields.contains_key("next"));
     }
 }

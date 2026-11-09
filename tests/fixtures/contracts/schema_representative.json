@@ -285,6 +285,7 @@
         }
       ],
       "auth_required": true,
+      "bankr_signer": "supported",
       "command": "hyperliquid orders create",
       "command_path": [
         "orders",
@@ -430,6 +431,7 @@
         "type": "object",
         "x-hyperliquid": {
           "aliases": [],
+          "bankr_signer": "supported",
           "confirmation": "prompt",
           "confirmation_bypass": {
             "arg": "yes",
@@ -555,6 +557,7 @@
         }
       ],
       "auth_required": true,
+      "bankr_signer": "supported",
       "command": "hyperliquid orders modify <ORDER_ID>",
       "command_path": [
         "orders",
@@ -623,6 +626,7 @@
         "type": "object",
         "x-hyperliquid": {
           "aliases": [],
+          "bankr_signer": "supported",
           "confirmation": "none",
           "confirmation_bypass": {
             "arg": null,
@@ -698,6 +702,7 @@
         }
       ],
       "auth_required": true,
+      "bankr_signer": "unsupported",
       "command": "hyperliquid transfer send",
       "command_path": [
         "transfer",
@@ -740,6 +745,7 @@
           "aliases": [
             "transfers"
           ],
+          "bankr_signer": "unsupported",
           "confirmation": "prompt",
           "confirmation_bypass": {
             "arg": "yes",
@@ -773,6 +779,7 @@
       "aliases": [],
       "args": [],
       "auth_required": true,
+      "bankr_signer": "supported",
       "command": "hyperliquid wallet address",
       "command_path": [
         "wallet",
@@ -793,6 +800,7 @@
         "type": "object",
         "x-hyperliquid": {
           "aliases": [],
+          "bankr_signer": "supported",
           "confirmation": "none",
           "confirmation_bypass": {
             "arg": null,
@@ -866,6 +874,7 @@
         }
       ],
       "auth_required": true,
+      "bankr_signer": "supported",
       "command": "hyperliquid borrowlend supply <TOKEN> --amount <AMOUNT>",
       "command_path": [
         "borrowlend",
@@ -905,6 +914,7 @@
         "type": "object",
         "x-hyperliquid": {
           "aliases": [],
+          "bankr_signer": "supported",
           "confirmation": "none",
           "confirmation_bypass": {
             "arg": null,
@@ -965,6 +975,7 @@
         }
       ],
       "auth_required": false,
+      "bankr_signer": "not_required",
       "command": "hyperliquid subscribe all-mids",
       "command_path": [
         "subscribe",
@@ -994,6 +1005,7 @@
         "type": "object",
         "x-hyperliquid": {
           "aliases": [],
+          "bankr_signer": "not_required",
           "confirmation": "none",
           "confirmation_bypass": {
             "arg": null,

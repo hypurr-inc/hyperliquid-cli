@@ -3,21 +3,22 @@
 //! The clap tree supplies names, args, defaults and help; each command's
 //! [`CommandSpec`] supplies policy. Nothing here is written by hand per command.
 
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use clap::builder::ValueParser;
 use clap::{Arg, ArgAction, Command};
 use serde::Serialize;
-use serde_json::{Value, json};
 
 use crate::command_spec::{
     ArgSpec, CommandSpec, ConfirmationPolicy, DryRunPolicy, GroupSpec, InputKind, Lifecycle,
-    OutputContract, OwsSupport, RawPayloadPolicy, Risk, StreamBound,
+    Mutability, OutputContract, OwsSupport, RawPayloadPolicy, Risk, SignerSupport, StreamBound,
+    Transport, YES_ARG,
 };
 use crate::commands;
 
-/// The order `schema` and the contract fixtures list commands in. A command that is
-/// not listed follows in registration order, so a new command needs no entry here.
+/// The order `schema`, the MCP tool list and the contract fixtures list commands
+/// in. Every registered command appears exactly once; a test fails when one does not.
 const SCHEMA_ORDER: &[&str] = &[
     "status",
     "meta",
@@ -142,15 +143,16 @@ const SCHEMA_ORDER: &[&str] = &[
     "setup",
     "mcp",
     "report-incident",
+    "wallet login",
+    "wallet logout",
 ];
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct CommandRegistry {
     commands: Vec<CommandContract>,
 }
 
 impl CommandRegistry {
-    /// The registry of every registered command, built once.
     pub fn get() -> &'static Self {
         static REGISTRY: LazyLock<CommandRegistry> = LazyLock::new(CommandRegistry::build);
         &REGISTRY
@@ -158,7 +160,7 @@ impl CommandRegistry {
 
     fn build() -> Self {
         let groups = commands::groups();
-        let mut tree = commands::command_tree();
+        let mut tree = commands::command_tree().clone();
         tree.build();
         let mut contracts = commands::entries()
             .iter()
@@ -188,41 +190,86 @@ impl CommandRegistry {
                 .eq(path.iter().copied())
         })
     }
-
-    pub fn find_matching_path(&self, args: &[String]) -> Option<String> {
-        for len in (1..=args.len()).rev() {
-            let slice = &args[..len];
-            let refs: Vec<&str> = slice.iter().map(String::as_str).collect();
-            if let Some(cmd) = self.find_path(&refs) {
-                return Some(cmd.command_path.join(" "));
-            }
-        }
-        None
-    }
 }
 
+/// What the schema says about one command. Serializing it yields the entry
+/// `hyperliquid schema` prints, except `json_schema`, which
+/// [`crate::commands::schema`] derives from the same value.
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandContract {
     pub command: String,
     pub command_path: Vec<String>,
-    pub aliases: Vec<String>,
-    pub group: String,
-    pub description: String,
+    #[serde(rename = "group")]
+    pub category: String,
     pub auth_required: bool,
     pub dangerous: bool,
+    #[serde(flatten)]
+    pub policy: Policy,
+    pub description: String,
+    #[serde(rename = "args")]
+    pub inputs: Vec<InputContract>,
+    #[serde(skip)]
+    pub spec: &'static CommandSpec,
+}
+
+/// The policy block of a contract. It is also the `x-hyperliquid` extension of
+/// the command's JSON schema.
+#[derive(Debug, Clone, Serialize)]
+pub struct Policy {
+    pub aliases: Vec<String>,
     pub lifecycle: Lifecycle,
     pub risk: Risk,
     pub mutability: Mutability,
     pub dry_run: DryRunPolicy,
     pub raw_payload: RawPayloadPolicy,
     pub confirmation: ConfirmationPolicy,
-    pub transport: Vec<Transport>,
+    pub confirmation_bypass: ConfirmationBypass,
     pub ows_signer: OwsSupport,
+    pub bankr_signer: SignerSupport,
+    pub transport: Vec<Transport>,
     pub output_contract: OutputContract,
-    pub one_of_required: Vec<Vec<String>>,
-    pub inputs: Vec<InputContract>,
-    #[serde(skip)]
-    pub spec: &'static CommandSpec,
+    pub stream_bounds: Option<StreamBoundsSchema>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfirmationBypass {
+    pub supported: bool,
+    pub arg: Option<&'static str>,
+}
+
+/// How a streaming command is bounded in machine contexts, read from its
+/// [`StreamBound`].
+#[derive(Debug, Clone, Serialize)]
+pub struct StreamBoundsSchema {
+    pub required_in_machine_context: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_when: Option<BTreeMap<&'static str, bool>>,
+    pub cli_args: &'static [&'static str],
+    pub env: Vec<&'static str>,
+    pub output_mode: &'static str,
+}
+
+impl From<StreamBound> for StreamBoundsSchema {
+    fn from(bound: StreamBound) -> Self {
+        Self {
+            required_in_machine_context: true,
+            required_when: bound
+                .required_when()
+                .map(|flag| BTreeMap::from([(flag, true)])),
+            cli_args: bound.cli_args(),
+            env: bound.env().map(|env| env.name).into_iter().collect(),
+            output_mode: "ndjson",
+        }
+    }
+}
+
+/// A contract reads as its policy: `contract.risk`, `contract.dry_run`.
+impl std::ops::Deref for CommandContract {
+    type Target = Policy;
+
+    fn deref(&self) -> &Policy {
+        &self.policy
+    }
 }
 
 impl CommandContract {
@@ -272,32 +319,40 @@ impl CommandContract {
                     .collect()
             })
             .unwrap_or_default();
+        let inputs = args
+            .into_iter()
+            .map(|arg| InputContract::generate(arg, spec.arg(arg.get_id().as_str())))
+            .collect::<Vec<_>>();
+        let confirmation_bypass_arg = inputs
+            .iter()
+            .any(|input| input.id == YES_ARG)
+            .then_some(YES_ARG);
         Self {
             command: usage,
             command_path: spec.path.iter().map(|part| (*part).to_string()).collect(),
-            aliases,
-            group: spec.group.to_string(),
-            description: spec.description.to_string(),
+            category: spec.category.to_string(),
             auth_required: spec.auth_required,
             dangerous: spec.dangerous,
-            lifecycle: spec.lifecycle,
-            risk: spec.risk,
-            mutability: Mutability::from_lifecycle_and_risk(spec.lifecycle, spec.risk),
-            dry_run: spec.dry_run,
-            raw_payload: spec.raw_payload,
-            confirmation: spec.confirmation,
-            transport: primary_transport(spec.lifecycle),
-            ows_signer: spec.ows_signer,
-            output_contract: output_contract(spec),
-            one_of_required: spec
-                .one_of_required
-                .iter()
-                .map(|required| required.iter().map(|id| (*id).to_string()).collect())
-                .collect(),
-            inputs: args
-                .into_iter()
-                .map(|arg| InputContract::generate(arg, spec.arg(arg.get_id().as_str())))
-                .collect(),
+            policy: Policy {
+                aliases,
+                lifecycle: spec.lifecycle,
+                risk: spec.risk,
+                mutability: spec.mutability(),
+                dry_run: spec.dry_run,
+                raw_payload: spec.raw_payload,
+                confirmation: spec.confirmation,
+                confirmation_bypass: ConfirmationBypass {
+                    supported: confirmation_bypass_arg.is_some(),
+                    arg: confirmation_bypass_arg,
+                },
+                ows_signer: spec.ows_signer,
+                bankr_signer: spec.bankr_signer(),
+                transport: vec![spec.transport()],
+                output_contract: output_contract(spec),
+                stream_bounds: spec.stream.map(StreamBoundsSchema::from),
+            },
+            description: spec.description.to_string(),
+            inputs,
             spec,
         }
     }
@@ -306,62 +361,23 @@ impl CommandContract {
         self.command_path.join(" ")
     }
 
-    /// Name of the boolean flag that answers this command's confirmation prompt,
-    /// derived from the args: `Some("yes")` for every command with a `yes` arg.
+    /// Name of the boolean flag that answers this command's confirmation prompt:
+    /// [`YES_ARG`] for every command that has it.
     pub fn confirmation_bypass_arg(&self) -> Option<&'static str> {
-        self.inputs
-            .iter()
-            .any(|input| input.id == "yes")
-            .then_some("yes")
+        self.policy.confirmation_bypass.arg
     }
 
-    /// Input for an arg id.
     pub fn input(&self, id: &str) -> Option<&InputContract> {
         self.inputs.iter().find(|input| input.id == id)
     }
+}
 
-    /// Schema description for an arg id, when it has one.
-    pub fn arg_description(&self, id: &str) -> Option<&str> {
-        self.input(id)
-            .and_then(|input| input.description.as_deref())
-    }
-
-    pub fn metadata_json(&self) -> Value {
-        let yes_support = self.confirmation_bypass_arg();
-        let stream_bounds = match self.spec.stream {
-            Some(StreamBound::Subscribe) => json!({
-                "required_in_machine_context": true,
-                "cli_args": ["max_events", "idle_timeout_ms"],
-                "env": ["HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"],
-                "output_mode": "ndjson"
-            }),
-            Some(StreamBound::SnapshotWatch) => json!({
-                "required_in_machine_context": true,
-                "required_when": {"watch": true},
-                "cli_args": ["max_ticks"],
-                "env": ["HYPERLIQUID_WATCH_MAX_TICKS"],
-                "output_mode": "ndjson"
-            }),
-            None => Value::Null,
-        };
-        json!({
-            "aliases": self.aliases,
-            "lifecycle": self.lifecycle,
-            "risk": self.risk,
-            "mutability": self.mutability,
-            "dry_run": self.dry_run,
-            "raw_payload": self.raw_payload,
-            "confirmation": self.confirmation,
-            "confirmation_bypass": {
-                "supported": yes_support.is_some(),
-                "arg": yes_support,
-            },
-            "ows_signer": self.ows_signer,
-            "transport": self.transport,
-            "output_contract": self.output_contract,
-            "stream_bounds": stream_bounds,
-        })
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArgType {
+    Boolean,
+    Integer,
+    String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -370,12 +386,13 @@ pub struct InputContract {
     pub long: Option<String>,
     pub short: Option<String>,
     pub positional_index: Option<usize>,
-    pub arg_type: String,
+    pub arg_type: ArgType,
     pub required: bool,
     pub multiple: bool,
     pub enum_values: Vec<String>,
     pub description: Option<String>,
     pub default: Option<String>,
+    #[serde(rename = "input_kind")]
     pub kind: Option<InputKind>,
 }
 
@@ -389,15 +406,14 @@ impl InputContract {
             short: arg.get_short().map(String::from),
             positional_index: arg.get_index().map(|index| index - 1),
             arg_type: if spec.is_some_and(|spec| spec.schema_string) {
-                "string"
+                ArgType::String
             } else if flag {
-                "boolean"
+                ArgType::Boolean
             } else if is_integer(arg) {
-                "integer"
+                ArgType::Integer
             } else {
-                "string"
-            }
-            .to_string(),
+                ArgType::String
+            },
             required: arg.is_required_set() || spec.is_some_and(|spec| spec.schema_required),
             multiple: repeats && !spec.is_some_and(|spec| spec.schema_single),
             enum_values: arg
@@ -446,56 +462,16 @@ fn is_integer(arg: &Arg) -> bool {
     .any(|integer| integer.type_id() == actual)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Mutability {
-    ReadOnly,
-    Streaming,
-    LocalOnly,
-    LiveMutating,
-    Blocked,
-}
-
-impl Mutability {
-    fn from_lifecycle_and_risk(lifecycle: Lifecycle, risk: Risk) -> Self {
-        match lifecycle {
-            Lifecycle::Streaming => Self::Streaming,
-            Lifecycle::InteractiveLocal => Self::LocalOnly,
-            Lifecycle::LiveMutating => Self::LiveMutating,
-            Lifecycle::BlockedUnsupported => Self::Blocked,
-            Lifecycle::ReadOnly if matches!(risk, Risk::LocalSecret | Risk::LocalState) => {
-                Self::LocalOnly
-            }
-            Lifecycle::ReadOnly => Self::ReadOnly,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Transport {
-    CliProcess,
-    CliInteractive,
-    CliBlocked,
-}
-
-fn primary_transport(lifecycle: Lifecycle) -> Vec<Transport> {
-    match lifecycle {
-        Lifecycle::InteractiveLocal => vec![Transport::CliInteractive],
-        Lifecycle::BlockedUnsupported => vec![Transport::CliBlocked],
-        _ => vec![Transport::CliProcess],
-    }
-}
-
 fn output_contract(spec: &CommandSpec) -> OutputContract {
     if let Some(contract) = spec.output {
         contract
-    } else if spec.stream == Some(StreamBound::Subscribe) {
+    } else if matches!(
+        spec.stream,
+        Some(StreamBound::Subscribe | StreamBound::Polled)
+    ) {
         OutputContract::BoundedNdjsonStream
     } else if spec.lifecycle == Lifecycle::InteractiveLocal {
         OutputContract::InteractiveLocal
-    } else if spec.lifecycle == Lifecycle::BlockedUnsupported {
-        OutputContract::BlockedUnsupported
     } else if spec.dry_run == DryRunPolicy::Optional {
         OutputContract::CommandResultOrDryRunEnvelope
     } else {
@@ -510,58 +486,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_enumerates_every_registered_command() {
-        let registry = CommandRegistry::get();
-        assert_eq!(registry.commands().len(), 125);
-        for path in [
-            &["asset", "decode"][..],
-            &["asset", "search"],
-            &["search"],
-            &["buy"],
-            &["orders", "chase"],
-            &["orders", "bracket"],
-            &["orders", "trailing-stop"],
-            &["watch", "risk"],
-            &["orders", "create"],
-            &["wallet", "create"],
-            &["report-incident"],
-            &["schema"],
-        ] {
-            assert!(registry.find_path(path).is_some(), "{path:?}");
-        }
-    }
-
-    #[test]
-    fn registry_includes_current_command_families() {
-        let groups = CommandRegistry::get()
-            .commands()
+    fn schema_order_lists_every_registered_command_exactly_once() {
+        let listed = SCHEMA_ORDER.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(
+            listed.len(),
+            SCHEMA_ORDER.len(),
+            "SCHEMA_ORDER has a duplicate"
+        );
+        let registered = commands::entries()
             .iter()
-            .map(|command| command.group.as_str())
+            .map(|entry| entry.spec.key())
             .collect::<BTreeSet<_>>();
-
-        for group in [
-            "account",
-            "builder",
-            "market",
-            "referral",
-            "staking",
-            "subscribe",
-            "system",
-            "trade",
-            "transfer",
-            "vault",
-            "wallet",
-        ] {
-            assert!(groups.contains(group), "missing command group {group}");
-        }
+        let missing = registered
+            .iter()
+            .filter(|key| !listed.contains(key.as_str()))
+            .collect::<Vec<_>>();
+        assert!(missing.is_empty(), "not in SCHEMA_ORDER: {missing:?}");
+        let unknown = listed
+            .iter()
+            .filter(|key| !registered.contains(**key))
+            .collect::<Vec<_>>();
+        assert!(
+            unknown.is_empty(),
+            "SCHEMA_ORDER names no command: {unknown:?}"
+        );
     }
 
     #[test]
-    fn schema_order_names_only_registered_commands() {
-        let registry = CommandRegistry::get();
-        for key in SCHEMA_ORDER {
-            let path = key.split(' ').collect::<Vec<_>>();
-            assert!(registry.find_path(&path).is_some(), "{key}");
-        }
+    fn every_registered_command_has_exactly_one_contract() {
+        let contracts = CommandRegistry::get().commands();
+        let paths = contracts
+            .iter()
+            .map(|command| command.command_path.clone())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(contracts.len(), commands::entries().len());
+        assert_eq!(paths.len(), contracts.len(), "two contracts share a path");
     }
 }

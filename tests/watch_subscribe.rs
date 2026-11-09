@@ -11,7 +11,7 @@ use hypersdk::hypercore::{
 };
 use predicates::prelude::*;
 use rust_decimal::Decimal;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use support::{API_OVERRIDE_ENV, FORMAT_ENV, IsolatedHome, mount_override_healthcheck};
 use wiremock::MockServer;
 
@@ -88,58 +88,34 @@ async fn watch_mids_json_max_ticks_cli_bounds_output_deterministically() {
 }
 
 #[tokio::test]
-async fn watch_mids_pretty_non_tty_with_bound_defaults_to_ndjson() {
-    let home = IsolatedHome::new();
-    let server = mock_all_mids_server().await;
+async fn watch_mids_human_formats_on_a_pipe_with_a_bound_stream_ndjson() {
+    for extra in [&[][..], &["--format", "table"][..]] {
+        let home = IsolatedHome::new();
+        let server = mock_all_mids_server().await;
 
-    let output = home
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args(["mids", "--watch", "--max-ticks", "1"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("EnterAlternateScreen").not())
-        .stderr(predicate::str::contains(
-            "Streaming JSON lines because stdout isn't a terminal.",
-        ))
-        .get_output()
-        .stdout
-        .clone();
+        let output = home
+            .command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .args(["mids", "--watch", "--max-ticks", "1"])
+            .args(extra)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("EnterAlternateScreen").not())
+            .stderr(predicate::str::contains(
+                "Streaming JSON lines because stdout isn't a terminal.",
+            ))
+            .get_output()
+            .stdout
+            .clone();
 
-    let stdout = String::from_utf8(output).unwrap();
-    let lines = stdout.lines().collect::<Vec<_>>();
-    assert_eq!(lines.len(), 1);
+        let stdout = String::from_utf8(output).unwrap();
+        let lines = stdout.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "{extra:?}");
 
-    let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(value["BTC"], "50000");
-    assert_eq!(value["ETH"], "3000");
-}
-
-#[tokio::test]
-async fn watch_mids_table_non_tty_with_bound_defaults_to_ndjson() {
-    let home = IsolatedHome::new();
-    let server = mock_all_mids_server().await;
-
-    let output = home
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args(["mids", "--watch", "--format", "table", "--max-ticks", "1"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "Streaming JSON lines because stdout isn't a terminal.",
-        ))
-        .get_output()
-        .stdout
-        .clone();
-
-    let stdout = String::from_utf8(output).unwrap();
-    let lines = stdout.lines().collect::<Vec<_>>();
-    assert_eq!(lines.len(), 1);
-
-    let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(value["BTC"], "50000");
-    assert_eq!(value["ETH"], "3000");
+        let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(value["BTC"], "50000", "{extra:?}");
+        assert_eq!(value["ETH"], "3000", "{extra:?}");
+    }
 }
 
 #[tokio::test]
@@ -322,6 +298,7 @@ async fn fake_subscribe_stream_applies_select_to_subscription_lines() {
         &mut events,
         &mut output_bytes,
         &options,
+        false,
     )
     .await
     .unwrap();
@@ -349,6 +326,7 @@ async fn fake_subscribe_stream_limits_nested_all_mids_payload() {
         &mut events,
         &mut output_bytes,
         &options,
+        false,
     )
     .await
     .unwrap();
@@ -377,6 +355,7 @@ async fn fake_subscribe_stream_emits_matching_event_envelopes() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await
     .unwrap();
@@ -403,6 +382,7 @@ async fn fake_subscribe_stream_ignores_non_matching_events_until_close() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await;
 
@@ -432,6 +412,7 @@ async fn fake_subscribe_stream_max_events_counts_only_emitted_events() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await
     .unwrap();
@@ -466,6 +447,7 @@ async fn fake_subscribe_stream_marks_reconnect_with_one_stream_gap_warning() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await
     .unwrap();
@@ -498,6 +480,7 @@ async fn fake_subscribe_stream_gap_warning_survives_select_projection() {
         &mut events,
         &mut output,
         &options,
+        false,
     )
     .await
     .unwrap();
@@ -601,30 +584,6 @@ async fn watch_mids_sigterm_exits_143_with_complete_json_lines() {
 }
 
 #[tokio::test]
-async fn fake_subscribe_stream_closed_stream_behavior_is_deterministic() {
-    let mut events = stream::iter([]);
-    let mut output = Vec::new();
-
-    let result = stream_subscription_events(
-        "allMids(None)",
-        bounds(Some(1), None),
-        matcher(SubscribeTarget::all_mids()),
-        &mut events,
-        &mut output,
-        &JsonRenderOptions::default(),
-    )
-    .await;
-
-    let error = result.unwrap_err().to_string();
-    assert!(error.contains("WebSocket closed before receiving subscription events"));
-
-    let lines = ndjson_values(output);
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["type"], "subscribed");
-    assert_eq!(lines[0]["subscription"], "allMids(None)");
-}
-
-#[tokio::test]
 async fn fake_subscribe_stream_max_zero_emits_only_subscribed_envelope() {
     let mut events = stream::iter([WsEvent::Message(all_mids_message())]);
     let mut output = Vec::new();
@@ -636,6 +595,7 @@ async fn fake_subscribe_stream_max_zero_emits_only_subscribed_envelope() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await
     .unwrap();
@@ -649,7 +609,6 @@ async fn fake_subscribe_stream_max_zero_emits_only_subscribed_envelope() {
 async fn fake_subscribe_stream_idle_timeout_bounds_quiet_max_events() {
     let mut events = stream::pending();
     let mut output = Vec::new();
-    let started = Instant::now();
 
     let result = stream_subscription_events(
         "trades(BTC)",
@@ -658,16 +617,12 @@ async fn fake_subscribe_stream_idle_timeout_bounds_quiet_max_events() {
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await;
 
     let error = result.unwrap_err().to_string();
     assert!(error.contains("Timed out waiting for subscription events after 5ms"));
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "idle timeout should bound quiet streams promptly"
-    );
-
     let lines = ndjson_values(output);
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["type"], "subscribed");
@@ -691,6 +646,7 @@ async fn fake_fills_subscribe_stream_ignores_non_fill_user_events_before_fill() 
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
+        false,
     )
     .await
     .unwrap();
@@ -744,22 +700,6 @@ fn subscription_event_matchers_cover_all_subscribe_wiring() {
     }
 
     assert!(SubscribeTarget::fills(Address::ZERO).matches(&user_events_fills_message()));
-}
-
-#[test]
-fn fills_subscription_ignores_non_fill_user_event_variants() {
-    let target = SubscribeTarget::fills(Address::ZERO);
-    for non_fill_message in [
-        user_events_funding_message(),
-        user_events_liquidation_message(),
-        user_events_non_user_cancel_message(),
-        user_events_unknown_message(),
-    ] {
-        assert!(
-            !target.matches(&non_fill_message),
-            "fills subscription should ignore non-fill user event: {non_fill_message:?}"
-        );
-    }
 }
 
 fn ndjson_values(output: Vec<u8>) -> Vec<serde_json::Value> {

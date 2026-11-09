@@ -2,9 +2,13 @@ use clap::Parser;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use hyperliquid_cli::auth::SignerFlags;
 use hyperliquid_cli::errors;
-use hyperliquid_cli::invocation::{Invocation, InvocationFlags, SignerFlags};
+use hyperliquid_cli::invocation::{Invocation, InvocationFlags};
 use hyperliquid_cli::output;
+use hyperliquid_cli::output::terminal::Terminal;
+use hyperliquid_cli::report;
+use hyperliquid_cli::settings::Settings;
 
 #[cfg(test)]
 mod cli_contract_tests;
@@ -12,11 +16,14 @@ mod cli_runtime;
 mod cli_shell;
 
 use cli_shell::{
-    PANIC_COMMAND, exit_for_clap_error, install_panic_hook, resolve_output_format,
-    try_parse_cli_from,
+    ParsedCli, exit_for_clap_error, install_panic_hook, name_command_in_panics,
+    print_help_to_stdout, startup, try_parse_cli_from,
 };
 
 const GLOBAL_OPTIONS: &str = "Global Options";
+
+/// Global options whose values are secrets. Suggested commands never repeat them.
+const SECRET_GLOBALS: &[&str] = &["private_key", "keystore_password"];
 
 fn root_after_help() -> String {
     format!(
@@ -46,10 +53,15 @@ Learn more:
 )]
 struct Cli {
     /// Output format: pretty, table, or json. Defaults to json when stdout is not a terminal or HYPERLIQUID_AGENT is set; overrides HYPERLIQUID_FORMAT
+    #[allow(
+        dead_code,
+        reason = "declares the option for clap; the format precedence reads it from the ArgMatches so a failed parse resolves the same way"
+    )]
     #[arg(long, short, global = true, value_enum, default_value = "pretty", help_heading = GLOBAL_OPTIONS)]
     format: output::OutputFormat,
 
     /// Shortcut for --format json
+    #[allow(dead_code, reason = "see `format`")]
     #[arg(long, global = true, help_heading = GLOBAL_OPTIONS)]
     json: bool,
     /// Private key to sign with. Prefer HYPERLIQUID_PRIVATE_KEY: command-line options appear in process lists
@@ -57,7 +69,7 @@ struct Cli {
     private_key: Option<String>,
 
     /// Foundry-compatible keystore file to decrypt for signing
-    #[arg(long, global = true, help_heading = GLOBAL_OPTIONS)]
+    #[arg(long, global = true, help_heading = GLOBAL_OPTIONS, conflicts_with = "private_key")]
     keystore: Option<PathBuf>,
 
     /// Password for --keystore. Prefer HYPERLIQUID_KEYSTORE_PASSWORD: command-line options appear in process lists
@@ -134,82 +146,80 @@ struct Cli {
     payload_file: Option<String>,
 }
 
-fn error_output(format: output::OutputFormat) -> errors::ErrorOutput {
-    match format {
-        output::OutputFormat::Json => errors::ErrorOutput::Json,
-        output::OutputFormat::Pretty | output::OutputFormat::Table => errors::ErrorOutput::Human,
-    }
-}
-
 #[tokio::main]
 async fn main() {
     install_panic_hook();
     let raw_args: Vec<OsString> = std::env::args_os().collect();
-    let parsed = match try_parse_cli_from(&raw_args) {
+    let settings = Settings::from_process();
+    let terminal = Terminal::probe();
+    let ParsedCli {
+        cli,
+        selected,
+        requested_format,
+    } = match try_parse_cli_from(&raw_args) {
         Ok(parsed) => parsed,
-        Err(err) => exit_for_clap_error(err, &raw_args),
+        Err(err) => exit_for_clap_error(err, &raw_args, terminal, settings.env()),
     };
-    output::colors::init(parsed.cli.no_color);
-    if let Some(path) = parsed.registry_path.as_deref() {
-        let _ = PANIC_COMMAND.set(path.join(" "));
-        errors::set_command_path(path);
-    }
-    let env = output::terminal::OutputEnv::probe(parsed.explicit_format);
-    let effective_format = if parsed.cli.json {
-        output::OutputFormat::Json
-    } else {
-        parsed.cli.format
-    };
-    let format = match resolve_output_format(&env, effective_format) {
-        Ok(format) => format,
-        Err(err) => errors::exit_with_error(err, errors::ErrorOutput::Json),
-    };
-    if let Err(err) = hyperliquid_cli::mode::validate_env() {
-        errors::exit_with_error(err, error_output(format));
-    }
-    let session = output::Session::new(
-        format,
-        output::JsonRenderOptions::from_cli(
-            parsed.cli.select.as_deref(),
-            parsed.cli.results_only,
-            parsed.cli.max_results,
-        ),
-        env,
-    );
-    let inv = Invocation::new(
-        session,
-        InvocationFlags {
-            testnet: parsed.cli.testnet,
-            dry_run: parsed.cli.dry_run,
-            non_interactive: parsed.cli.non_interactive,
-            payload_from_stdin: parsed.cli.payload_file.as_deref() == Some("-"),
-            signer: SignerFlags {
-                bankr: parsed.cli.bankr,
-                private_key: parsed.cli.private_key.clone(),
-                keystore: parsed.cli.keystore.clone(),
-                keystore_password: parsed.cli.keystore_password.clone(),
-                account: parsed.cli.account.clone(),
-                ows_signer: parsed.cli.ows_signer.clone(),
-            },
-        },
-    );
-    let is_update_command = parsed
-        .selected
+    output::colors::init(cli.no_color, settings.env(), terminal);
+    let command = selected
         .as_ref()
-        .is_some_and(|selected| selected.entry.spec.path == ["update"]);
-    let update_check_handle = hyperliquid_cli::update::maybe_start_update_check(
-        format,
-        parsed.cli.no_update_check || is_update_command,
+        .map(|selected| selected.entry.spec.path.join(" "));
+    if let Some(command) = &command {
+        name_command_in_panics(command);
+    }
+    let skip_update_check = cli.no_update_check
+        || selected
+            .as_ref()
+            .is_some_and(|selected| selected.entry.spec.skips_update_check);
+    let flags = InvocationFlags {
+        testnet: cli.testnet,
+        dry_run: cli.dry_run,
+        non_interactive: cli.non_interactive,
+        payload_json: cli.payload_json,
+        payload_file: cli.payload_file,
+        signer: SignerFlags {
+            bankr: cli.bankr,
+            private_key: cli.private_key,
+            keystore: cli.keystore,
+            keystore_password: cli.keystore_password,
+            account: cli.account,
+            ows_signer: cli.ows_signer,
+        },
+    };
+    let env = settings.env().clone();
+    let mode = match startup(requested_format, &flags, terminal, &env) {
+        Ok(mode) => mode,
+        Err((err, format)) => report::exit_with_error(err, format, command.as_deref(), &env),
+    };
+    let session = output::Session::new(
+        output::JsonRenderOptions::from_cli(
+            cli.select.as_deref(),
+            cli.results_only,
+            cli.max_results,
+        ),
+        &mode,
     );
+    let update_check_handle =
+        hyperliquid_cli::update::maybe_start_update_check(&mode, skip_update_check, &env);
 
-    if let Err(err) = cli_runtime::run(&parsed.cli, parsed.selected, parsed.confirmation, inv).await
-    {
+    let result = match selected {
+        Some(selected) => {
+            let inv = Invocation::new(settings, session, mode, flags, selected.entry.spec);
+            cli_runtime::run(selected, inv).await
+        }
+        None => print_help_to_stdout(&[]),
+    };
+    if let Err(err) = result {
         // This path handles CliError and anyhow errors from command handlers.
         // clap usage errors (exit 2) are handled by exit_for_clap_error before
         // the command runs, so they don't go through this path.
         hyperliquid_cli::update::flush_update_check_silent(update_check_handle).await;
-        let cli_err = errors::from_anyhow(err);
-        errors::exit_with_error(cli_err, error_output(format));
+        report::exit_with_error(
+            errors::from_anyhow(err),
+            mode.format,
+            command.as_deref(),
+            &env,
+        );
     }
 
     hyperliquid_cli::update::flush_update_check(update_check_handle).await;

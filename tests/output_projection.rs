@@ -1,12 +1,14 @@
-use hyperliquid_cli::commands::account::{AbstractionOutput, AbstractionRow, FillRow, FillsOutput};
+use hyperliquid_cli::commands::abstraction::AbstractionRow;
+use hyperliquid_cli::commands::account::{FillRow, FillsOutput};
 use hyperliquid_cli::commands::meta::{AssetContextRow, DexRow, MetaOutput, MetaSpotRow};
 use hyperliquid_cli::commands::orderbook::{
     BookLevelRow, BookSnapshot, CandleRow, CandlesOutput, FundingRow, MidRow, MidsOutput, SpreadRow,
 };
 use hyperliquid_cli::commands::perps::{PerpMarketRow, PerpMarketsOutput};
+use hyperliquid_cli::commands::rows::One;
 use hyperliquid_cli::commands::spot::{SpotMarketRow, SpotMarketsOutput};
 use hyperliquid_cli::commands::status::StatusOutput;
-use hyperliquid_cli::output::terminal::OutputEnv;
+use hyperliquid_cli::mode::Mode;
 use hyperliquid_cli::output::{JsonRenderOptions, OutputFormat, Session};
 use rust_decimal::Decimal;
 use serde_json::{Map, Value};
@@ -17,10 +19,13 @@ fn json_session(select: Option<&str>) -> Session {
 }
 
 fn json_session_with_limit(select: Option<&str>, max_results: Option<usize>) -> Session {
+    let mode = Mode {
+        format: OutputFormat::Json,
+        ..Mode::default()
+    };
     Session::new(
-        OutputFormat::Json,
         JsonRenderOptions::from_cli(select, false, max_results),
-        OutputEnv::default(),
+        &mode,
     )
 }
 
@@ -104,13 +109,11 @@ fn account_fills_projection_selects_requested_fields() {
 
 #[test]
 fn account_abstraction_projection_selects_requested_fields() {
-    let output = AbstractionOutput {
-        row: AbstractionRow {
-            user: "0x0000000000000000000000000000000000000001".to_string(),
-            raw_mode: "unifiedAccount".to_string(),
-            normalized_mode: "unified-account".to_string(),
-        },
-    };
+    let output = One::new(AbstractionRow {
+        user: "0x0000000000000000000000000000000000000001".to_string(),
+        raw_mode: "unifiedAccount".to_string(),
+        normalized_mode: "unified-account".to_string(),
+    });
     let rendered = json_session(Some("user,normalized_mode")).render(&output);
     let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
 
