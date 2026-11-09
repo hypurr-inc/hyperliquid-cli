@@ -7,78 +7,36 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use hypersdk::hypercore::types::{
-    AssetPosition, BatchOrder, LeverageType, OrderGrouping, OrderRequest, OrderTypePlacement,
-    TimeInForce, TpSl,
+    AssetPosition, OrderGrouping, OrderRequest, OrderTypePlacement, TimeInForce, TpSl,
+    TrailingStop, TrailingStopRetracement,
 };
 use hypersdk::hypercore::{Cloid, HttpClient};
 use hypersdk::{Address, Decimal};
 
 use super::args::{
-    BatchCreateArgs, BatchCreateOrder, CreateArgs, CreateOrderType, MarginModeArg, OrderSide,
-    ScaleArgs, ScheduleCancelArgs, TifArg, TpslGroupingArg, TriggerPriceSpec, TwapCancelArgs,
-    TwapCreateArgs,
+    BatchCreateArgs, BatchCreateOrder, CreateArgs, CreateOrderType, CreateTpslGroupingArg,
+    OrderSide, ScaleArgs, ScheduleCancelArgs, TifArg, TpslGroupingArg, TrailingStopArgs,
+    TriggerPriceSpec, TwapCancelArgs, TwapCreateArgs,
 };
 use super::cloid::{cloid_from_wire, parse_cloid, wire_cloid};
-use super::exchange::{OrderBuilderFee, TwapExchangeAction, TwapOrderAction};
+use super::exchange::{TwapExchangeAction, TwapOrderAction};
 use super::prepared::{
     CreateOrderSubmission, NormalTpslOrder, PreparedOrder, PreparedOrderBatch, PreparedTpslBatch,
-    PreparedTpslLeg, QuoteAmount, TpslLegKind,
+    PreparedTpslLeg, QuoteAmount, TpslLegKind, order_batch, priority_grouping,
 };
+use super::preview::OrderDryRunPlan;
 use super::validation::{
     AttachedTpsl, BuilderRequest, ClosingSize, MarketPrecision, MarketSizing, OrderKind, OrderSpec,
-    ScaleLadder, TpslSpec, validate_margin_mode_for_market, validate_order_for_market,
-    validate_twap_create_args,
+    ScaleLadder, TpslSpec, validate_order_for_market, validate_twap_create_args,
 };
-use crate::assets::asset_id::spot_coin_key;
 use crate::assets::{
     AssetQuery, AssetResolver, Market, OutcomeAsset, PerpAsset, parse_asset_query,
     qualify_dex_asset,
 };
-use crate::builder_fee;
+use crate::builder_fee::{self, BuilderFee};
 use crate::errors::{CliError, from_sdk};
-use crate::http_api::ApiClient;
+use crate::margin::{MarginModeArg, MarginPlan};
 use crate::settings::Settings;
-use crate::wire::InfoRequest;
-
-pub(super) struct OrderDryRunPlan {
-    would_execute: &'static str,
-    args: serde_json::Value,
-}
-
-impl OrderDryRunPlan {
-    pub(super) fn new(would_execute: &'static str, args: serde_json::Value) -> Self {
-        Self {
-            would_execute,
-            args,
-        }
-    }
-
-    fn acting_for(mut self, on_behalf_of: &Option<String>) -> Self {
-        if let Some(object) = self.args.as_object_mut() {
-            object.insert("on_behalf_of".to_string(), serde_json::json!(on_behalf_of));
-        }
-        self
-    }
-
-    /// Replace the previewed `margin_mode` with the one the account is set to
-    /// for this market, as read from the exchange.
-    pub(super) fn with_account_margin_mode(mut self, margin_mode: MarginModeArg) -> Self {
-        if let Some(object) = self.args.as_object_mut() {
-            object.insert("margin_mode".to_string(), serde_json::json!(margin_mode));
-        }
-        self
-    }
-
-    #[must_use]
-    pub(super) fn would_execute(&self) -> &'static str {
-        self.would_execute
-    }
-
-    #[must_use]
-    pub(super) fn into_args(self) -> serde_json::Value {
-        self.args
-    }
-}
 
 pub(super) struct TwapCreatePlan {
     pub(super) action: TwapExchangeAction,
@@ -89,8 +47,9 @@ pub(super) struct TwapCreatePlan {
     pub(super) duration_seconds: u64,
     pub(super) duration_minutes: u64,
     pub(super) randomize: bool,
-    /// The margin mode the account must already be set to for this market.
-    pub(super) margin_mode: Option<MarginModeArg>,
+    /// The margin mode of the TWAP: requested, else what the market's rule
+    /// implies.
+    pub(super) margin: MarginPlan,
 }
 
 pub(super) struct TwapCancelPlan {
@@ -130,27 +89,6 @@ impl ScheduleCancelPlan {
             }),
             Self::Clear => None,
         }
-    }
-}
-
-/// The margin mode a preview shows: the one requested, else the mode the
-/// market's rule implies (isolated for an isolated-only market, cross
-/// otherwise). The account's own setting replaces it where the command can
-/// read one ([`OrderDryRunPlan::with_account_margin_mode`]).
-fn insert_margin_mode(
-    preview: &mut serde_json::Value,
-    perp: Option<&PerpAsset>,
-    margin_mode: Option<MarginModeArg>,
-) {
-    let rule_default = match perp {
-        Some(perp) if !perp.margin_rule.allows_cross() => MarginModeArg::Isolated,
-        _ => MarginModeArg::Cross,
-    };
-    if let Some(object) = preview.as_object_mut() {
-        object.insert(
-            "margin_mode".to_string(),
-            serde_json::json!(margin_mode.unwrap_or(rule_default).to_string()),
-        );
     }
 }
 
@@ -220,18 +158,20 @@ struct Venue {
     coin: String,
     index: usize,
     precision: MarketPrecision,
-    quote: String,
+    /// The asset an `--amount` is in. An outcome market has none: its orders
+    /// are sized in tokens.
+    quote: Option<String>,
 }
 
 fn venue(market: &Market) -> Result<Venue, CliError> {
     let (coin, index, quote) = match market {
-        Market::Perp(perp) => (perp.display_name(), perp.index, perp.collateral.clone()),
-        Market::Spot(spot) => (spot.symbol.clone(), spot.index, spot.quote.clone()),
-        Market::Outcome(outcome) => (
-            outcome.notation().to_string(),
-            outcome.asset_index()?,
-            "USDH".to_string(),
+        Market::Perp(perp) => (
+            perp.display_name(),
+            perp.index,
+            Some(perp.collateral.clone()),
         ),
+        Market::Spot(spot) => (spot.symbol.clone(), spot.index, Some(spot.quote.clone())),
+        Market::Outcome(outcome) => (outcome.notation().to_string(), outcome.asset_index()?, None),
     };
     Ok(Venue {
         coin,
@@ -250,6 +190,19 @@ pub(super) fn market_dex(market: &Market) -> Option<String> {
     }
 }
 
+/// The key `allMids` lists `market` under, and the name an error calls it.
+/// `coin` and `dex` are the flags that named the market.
+fn mid_key(market: &Market, coin: &str, dex: Option<&str>) -> Result<(String, String), CliError> {
+    match market {
+        Market::Perp(perp) => Ok((perp.display_name(), qualify_dex_asset(dex, coin))),
+        Market::Spot(spot) => Ok((spot.info_coin(), coin.to_string())),
+        Market::Outcome(_) => Err(CliError::Unsupported(
+            "outcome orders do not support --type market because outcome size decimals are not verified; use an explicit --price and --size"
+                .to_string(),
+        )),
+    }
+}
+
 /// The current mid of `market`. `coin` and `dex` are the flags that named it,
 /// for the error that says the mid was not available.
 pub(super) async fn market_mid_price(
@@ -258,16 +211,7 @@ pub(super) async fn market_mid_price(
     coin: &str,
     dex: Option<&str>,
 ) -> Result<Decimal, CliError> {
-    let (key, label) = match market {
-        Market::Perp(perp) => (perp.display_name(), qualify_dex_asset(dex, coin)),
-        Market::Spot(spot) => (spot_coin_key(spot.index), coin.to_string()),
-        Market::Outcome(_) => {
-            return Err(CliError::Unsupported(
-                "outcome orders do not support --type market because outcome size decimals are not verified; use an explicit --price and --size"
-                    .to_string(),
-            ));
-        }
-    };
+    let (key, label) = mid_key(market, coin, dex)?;
     let mids = client
         .all_mids(market_dex(market))
         .await
@@ -287,7 +231,7 @@ fn order_builder_fee(
     request: &BuilderRequest,
     market: &Market,
     side: OrderSide,
-) -> Result<Option<OrderBuilderFee>, CliError> {
+) -> Result<Option<BuilderFee>, CliError> {
     let spot_buy = matches!(market, Market::Spot(_)) && side == OrderSide::Buy;
     let (address, fee, sub_builders) = match request {
         BuilderRequest::None => return Ok(None),
@@ -314,19 +258,11 @@ fn order_builder_fee(
             }
         }
     };
-    if matches!(market, Market::Perp(_)) && fee > OrderBuilderFee::PERP_MAX_TENTHS_BPS {
-        return Err(CliError::Unsupported(
-            "perp order builder fee rate cannot exceed 0.1%".to_string(),
-        ));
+    let fee = BuilderFee::new(address, fee, sub_builders);
+    if matches!(market, Market::Perp(_)) {
+        fee.ensure_within_perp_cap()?;
     }
-    Ok(Some(OrderBuilderFee {
-        // Hyperliquid's Python SDK lowercases builder addresses before hashing/signing
-        // L1 order actions. Checksum casing can change the msgpack action hash and
-        // recover a random nonexistent signer on exchange validation.
-        b: address.to_string().to_ascii_lowercase(),
-        f: fee,
-        s: sub_builders,
-    }))
+    Ok(Some(fee))
 }
 
 pub(super) async fn prepare_order(
@@ -347,9 +283,9 @@ pub(super) async fn prepare_order_in(
     settings: &Settings,
     spec: &OrderSpec,
 ) -> Result<PreparedOrder, CliError> {
-    validate_order_for_market(spec, market)?;
+    let margin = validate_order_for_market(spec, market)?;
     let builder = order_builder_fee(settings, &spec.builder, market, spec.side)?;
-    plan_order(client, market, spec, builder).await
+    plan_order(client, market, spec, builder, margin).await
 }
 
 /// Plan one order, already validated for `market`, with its builder fee.
@@ -357,7 +293,8 @@ async fn plan_order(
     client: &HttpClient,
     market: &Market,
     spec: &OrderSpec,
-    builder: Option<OrderBuilderFee>,
+    builder: Option<BuilderFee>,
+    margin: Option<MarginPlan>,
 ) -> Result<PreparedOrder, CliError> {
     let Venue {
         coin,
@@ -418,7 +355,18 @@ async fn plan_order(
                             "amount is too small for {coin}; derived size rounds to zero"
                         ))
                     })?;
-                    (size, Some(amount))
+                    let unit = quote.clone().ok_or_else(|| {
+                        CliError::Internal(anyhow::anyhow!(
+                            "{coin} has no quote asset to size an amount in"
+                        ))
+                    })?;
+                    (
+                        size,
+                        Some(QuoteAmount {
+                            value: amount,
+                            unit,
+                        }),
+                    )
                 }
             };
             (
@@ -442,7 +390,7 @@ async fn plan_order(
             ..
         }
     );
-    let amount = amount.map(|value| QuoteAmount { value, unit: quote });
+
     Ok(PreparedOrder {
         request: OrderRequest {
             asset: index,
@@ -462,7 +410,7 @@ async fn plan_order(
         amount,
         warning,
         builder,
-        margin_mode: spec.margin_mode,
+        margin,
         priority_rate: spec.priority_rate,
     })
 }
@@ -562,12 +510,6 @@ pub(super) async fn prepare_batch_create_orders(
     prepare_order_batch(client, resolver, settings, specs).await
 }
 
-/// The grouping an order action with no TP/SL carries: none, or the order
-/// write priority `rate` when one is paid.
-pub(super) fn priority_grouping(rate: Option<u32>) -> OrderGrouping {
-    rate.map_or(OrderGrouping::Na, OrderGrouping::PriorityRate)
-}
-
 async fn prepare_order_batch(
     client: &HttpClient,
     resolver: &AssetResolver,
@@ -597,11 +539,10 @@ async fn prepare_order_batch(
             ));
         }
     }
-    let batch = BatchOrder {
-        orders: legs.iter().map(|leg| leg.request.clone()).collect(),
-        grouping: priority_grouping(priority_rate),
-        builder: None,
-    };
+    let batch = order_batch(
+        legs.iter().map(|leg| leg.request.clone()).collect(),
+        priority_grouping(priority_rate),
+    );
     Ok(PreparedOrderBatch { batch, legs })
 }
 
@@ -691,11 +632,10 @@ impl TpslChildren<'_> {
 }
 
 fn batch_from_legs(grouping: TpslGroupingArg, legs: Vec<PreparedTpslLeg>) -> PreparedTpslBatch {
-    let batch = BatchOrder {
-        orders: legs.iter().map(|leg| leg.request.clone()).collect(),
-        grouping: grouping.into(),
-        builder: None,
-    };
+    let batch = order_batch(
+        legs.iter().map(|leg| leg.request.clone()).collect(),
+        grouping.into(),
+    );
     PreparedTpslBatch {
         batch,
         grouping,
@@ -777,30 +717,6 @@ pub(super) async fn fetch_position(
         }))
 }
 
-/// The margin mode `user` is set to for `perp`, from `activeAssetData`. Unlike
-/// a position's leverage type, it exists before any position is open.
-pub(super) async fn fetch_current_margin_mode(
-    api: &ApiClient,
-    user: Address,
-    perp: &PerpAsset,
-) -> Result<MarginModeArg, CliError> {
-    #[derive(serde::Deserialize)]
-    struct ActiveAssetData {
-        leverage: ActiveLeverage,
-    }
-
-    #[derive(serde::Deserialize)]
-    struct ActiveLeverage {
-        #[serde(rename = "type")]
-        leverage_type: LeverageType,
-    }
-
-    // HIP-3 coins are dex-qualified on the wire, as in position rows.
-    let request = InfoRequest::user("activeAssetData", user).field("coin", perp.display_name());
-    let data: ActiveAssetData = api.info(&request, "loading margin mode").await?;
-    Ok(data.leverage.leverage_type.into())
-}
-
 fn position_close_side_and_size(
     position: &AssetPosition,
 ) -> Result<(OrderSide, Decimal), CliError> {
@@ -823,9 +739,6 @@ pub(super) async fn prepare_position_tpsl_batch(
     user: Address,
     spec: &TpslSpec,
 ) -> Result<PreparedTpslBatch, CliError> {
-    if let Some(margin_mode) = spec.margin_mode {
-        validate_margin_mode_for_market(perp, margin_mode)?;
-    }
     let (close_side, size, entry) = match spec.close {
         ClosingSize::Fixed { side, size } => {
             let entry =
@@ -881,19 +794,17 @@ pub(super) fn resolve_trigger_prices(
     entry: Option<Decimal>,
     position_side: OrderSide,
 ) -> Result<(Option<Decimal>, Option<Decimal>), CliError> {
-    if trigger_specs_need_entry(take_profit, stop_loss) && entry.is_none() {
-        return Err(CliError::Unsupported(
-            "percent and entry TP/SL require an open position with an entry price".to_string(),
-        ));
-    }
-    let entry = entry.unwrap_or(Decimal::ONE);
+    let resolve = |spec: &TriggerPriceSpec| match entry {
+        Some(entry) => spec.resolve(entry, position_side),
+        None => spec.absolute().ok_or_else(|| {
+            CliError::Unsupported(
+                "percent and entry TP/SL require an open position with an entry price".to_string(),
+            )
+        }),
+    };
     Ok((
-        take_profit
-            .map(|spec| spec.resolve(entry, position_side))
-            .transpose()?,
-        stop_loss
-            .map(|spec| spec.resolve(entry, position_side))
-            .transpose()?,
+        take_profit.map(resolve).transpose()?,
+        stop_loss.map(resolve).transpose()?,
     ))
 }
 
@@ -902,14 +813,8 @@ fn absolute_trigger_prices(
     stop_loss: Option<&TriggerPriceSpec>,
 ) -> (Option<Decimal>, Option<Decimal>) {
     (
-        match take_profit {
-            Some(TriggerPriceSpec::Absolute(price)) => Some(*price),
-            _ => None,
-        },
-        match stop_loss {
-            Some(TriggerPriceSpec::Absolute(price)) => Some(*price),
-            _ => None,
-        },
+        take_profit.and_then(TriggerPriceSpec::absolute),
+        stop_loss.and_then(TriggerPriceSpec::absolute),
     )
 }
 
@@ -945,9 +850,7 @@ pub(super) fn prepare_twap_create_plan(
     perp: &PerpAsset,
     args: &TwapCreateArgs,
 ) -> Result<TwapCreatePlan, CliError> {
-    if let Some(margin_mode) = args.margin_mode {
-        validate_margin_mode_for_market(perp, margin_mode)?;
-    }
+    let margin = MarginPlan::for_market(perp, args.margin_mode)?;
     let minutes = validate_twap_create_args(args)?;
     let coin = perp.display_name();
     let size = MarketPrecision::of_perp(perp).size(args.size, &coin)?;
@@ -969,7 +872,7 @@ pub(super) fn prepare_twap_create_plan(
         duration_seconds: args.duration,
         duration_minutes: minutes,
         randomize: args.randomize,
-        margin_mode: args.margin_mode,
+        margin,
     })
 }
 
@@ -1011,11 +914,49 @@ pub(super) fn prepare_schedule_cancel_plan(
     }
 }
 
+/// The flags a create-like preview echoes back: what the user typed, which is
+/// not always what was planned. `orders create` takes them from its args and a
+/// bracket entry names its own.
+pub(super) struct OrderEcho<'a> {
+    pub(super) coin: &'a str,
+    pub(super) dex: Option<&'a str>,
+    pub(super) side: OrderSide,
+    pub(super) order_type: CreateOrderType,
+    pub(super) cloid: Option<&'a str>,
+    pub(super) max_slippage_bps: u16,
+    pub(super) take_profit: Option<Decimal>,
+    pub(super) stop_loss: Option<Decimal>,
+    pub(super) grouping: Option<CreateTpslGroupingArg>,
+    pub(super) builder_address: Option<&'a str>,
+    pub(super) builder_fee_rate: Option<&'a str>,
+}
+
+impl<'a> From<&'a CreateArgs> for OrderEcho<'a> {
+    fn from(args: &'a CreateArgs) -> Self {
+        Self {
+            coin: &args.coin,
+            dex: args.dex.as_deref(),
+            side: args.side,
+            order_type: args.order_type,
+            cloid: args.cloid.as_deref(),
+            max_slippage_bps: args.max_slippage_bps,
+            take_profit: args.take_profit,
+            stop_loss: args.stop_loss,
+            grouping: args.grouping,
+            builder_address: args.builder.as_deref(),
+            builder_fee_rate: args.builder_fee_rate.as_deref(),
+        }
+    }
+}
+
+/// What `submission` previews. `margin` is the margin plan its `margin_mode`
+/// shows: the one it was planned with, or the plan once the account was read.
 pub(super) fn create_dry_run_preview(
     submission: &CreateOrderSubmission,
-    args: &CreateArgs,
+    echo: &OrderEcho<'_>,
+    margin: Option<&MarginPlan>,
 ) -> Result<serde_json::Value, CliError> {
-    let mut preview = prepared_order_dry_run_args(submission.parent(), args)?;
+    let mut preview = prepared_order_dry_run_args(submission.parent(), echo, margin)?;
     if let CreateOrderSubmission::NormalTpsl(order) = submission {
         append_tpsl_preview(&mut preview, &order.batch)?;
     }
@@ -1024,58 +965,53 @@ pub(super) fn create_dry_run_preview(
 
 pub(super) fn create_dry_run_plan(
     submission: &CreateOrderSubmission,
-    args: &CreateArgs,
+    echo: &OrderEcho<'_>,
+    margin: Option<&MarginPlan>,
 ) -> Result<OrderDryRunPlan, CliError> {
-    Ok(
-        OrderDryRunPlan::new("submit_order", create_dry_run_preview(submission, args)?)
-            .acting_for(&args.on_behalf_of),
-    )
+    Ok(OrderDryRunPlan::new(
+        "submit_order",
+        create_dry_run_preview(submission, echo, margin)?,
+    ))
 }
 
 pub(super) fn scale_dry_run_plan(
     prepared: &PreparedOrderBatch,
-    args: &ScaleArgs,
+    margin: Option<&MarginPlan>,
 ) -> OrderDryRunPlan {
-    let mut preview = order_batch_dry_run_args(prepared);
-    insert_margin_mode(
-        &mut preview,
-        prepared.legs.first().and_then(PreparedOrder::perp),
-        args.margin_mode,
-    );
-    OrderDryRunPlan::new("submit_order_batch", preview).acting_for(&args.on_behalf_of)
+    // A batch on a market with no margin previews cross, as it always has.
+    let mode = margin.map_or(MarginModeArg::Cross, MarginPlan::mode);
+    OrderDryRunPlan::new("submit_order_batch", order_batch_dry_run_args(prepared))
+        .with_margin_mode(mode)
 }
 
 pub(super) fn batch_create_dry_run_plan(
     prepared: &PreparedOrderBatch,
     args: &BatchCreateArgs,
 ) -> OrderDryRunPlan {
-    let mut preview = order_batch_dry_run_args(prepared);
-    if let Some(object) = preview.as_object_mut() {
-        object.insert(
-            "orders_file".to_string(),
-            serde_json::json!(args.orders_file),
-        );
-    }
-    OrderDryRunPlan::new("submit_order_batch", preview).acting_for(&args.on_behalf_of)
+    OrderDryRunPlan::new("submit_order_batch", order_batch_dry_run_args(prepared))
+        .with_extra("orders_file", serde_json::json!(args.orders_file))
 }
 
 pub(super) fn twap_create_dry_run_plan(
     plan: &TwapCreatePlan,
     args: &TwapCreateArgs,
+    margin: &MarginPlan,
 ) -> OrderDryRunPlan {
-    let mut preview = serde_json::json!({
-        "coin": args.coin,
-        "dex": args.dex,
-        "side": plan.side,
-        "size": plan.size.to_string(),
-        "duration": plan.duration_seconds,
-        "duration_minutes": plan.duration_minutes,
-        "randomize": plan.randomize,
-        "asset_id": plan.perp.index,
-        "resolved_asset": plan.coin,
-    });
-    insert_margin_mode(&mut preview, Some(&plan.perp), plan.margin_mode);
-    OrderDryRunPlan::new("create_twap_order", preview).acting_for(&args.on_behalf_of)
+    OrderDryRunPlan::new(
+        "create_twap_order",
+        serde_json::json!({
+            "coin": args.coin,
+            "dex": args.dex,
+            "side": plan.side,
+            "size": plan.size.to_string(),
+            "duration": plan.duration_seconds,
+            "duration_minutes": plan.duration_minutes,
+            "randomize": plan.randomize,
+            "asset_id": plan.perp.index,
+            "resolved_asset": plan.coin,
+        }),
+    )
+    .with_margin_mode(margin.mode())
 }
 
 pub(super) fn twap_cancel_dry_run_plan(
@@ -1091,12 +1027,10 @@ pub(super) fn twap_cancel_dry_run_plan(
             "resolved_asset": plan.coin,
         }),
     )
-    .acting_for(&args.on_behalf_of)
 }
 
 pub(super) fn schedule_cancel_dry_run_plan(
     plan: &ScheduleCancelPlan,
-    args: &ScheduleCancelArgs,
     now: chrono::DateTime<Utc>,
 ) -> OrderDryRunPlan {
     let preview = match plan.scheduled(now) {
@@ -1108,50 +1042,69 @@ pub(super) fn schedule_cancel_dry_run_plan(
         }),
         None => serde_json::json!({ "mode": "clear" }),
     };
-    OrderDryRunPlan::new("schedule_dead_mans_switch", preview).acting_for(&args.on_behalf_of)
+    OrderDryRunPlan::new("schedule_dead_mans_switch", preview)
+}
+
+/// The trigger fields a preview shows for an order placement: all `null` for
+/// a limit order.
+struct TriggerFields {
+    is_market: Option<bool>,
+    trigger_px: Option<Decimal>,
+    tpsl: Option<TpSl>,
+}
+
+impl TriggerFields {
+    fn of(placement: &OrderTypePlacement) -> Self {
+        match placement {
+            OrderTypePlacement::Trigger {
+                is_market,
+                trigger_px,
+                tpsl,
+            } => Self {
+                is_market: Some(*is_market),
+                trigger_px: Some(*trigger_px),
+                tpsl: Some(*tpsl),
+            },
+            OrderTypePlacement::Limit { .. } => Self {
+                is_market: None,
+                trigger_px: None,
+                tpsl: None,
+            },
+        }
+    }
 }
 
 fn prepared_order_dry_run_args(
     prepared: &PreparedOrder,
-    args: &CreateArgs,
+    echo: &OrderEcho<'_>,
+    margin: Option<&MarginPlan>,
 ) -> Result<serde_json::Value, CliError> {
-    let (is_market, trigger_px, tpsl) = match &prepared.request.order_type {
-        OrderTypePlacement::Trigger {
-            is_market,
-            trigger_px,
-            tpsl,
-        } => (
-            Some(*is_market),
-            Some(*trigger_px),
-            Some(tpsl_to_str(*tpsl)),
-        ),
-        OrderTypePlacement::Limit { .. } => (None, None, None),
-    };
+    let trigger = TriggerFields::of(&prepared.request.order_type);
 
     let mut value = serde_json::json!({
-        "coin": args.coin.clone(),
-        "dex": args.dex.clone(),
-        "side": args.side.to_string(),
-        "type": args.order_type.to_string(),
+        "coin": echo.coin,
+        "dex": echo.dex,
+        "side": echo.side.to_string(),
+        "type": echo.order_type.to_string(),
         "asset_id": prepared.request.asset,
         "resolved_asset": prepared.coin.clone(),
         "limit_px": prepared.request.limit_px.to_string(),
-        "trigger_px": trigger_px.map(|value| value.to_string()),
-        "is_market": is_market,
-        "tpsl": tpsl,
+        "trigger_px": trigger.trigger_px.map(|value| value.to_string()),
+        "is_market": trigger.is_market,
+        "tpsl": trigger.tpsl,
         "size": prepared.request.sz.to_string(),
         "amount": prepared.amount.as_ref().map(|amount| amount.value.to_string()),
         "amount_unit": prepared.amount.as_ref().map(|amount| amount.unit.clone()),
         "tif": prepared.tif.map(|tif| tif.to_string()),
         "reduce_only": prepared.request.reduce_only,
-        "cloid": args.cloid.clone(),
-        "max_slippage_bps": args.max_slippage_bps,
-        "take_profit": args.take_profit.map(|value| value.to_string()),
-        "stop_loss": args.stop_loss.map(|value| value.to_string()),
-        "grouping": args.grouping.map(|grouping| TpslGroupingArg::from(grouping).to_string()),
+        "cloid": echo.cloid,
+        "max_slippage_bps": echo.max_slippage_bps,
+        "take_profit": echo.take_profit.map(|value| value.to_string()),
+        "stop_loss": echo.stop_loss.map(|value| value.to_string()),
+        "grouping": echo.grouping.map(|grouping| TpslGroupingArg::from(grouping).to_string()),
         "builder": prepared.builder.as_ref().map(|builder| serde_json::json!(builder)),
-        "builder_address": args.builder.clone(),
-        "builder_fee_rate": args.builder_fee_rate.clone(),
+        "builder_address": echo.builder_address,
+        "builder_fee_rate": echo.builder_fee_rate,
     });
     if let Some(rate) = prepared.priority_rate {
         insert_priority_rate(&mut value, rate);
@@ -1165,12 +1118,16 @@ fn prepared_order_dry_run_args(
                     "side": notation.side,
                     "encoding": notation.encoding,
                     "asset_id": prepared.request.asset,
-                    "notation": args.coin,
+                    "notation": echo.coin,
                     "live_submission": "enabled: outcome order encoding is verified; use explicit --price and --size"
                 }));
             }
         }
-        Market::Perp(perp) => insert_margin_mode(&mut value, Some(perp), args.margin_mode),
+        Market::Perp(_) => {
+            if let Some(margin) = margin {
+                value["margin_mode"] = serde_json::json!(margin.mode().to_string());
+            }
+        }
         Market::Spot(_) => {}
     }
     Ok(value)
@@ -1182,18 +1139,7 @@ fn order_batch_dry_run_args(prepared: &PreparedOrderBatch) -> serde_json::Value 
         .iter()
         .enumerate()
         .map(|(leg_index, order)| {
-            let (is_market, trigger_px, tpsl) = match &order.request.order_type {
-                OrderTypePlacement::Trigger {
-                    is_market,
-                    trigger_px,
-                    tpsl,
-                } => (
-                    Some(*is_market),
-                    Some(trigger_px.to_string()),
-                    Some(tpsl_to_str(*tpsl)),
-                ),
-                OrderTypePlacement::Limit { .. } => (None, None, None),
-            };
+            let trigger = TriggerFields::of(&order.request.order_type);
             serde_json::json!({
                 "leg_index": leg_index,
                 "coin": order.coin,
@@ -1202,9 +1148,9 @@ fn order_batch_dry_run_args(prepared: &PreparedOrderBatch) -> serde_json::Value 
                 "asset_id": order.request.asset,
                 "resolved_asset": order.coin,
                 "limit_px": order.request.limit_px.to_string(),
-                "trigger_px": trigger_px,
-                "is_market": is_market,
-                "tpsl": tpsl,
+                "trigger_px": trigger.trigger_px.map(|price| price.to_string()),
+                "is_market": trigger.is_market,
+                "tpsl": trigger.tpsl,
                 "price": order.price().to_string(),
                 "size": order.size().to_string(),
                 "amount": order.amount.as_ref().map(|amount| amount.value.to_string()),
@@ -1227,36 +1173,27 @@ fn order_batch_dry_run_args(prepared: &PreparedOrderBatch) -> serde_json::Value 
 }
 
 /// Name the order write priority a preview would send: the grouping is the
-/// rate, and the wire form is `{ "p": rate }`.
+/// rate, and the wire form is the SDK's own (`{ "p": rate }`).
 fn insert_priority_rate(preview: &mut serde_json::Value, rate: u32) {
     if let Some(object) = preview.as_object_mut() {
         object.insert("grouping".to_string(), "priority-rate".into());
         object.insert(
             "grouping_wire".to_string(),
-            serde_json::json!({ "p": rate }),
+            serde_json::json!(OrderGrouping::PriorityRate(rate)),
         );
         object.insert("priority_rate".to_string(), rate.into());
-    }
-}
-
-fn tpsl_to_str(tpsl: TpSl) -> &'static str {
-    match tpsl {
-        TpSl::Tp => "tp",
-        TpSl::Sl => "sl",
     }
 }
 
 /// `orders tpsl` dry-run details: what the live command would send, without a
 /// signer or a position lookup. The legs come from the same
 /// [`position_tpsl_triggers`] and [`position_tpsl_batch`] the live order uses.
+/// `margin` is the plan its `margin_mode` shows.
 pub(super) fn tpsl_dry_run_plan(
     perp: &PerpAsset,
     spec: &TpslSpec,
-    on_behalf_of: &Option<String>,
+    margin: &MarginPlan,
 ) -> Result<OrderDryRunPlan, CliError> {
-    if let Some(margin_mode) = spec.margin_mode {
-        validate_margin_mode_for_market(perp, margin_mode)?;
-    }
     let (absolute_tp, absolute_sl) =
         absolute_trigger_prices(spec.take_profit.as_ref(), spec.stop_loss.as_ref());
     let (absolute_tp, absolute_sl) = truncate_triggers(perp, absolute_tp, absolute_sl)?;
@@ -1272,7 +1209,6 @@ pub(super) fn tpsl_dry_run_plan(
     let mut preview = serde_json::json!({
         "coin": spec.coin,
         "dex": spec.dex,
-        "on_behalf_of": on_behalf_of,
         "take_profit": spec.take_profit.as_ref().map(TriggerPriceSpec::display),
         "stop_loss": spec.stop_loss.as_ref().map(TriggerPriceSpec::display),
         "grouping": grouping.to_string(),
@@ -1282,7 +1218,7 @@ pub(super) fn tpsl_dry_run_plan(
         "size": fixed_size.map(|value| value.to_string()),
         "size_mode": if fixed_size.is_some() { "fixed" } else { "current_position" },
     });
-    insert_margin_mode(&mut preview, Some(perp), spec.margin_mode);
+    preview["margin_mode"] = serde_json::json!(margin.mode().to_string());
 
     match spec.close {
         ClosingSize::Fixed { side, size } => {
@@ -1392,7 +1328,7 @@ fn append_position_sized_tpsl_preview(
         let Some(price) = price else {
             continue;
         };
-        let tpsl_str = tpsl_to_str(tpsl);
+        let tpsl_wire = serde_json::json!(tpsl);
         let child = serde_json::json!({
             "asset": asset,
             "is_buy": inferred_side.map(OrderSide::is_buy),
@@ -1401,7 +1337,7 @@ fn append_position_sized_tpsl_preview(
             "reduce_only": true,
             "trigger_px": price.to_string(),
             "is_market": true,
-            "tpsl": tpsl_str,
+            "tpsl": tpsl_wire.clone(),
         });
         match tpsl {
             TpSl::Tp => position_tp_order = child.clone(),
@@ -1429,7 +1365,7 @@ fn append_position_sized_tpsl_preview(
                 "trigger": {
                     "isMarket": true,
                     "triggerPx": price.to_string(),
-                    "tpsl": tpsl_str,
+                    "tpsl": tpsl_wire,
                 }
             }
         }));
@@ -1476,6 +1412,167 @@ fn infer_close_side_from_tpsl_prices(
         (Some(tp), Some(sl)) if tp < sl => Some(OrderSide::Buy),
         _ => None,
     }
+}
+
+/// `value` must be above zero; `flag` names it in the error.
+fn require_positive(value: Decimal, flag: &'static str) -> Result<(), CliError> {
+    if value <= Decimal::ZERO {
+        return Err(CliError::Configuration(format!(
+            "{flag} must be greater than zero"
+        )));
+    }
+    Ok(())
+}
+
+/// The retracement the user asked for. Exactly one option must be set.
+fn retracement_from_args(args: &TrailingStopArgs) -> Result<TrailingStopRetracement, CliError> {
+    match (args.retracement_pct, args.retracement_px) {
+        (Some(pct), None) => {
+            if pct <= Decimal::ZERO || pct >= Decimal::ONE_HUNDRED {
+                return Err(CliError::Configuration(
+                    "--retracement-pct must be greater than 0 and less than 100".to_string(),
+                ));
+            }
+            Ok(TrailingStopRetracement::Pct(pct))
+        }
+        (None, Some(px)) => {
+            require_positive(px, "--retracement-px")?;
+            Ok(TrailingStopRetracement::Px(px))
+        }
+        _ => Err(CliError::Configuration(
+            "orders trailing-stop requires exactly one of --retracement-pct or --retracement-px.\n  \
+             hyperliquid --format json --dry-run orders trailing-stop --coin BTC --side sell --size 0.01 --retracement-pct 5 --reduce-only"
+                .to_string(),
+        )),
+    }
+}
+
+/// Validate `orders trailing-stop` arguments before auth or network access.
+pub(super) fn validate_trailing_stop_args(args: &TrailingStopArgs) -> Result<(), CliError> {
+    match parse_asset_query(&qualify_dex_asset(args.dex.as_deref(), &args.coin)) {
+        AssetQuery::Spot(_) => {
+            return Err(CliError::Configuration(format!(
+                "orders trailing-stop supports perpetual markets only; {} is a spot market",
+                args.coin
+            )));
+        }
+        AssetQuery::Outcome(_) => {
+            return Err(CliError::Configuration(format!(
+                "orders trailing-stop supports perpetual markets only; {} is an outcome market",
+                args.coin
+            )));
+        }
+        AssetQuery::Perp(_) | AssetQuery::Hip3 { .. } => {}
+    }
+    require_positive(args.size, "--size")?;
+    retracement_from_args(args)?;
+    if let Some(activation) = args.activation_price {
+        require_positive(activation, "--activation-price")?;
+    }
+    Ok(())
+}
+
+/// A native trailing stop, planned: the action to send and what the preview,
+/// the approval block and the result row say of it.
+pub(super) struct TrailingStopPlan {
+    action: TrailingStop,
+    coin: String,
+    side: OrderSide,
+    size: Decimal,
+    retracement: TrailingStopRetracement,
+    activation_px: Option<Decimal>,
+}
+
+impl TrailingStopPlan {
+    pub(super) fn action(&self) -> &TrailingStop {
+        &self.action
+    }
+
+    pub(super) fn coin(&self) -> &str {
+        &self.coin
+    }
+
+    pub(super) fn side(&self) -> OrderSide {
+        self.side
+    }
+
+    pub(super) fn size(&self) -> Decimal {
+        self.size
+    }
+
+    pub(super) fn activation_px(&self) -> Option<Decimal> {
+        self.activation_px
+    }
+
+    pub(super) fn reduce_only(&self) -> bool {
+        self.action.reduce_only
+    }
+
+    /// The retracement as the exchange spells it: `{ "pct": .. }` or `{ "px": .. }`.
+    pub(super) fn retracement_json(&self) -> serde_json::Value {
+        match &self.retracement {
+            TrailingStopRetracement::Pct(pct) => {
+                serde_json::json!({ "pct": pct.normalize().to_string() })
+            }
+            TrailingStopRetracement::Px(px) => {
+                serde_json::json!({ "px": px.normalize().to_string() })
+            }
+        }
+    }
+
+    /// The retracement as a person reads it: `5%` or a price distance.
+    pub(super) fn retracement_label(&self) -> String {
+        match &self.retracement {
+            TrailingStopRetracement::Pct(pct) => format!("{}%", pct.normalize()),
+            TrailingStopRetracement::Px(px) => px.normalize().to_string(),
+        }
+    }
+
+    pub(super) fn dry_run_plan(&self, args: &TrailingStopArgs) -> OrderDryRunPlan {
+        OrderDryRunPlan::new(
+            "trailing_stop",
+            serde_json::json!({
+                "coin": args.coin,
+                "dex": args.dex,
+                "resolved_asset": self.coin,
+                "asset_id": self.action.asset,
+                "side": self.side.to_string(),
+                "size": self.size.to_string(),
+                "reduce_only": self.reduce_only(),
+                "retracement": self.retracement_json(),
+                "activation_px": self.activation_px.map(|price| price.to_string()),
+            }),
+        )
+    }
+}
+
+pub(super) fn prepare_trailing_stop_plan(
+    perp: &PerpAsset,
+    args: &TrailingStopArgs,
+) -> Result<TrailingStopPlan, CliError> {
+    let retracement = retracement_from_args(args)?;
+    let coin = perp.display_name();
+    let precision = MarketPrecision::of_perp(perp);
+    let size = precision.size(args.size, &coin)?;
+    let activation_px = args
+        .activation_price
+        .map(|price| precision.price(price, &coin))
+        .transpose()?;
+    Ok(TrailingStopPlan {
+        action: TrailingStop {
+            asset: perp.index,
+            is_buy: args.side.is_buy(),
+            sz: size,
+            reduce_only: args.reduce_only,
+            retracement,
+            activation_px,
+        },
+        coin,
+        side: args.side,
+        size,
+        retracement,
+        activation_px,
+    })
 }
 
 #[cfg(test)]

@@ -4,10 +4,11 @@
 use hypersdk::Address;
 
 use super::consent::{ConsentKind, ConsentTarget};
-use super::exchange::OrderBuilderFee;
+use crate::builder_fee::BuilderFee;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::network::Network;
 use crate::signing::SelectedSigner;
 
 #[derive(Clone, Copy)]
@@ -34,13 +35,19 @@ impl<'a> OrderSubmissionContext<'a> {
     pub(super) fn consent(
         self,
         kind: ConsentKind,
-        builder: Option<&OrderBuilderFee>,
+        builder: Option<&BuilderFee>,
         ask: impl FnOnce(&ConsentTarget<'_>) -> Result<bool, CliError>,
     ) -> Result<(), CliError> {
         if !self.requires_approval {
             return Ok(());
         }
-        let target = ConsentTarget::new(self, builder);
+        let target = ConsentTarget::new(
+            self.inv.mode(),
+            Network::from(self.api.chain()),
+            self.signer,
+            self.vault_address,
+            builder,
+        );
         if ask(&target)? {
             return Ok(());
         }

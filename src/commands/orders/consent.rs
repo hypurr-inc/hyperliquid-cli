@@ -4,18 +4,16 @@ use chrono::Utc;
 use hypersdk::hypercore::types::OrderGrouping;
 use hypersdk::{Address, Decimal};
 
-use super::context::OrderSubmissionContext;
-use super::exchange::OrderBuilderFee;
-use super::planning::{ScheduleCancelPlan, TwapCreatePlan};
+use super::planning::{ScheduleCancelPlan, TrailingStopPlan, TwapCreatePlan};
 use super::prepared::{
     PreparedOrder, PreparedOrderBatch, PreparedTpslBatch, QuoteAmount, TpslLegKind,
 };
+use crate::builder_fee::BuilderFee;
 use crate::errors::CliError;
 use crate::mode::Mode;
 use crate::network::Network;
 use crate::output;
 use crate::prompt;
-use crate::quantity::Scale;
 use crate::signing::SelectedSigner;
 
 /// What the user is asked to approve. It names the error a decline fails with.
@@ -53,7 +51,7 @@ impl ConsentKind {
     }
 }
 
-pub(super) fn confirm_mainnet_batch_modify(
+pub(super) fn confirm_batch_modify(
     count: usize,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
@@ -79,7 +77,7 @@ pub(super) fn confirm_cancel_all(
     ask_confirmation(target, &[], &question)
 }
 
-pub(super) fn confirm_mainnet_schedule_cancel(
+pub(super) fn confirm_schedule_cancel(
     plan: &ScheduleCancelPlan,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
@@ -95,7 +93,7 @@ pub(super) fn confirm_mainnet_schedule_cancel(
     ask_confirmation(target, &[], &question)
 }
 
-pub(super) fn confirm_mainnet_order(
+pub(super) fn confirm_order(
     prepared: &PreparedOrder,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
@@ -146,7 +144,7 @@ fn priority_line(rate: u32) -> String {
     )
 }
 
-pub(super) fn confirm_mainnet_order_batch(
+pub(super) fn confirm_order_batch(
     label: &str,
     prepared: &PreparedOrderBatch,
     target: &ConsentTarget<'_>,
@@ -164,7 +162,7 @@ pub(super) fn confirm_mainnet_order_batch(
     )
 }
 
-pub(super) fn confirm_mainnet_tpsl_batch(
+pub(super) fn confirm_tpsl_batch(
     prepared: &PreparedTpslBatch,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
@@ -208,7 +206,7 @@ pub(super) fn confirm_mainnet_tpsl_batch(
     )
 }
 
-pub(super) fn confirm_mainnet_twap(
+pub(super) fn confirm_twap(
     plan: &TwapCreatePlan,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
@@ -223,24 +221,64 @@ pub(super) fn confirm_mainnet_twap(
     )
 }
 
+pub(super) fn confirm_trailing_stop(
+    plan: &TrailingStopPlan,
+    target: &ConsentTarget<'_>,
+) -> Result<bool, CliError> {
+    let tracking = if plan.side().is_buy() {
+        "lowest"
+    } else {
+        "highest"
+    };
+    let activation = plan
+        .activation_px()
+        .map(|price| format!("Activation: {} (mark price)", price.normalize()))
+        .unwrap_or_else(|| "Activation: starts tracking immediately".to_string());
+    let details = [
+        format!("Trailing stop: {} market order when it fires", plan.side()),
+        format!("Coin: {}", plan.coin()),
+        format!("Side: {}", plan.side()),
+        format!("Size: {}", plan.size().normalize()),
+        format!(
+            "Retracement: {} from the {tracking} mark price",
+            plan.retracement_label()
+        ),
+        activation,
+        format!(
+            "Reduce-only: {}",
+            if plan.reduce_only() { "yes" } else { "no" }
+        ),
+    ];
+    ask_confirmation(
+        target,
+        &details,
+        &format!("Place this trailing stop on {}?", target.network()),
+    )
+}
+
+/// Who is asked, and what the approval block tells them about where the action
+/// goes: the network, the signer, the account it acts for, the builder fee.
 pub(super) struct ConsentTarget<'a> {
     mode: &'a Mode,
     network: Network,
     signer: &'a SelectedSigner,
     vault_address: Option<Address>,
-    builder: Option<&'a OrderBuilderFee>,
+    builder: Option<&'a BuilderFee>,
 }
 
 impl<'a> ConsentTarget<'a> {
     pub(super) fn new(
-        submission: OrderSubmissionContext<'a>,
-        builder: Option<&'a OrderBuilderFee>,
+        mode: &'a Mode,
+        network: Network,
+        signer: &'a SelectedSigner,
+        vault_address: Option<Address>,
+        builder: Option<&'a BuilderFee>,
     ) -> Self {
         Self {
-            mode: submission.inv.mode(),
-            network: Network::from(submission.api.chain()),
-            signer: submission.signer,
-            vault_address: submission.vault_address,
+            mode,
+            network,
+            signer,
+            vault_address,
             builder,
         }
     }
@@ -260,14 +298,14 @@ impl<'a> ConsentTarget<'a> {
         if let Some(builder) = self.builder {
             lines.push(format!(
                 "Builder: {} (max fee {}%)",
-                builder.b,
+                builder.address_wire(),
                 builder.percent()
             ));
-            for sub in &builder.s {
+            for sub in builder.subs() {
                 lines.push(format!(
                     "Sub-builder: {} ({}% of the builder fee)",
-                    sub.b,
-                    Scale::TENTHS_BPS_PER_PERCENT.amount(sub.s)
+                    sub.address_wire(),
+                    sub.percent()
                 ));
             }
         }

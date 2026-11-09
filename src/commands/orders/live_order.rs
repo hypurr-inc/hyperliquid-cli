@@ -19,10 +19,10 @@ use crate::errors::{CliError, from_sdk};
 /// where an order request carries it as a `usize`. Built before an order is
 /// placed, so an order that could not be cancelled by cloid is never placed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CloidAsset(u32);
+pub(super) struct CloidAsset(u32);
 
 impl CloidAsset {
-    pub(crate) fn new(index: usize) -> Result<Self, CliError> {
+    pub(super) fn new(index: usize) -> Result<Self, CliError> {
         u32::try_from(index).map(Self).map_err(|_| {
             CliError::Internal(anyhow::anyhow!(
                 "asset index {index} does not fit a cancel-by-cloid request"
@@ -30,12 +30,12 @@ impl CloidAsset {
         })
     }
 
-    pub(crate) fn index(self) -> u32 {
+    pub(super) fn index(self) -> u32 {
         self.0
     }
 }
 
-pub(crate) struct LiveOrder {
+pub(super) struct LiveOrder {
     pub oid: Option<u64>,
     pub cloid: Cloid,
     pub asset: CloidAsset,
@@ -43,11 +43,11 @@ pub(crate) struct LiveOrder {
     pub open_size: Decimal,
 }
 
-pub(crate) fn elapsed_ms(started: Instant) -> u64 {
+pub(super) fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-pub(crate) async fn send_tracked_action(
+pub(super) async fn send_tracked_action(
     context: OrderSubmissionContext<'_>,
     action: Action,
     error_label: &'static str,
@@ -65,7 +65,7 @@ pub(crate) async fn send_tracked_action(
 
 impl LiveOrder {
     /// Size still open for this order. Zero means it filled or was cancelled.
-    pub(crate) fn open_size_in(&self, orders: &[BasicOrder]) -> Decimal {
+    pub(super) fn open_size_in(&self, orders: &[BasicOrder]) -> Decimal {
         orders
             .iter()
             .filter(|order| {
@@ -80,14 +80,14 @@ impl LiveOrder {
     /// that left the book since the last read. An order that is gone left with
     /// everything it had open: a fill is the only way a command's own resting
     /// order disappears.
-    pub(crate) fn settle(&mut self, open_now: Decimal) -> Decimal {
+    pub(super) fn settle(&mut self, open_now: Decimal) -> Decimal {
         let open_now = open_now.max(Decimal::ZERO).min(self.open_size);
         let left = self.open_size - open_now;
         self.open_size = open_now;
         left
     }
 
-    pub(crate) fn is_gone(&self) -> bool {
+    pub(super) fn is_gone(&self) -> bool {
         self.open_size <= Decimal::ZERO
     }
 
@@ -95,7 +95,7 @@ impl LiveOrder {
     /// the order's market (another dex's list never holds the order, so reading
     /// it would report the order as gone), and [`settle`](Self::settle) it.
     /// Returns the size that left the book since the last read.
-    pub(crate) async fn refresh(
+    pub(super) async fn refresh(
         &mut self,
         client: &HttpClient,
         user: Address,
@@ -107,7 +107,7 @@ impl LiveOrder {
 
     /// Cancel by cloid, even when an oid is known. Chase uses this so a
     /// requote never cancels a different order that reused an oid.
-    pub(crate) fn cancel_by_cloid(&self) -> Action {
+    pub(super) fn cancel_by_cloid(&self) -> Action {
         Action::CancelByCloid(BatchCancelCloid {
             cancels: vec![CancelByCloid {
                 asset: self.asset.index(),
@@ -117,7 +117,7 @@ impl LiveOrder {
         })
     }
 
-    pub(crate) fn cancel_prefer_oid(&self) -> Action {
+    pub(super) fn cancel_prefer_oid(&self) -> Action {
         match self.oid {
             Some(oid) => Action::Cancel(BatchCancel {
                 cancels: vec![Cancel {

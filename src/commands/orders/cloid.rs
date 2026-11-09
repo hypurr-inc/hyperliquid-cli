@@ -16,6 +16,11 @@ pub(super) fn cloid_from_wire(cloid: Cloid) -> Option<Cloid> {
     (cloid != Cloid::default()).then_some(cloid)
 }
 
+/// A cloid as the exchange and a person read it: 0x-prefixed lowercase hex.
+pub(super) fn cloid_text(cloid: Cloid) -> String {
+    format!("{cloid:#x}")
+}
+
 /// A CLOID given to a command that places an order: exactly 16 bytes of hex.
 pub(super) fn parse_cloid(input: &str) -> Result<Cloid, CliError> {
     let Some(stripped) = input.strip_prefix("0x") else {
@@ -91,6 +96,13 @@ mod tests {
         let id = cloid("0x00000000000000000000000000000001");
         assert_eq!(cloid_from_wire(wire_cloid(Some(id))), Some(id));
         assert_eq!(cloid_from_wire(wire_cloid(None)), None);
+    }
+
+    #[test]
+    fn a_cloids_display_is_its_full_hex_text() {
+        let id = cloid("0x000000000000000000000000deadbeef");
+        assert_eq!(id.to_string(), cloid_text(id));
+        assert_eq!(cloid_text(id), "0x000000000000000000000000deadbeef");
     }
 
     #[test]

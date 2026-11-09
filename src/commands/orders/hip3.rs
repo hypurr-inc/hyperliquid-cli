@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use hypersdk::{Address, Decimal};
 use serde_json::json;
 
+use super::args::BPS_DENOMINATOR;
 use super::prepared::PreparedOrder;
-use super::validation::BPS_DENOMINATOR;
 use crate::commands::abstraction::fetch_abstraction;
 use crate::commands::transfers::{self, SendAssetArgs};
 use crate::http_api::ApiClient;
@@ -20,19 +20,24 @@ const DEFAULT_HIP3_LEVERAGE: i64 = 10;
 const MARGIN_BUFFER_BPS: i64 = 12_000;
 
 #[derive(Debug, Clone)]
-pub struct Hip3MarginPlan {
-    pub dest_dex: String,
+pub(super) struct Hip3MarginPlan {
+    pub(super) dest_dex: String,
     /// The dex's collateral token, which is what the transfer moves.
-    pub token: String,
-    pub amount: Decimal,
+    pub(super) token: String,
+    pub(super) amount: Decimal,
 }
 
 impl Hip3MarginPlan {
-    pub fn to_json(&self) -> serde_json::Value {
+    /// The transfer's destination, as `send-asset` names it.
+    fn dest(&self) -> String {
+        format!("dex:{}", self.dest_dex)
+    }
+
+    pub(super) fn to_json(&self) -> serde_json::Value {
         json!({
             "action": "send_asset",
             "source": "perp",
-            "dest": format!("dex:{}", self.dest_dex),
+            "dest": self.dest(),
             "token": self.token,
             "amount": self.amount.normalize().to_string(),
         })
@@ -42,7 +47,7 @@ impl Hip3MarginPlan {
 /// The transfers that top up each HIP-3 dex `orders` trade on, one per dex
 /// that needs one. Orders on the default dex, or on an account whose exchange moves
 /// dex collateral itself, need none.
-pub async fn plan_hip3_margin_transfers(
+pub(super) async fn plan_hip3_margin_transfers(
     api: &ApiClient,
     user: Address,
     orders: &[&PreparedOrder],
@@ -119,7 +124,7 @@ fn required_margin(notional: Decimal) -> Decimal {
     .round_dp(2)
 }
 
-pub async fn execute_hip3_margin_transfers(
+pub(super) async fn execute_hip3_margin_transfers(
     mode: &Mode,
     remote: &Remote,
     signer: &SelectedSigner,
@@ -134,7 +139,7 @@ pub async fn execute_hip3_margin_transfers(
             &SendAssetArgs {
                 to: user.to_string(),
                 source: "perp".to_string(),
-                dest: format!("dex:{}", plan.dest_dex),
+                dest: plan.dest(),
                 token: plan.token.clone(),
                 amount: plan.amount,
                 from_subaccount: None,
@@ -177,7 +182,7 @@ mod tests {
             amount: None,
             warning: None,
             builder: None,
-            margin_mode: None,
+            margin: None,
             priority_rate: None,
         }
     }

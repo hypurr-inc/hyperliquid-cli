@@ -657,6 +657,76 @@ async fn orders_cancel_all_coin_filter_accepts_spot_pair() {
     assert_single_cancel(&server, serde_json::json!([{"a": 11035, "o": 555}])).await;
 }
 
+/// The exchange lists PURR/USDC by name, not as `@0`, so a filter on the pair
+/// matches the orders listed under that name.
+#[tokio::test]
+async fn orders_cancel_all_coin_filter_matches_purr_by_its_listed_name() {
+    let env = IsolatedHome::new();
+    let server = mock_order_management_server_with_spot_meta(
+        None,
+        vec![
+            basic_order("PURR/USDC", 777, None),
+            basic_order("@1035", 555, None),
+            basic_order("BTC", 111, None),
+        ],
+        vec![serde_json::json!("success")],
+        "cancel",
+        serde_json::json!({
+            "universe": [
+                { "name": "PURR/USDC", "index": 0, "tokens": [1, 0] },
+                { "name": "HYPE/USDC", "index": 1035, "tokens": [1105, 0] }
+            ],
+            "tokens": [
+                {
+                    "name": "USDC", "index": 0,
+                    "tokenId": "0x00000000000000000000000000000000",
+                    "szDecimals": 6, "weiDecimals": 6, "evmContract": null
+                },
+                {
+                    "name": "PURR", "index": 1,
+                    "tokenId": "0x00000000000000000000000000000002",
+                    "szDecimals": 0, "weiDecimals": 5, "evmContract": null
+                },
+                {
+                    "name": "HYPE", "index": 1105,
+                    "tokenId": "0x00000000000000000000000000000001",
+                    "szDecimals": 5, "weiDecimals": 18, "evmContract": null
+                }
+            ]
+        }),
+    )
+    .await;
+
+    for coin in ["PURR/USDC", "@0"] {
+        let env = &env;
+        env.command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+            .args(["orders", "cancel-all", "--coin", coin, "-y", "--testnet"])
+            .assert()
+            .success();
+    }
+
+    let cancels: Vec<serde_json::Value> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path() == "/exchange")
+        .map(|request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            body["action"]["cancels"].clone()
+        })
+        .collect();
+    assert_eq!(
+        cancels,
+        vec![
+            serde_json::json!([{"a": 10_000, "o": 777}]),
+            serde_json::json!([{"a": 10_000, "o": 777}]),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn orders_modify_price_and_size_outputs_updated_details() {
     let env = IsolatedHome::new();
