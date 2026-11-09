@@ -6554,7 +6554,7 @@
         "supported": false
       },
       "dangerous": true,
-      "description": "Add or remove isolated margin.",
+      "description": "Add isolated margin.",
       "dry_run": "optional",
       "group": "trade",
       "lifecycle": "live_mutating",
