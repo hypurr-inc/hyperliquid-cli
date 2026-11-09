@@ -9,11 +9,12 @@ use crate::auth;
 use crate::cli_command::CliCommand;
 use crate::clock::{self, DurationError};
 use crate::command_spec::{CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
-use crate::commands::common::support::action_json;
+use crate::commands::common::support::{SUBMITTED, action_json};
 use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
+use crate::network::ChainExt;
 use crate::output::{TableData, serialize_row};
 use crate::quantity;
 use crate::signing::SelectedSigner;
@@ -405,7 +406,7 @@ async fn approve_prepared(
     print_action_output(
         inv,
         ApiWalletActionRow {
-            status: "submitted".to_string(),
+            status: SUBMITTED.to_string(),
             action: operation.action().to_string(),
             master_address: Some(signer.address().to_string()),
             agent_address: prepared.agent_address.to_string(),
@@ -542,7 +543,7 @@ fn parse_expires_in(raw: &str) -> Result<u64, CliError> {
 
 fn approval_action(chain: Chain, prepared: &PreparedAgentApproval, nonce: u64) -> ApproveAgent {
     ApproveAgent {
-        signature_chain_id: chain.arbitrum_id().to_owned(),
+        signature_chain_id: chain.signature_chain_id().to_owned(),
         hyperliquid_chain: chain,
         agent_address: prepared.agent_address,
         agent_name: prepared.action_agent_name.clone(),

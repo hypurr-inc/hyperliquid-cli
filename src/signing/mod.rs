@@ -188,12 +188,13 @@ impl SelectedSigner {
     }
 
     /// Whether this provider signs `signs` at all: a local key and an OWS wallet
-    /// sign anything, Bankr only what [`bankr::covers`] says. Holds whether or
-    /// not a key is at hand, so a dry run can ask it too.
+    /// sign anything, Bankr only what [`Signs::bankr_covers`] says. Holds whether
+    /// or not a key is at hand, so a dry run can ask it too.
     pub fn ensure_covers(&self, signs: Signs<'_>) -> Result<(), CliError> {
         match &self.backend {
             SignerBackend::Local { .. } | SignerBackend::Ows(_) => Ok(()),
-            SignerBackend::Bankr(_) => bankr::ensure_covers(signs),
+            SignerBackend::Bankr(_) if signs.bankr_covers() => Ok(()),
+            SignerBackend::Bankr(_) => Err(bankr::not_covered()),
         }
     }
 
@@ -320,10 +321,10 @@ impl SelectedSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exchange::user_signed::typed_data;
+    use crate::network::ChainExt;
     use crate::ows::vault::test_support::import_test_wallet;
-    use crate::signable::{USER_SIGNED_PREFIX, UsdClassTransfer};
-    use alloy::dyn_abi::{Eip712Types, Resolver};
-    use alloy::sol_types::SolStruct;
+    use crate::signable::UsdClassTransfer;
     use hypersdk::hypercore::types::api::ApproveAgent;
     use hypersdk::hypercore::types::{Action, ScheduleCancel};
 
@@ -342,26 +343,10 @@ mod tests {
         KEY.parse().unwrap()
     }
 
-    /// The typed data a user-signed command signs, built the way the commands build it.
-    fn user_signed<T: SolStruct>(message: &impl serde::Serialize, chain: Chain) -> TypedData {
-        let prefixed = format!("{USER_SIGNED_PREFIX}{}", T::NAME);
-        let mut resolver = Resolver::from_struct::<T>();
-        resolver.ingest_string(T::eip712_encode_type()).unwrap();
-        let mut types = Eip712Types::from(&resolver);
-        let primary = types.remove(T::NAME).unwrap();
-        types.insert(prefixed.clone(), primary);
-        TypedData {
-            domain: chain.domain(),
-            resolver: Resolver::from(types),
-            primary_type: prefixed,
-            message: serde_json::to_value(message).unwrap(),
-        }
-    }
-
     fn usd_class_transfer(chain: Chain) -> TypedData {
-        user_signed::<UsdClassTransfer>(
+        typed_data::<UsdClassTransfer>(
             &serde_json::json!({
-                "hyperliquidChain": chain.to_string(),
+                "hyperliquidChain": chain.label(),
                 "amount": "12.5",
                 "toPerp": true,
                 "nonce": 1_700_000_000_123_u64,
@@ -371,9 +356,9 @@ mod tests {
     }
 
     fn withdraw(chain: Chain) -> TypedData {
-        user_signed::<Withdraw>(
+        typed_data::<Withdraw>(
             &serde_json::json!({
-                "hyperliquidChain": chain.to_string(),
+                "hyperliquidChain": chain.label(),
                 "destination": "0x0000000000000000000000000000000000000001",
                 "amount": "5",
                 "time": 1_700_000_000_123_u64,
@@ -384,7 +369,7 @@ mod tests {
 
     fn approve_agent(chain: Chain) -> Action {
         Action::ApproveAgent(ApproveAgent {
-            signature_chain_id: chain.arbitrum_id().to_owned(),
+            signature_chain_id: chain.signature_chain_id().to_owned(),
             hyperliquid_chain: chain,
             agent_address: "0x0000000000000000000000000000000000000002"
                 .parse()

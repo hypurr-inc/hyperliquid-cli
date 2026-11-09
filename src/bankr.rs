@@ -9,8 +9,9 @@
 //! current-thread runtime on a scoped thread: the handler's own runtime is never
 //! blocked on a future it would have to poll. Async callers await the request.
 //!
-//! Bankr signs trading actions and spot-to-perp USDC moves; every other
-//! user-signed action is refused by [`covers`] before a request is sent. The
+//! Bankr signs trading actions and spot-to-perp USDC moves
+//! ([`Signs::bankr_covers`](crate::signable::Signs::bankr_covers)); every other
+//! user-signed action is refused before a request is sent. The
 //! signature a request returns is recovered against the payload's digest by
 //! the selected signer, so a Bankr reply can never sign for a different account
 //! than the one selected.
@@ -33,7 +34,7 @@ use crate::network::is_loopback_url;
 use crate::resolvers::parse_hex_address;
 use crate::response_sanitization::Untrusted;
 use crate::settings::Settings;
-use crate::signable::{Payload, Signs};
+use crate::signable::Payload;
 use crate::signature::Provider;
 
 /// Bankr's public API, used when no other URL is configured.
@@ -77,15 +78,7 @@ struct SignRequest<'a> {
 }
 
 /// The refusal for a signature Bankr does not cover, before a request is sent.
-pub fn ensure_covers(signs: Signs<'_>) -> Result<(), CliError> {
-    if signs.bankr_covers() {
-        Ok(())
-    } else {
-        Err(not_covered())
-    }
-}
-
-fn not_covered() -> CliError {
+pub fn not_covered() -> CliError {
     CliError::Unsupported(
         "Bankr signs trading actions (orders, cancels, modifies, leverage, margin, trailing stops, TWAP, vault and subaccount actions) and spot-to-perp USDC moves; this action needs a user-signed payload Bankr does not cover, so use a local key or an OWS wallet for it"
             .to_string(),
@@ -95,7 +88,9 @@ fn not_covered() -> CliError {
 /// The typed-data document Bankr is asked to sign for `payload`, or the refusal
 /// for a payload it does not cover.
 pub(crate) fn document(payload: &Payload<'_>) -> Result<Value, CliError> {
-    ensure_covers(payload.signs())?;
+    if !payload.signs().bankr_covers() {
+        return Err(not_covered());
+    }
     match payload {
         Payload::Agent {
             chain,
