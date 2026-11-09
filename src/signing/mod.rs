@@ -27,7 +27,7 @@ use hypersdk::hypercore::types::{Action, ActionRequest, Signature};
 use hypersdk::hypercore::{Chain, PrivateKeySigner};
 use ows_lib::types::WalletInfo;
 
-pub(crate) use self::payload::{Payload, USER_SIGNED_PREFIX, expires_after_refusal};
+pub(crate) use self::payload::{Payload, USER_SIGNED_PREFIX};
 pub use self::payload::{Signs, ensure_supports_expires_after};
 use self::signature::Provider;
 use crate::bankr::{self, BankrClient, BankrSigner};
@@ -171,20 +171,13 @@ impl SelectedSigner {
     /// Every other signer is [`SignerRole::Unverified`] here; only the
     /// exchange can say ([`Invocation::signer_role`](crate::invocation::Invocation::signer_role)).
     /// The one offline definition of an agent wallet, which `master_only` and
-    /// the agent form of an action use.
+    /// the agent form of an action use through the invocation.
     #[must_use]
     pub fn local_role(&self) -> SignerRole {
         match self.query_address() {
             master if master != self.address() => SignerRole::Agent { master },
             _ => SignerRole::Unverified,
         }
-    }
-
-    /// Whether this signs as an agent wallet for another account, which can
-    /// trade for its master but not approve agents or withdraw.
-    #[must_use]
-    pub fn is_stored_agent(&self) -> bool {
-        matches!(self.local_role(), SignerRole::Agent { .. })
     }
 
     #[must_use]
@@ -744,8 +737,6 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(stored.describe().alias.as_deref(), Some("main"));
-        assert!(stored.is_stored_agent());
-        assert!(!SelectedSigner::private_key(key()).is_stored_agent());
         assert!(
             unreachable_bankr()
                 .describe()
@@ -767,7 +758,6 @@ mod tests {
         let stored_master = SelectedSigner::stored_account(key(), "m".to_string(), own.address());
         for signer in [own, stored_master, SelectedSigner::keystore(key())] {
             assert_eq!(signer.local_role(), SignerRole::Unverified);
-            assert!(!signer.is_stored_agent());
         }
     }
 }

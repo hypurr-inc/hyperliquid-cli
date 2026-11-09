@@ -13,6 +13,7 @@ use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
+use crate::exchange_reply;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::{self, TableData};
@@ -389,7 +390,7 @@ async fn action(
         remote.api(),
         signer,
         &exchange_action,
-        actions::RawL1ActionMetadata::new(actions::nonce_now()),
+        None,
         "borrow/lend action failed",
     )
     .await?;
@@ -613,45 +614,10 @@ async fn post_info<T: for<'de> Deserialize<'de>>(
     request: &InfoRequest,
 ) -> Result<T, BorrowLendInfoError> {
     let reply = api.info_raw(request).await?;
-    if info_request_type_is_unavailable(reply.status().as_u16(), reply.body()) {
+    if exchange_reply::info_request_unavailable(reply.status().as_u16(), reply.body()) {
         return Err(BorrowLendInfoError::EndpointUnavailable);
     }
     reply.decode("borrow/lend").map_err(Into::into)
-}
-
-fn info_request_type_is_unavailable(status_code: u16, body: &str) -> bool {
-    if (200..300).contains(&status_code) {
-        return structured_unknown_request_error(body);
-    }
-
-    let lower = body.to_ascii_lowercase();
-    (status_code == 400 || status_code == 404 || status_code == 422)
-        && (lower.contains("unknown")
-            || lower.contains("unsupported")
-            || lower.contains("invalid request")
-            || lower.contains("invalid type"))
-        && (lower.contains("borrowlend")
-            || lower.contains("borrow/lend")
-            || lower.contains("request")
-            || lower.contains("type"))
-}
-
-fn structured_unknown_request_error(body: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
-        return false;
-    };
-
-    let status_is_error = value
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|status| {
-            matches!(
-                status.to_ascii_lowercase().as_str(),
-                "err" | "error" | "failed" | "failure"
-            )
-        });
-
-    status_is_error && info_request_type_is_unavailable(400, &value.to_string())
 }
 
 pub const GROUP: GroupSpec = GroupSpec::new(

@@ -316,7 +316,7 @@ async fn create(
         remote.api(),
         signer,
         &action,
-        actions::RawL1ActionMetadata::new(actions::nonce_now()),
+        None,
         "create subaccount failed",
     )
     .await?;
@@ -357,7 +357,7 @@ async fn transfer(
         remote.api(),
         signer,
         &action,
-        actions::RawL1ActionMetadata::new(actions::nonce_now()),
+        None,
         "subaccount transfer failed",
     )
     .await?;
@@ -403,7 +403,7 @@ async fn spot_transfer(
         remote.api(),
         signer,
         &action,
-        actions::RawL1ActionMetadata::new(actions::nonce_now()),
+        None,
         "subaccount spot transfer failed",
     )
     .await?;

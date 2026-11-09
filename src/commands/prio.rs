@@ -4,11 +4,12 @@ use hypersdk::hypercore::types::{Action, GossipPriorityBid};
 use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
-use crate::commands::actions::{nonce_now, send_l1_action_raw};
+use crate::commands::actions::send_l1_action;
 use crate::commands::rows::{ListRow, MISSING, Row, Rows};
 use crate::commands::support::print_dry_run;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
+use crate::exchange_reply;
 use crate::invocation::Invocation;
 use crate::quantity::{self, Scale};
 use crate::signing::SelectedSigner;
@@ -146,7 +147,7 @@ async fn bid(
     }
 
     let bid = if current > 0 { current + 1 } else { max_gas };
-    let response = send_l1_action_raw(
+    let response = send_l1_action(
         api,
         signer,
         Action::GossipPriorityBid(GossipPriorityBid {
@@ -154,18 +155,14 @@ async fn bid(
             ip: ip.to_string(),
             max_gas: bid,
         }),
-        nonce_now(),
         None,
         "priority bid",
     )
     .await?;
-    let status = match response {
-        serde_json::Value::Object(map)
-            if map.get("type") == Some(&serde_json::Value::String("default".to_string())) =>
-        {
-            "submitted".to_string()
-        }
-        other => format!("submitted with response: {other}"),
+    let status = if exchange_reply::typed(&response).is_some_and(|typed| typed.kind == "default") {
+        "submitted".to_string()
+    } else {
+        format!("submitted with response: {response}")
     };
 
     let row = PriorityBidRow {

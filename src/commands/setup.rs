@@ -495,7 +495,7 @@ impl CliCommand for Setup {
 
         let record_setup: ConfigEdit<'_> = Box::new(|config, wallet, _| {
             config.network = network;
-            config.default_wallet_id = Some(wallet.id.clone());
+            WalletStore::make_default(config, wallet);
             config.default_builder_address = builder_defaults
                 .as_ref()
                 .map(|(address, _)| address.clone());

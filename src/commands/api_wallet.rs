@@ -6,7 +6,7 @@ use hypersdk::hypercore::{Chain, PrivateKeySigner};
 use serde::Serialize;
 
 use crate::auth;
-use crate::clock;
+use crate::clock::{self, DurationError};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
 use crate::commands::actions;
 use crate::errors::CliError;
@@ -14,7 +14,7 @@ use crate::errors::from_sdk;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
 use crate::output::{OutputFormat, TableData, serialize_row};
-use crate::signing::{SelectedSigner, Signs};
+use crate::signing::{SelectedSigner, Signs, nonce};
 use crate::wire::{AddressRole, address};
 
 const MAX_AGENT_EXPIRATION_MS: u64 = 180 * 24 * 60 * 60 * 1000;
@@ -391,9 +391,9 @@ async fn approve_prepared(
     ensure_generated_key_projection_is_safe(&prepared, inv)?;
 
     let signer = inv.resolve_signer()?;
-    let nonce = actions::nonce_now();
+    let nonce = nonce::next();
     let (approval, approval_value) = approval_document(chain, &prepared, nonce)?;
-    actions::send_l1_action_raw(
+    actions::send_l1_action_with_nonce(
         remote.api(),
         &signer,
         Action::ApproveAgent(approval),
@@ -525,41 +525,28 @@ fn prepare_agent_approval(
 }
 
 fn parse_expires_in(raw: &str) -> Result<u64, CliError> {
+    let refuse = |message: &str| CliError::Configuration(message.to_string());
     let raw = raw.trim();
     if raw.len() < 2 {
-        return Err(CliError::Configuration(
-            "--expires-in must use a duration like 30d, 12h, or 1w".to_string(),
+        return Err(refuse(
+            "--expires-in must use a duration like 30d, 12h, or 1w",
         ));
     }
-    let (amount, unit) = raw.split_at(raw.len() - 1);
-    let amount = amount.parse::<u64>().map_err(|_| {
-        CliError::Configuration("--expires-in amount must be a positive integer".to_string())
-    })?;
-    if amount == 0 {
-        return Err(CliError::Configuration(
-            "--expires-in amount must be greater than zero".to_string(),
-        ));
+    let overflowed = || refuse("--expires-in duration overflowed");
+    let duration =
+        clock::parse_duration(raw, &clock::AGENT_EXPIRY).map_err(|fault| match fault {
+            DurationError::Empty | DurationError::Count(_) => {
+                refuse("--expires-in amount must be a positive integer")
+            }
+            DurationError::Zero => refuse("--expires-in amount must be greater than zero"),
+            DurationError::Unit => refuse("--expires-in unit must be one of m, h, d, or w"),
+            DurationError::TooLarge => overflowed(),
+        })?;
+    let millis = u64::try_from(duration.as_millis()).map_err(|_| overflowed())?;
+    if millis > MAX_AGENT_EXPIRATION_MS {
+        return Err(refuse("--expires-in cannot exceed 180d"));
     }
-    let unit_ms = match unit {
-        "m" => 60 * 1000,
-        "h" => 60 * 60 * 1000,
-        "d" => 24 * 60 * 60 * 1000,
-        "w" => 7 * 24 * 60 * 60 * 1000,
-        _ => {
-            return Err(CliError::Configuration(
-                "--expires-in unit must be one of m, h, d, or w".to_string(),
-            ));
-        }
-    };
-    let duration = amount
-        .checked_mul(unit_ms)
-        .ok_or_else(|| CliError::Configuration("--expires-in duration overflowed".to_string()))?;
-    if duration > MAX_AGENT_EXPIRATION_MS {
-        return Err(CliError::Configuration(
-            "--expires-in cannot exceed 180d".to_string(),
-        ));
-    }
-    Ok(duration)
+    Ok(millis)
 }
 
 fn approval_action(chain: Chain, prepared: &PreparedAgentApproval, nonce: u64) -> ApproveAgent {
@@ -766,6 +753,35 @@ mod tests {
         assert!(parse_expires_in("0d").is_err());
         assert!(parse_expires_in("181d").is_err());
         assert!(parse_expires_in("5x").is_err());
+    }
+
+    #[test]
+    fn every_expires_in_fault_keeps_its_message_and_exit_class() {
+        let fault = |raw: &str| parse_expires_in(raw).unwrap_err();
+        for (raw, message) in [
+            ("", "--expires-in must use a duration like 30d, 12h, or 1w"),
+            ("d", "--expires-in must use a duration like 30d, 12h, or 1w"),
+            ("ad", "--expires-in amount must be a positive integer"),
+            ("1.5d", "--expires-in amount must be a positive integer"),
+            ("ax", "--expires-in amount must be a positive integer"),
+            ("0d", "--expires-in amount must be greater than zero"),
+            ("0x", "--expires-in amount must be greater than zero"),
+            ("05", "--expires-in amount must be greater than zero"),
+            ("5x", "--expires-in unit must be one of m, h, d, or w"),
+            ("5s", "--expires-in unit must be one of m, h, d, or w"),
+            ("30", "--expires-in unit must be one of m, h, d, or w"),
+            ("99999999999999999w", "--expires-in duration overflowed"),
+            ("181d", "--expires-in cannot exceed 180d"),
+            ("26w", "--expires-in cannot exceed 180d"),
+        ] {
+            let err = fault(raw);
+            assert!(
+                matches!(&err, CliError::Configuration(text) if text == message),
+                "{raw}: {err}"
+            );
+        }
+        assert_eq!(parse_expires_in(" 180d ").unwrap(), MAX_AGENT_EXPIRATION_MS);
+        assert_eq!(parse_expires_in("30m").unwrap(), 30 * 60 * 1000);
     }
 
     #[test]

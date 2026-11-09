@@ -393,13 +393,12 @@ async fn convert(inv: &Invocation, conversion: Conversion, yes: bool) -> Result<
         &format!("{description}?"),
         "outcome conversion aborted",
     )?;
-    actions::send_l1_action_raw(
+    actions::send_l1_action(
         remote.api(),
         &signer,
         action,
-        actions::nonce_now(),
         None,
-        "exchange action",
+        actions::EXCHANGE_ACTION,
     )
     .await?;
 

@@ -497,7 +497,7 @@ async fn claim_rewards(inv: &Invocation, signer: &SelectedSigner) -> Result<(), 
         remote.api(),
         signer,
         &StakingL1Action::ClaimRewards,
-        actions::RawL1ActionMetadata::new(actions::nonce_now()),
+        None,
         "claim staking rewards",
     )
     .await?;
@@ -828,19 +828,21 @@ async fn run_deposit(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::
     let agent_action = StakingL1Action::CDeposit2 { wei };
     if inv.dry_run() {
         let mut preview = amount_dry_run_value(inv.remote()?.chain(), args, kind);
-        if inv.dry_run_signer()?.and_then(AgentForm::of).is_some() {
+        // A signer the live run would refuse fails the preview too.
+        inv.dry_run_signer()?;
+        if inv.acts_as_agent() {
             preview["action_type"] = agent_action.type_tag();
         }
         return print_dry_run(inv, kind.would_execute(), preview);
     }
     let signer = inv.resolve_signer()?;
     let remote = inv.remote()?;
-    if AgentForm::of(&signer).is_some() {
+    if AgentForm::of(inv).is_some() {
         actions::send_raw_l1_json_action(
             remote.api(),
             &signer,
             &agent_action,
-            actions::RawL1ActionMetadata::new(actions::nonce_now()),
+            None,
             "deposit to staking",
         )
         .await?;

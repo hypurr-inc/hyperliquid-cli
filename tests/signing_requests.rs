@@ -168,6 +168,49 @@ async fn a_dry_run_approval_consumes_no_nonce_and_writes_no_mark() {
     assert_eq!(read_mark(&env), mark, "a preview must not raise the mark");
 }
 
+/// Commands that sign through the sender (`send_l1_action`,
+/// `send_raw_l1_json_action`) or a user-signed document: each allocates its
+/// nonce after the preview returns.
+const DRY_RUN_SENDS: [&[&str]; 6] = [
+    &["account", "reserve-weight", "--weight", "1", "--dry-run"],
+    &["account", "evm-big-blocks", "--enable", "--dry-run"],
+    &["subaccount", "create", "--name", "desk", "--dry-run"],
+    &["staking", "claim-rewards", "--dry-run"],
+    &["staking", "deposit", "--amount", "1", "--dry-run"],
+    &[
+        "transfer",
+        "send",
+        "--to",
+        DESTINATION,
+        "--amount",
+        "1",
+        "--dry-run",
+    ],
+];
+
+#[tokio::test]
+async fn a_dry_run_of_a_sending_command_consumes_no_nonce_and_writes_no_mark() {
+    let env = IsolatedHome::new();
+    let server = exchange().await;
+
+    for args in DRY_RUN_SENDS {
+        signed(&env, &server, args).assert().success();
+    }
+
+    assert!(
+        !mark_file(&env).exists(),
+        "a preview must not create the nonce mark"
+    );
+    assert!(server.exchange_bodies().await.is_empty());
+
+    let mark = unix_millis() + 60 * 60 * 1000;
+    write_mark(&env, mark);
+    for args in DRY_RUN_SENDS {
+        signed(&env, &server, args).assert().success();
+    }
+    assert_eq!(read_mark(&env), mark, "a preview must not raise the mark");
+}
+
 #[tokio::test]
 async fn an_unwritable_data_directory_still_signs_and_says_so() {
     let env = IsolatedHome::new();
@@ -554,6 +597,38 @@ async fn invalidate_nonce_refuses_a_nonce_the_exchange_could_not_hold() {
     .assert()
     .code(2);
     assert!(server.exchange_bodies().await.is_empty());
+}
+
+// ---- what an ok reply must be ---------------------------------------------
+
+/// An ok reply whose `type` is not `default`.
+fn cancel_reply() -> Value {
+    json!({"status": "ok", "response": {"type": "cancel", "data": {"statuses": ["success"]}}})
+}
+
+#[tokio::test]
+async fn an_action_with_nothing_to_report_refuses_an_ok_reply_that_is_not_default() {
+    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server.mount_exchange(cancel_reply()).await;
+
+    signed(&env, &server, &["account", "evm-big-blocks", "--enable"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "exchange action: unexpected response type: [untrusted remote data] Ok(Cancel { statuses: [Success] })",
+        ));
+    assert_eq!(server.exchange_bodies().await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_action_that_returns_its_payload_does_not_check_the_reply_type() {
+    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server.mount_exchange(cancel_reply()).await;
+
+    signed(&env, &server, &RESERVE_ONE).assert().success();
+    assert_eq!(server.exchange_bodies().await.len(), 1);
 }
 
 // ---- account reserve-weight ---------------------------------------------

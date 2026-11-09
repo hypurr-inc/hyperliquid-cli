@@ -1,5 +1,6 @@
 use super::CliError;
 use crate::command_spec::YES_FLAG;
+use crate::ows::hints;
 use crate::settings::env;
 
 /// A recovery command in the `next` list of an error envelope. `when` states
@@ -38,8 +39,8 @@ impl CliError {
             Self::AuthRequired => Some(Recovery {
                 instruction: "Set up a wallet:".into(),
                 commands: vec![
-                    NextCommand::new("hyperliquid setup"),
-                    NextCommand::new("hyperliquid wallet login"),
+                    NextCommand::new(hints::SETUP),
+                    NextCommand::new(hints::WALLET_LOGIN),
                 ],
                 note: Some(format!(
                     "Or set {}, or {} with --bankr, for this run.",

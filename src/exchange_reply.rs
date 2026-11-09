@@ -43,15 +43,21 @@ impl<'a> Reply<'a> {
             const NULL: &Value = &Value::Null;
             Self::Ok(body.get("response").unwrap_or(NULL))
         } else if is_error_status(status) {
-            Self::Err(
-                body.get("response")
-                    .and_then(Value::as_str)
-                    .map_or_else(|| body.to_string(), str::to_string),
-            )
+            Self::Err(failure_text(body))
         } else {
             Self::Unrecognized(body)
         }
     }
+}
+
+/// The exchange's words for a failed reply: `response` when that is a string,
+/// else the whole body. A caller that treats any non-ok status as a failure
+/// quotes this for a reply [`Reply::decode`] did not recognize too.
+#[must_use]
+pub fn failure_text(body: &Value) -> String {
+    body.get("response")
+        .and_then(Value::as_str)
+        .map_or_else(|| body.to_string(), str::to_string)
 }
 
 /// The text of an error reply, `None` for anything else.

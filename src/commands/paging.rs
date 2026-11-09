@@ -62,10 +62,13 @@ enum More {
     Unwindowed,
 }
 
-/// The rows read and what lies beyond them.
+/// The rows read, the read that produced them, and what lies beyond them.
 #[derive(Debug)]
 pub(crate) struct Window {
     pub rows: Vec<Value>,
+    endpoint: Endpoint,
+    /// Whether the read was asked to page through the whole window.
+    all: bool,
     more: More,
 }
 
@@ -92,12 +95,16 @@ pub(crate) async fn read_window(
         let Some(last) = last.filter(|_| full) else {
             return Ok(Window {
                 rows,
+                endpoint,
+                all,
                 more: More::Nothing,
             });
         };
         if !all {
             return Ok(Window {
                 rows,
+                endpoint,
+                all,
                 more: More::From(last),
             });
         }
@@ -121,6 +128,8 @@ pub(crate) async fn read_window(
             .and_then(row_time)
             .map_or(More::Nothing, More::From),
         rows,
+        endpoint,
+        all,
     })
 }
 
@@ -141,18 +150,19 @@ pub(crate) async fn read_recent(
     } else {
         More::Nothing
     };
-    Ok(Window { rows, more })
+    Ok(Window {
+        rows,
+        endpoint,
+        all: false,
+        more,
+    })
 }
 
 /// Say on stderr that `window` stopped at the API's cap. A person reads one
 /// sentence; a JSON run gets one compact object, so stdout keeps the shape it
 /// always had.
-pub(crate) fn announce_truncation(
-    inv: &Invocation,
-    endpoint: Endpoint,
-    window: &Window,
-    all: bool,
-) {
+pub(crate) fn announce_truncation(inv: &Invocation, window: &Window) {
+    let (endpoint, all) = (window.endpoint, window.all);
     let returned = window.rows.len();
     let (message, next_start) = match window.more {
         More::From(next) if all => (

@@ -20,6 +20,7 @@ use super::status::Status;
 use crate::commands::actions;
 use crate::commands::rows::{ListRow, Row, Rows};
 use crate::errors::CliError;
+use crate::exchange_reply;
 use crate::hints;
 use crate::output::OutputFormat;
 use crate::response_sanitization::labelled_untrusted_text;
@@ -32,11 +33,10 @@ pub(super) async fn trailing_stop(
     context.consent(ConsentKind::TrailingStop, None, |target| {
         confirm_trailing_stop(plan, target)
     })?;
-    let response = actions::send_l1_action_raw(
+    let response = actions::send_l1_action(
         context.api,
         context.signer,
         Action::TrailingStop(plan.action().clone()),
-        actions::nonce_now(),
         context.vault_address,
         "trailing stop rejected",
     )
@@ -72,9 +72,11 @@ fn print_cancel_hint(oid: u64, on_behalf_of: Option<&str>) {
 
 /// Extract the order id from an `ok` trailing stop response.
 fn parse_trailing_stop_response(response: &serde_json::Value) -> Result<u64, CliError> {
-    if response.get("type").and_then(serde_json::Value::as_str) == Some("trailingStop")
-        && let Some(oid) = response
-            .pointer("/data/oid")
+    if let Some(typed) = exchange_reply::typed(response)
+        && typed.kind == "trailingStop"
+        && let Some(oid) = typed
+            .data
+            .and_then(|data| data.get("oid"))
             .and_then(serde_json::Value::as_u64)
     {
         return Ok(oid);

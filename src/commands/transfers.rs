@@ -17,7 +17,7 @@ use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::invocation::{Invocation, Remote};
 use crate::quantity;
-use crate::signing::{SelectedSigner, Signs};
+use crate::signing::{SelectedSigner, Signs, nonce};
 use crate::wire::{AddressRole, address};
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
@@ -312,7 +312,7 @@ async fn send(
         "send transfer aborted",
     )?;
 
-    let nonce = actions::nonce_now();
+    let nonce = nonce::next();
     let action = Action::UsdSend(
         UsdSend {
             destination,
@@ -321,7 +321,7 @@ async fn send(
         }
         .into_action(chain),
     );
-    actions::send_l1_action(api, signer, action, nonce).await?;
+    actions::send_default_l1_action_with_nonce(api, signer, action, nonce).await?;
 
     TransferConfirmation::new("send", args.amount, "USDC")
         .to(&args.to)
@@ -360,7 +360,7 @@ async fn spot_send(
         "spot send transfer aborted",
     )?;
 
-    let nonce = actions::nonce_now();
+    let nonce = nonce::next();
     let spot_send = SpotSend {
         destination,
         token: SendToken(token.clone()),
@@ -369,7 +369,7 @@ async fn spot_send(
     }
     .into_action(chain);
     let action = Action::SpotSend(spot_send);
-    actions::send_l1_action(api, signer, action, nonce).await?;
+    actions::send_default_l1_action_with_nonce(api, signer, action, nonce).await?;
 
     TransferConfirmation::new("spot-send", args.amount, token.name)
         .to(&args.to)
@@ -464,15 +464,14 @@ impl AssetMove {
         })
     }
 
-    /// The agent form `signer` would sign this move in, `None` when it signs
-    /// the master's `sendAsset`; an error when the exchange would refuse the
-    /// agent form for this move.
-    fn agent_form(&self, signer: Option<&SelectedSigner>) -> Result<Option<AgentForm>, CliError> {
-        let Some(form) = signer.and_then(AgentForm::of) else {
-            return Ok(None);
-        };
-        ensure_agent_send_target(self.to, form.master, self.from_subaccount.as_deref())?;
-        Ok(Some(form))
+    /// The agent form this move is signed in, given how the signer signs
+    /// ([`AgentForm::of`]): `None` when it signs the master's `sendAsset`; an
+    /// error when the exchange would refuse the agent form for this move.
+    fn agent_form(&self, form: Option<AgentForm>) -> Result<Option<AgentForm>, CliError> {
+        if let Some(form) = form {
+            ensure_agent_send_target(self.to, form.master, self.from_subaccount.as_deref())?;
+        }
+        Ok(form)
     }
 }
 
@@ -499,7 +498,7 @@ impl ResolvedMove {
         form: Option<AgentForm>,
     ) -> Result<(), anyhow::Error> {
         let chain = remote.chain();
-        let nonce = actions::nonce_now();
+        let nonce = nonce::next();
         let AssetMove {
             to,
             source,
@@ -538,19 +537,20 @@ impl ResolvedMove {
                 .into_action(chain),
             )
         };
-        actions::send_l1_action(remote.api(), signer, action, nonce).await?;
+        actions::send_default_l1_action_with_nonce(remote.api(), signer, action, nonce).await?;
         Ok(())
     }
 }
 
 /// Sign and submit a `sendAsset` without asking or printing a receipt.
 pub async fn send_asset(
-    remote: &Remote,
+    inv: &Invocation,
     signer: &SelectedSigner,
     mv: AssetMove,
 ) -> Result<(), anyhow::Error> {
+    let remote = inv.remote()?;
     let resolved = ResolvedMove::resolve(remote, mv).await?;
-    let form = resolved.mv.agent_form(Some(signer))?;
+    let form = resolved.mv.agent_form(AgentForm::of(inv))?;
     resolved.send(remote, signer, form).await
 }
 
@@ -935,13 +935,14 @@ impl CliCommand for TransferSendAsset {
             });
             // An API wallet previews the action it would sign, and the
             // refusal the live run would give.
-            if resolved.mv.agent_form(inv.dry_run_signer()?)?.is_some() {
+            inv.dry_run_signer()?;
+            if resolved.mv.agent_form(AgentForm::of(inv))?.is_some() {
                 preview["action_type"] = "agentSendAsset".into();
             }
             return print_dry_run(inv, TransferActionKind::SendAsset.would_execute(), preview);
         }
         let signer = inv.resolve_signer()?;
-        let form = resolved.mv.agent_form(Some(&signer))?;
+        let form = resolved.mv.agent_form(AgentForm::of(inv))?;
         let preview = TransferPreview {
             network: remote.chain(),
             signer: signer.address(),
@@ -1011,8 +1012,6 @@ impl CliCommand for TransferWithdraw {
 
 #[cfg(test)]
 mod tests {
-    use hypersdk::hypercore::PrivateKeySigner;
-
     use super::*;
 
     #[test]
@@ -1135,29 +1134,16 @@ mod tests {
     }
 
     #[test]
-    fn only_an_api_wallet_signs_the_agent_form() {
+    fn the_agent_form_refuses_a_stranger_as_the_destination() {
         let master = Address::repeat_byte(1);
-        let agent =
-            SelectedSigner::stored_account(PrivateKeySigner::random(), "bot".to_string(), master);
-        let owner = SelectedSigner::private_key(PrivateKeySigner::random());
+        let form = Some(AgentForm { master });
         let to_master = move_to(master);
 
         assert_eq!(to_master.agent_form(None).unwrap(), None);
-        assert_eq!(to_master.agent_form(Some(&owner)).unwrap(), None);
-        assert_eq!(
-            to_master.agent_form(Some(&agent)).unwrap(),
-            Some(AgentForm { master })
-        );
-        // The agent form refuses a stranger as the destination; the master's
-        // form does not.
+        assert_eq!(to_master.agent_form(form).unwrap(), form);
+        // The master's own form has no such rule.
         let to_stranger = move_to(Address::repeat_byte(9));
-        assert_eq!(
-            to_stranger
-                .agent_form(Some(&agent))
-                .unwrap_err()
-                .exit_code(),
-            13
-        );
-        assert_eq!(to_stranger.agent_form(Some(&owner)).unwrap(), None);
+        assert_eq!(to_stranger.agent_form(form).unwrap_err().exit_code(), 13);
+        assert_eq!(to_stranger.agent_form(None).unwrap(), None);
     }
 }

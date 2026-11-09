@@ -52,11 +52,10 @@ pub(super) async fn send_tracked_action(
     action: Action,
     error_label: &'static str,
 ) -> Result<serde_json::Value, CliError> {
-    actions::send_l1_action_raw(
+    actions::send_l1_action(
         context.api,
         context.signer,
         action,
-        actions::nonce_now(),
         context.vault_address,
         error_label,
     )

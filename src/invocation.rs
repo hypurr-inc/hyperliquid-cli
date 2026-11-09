@@ -279,7 +279,7 @@ impl Invocation {
             signer.ensure_covers(signs)?;
         }
         if let Some(action) = self.command.master_only
-            && signer.is_stored_agent()
+            && matches!(signer.local_role(), SignerRole::Agent { .. })
         {
             return Err(CliError::Unsupported(format!(
                 "{action} must be signed by the master account; select the master wallet, not a stored API wallet"
@@ -343,7 +343,7 @@ impl Invocation {
     /// read ([`SignerRole::Unverified`]) is not a reason to refuse.
     pub async fn resolve_signer_account(&self) -> Result<hypersdk::Address, anyhow::Error> {
         let signer = self.resolve_signer()?;
-        if !signer.is_stored_agent()
+        if signer.local_role() == SignerRole::Unverified
             && let SignerRole::Agent { master } = self.role_of(&signer).await
         {
             return Err(CliError::Unsupported(format!(
@@ -366,15 +366,24 @@ impl Invocation {
         Ok(self.role_of(signer).await)
     }
 
-    /// Whether the selected signer is known, without a request, to sign as an
-    /// agent wallet: the question `master_only` commands and the agent form of
-    /// an action ask, live or dry run, so it cannot wait for the network. The
-    /// master is [`SelectedSigner::query_address`]. A signer that does not
-    /// resolve is not an agent here; the live run reports why it cannot sign.
+    /// The master the selected signer is known, without a request, to sign for
+    /// as an agent wallet: what `master_only` commands and the agent form of
+    /// an action ask, live or dry run, so it cannot wait for the network. A
+    /// signer that does not resolve is not an agent here; the live run reports
+    /// why it cannot sign.
+    #[must_use]
+    pub fn agent_master(&self) -> Option<hypersdk::Address> {
+        match self.signer_identity().ok()?.local_role() {
+            SignerRole::Agent { master } => Some(master),
+            SignerRole::Master | SignerRole::Unverified => None,
+        }
+    }
+
+    /// Whether the selected signer is known offline to sign as an agent
+    /// wallet ([`Self::agent_master`]).
     #[must_use]
     pub fn acts_as_agent(&self) -> bool {
-        self.signer_identity()
-            .is_ok_and(SelectedSigner::is_stored_agent)
+        self.agent_master().is_some()
     }
 
     async fn role_of(&self, signer: &SelectedSigner) -> SignerRole {
@@ -785,7 +794,7 @@ mod tests {
         );
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         assert!(
-            !inv.acts_as_agent(),
+            !inv.acts_as_agent() && inv.agent_master().is_none(),
             "the offline answer never waits for the network: a bare key is not known to be an agent"
         );
     }
