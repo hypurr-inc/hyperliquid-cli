@@ -2,8 +2,7 @@
 //! and where the values come from.
 //!
 //! Every variable is a constant here, with a [`Kind`] that says how its reader
-//! interprets it. The root help text, the test harness's list of variables to
-//! clear ([`ALL`]) and the strict-flag check (`mode::validate_env`) are
+//! interprets it. [`ALL`], the root help text and the strict-flag list are
 //! generated from the same table. [`EnvSource`] is the only way the CLI reads a
 //! variable, so settings built over a fixed map never see the process's.
 //!

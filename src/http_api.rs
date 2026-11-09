@@ -34,7 +34,7 @@ pub use sdk::Sdk;
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-/// The mainnet vault list is a ~14 MB file: allow for a slow link.
+/// The mainnet vault list is a large file: allow for a slow link.
 const STATS_TIMEOUT: Duration = Duration::from_secs(60);
 /// The public host of the exchange's stats datasets (`/<Network>/<dataset>`).
 const STATS_BASE_URL: &str = "https://stats-data.hyperliquid.xyz";

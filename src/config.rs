@@ -1,8 +1,8 @@
 //! The persisted config file.
 //!
-//! The file is created by `setup` and the wallet commands that choose a default
-//! wallet or write builder/referral defaults (`wallet create|import|import-mnemonic|reset`,
-//! `account add --default|set-default|remove`). A missing file is not an error.
+//! The file is created by `setup` and the wallet and account commands that
+//! choose a default wallet or write builder/referral defaults. A missing file
+//! is not an error.
 //! Layering with environment variables and flags, and every read-modify-write of
 //! the file, happens in [`crate::settings`].
 
@@ -261,7 +261,7 @@ impl ConfigFile {
     }
 
     /// Hold the lock for a config read-modify-write so concurrent CLI processes
-    /// can't lose each other's keys. Waits up to 10 seconds. Writing the file
+    /// can't lose each other's keys. Waits up to `LOCK_WAIT`. Writing the file
     /// takes the guard, so a write can't happen without it.
     pub fn lock(&self) -> Result<FileLock, CliError> {
         FileLock::acquire(&self.path, LOCK_WAIT).map_err(|err| match err {

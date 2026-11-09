@@ -293,7 +293,7 @@ pub fn from_anyhow(err: anyhow::Error) -> CliError {
     recover_typed(err).unwrap_or_else(CliError::Internal)
 }
 
-/// hypersdk 0.3 returns `anyhow::Error`. API failures carry a
+/// hypersdk returns `anyhow::Error`. API failures carry a
 /// [`hypersdk::hypercore::ApiError`] (HTTP non-2xx arrives as
 /// `HTTP {status} body={text}`) and transport failures carry a
 /// `reqwest::Error`. Everything else is plain text.

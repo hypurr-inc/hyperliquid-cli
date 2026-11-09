@@ -247,7 +247,7 @@ fn effective_timeout(args: &ChaseArgs, require_explicit: bool) -> Result<Duratio
     }
 }
 
-/// A run nobody watches live cannot assume the 300s default; the shared
+/// A run nobody watches live cannot assume the default timeout; the shared
 /// [`Mode`](crate::mode::Mode) decides that, not a local env read.
 fn requires_explicit_timeout(inv: &Invocation) -> bool {
     !inv.mode().live_display()

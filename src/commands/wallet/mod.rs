@@ -1,6 +1,6 @@
 //! OWS (Open Wallet Standard) is the only wallet backend: creation, import,
-//! listing and signing all go through the OWS vault (default `~/.hyperliquid`,
-//! or `HYPERLIQUID_OWS_VAULT_PATH`). The `wallet` and `account` command families
+//! listing and signing all go through the OWS vault (located by
+//! `HYPERLIQUID_OWS_VAULT_PATH`). The `wallet` and `account` command families
 //! are two surfaces over the same [`WalletStore`] workflow.
 
 mod output;

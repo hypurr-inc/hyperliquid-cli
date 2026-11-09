@@ -17,7 +17,7 @@ pub(crate) struct Scale(u32);
 impl Scale {
     /// USDC on the exchange wire: micro-units.
     pub(crate) const USDC: Self = Self(6);
-    /// HYPE on HyperCore: 8 decimal places.
+    /// HYPE on HyperCore.
     pub(crate) const HYPE_CORE: Self = Self(8);
     /// A percent expressed in tenths of a basis point.
     pub(crate) const TENTHS_BPS_PER_PERCENT: Self = Self(3);

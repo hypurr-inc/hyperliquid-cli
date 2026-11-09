@@ -77,8 +77,7 @@ pub struct SignerFlags {
 
 impl SignerFlags {
     /// The flags whose values are secrets: a suggested command never repeats
-    /// them. Kept beside the fields; a test in the shell pins it to the clap
-    /// definition.
+    /// them. Kept beside the fields.
     pub const SECRET: [&'static str; 2] = ["private_key", "keystore_password"];
 }
 

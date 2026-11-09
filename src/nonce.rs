@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn a_store_without_a_mark_never_touches_the_disk_or_speaks() {
+    fn an_in_process_store_issues_increasing_nonces() {
         let store = NonceStore::in_process();
         assert!(store.next() < store.next());
     }
