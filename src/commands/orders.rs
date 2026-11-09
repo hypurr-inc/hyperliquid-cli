@@ -24,6 +24,7 @@ mod exchange;
 mod existing;
 mod hip3;
 mod identifier;
+mod limits;
 mod live_order;
 mod planning;
 mod prepared;
@@ -35,6 +36,7 @@ mod status;
 mod submit;
 mod trailing_stop;
 mod validation;
+mod vocab;
 
 use args::{CancelAllArgs, CancelArgs, ModifyArgs};
 use consent::Consent;
@@ -229,7 +231,7 @@ async fn cancel(
         .statuses()?;
 
     ensure_action_statuses_ok(&statuses, "cancel order")?;
-    context.inv.print(&Rows::one(CancelConfirmation {
+    context.inv.print(&Rows::list_of_one(CancelConfirmation {
         coin: plan.coin,
         status: Status::Cancelled,
         order_id: plan.order_id,
@@ -248,7 +250,7 @@ async fn cancel_all(
     let order_ids = plan.order_ids();
 
     let Some(action) = plan.action() else {
-        context.inv.print(&Rows::one(CancelAllSummary {
+        context.inv.print(&Rows::list_of_one(CancelAllSummary {
             coin: plan.summary_coin,
             cancelled_orders: 0,
         }));
@@ -276,7 +278,7 @@ async fn cancel_all(
         return finish_with_failures(legs, BatchVerb::CancelAll, failures, context.inv);
     }
 
-    context.inv.print(&Rows::one(CancelAllSummary {
+    context.inv.print(&Rows::list_of_one(CancelAllSummary {
         coin: plan.summary_coin,
         cancelled_orders: order_ids.len(),
     }));
@@ -304,7 +306,7 @@ async fn modify(
     let mut confirmation = plan.confirmation;
     confirmation.order_id = modification_result_oid(&statuses).or(confirmation.order_id);
 
-    context.inv.print(&Rows::one(confirmation));
+    context.inv.print(&Rows::list_of_one(confirmation));
     Ok(())
 }
 
@@ -381,15 +383,17 @@ async fn twap_create(
         .await?
         .twap_id()?;
 
-    context.inv.print(&Rows::one(TwapCreateConfirmation {
-        coin: plan.coin,
-        side: plan.side,
-        size: plan.size,
-        duration_seconds: plan.duration_seconds,
-        duration_minutes: plan.duration_minutes,
-        status: Status::Running,
-        twap_id,
-    }));
+    context
+        .inv
+        .print(&Rows::list_of_one(TwapCreateConfirmation {
+            coin: plan.coin,
+            side: plan.side,
+            size: plan.size,
+            duration_seconds: plan.duration_seconds,
+            duration_minutes: plan.duration_minutes,
+            status: Status::Running,
+            twap_id,
+        }));
     Ok(())
 }
 
@@ -402,11 +406,13 @@ async fn twap_cancel(
         .await?
         .twap_cancelled()?;
 
-    context.inv.print(&Rows::one(TwapCancelConfirmation {
-        coin: plan.coin,
-        status: Status::Cancelled,
-        twap_id: plan.twap_id,
-    }));
+    context
+        .inv
+        .print(&Rows::list_of_one(TwapCancelConfirmation {
+            coin: plan.coin,
+            status: Status::Cancelled,
+            twap_id: plan.twap_id,
+        }));
     Ok(())
 }
 
@@ -432,15 +438,17 @@ async fn schedule_cancel(
             .await?;
     }
 
-    context.inv.print(&Rows::one(ScheduleCancelConfirmation {
-        status: if scheduled.is_some() {
-            Status::Scheduled
-        } else {
-            Status::Cleared
-        },
-        scheduled_time: scheduled.as_ref().map(|value| value.at.to_rfc3339()),
-        scheduled_time_ms: scheduled.as_ref().map(ScheduledCancel::at_ms),
-        in_seconds: scheduled.as_ref().map(|value| value.in_seconds),
-    }));
+    context
+        .inv
+        .print(&Rows::list_of_one(ScheduleCancelConfirmation {
+            status: if scheduled.is_some() {
+                Status::Scheduled
+            } else {
+                Status::Cleared
+            },
+            scheduled_time: scheduled.as_ref().map(|value| value.at.to_rfc3339()),
+            scheduled_time_ms: scheduled.as_ref().map(ScheduledCancel::at_ms),
+            in_seconds: scheduled.as_ref().map(|value| value.in_seconds),
+        }));
     Ok(())
 }

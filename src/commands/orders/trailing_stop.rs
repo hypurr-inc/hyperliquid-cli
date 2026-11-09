@@ -16,6 +16,7 @@ use super::status::Status;
 use crate::commands::common::rows::{ListRow, Row, Rows};
 use crate::hints;
 use crate::output::sink;
+use crate::quantity::wire_text;
 use crate::terminal::OutputFormat;
 
 pub(super) async fn trailing_stop(
@@ -32,17 +33,19 @@ pub(super) async fn trailing_stop(
         .await?
         .trailing_stop_oid()?;
 
-    context.inv.print(&Rows::one(TrailingStopConfirmation {
-        oid,
-        coin: plan.coin().to_string(),
-        side: plan.side().to_string(),
-        size: plan.size(),
-        reduce_only: plan.reduce_only(),
-        retracement: plan.retracement_json(),
-        activation_px: plan.activation_px().map(|price| price.to_string()),
-        status: Status::WaitingForTrigger,
-        retracement_label: plan.retracement_label(),
-    }));
+    context
+        .inv
+        .print(&Rows::list_of_one(TrailingStopConfirmation {
+            oid,
+            coin: plan.coin().to_string(),
+            side: plan.side().to_string(),
+            size: plan.size(),
+            reduce_only: plan.reduce_only(),
+            retracement: plan.retracement_json(),
+            activation_px: plan.activation_px().map(|price| price.to_string()),
+            status: Status::WaitingForTrigger,
+            retracement_label: plan.retracement_label(),
+        }));
     if context.inv.format() == OutputFormat::Pretty {
         print_cancel_hint(oid, on_behalf_of);
     }
@@ -87,7 +90,7 @@ impl Row for TrailingStopConfirmation {
         vec![
             self.coin.clone(),
             self.side.clone(),
-            self.size.normalize().to_string(),
+            wire_text(self.size),
             self.retracement_label.clone(),
             self.activation_px
                 .clone()

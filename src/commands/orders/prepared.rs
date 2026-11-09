@@ -6,7 +6,7 @@ use std::fmt;
 use hypersdk::Decimal;
 use hypersdk::hypercore::types::{BatchOrder, OrderGrouping, OrderRequest, TpSl};
 
-use super::args::{CreateOrderType, OrderSide, TifArg, TpslGroupingArg};
+use super::vocab::{CreateOrderType, OrderSide, TifArg, TpslGroupingArg};
 use crate::assets::{Market, PerpAsset};
 use crate::builder_fee::BuilderFee;
 use crate::margin::MarginPlan;

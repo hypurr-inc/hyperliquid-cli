@@ -169,7 +169,7 @@ impl TransferConfirmation {
     }
 
     fn print(self, inv: &Invocation) {
-        inv.print(&Rows::one(self));
+        inv.print(&Rows::list_of_one(self));
     }
 }
 
