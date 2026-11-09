@@ -407,3 +407,51 @@ async fn dex_is_sent_in_its_canonical_spelling() {
 
     server.verify().await;
 }
+
+#[tokio::test]
+async fn unknown_dex_fails_before_a_watch_starts() {
+    let env = IsolatedHome::new();
+    let server = MockServer::start().await;
+    mount_override_healthcheck(&server).await;
+    mount_resolver_metadata(&server).await;
+
+    env.command_with_server(&server)
+        .args([
+            "--format",
+            "json",
+            "--non-interactive",
+            "--ows-signer",
+            USER,
+            "positions",
+            "list",
+            "--watch",
+            "--max-ticks",
+            "1",
+            "--dex",
+            "nope",
+        ])
+        .assert()
+        .code(13)
+        .stdout(predicate::str::contains("Unknown DEX"));
+
+    env.command_with_server(&server)
+        .args([
+            "--format",
+            "json",
+            "--non-interactive",
+            "--ows-signer",
+            USER,
+            "orders",
+            "open",
+            "--watch",
+            "--max-ticks",
+            "1",
+            "--dex",
+            "nope",
+        ])
+        .assert()
+        .code(13)
+        .stdout(predicate::str::contains("Unknown DEX"));
+
+    server.verify().await;
+}

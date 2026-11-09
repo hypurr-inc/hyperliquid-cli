@@ -50,17 +50,16 @@ impl CliCommand for OrdersOpen {
     ]);
 
     async fn run(inv: &Invocation, args: &OpenOrdersArgs) -> Result<(), anyhow::Error> {
+        // Validate once, before either path: a watch must not start on a dex that
+        // cannot be read, and both paths send the canonical spelling.
+        let client = inv.remote()?.api().sdk();
+        let dex = canonical_dex(client, args.dex.as_deref()).await?;
         if args.watch.watch {
-            watch_open_orders(
-                inv,
-                normalize_dex(args.dex.as_deref()),
-                args.watch.max_ticks,
-            )
-            .await
+            watch_open_orders(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
             let resolver = inv.asset_resolver().await?;
             let user = inv.resolve_signer()?.query_address();
-            open(inv, &resolver, user, normalize_dex(args.dex.as_deref())).await
+            open(inv, &resolver, user, dex.as_deref()).await
         }
     }
 }
@@ -1073,6 +1072,13 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
         validate_bracket_args(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
+        // The protection legs resolve the perp without a client, so a HIP-3
+        // market has to be in the resolver before either leg is planned.
+        let coin_query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
+        let (resolver, _) = resolver
+            .with_resolved_perp(client, &coin_query)
+            .await
+            .map_err(CliError::from)?;
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
