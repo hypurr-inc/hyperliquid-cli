@@ -343,6 +343,32 @@ mod margin_basis {
     }
 
     #[tokio::test]
+    async fn a_unified_account_with_no_collateral_left_for_its_maintenance_margin_alerts() {
+        // 500 of maintenance margin and a USDC balance of 0: there is no ratio
+        // to compute, which is the most dangerous state, not a quiet one.
+        let server = account(
+            "unifiedAccount",
+            perp_state("100", "1", "500", vec![cross_position()]),
+            perp_state("0", "0", "0", vec![]),
+            "0",
+        )
+        .await;
+
+        let alerts = margin_alerts(&server, "1");
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["rule"], "margin_usage");
+        assert_eq!(
+            alerts[0]["payload"],
+            json!({
+                "basis": "unified_account_ratio",
+                "collateral_token": 0,
+                "uncovered": true
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn a_unified_account_below_the_limit_stays_quiet_whatever_its_perp_summary_says() {
         // The perp summary claims 95% used; the account has 10000 of USDC.
         let server = account(

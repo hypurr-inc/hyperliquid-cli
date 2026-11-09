@@ -15,7 +15,7 @@ use serde_json::json;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, StreamBound, arg};
 use crate::commands::abstraction::{
-    AccountMode, DexCollateral, UnifiedRatio, fetch_abstraction, load_dex_collateral,
+    AccountMode, DexCollateral, UnifiedRisk, fetch_abstraction, load_dex_collateral,
     unified_account_ratio,
 };
 use crate::commands::actions::nonce_now;
@@ -371,9 +371,9 @@ enum MarginBasis {
         equity: Decimal,
         margin_used: Decimal,
     },
-    /// The unified account ratio; `None` when no collateral token has a
-    /// balance to measure against.
-    UnifiedRatio(Option<UnifiedRatio>),
+    /// The unified account risk; `None` when no collateral token carries
+    /// cross maintenance margin.
+    UnifiedRatio(Option<UnifiedRisk>),
     /// The borrow/lend health a portfolio-margin account reports.
     PortfolioHealth {
         health: String,
@@ -401,21 +401,34 @@ impl MarginBasis {
                     json!({ "margin_used_pct": pct.to_string() }),
                 )
             }
-            Self::UnifiedRatio(ratio) => {
-                let ratio = (*ratio)?;
-                let pct = (ratio.ratio * Decimal::from(100)).round_dp(2).normalize();
-                if pct < limit {
-                    return None;
+            Self::UnifiedRatio(risk) => match (*risk)? {
+                UnifiedRisk::Ratio(ratio) => {
+                    let pct = (ratio.ratio * Decimal::from(100)).round_dp(2).normalize();
+                    if pct < limit {
+                        return None;
+                    }
+                    (
+                        format!(
+                            "unified account ratio {pct}% (maintenance margin over collateral)"
+                        ),
+                        json!({
+                            "margin_used_pct": pct.to_string(),
+                            "basis": "unified_account_ratio",
+                            "collateral_token": ratio.collateral_token,
+                        }),
+                    )
                 }
-                (
-                    format!("unified account ratio {pct}% (maintenance margin over collateral)"),
+                UnifiedRisk::Uncovered { collateral_token } => (
+                    format!(
+                        "unified account has maintenance margin on collateral token {collateral_token} and no collateral left to cover it"
+                    ),
                     json!({
-                        "margin_used_pct": pct.to_string(),
                         "basis": "unified_account_ratio",
-                        "collateral_token": ratio.collateral_token,
+                        "collateral_token": collateral_token,
+                        "uncovered": true,
                     }),
-                )
-            }
+                ),
+            },
             Self::PortfolioHealth {
                 health,
                 health_factor,
