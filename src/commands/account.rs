@@ -11,10 +11,11 @@ use chrono::DateTime;
 use clap::{Args, ValueEnum};
 use hypersdk::Address;
 use hypersdk::Decimal;
-use hypersdk::hypercore::{BasicOrder, ClearinghouseState, Fill, SubAccount, UserVaultEquity};
+use hypersdk::hypercore::{ClearinghouseState, Fill, SubAccount, UserVaultEquity};
 use serde::Serialize;
 
 use crate::command_spec::{ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
+use crate::commands::orders::OrderListOutput;
 use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
 use crate::commands::support::{canonical_dex, print_dry_run, require_master_signer};
@@ -509,99 +510,6 @@ impl TableData for FillsOutput {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct OrderRow {
-    pub coin: String,
-    pub side: String,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub limit_price: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub size: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub original_size: Decimal,
-    pub oid: u64,
-    pub order_type: String,
-    pub tif: Option<String>,
-    pub reduce_only: bool,
-    pub timestamp: u64,
-    pub cloid: Option<String>,
-}
-
-impl From<BasicOrder> for OrderRow {
-    fn from(order: BasicOrder) -> Self {
-        Self {
-            coin: order.coin,
-            side: order.side.to_string(),
-            limit_price: order.limit_px,
-            size: order.sz,
-            original_size: order.orig_sz,
-            oid: order.oid,
-            order_type: format!("{:?}", order.order_type),
-            tif: order.tif.map(|tif| format!("{tif:?}")),
-            reduce_only: order.reduce_only,
-            timestamp: order.timestamp,
-            cloid: order.cloid.map(|cloid| cloid.to_string()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OrdersOutput {
-    orders: Vec<OrderRow>,
-}
-
-impl OrdersOutput {
-    #[must_use]
-    pub fn new(orders: Vec<OrderRow>) -> Self {
-        Self { orders }
-    }
-}
-
-impl TableData for OrdersOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec![
-            "Coin",
-            "Side",
-            "Limit Price",
-            "Size",
-            "Original Size",
-            "OID",
-            "Type",
-            "TIF",
-            "Reduce Only",
-            "Timestamp",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.orders
-            .iter()
-            .map(|order| {
-                vec![
-                    order.coin.clone(),
-                    order.side.clone(),
-                    order.limit_price.to_string(),
-                    order.size.to_string(),
-                    order.original_size.to_string(),
-                    order.oid.to_string(),
-                    order.order_type.clone(),
-                    order.tif.clone().unwrap_or_else(|| "n/a".to_string()),
-                    order.reduce_only.to_string(),
-                    order.timestamp.to_string(),
-                ]
-            })
-            .collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No orders.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.orders).unwrap_or_else(|_| serde_json::json!([]))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PortfolioSummaryRow {
     #[serde(with = "rust_decimal::serde::str")]
     pub account_value: Decimal,
@@ -1071,11 +979,8 @@ impl CliCommand for AccountOrders {
             .sdk()
             .open_orders(user, None)
             .await
-            .map_err(from_sdk)?
-            .into_iter()
-            .map(OrderRow::from)
-            .collect();
-        inv.print(&OrdersOutput::new(orders));
+            .map_err(from_sdk)?;
+        inv.print(&OrderListOutput::new(orders, "No orders."));
         Ok(())
     }
 }
@@ -1392,15 +1297,6 @@ mod tests {
 
         assert!(output.rows().is_empty());
         assert_eq!(output.empty_message(), Some("No fills."));
-        assert!(output.to_json_value().as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn empty_orders_show_no_data_message_but_json_is_empty_array() {
-        let output = OrdersOutput::new(vec![]);
-
-        assert!(output.rows().is_empty());
-        assert_eq!(output.empty_message(), Some("No orders."));
         assert!(output.to_json_value().as_array().unwrap().is_empty());
     }
 

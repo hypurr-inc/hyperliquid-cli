@@ -26,6 +26,13 @@
 - The dry-run `command` of `buy`, `sell`, `outcome-buy` and `outcome-sell` names the command typed instead of `orders create`.
 - `asset decode` and `asset search` print a warning on stderr when asset or outcome metadata can't be loaded (the JSON answer is unchanged: formula-only rows), and `asset decode` shows an unknown `Cli Input` as an empty table cell instead of `null`.
 - `report-incident` URL-encodes the issue labels like `feedback` does (`labels=bug%2Cagent-incident`); GitHub reads both spellings alike.
+- The exit-15 result of `orders batch-create`, `scale`, `cancel-all` and `orders bracket` now carries the standard partial-result keys: `category` is `partial_results` (was `partial_failure`, which is now the `reason`) and the commands to run are in `next` (`[{"command": "..."}]`), replacing `next_command` and `next_commands`.
+- An order, cancel, modify, TWAP, TP/SL, trailing-stop, chase or bracket status that carries a rate-limit text now exits `11`, and one that carries a credential refusal exits `10`; every other rejection keeps exit `13` and its wording.
+- `orders chase`, `orders bracket` and `orders cancel-all --coin ... --dex ...` read a HIP-3 market's own dex: a resting chase quote or bracket entry is no longer treated as filled because the default dex's open orders do not list it, and `cancel-all` finds the dex's orders.
+- `orders chase` resolves its market once, accepts perpetual markets only, and no longer reads the default builder configuration (it never sent a builder fee). `--dry-run` now fails like the live command when the market or its mid price is unavailable (exit `13`/`12`) instead of previewing a null `first_price`.
+- `orders bracket --entry limit` refuses `--amount` with a bracket-specific message (exit `2`).
+- `account orders` shows a missing TIF as a dimmed `n/a` in pretty output, like `orders open`.
+- `orders history` retries the raw order list only when the response shape does not match, not when the body is malformed JSON.
 
 ## 0.17.0 - 2026-11-09
 

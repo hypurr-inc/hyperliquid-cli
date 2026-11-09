@@ -14,19 +14,19 @@ use hypersdk::hypercore::types::{
 use hypersdk::hypercore::{Cloid, HttpClient};
 use hypersdk::{Address, Decimal};
 
+use super::exchange::{TwapExchangeAction, TwapOrderAction};
 use super::rendering::ModifyConfirmation;
 use super::validation::{
-    AttachedTpsl, BuilderRequest, MarketPrecision, MarketSizing, OrderKind, OrderSpec,
-    validate_order_for_market, validate_twap_create_args,
+    AttachedTpsl, BuilderRequest, ClosingSize, MarketPrecision, MarketSizing, OrderKind, OrderSpec,
+    TpslSpec, validate_order_for_market, validate_twap_create_args,
 };
 use super::{
     BatchCreateArgs, BatchCreateOrder, CancelAllArgs, CancelArgs, CreateArgs, CreateOrderType,
     MarginModeArg, ModifyArgs, OrderBuilderFee, OrderIdentifier, OrderSide, PreparedOrder,
     PreparedOrderBatch, PreparedOrderLeg, PreparedTpslBatch, PreparedTpslLeg, ScaleArgs,
-    ScheduleCancelArgs, TifArg, TpslArgs, TpslGroupingArg, TpslLegKind, TriggerPriceSpec,
-    TwapCancelArgs, TwapCreateArgs, TwapExchangeAction, TwapOrderAction, cloid_from_wire,
-    filter_orders_by_coin, lookup_order, order_type_placement, parse_cloid, parse_lookup_cloid,
-    resolve_cancel_all_coin_filter, wire_cloid,
+    ScheduleCancelArgs, TifArg, TpslGroupingArg, TpslLegKind, TriggerPriceSpec, TwapCancelArgs,
+    TwapCreateArgs, cloid_from_wire, filter_orders_by_coin, lookup_order, order_type_placement,
+    parse_cloid, parse_lookup_cloid, resolve_cancel_all_coin_filter, wire_cloid,
 };
 use crate::assets::asset_id::{parse_spot_coin_key, spot_asset_index, spot_coin_key};
 use crate::assets::{
@@ -183,14 +183,34 @@ pub(super) async fn resolve_perp(
         .await?)
 }
 
-/// The market `spec` trades, fetching a HIP-3 market the resolver does not list yet.
+/// The perpetual market `coin` and `dex` name, for a command that only trades
+/// perpetuals. Like [`resolve_perp`], but a market of another kind is named
+/// in the error, as `command` (such as `orders bracket`) refusing it.
+pub(super) async fn resolve_perp_market(
+    client: &HttpClient,
+    resolver: &AssetResolver,
+    command: &str,
+    dex: Option<&str>,
+    coin: &str,
+) -> Result<PerpAsset, CliError> {
+    match resolve_tradable_asset(client, resolver, coin, dex).await? {
+        Market::Perp(perp) => Ok(perp),
+        Market::Spot(_) | Market::Outcome(_) => Err(CliError::Unsupported(format!(
+            "{command} supports perpetual markets only; {coin} is not a perpetual market"
+        ))),
+    }
+}
+
+/// The market `coin` and `dex` name, fetching a HIP-3 market the resolver does
+/// not list yet.
 async fn resolve_tradable_asset(
     client: &HttpClient,
     resolver: &AssetResolver,
-    spec: &OrderSpec,
+    coin: &str,
+    dex: Option<&str>,
 ) -> Result<Market, CliError> {
-    if let AssetQuery::Outcome(notation) = parse_asset_query(&spec.coin) {
-        if spec.dex.is_some() {
+    if let AssetQuery::Outcome(notation) = parse_asset_query(coin) {
+        if dex.is_some() {
             return Err(CliError::Unsupported(format!(
                 "outcome notation '{notation}' cannot be used with --dex; omit --dex for outcome orders"
             )));
@@ -198,7 +218,7 @@ async fn resolve_tradable_asset(
         return Ok(Market::Outcome(OutcomeAsset::new(notation)));
     }
 
-    let query = qualify_dex_asset(spec.dex.as_deref(), &spec.coin);
+    let query = qualify_dex_asset(dex, coin);
     let perp_err = match resolver.resolve_perp_or_fetch(client, &query).await {
         Ok(perp) => return Ok(Market::Perp(perp)),
         Err(err) => err,
@@ -237,18 +257,26 @@ fn venue(market: &Market) -> Result<Venue, CliError> {
     })
 }
 
-async fn market_mid_price(
+/// The dex whose books list `market`: a HIP-3 perp's own dex, otherwise the
+/// default one. Every read of the market's mids or resting orders names it.
+pub(super) fn market_dex(market: &Market) -> Option<String> {
+    match market {
+        Market::Perp(perp) => perp.dex.clone(),
+        Market::Spot(_) | Market::Outcome(_) => None,
+    }
+}
+
+/// The current mid of `market`. `coin` and `dex` are the flags that named it,
+/// for the error that says the mid was not available.
+pub(super) async fn market_mid_price(
     client: &HttpClient,
     market: &Market,
-    spec: &OrderSpec,
+    coin: &str,
+    dex: Option<&str>,
 ) -> Result<Decimal, CliError> {
-    let (key, dex, label) = match market {
-        Market::Perp(perp) => (
-            perp.display_name(),
-            perp.dex.clone(),
-            qualify_dex_asset(spec.dex.as_deref(), &spec.coin),
-        ),
-        Market::Spot(spot) => (spot_coin_key(spot.index), None, spec.coin.clone()),
+    let (key, label) = match market {
+        Market::Perp(perp) => (perp.display_name(), qualify_dex_asset(dex, coin)),
+        Market::Spot(spot) => (spot_coin_key(spot.index), coin.to_string()),
         Market::Outcome(_) => {
             return Err(CliError::Unsupported(
                 "outcome orders do not support --type market because outcome size decimals are not verified; use an explicit --price and --size"
@@ -256,7 +284,10 @@ async fn market_mid_price(
             ));
         }
     };
-    let mids = client.all_mids(dex).await.map_err(from_sdk)?;
+    let mids = client
+        .all_mids(market_dex(market))
+        .await
+        .map_err(from_sdk)?;
     mids.get(&key).copied().ok_or_else(|| {
         CliError::Unavailable(format!(
             "mid price for {label} was not available. Retry after market data refresh."
@@ -313,12 +344,13 @@ pub(super) async fn prepare_order(
     resolver: &AssetResolver,
     spec: &OrderSpec,
 ) -> Result<PreparedOrder, CliError> {
-    let market = resolve_tradable_asset(client, resolver, spec).await?;
+    let market = resolve_tradable_asset(client, resolver, &spec.coin, spec.dex.as_deref()).await?;
     prepare_order_in(client, &market, spec).await
 }
 
-/// Plan one order on an already resolved market.
-async fn prepare_order_in(
+/// Plan one order on an already resolved market. A command that places many
+/// orders on one market resolves it once and plans each order here.
+pub(super) async fn prepare_order_in(
     client: &HttpClient,
     market: &Market,
     spec: &OrderSpec,
@@ -371,7 +403,7 @@ async fn prepare_order_in(
             sizing,
             max_slippage_bps,
         } => {
-            let mid = market_mid_price(client, market, spec).await?;
+            let mid = market_mid_price(client, market, &spec.coin, spec.dex.as_deref()).await?;
             let price = precision.marketable_price(mid, spec.side, max_slippage_bps)?;
             let warning = Some(format!(
                 "Slippage warning: market order uses a {max_slippage_bps} bps protective price around mid {mid}"
@@ -424,9 +456,7 @@ async fn prepare_order_in(
         side: spec.side,
         order_type: spec.kind.order_type(),
         tif,
-        price,
         trigger_price,
-        size,
         amount,
         amount_unit: quote,
         warning,
@@ -452,15 +482,6 @@ pub(super) async fn prepare_create_order(
         }
         None => Ok(CreateOrderSubmission::Single(parent)),
     }
-}
-
-/// [`prepare_create_order`] for orders the CLI generates from `CreateArgs`.
-pub(super) async fn prepare_create_order_plan(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    args: &CreateArgs,
-) -> Result<CreateOrderSubmission, CliError> {
-    prepare_create_order(client, resolver, &OrderSpec::from_create(args)?).await
 }
 
 pub(super) async fn prepare_scale_batch(
@@ -490,7 +511,7 @@ pub(super) async fn prepare_scale_batch(
         .collect::<Result<Vec<_>, _>>()?;
     let prepared = prepare_order_batch(client, resolver, specs).await?;
 
-    let placed_size: Decimal = prepared.legs.iter().map(|leg| leg.order.size).sum();
+    let placed_size: Decimal = prepared.legs.iter().map(|leg| leg.order.size()).sum();
     if placed_size != args.total_size {
         return Err(CliError::Configuration(
             "orders scale total size cannot be evenly distributed across requested orders at the market's lot size"
@@ -500,7 +521,7 @@ pub(super) async fn prepare_scale_batch(
     if prepared
         .legs
         .windows(2)
-        .any(|pair| pair[0].order.price == pair[1].order.price)
+        .any(|pair| pair[0].order.price() == pair[1].order.price())
     {
         return Err(CliError::Configuration(format!(
             "orders scale prices collapse onto the same tick for {}; use fewer --orders or a wider price range",
@@ -545,7 +566,8 @@ async fn prepare_order_batch(
     for (leg_index, spec) in specs.iter().enumerate() {
         let key = (spec.coin.clone(), spec.dex.clone());
         if !markets.contains_key(&key) {
-            let market = resolve_tradable_asset(client, resolver, spec).await?;
+            let market =
+                resolve_tradable_asset(client, resolver, &spec.coin, spec.dex.as_deref()).await?;
             markets.insert(key.clone(), market);
         }
         let order = prepare_order_in(client, &markets[&key], spec).await?;
@@ -621,8 +643,8 @@ pub(super) fn prepare_normal_tpsl_batch(
         coin: parent.coin.clone(),
         side: parent.side,
         order_type: parent.order_type,
-        price: parent.price,
-        size: parent.size,
+        price: parent.price(),
+        size: parent.size(),
         tif: parent.tif,
         reduce_only: parent.request.reduce_only,
         warning: parent.warning.clone(),
@@ -745,13 +767,13 @@ fn truncate_triggers(
 /// live order and its dry-run preview.
 fn position_tpsl_triggers(
     perp: &PerpAsset,
-    args: &TpslArgs,
+    spec: &TpslSpec,
     close_side: OrderSide,
     entry: Option<Decimal>,
 ) -> Result<(Option<Decimal>, Option<Decimal>), CliError> {
     let (take_profit, stop_loss) = resolve_trigger_prices(
-        args.take_profit.as_ref(),
-        args.stop_loss.as_ref(),
+        spec.take_profit.as_ref(),
+        spec.stop_loss.as_ref(),
         entry,
         close_side.opposite(),
     )?;
@@ -795,12 +817,12 @@ pub(super) async fn prepare_position_tpsl_batch(
     client: &HttpClient,
     perp: &PerpAsset,
     user: Address,
-    args: &TpslArgs,
+    spec: &TpslSpec,
 ) -> Result<PreparedTpslBatch, CliError> {
-    let (close_side, size, entry) = match (args.side, args.size) {
-        (Some(side), Some(size)) => {
+    let (close_side, size, entry) = match spec.close {
+        ClosingSize::Fixed { side, size } => {
             let entry =
-                if trigger_specs_need_entry(args.take_profit.as_ref(), args.stop_loss.as_ref()) {
+                if trigger_specs_need_entry(spec.take_profit.as_ref(), spec.stop_loss.as_ref()) {
                     let position = fetch_position(client, user, perp).await?.ok_or_else(|| {
                         CliError::Unsupported(format!(
                             "percent and entry TP/SL require an open {} position",
@@ -813,7 +835,7 @@ pub(super) async fn prepare_position_tpsl_batch(
                 };
             (side, size, entry)
         }
-        (None, None) => {
+        ClosingSize::CurrentPosition => {
             let position = fetch_position(client, user, perp).await?.ok_or_else(|| {
                 CliError::Configuration(format!(
                     "orders tpsl requires an open {} position or both --side and --size for a fixed-size TP/SL",
@@ -823,22 +845,16 @@ pub(super) async fn prepare_position_tpsl_batch(
             let (side, size) = position_close_side_and_size(&position)?;
             (side, size, position.position.entry_px)
         }
-        _ => {
-            return Err(CliError::Configuration(
-                "orders tpsl needs --side and --size together".to_string(),
-            ));
-        }
     };
     let size = MarketPrecision::perp(perp.sz_decimals).size(size, &perp.display_name())?;
-    let (take_profit, stop_loss) = position_tpsl_triggers(perp, args, close_side, entry)?;
-    let cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
+    let (take_profit, stop_loss) = position_tpsl_triggers(perp, spec, close_side, entry)?;
     Ok(position_tpsl_batch(
         perp,
         close_side,
         size,
         take_profit,
         stop_loss,
-        cloid,
+        spec.cloid,
     ))
 }
 
@@ -1105,10 +1121,19 @@ pub(super) async fn prepare_cancel_all_orders_plan(
     user: Address,
     args: &CancelAllArgs,
 ) -> Result<CancelAllOrdersPlan, CliError> {
-    let open_orders = client.open_orders(user, None).await.map_err(from_sdk)?;
     let coin_filter =
         resolve_cancel_all_coin_filter(resolver, args.coin.as_deref(), args.dex.as_deref())?;
-    let orders = filter_orders_by_coin(open_orders, coin_filter.as_deref());
+    let open_orders = client
+        .open_orders(
+            user,
+            coin_filter.as_ref().and_then(|filter| filter.dex.clone()),
+        )
+        .await
+        .map_err(from_sdk)?;
+    let orders = filter_orders_by_coin(
+        open_orders,
+        coin_filter.as_ref().map(|filter| filter.coin.as_str()),
+    );
 
     let action = if orders.is_empty() {
         None
@@ -1339,7 +1364,7 @@ pub(super) fn cancel_all_dry_run_plan(
             "coin": args.coin,
             "dex": args.dex,
             "on_behalf_of": args.on_behalf_of,
-            "resolved_coin_filter": coin_filter,
+            "resolved_coin_filter": coin_filter.map(|filter| filter.coin),
         }),
     ))
 }
@@ -1438,8 +1463,8 @@ fn order_batch_dry_run_args(prepared: &PreparedOrderBatch) -> serde_json::Value 
                 "trigger_px": trigger_px,
                 "is_market": is_market,
                 "tpsl": tpsl,
-                "price": order.price.to_string(),
-                "size": order.request.sz.to_string(),
+                "price": order.price().to_string(),
+                "size": order.size().to_string(),
                 "amount": order.amount.map(|value| value.to_string()),
                 "amount_unit": order.amount.as_ref().map(|_| order.amount_unit.clone()),
                 "tif": order.tif.map(|tif| tif.to_string()),
@@ -1467,46 +1492,50 @@ fn tpsl_to_str(tpsl: TpSl) -> &'static str {
 /// [`position_tpsl_triggers`] and [`position_tpsl_batch`] the live order uses.
 pub(super) fn tpsl_dry_run_plan(
     perp: &PerpAsset,
-    args: &TpslArgs,
+    spec: &TpslSpec,
+    on_behalf_of: &Option<String>,
 ) -> Result<OrderDryRunPlan, CliError> {
     let (absolute_tp, absolute_sl) =
-        absolute_trigger_prices(args.take_profit.as_ref(), args.stop_loss.as_ref());
+        absolute_trigger_prices(spec.take_profit.as_ref(), spec.stop_loss.as_ref());
     let (absolute_tp, absolute_sl) = truncate_triggers(perp, absolute_tp, absolute_sl)?;
-    let inferred_side = args
-        .side
-        .or_else(|| infer_close_side_from_tpsl_prices(absolute_tp, absolute_sl));
-    let needs_entry = trigger_specs_need_entry(args.take_profit.as_ref(), args.stop_loss.as_ref());
+    let (inferred_side, fixed_size) = match spec.close {
+        ClosingSize::Fixed { side, size } => (Some(side), Some(size)),
+        ClosingSize::CurrentPosition => (
+            infer_close_side_from_tpsl_prices(absolute_tp, absolute_sl),
+            None,
+        ),
+    };
+    let needs_entry = trigger_specs_need_entry(spec.take_profit.as_ref(), spec.stop_loss.as_ref());
+    let grouping = TpslGroupingArg::PositionTpsl;
     let mut preview = serde_json::json!({
-        "coin": args.coin,
-        "dex": args.dex,
-        "on_behalf_of": args.on_behalf_of,
-        "take_profit": args.take_profit.as_ref().map(TriggerPriceSpec::display),
-        "stop_loss": args.stop_loss.as_ref().map(TriggerPriceSpec::display),
-        "grouping": TpslGroupingArg::from(args.grouping).to_string(),
-        "grouping_wire": TpslGroupingArg::from(args.grouping).wire_value(),
+        "coin": spec.coin,
+        "dex": spec.dex,
+        "on_behalf_of": on_behalf_of,
+        "take_profit": spec.take_profit.as_ref().map(TriggerPriceSpec::display),
+        "stop_loss": spec.stop_loss.as_ref().map(TriggerPriceSpec::display),
+        "grouping": grouping.to_string(),
+        "grouping_wire": grouping.wire_value(),
         "resolved_asset": perp.display_name(),
         "side": inferred_side.map(|side| side.to_string()),
-        "size": args.size.map(|value| value.to_string()),
-        "size_mode": if args.size.is_some() { "fixed" } else { "current_position" },
+        "size": fixed_size.map(|value| value.to_string()),
+        "size_mode": if fixed_size.is_some() { "fixed" } else { "current_position" },
     });
-    insert_margin_mode(&mut preview, args.margin_mode);
+    insert_margin_mode(&mut preview, spec.margin_mode);
 
-    match (args.side, args.size) {
-        (Some(close_side), Some(size)) => {
+    match spec.close {
+        ClosingSize::Fixed { side, size } => {
             // Percent and entry triggers need the position's entry price, which
             // a dry run does not read: it previews no legs for them.
             if !needs_entry {
                 let size =
                     MarketPrecision::perp(perp.sz_decimals).size(size, &perp.display_name())?;
-                let (take_profit, stop_loss) =
-                    position_tpsl_triggers(perp, args, close_side, None)?;
-                let cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
+                let (take_profit, stop_loss) = position_tpsl_triggers(perp, spec, side, None)?;
                 let batch =
-                    position_tpsl_batch(perp, close_side, size, take_profit, stop_loss, cloid);
+                    position_tpsl_batch(perp, side, size, take_profit, stop_loss, spec.cloid);
                 append_tpsl_preview(&mut preview, &batch)?;
             }
         }
-        _ => {
+        ClosingSize::CurrentPosition => {
             if needs_entry {
                 preview.as_object_mut().expect("preview object").insert(
                     "resolution".to_string(),
@@ -1522,7 +1551,6 @@ pub(super) fn tpsl_dry_run_plan(
             );
         }
     }
-
     Ok(OrderDryRunPlan::new("submit_position_tpsl", preview))
 }
 

@@ -10,7 +10,7 @@ use super::args::{
     TwapCancelArgs, TwapCreateArgs,
 };
 use super::bracket::{bracket, bracket_dry_run_plan, validate_bracket_args};
-use super::chase::{self, chase, chase_dry_run_plan};
+use super::chase::{chase, chase_dry_run_plan, chase_timeout};
 use super::hip3::plan_hip3_margin_transfer;
 use super::planning::{
     batch_create_dry_run_plan, cancel_all_dry_run_plan, cancel_dry_run_plan, create_dry_run_plan,
@@ -24,14 +24,14 @@ use super::trailing_stop::{
     TrailingStopArgs, prepare_trailing_stop_plan, trailing_stop, validate_trailing_stop_args,
 };
 use super::validation::{
-    OrderSpec, read_validated_batch_create_orders, validate_batch_create_args,
-    validate_modify_args, validate_scale_args, validate_tpsl_args,
+    OrderSpec, TpslSpec, read_validated_batch_create_orders, validate_batch_create_args,
+    validate_modify_args, validate_scale_args,
 };
 use super::{
     OrderExecutionContext, OrderSubmissionContext, batch_create, cancel, cancel_all, create,
     modify, scale, schedule_cancel, tpsl, twap_cancel, twap_create,
 };
-use crate::assets::{AssetResolver, qualify_dex_asset};
+use crate::assets::AssetResolver;
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk, StreamBound, arg,
 };
@@ -39,7 +39,6 @@ use crate::commands::support::*;
 use crate::errors::CliError;
 use crate::input_hardening::{FilePolicy, validate_file_path, validate_resource_id};
 use crate::invocation::Invocation;
-use crate::network::Network;
 use crate::stream::SnapshotWatchArgs;
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["orders"], "Manage orders").aliases(&["order"]);
@@ -383,15 +382,15 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
     ]);
 
     async fn run(inv: &Invocation, args: &TpslArgs) -> Result<(), anyhow::Error> {
-        validate_tpsl_args(args)?;
+        let spec = TpslSpec::from_flags(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
+        let perp = resolve_perp(client, &resolver, spec.dex.as_deref(), &spec.coin).await?;
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
-            let plan = tpsl_dry_run_plan(&perp, args)?;
+            let plan = tpsl_dry_run_plan(&perp, &spec, &args.on_behalf_of)?;
             return print_dry_run_acting_for(
                 inv,
                 plan.would_execute(),
@@ -404,7 +403,7 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
         tpsl(
             order_submission_context(inv, &signer, &Self::SPEC, args.yes)?,
             &perp,
-            args,
+            &spec,
             vault_address,
         )
         .await
@@ -838,20 +837,14 @@ hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeou
     ]);
 
     async fn run(inv: &Invocation, args: &ChaseArgs) -> Result<(), anyhow::Error> {
-        chase_dry_run_plan(args, None, chase::requires_explicit_timeout(inv))?;
+        let timeout = chase_timeout(inv, args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
-            let coin_key = qualify_dex_asset(args.dex.as_deref(), &args.coin);
-            let mid = client
-                .all_mids(None)
-                .await
-                .ok()
-                .and_then(|mids| mids.get(&coin_key).copied());
-            let plan = chase_dry_run_plan(args, mid, chase::requires_explicit_timeout(inv))?;
+            let plan = chase_dry_run_plan(client, &resolver, args, timeout).await?;
             return print_dry_run_acting_for(inv, "chase", plan, vault_address_string);
         }
         let resolved_signer = inv.resolve_signer()?;
@@ -859,6 +852,7 @@ hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeou
         chase(
             order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
             args,
+            timeout,
             vault_address,
         )
         .await
@@ -1151,9 +1145,7 @@ fn order_submission_context<'a>(
         inv,
         api: remote.api(),
         signer,
-        require_mainnet_confirmation: spec.testnet_unprompted
-            && remote.network() == Network::Mainnet
-            && !yes,
+        require_mainnet_confirmation: spec.prompts_on(remote.network()) && !yes,
     })
 }
 
