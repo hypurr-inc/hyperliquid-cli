@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use hyperliquid_cli::command_registry::CommandRegistry;
+use hyperliquid_cli::commands;
 use serde_json::{Value, json};
 
 /// Set to `1` to rewrite the snapshot fixtures instead of checking them. The
@@ -90,7 +90,7 @@ pub fn registry_fixtures() -> Vec<(&'static str, Value)> {
     vec![
         (
             "registry_inventory.json",
-            json!(CommandRegistry::get().commands()),
+            json!(commands::registry().commands()),
         ),
         ("schema_representative.json", Value::Array(representative)),
     ]

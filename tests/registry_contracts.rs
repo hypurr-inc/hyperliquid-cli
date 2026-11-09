@@ -3,11 +3,11 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use hyperliquid_cli::command_registry::CommandRegistry;
 use hyperliquid_cli::command_spec::{
     ConfirmationPolicy, DryRunPolicy, InputKind, Lifecycle, OutputContract, OwsSupport,
     RawPayloadPolicy, Risk, SignerSupport,
 };
+use hyperliquid_cli::commands;
 use hyperliquid_cli::env;
 use serde_json::json;
 
@@ -15,7 +15,7 @@ use contract_support::{command_path, schema_all};
 
 #[test]
 fn the_schema_is_the_registry_serialized() {
-    let registry = CommandRegistry::get();
+    let registry = commands::registry();
     let schemas = schema_all();
     assert_eq!(schemas.len(), registry.commands().len());
 
@@ -75,7 +75,7 @@ fn the_schema_is_the_registry_serialized() {
 /// the agent-facing docs with it.
 #[test]
 fn every_command_policy_follows_its_lifecycle() {
-    for command in CommandRegistry::get().commands() {
+    for command in commands::registry().commands() {
         let key = command.command_key();
         match command.lifecycle {
             Lifecycle::ReadOnly | Lifecycle::Streaming => {
@@ -139,7 +139,7 @@ fn every_command_policy_follows_its_lifecycle() {
 /// reports its bound, and `--watch` reports the one that applies when it is on.
 #[test]
 fn every_stream_declares_the_bound_an_agent_must_give_it() {
-    for command in CommandRegistry::get().commands() {
+    for command in commands::registry().commands() {
         let key = command.command_key();
         let streams = command.lifecycle == Lifecycle::Streaming
             || command.output_contract == OutputContract::BoundedNdjsonStream;
@@ -164,7 +164,7 @@ fn every_stream_declares_the_bound_an_agent_must_give_it() {
         }
     }
 
-    let registry = CommandRegistry::get();
+    let registry = commands::registry();
     let subscribe = registry.find_path(&["subscribe", "all-mids"]).unwrap();
     assert_eq!(
         subscribe.stream_bounds.as_ref().unwrap().env,
@@ -179,7 +179,7 @@ fn every_stream_declares_the_bound_an_agent_must_give_it() {
 
 #[test]
 fn registry_explicitly_classifies_critical_command_classes() {
-    let registry = CommandRegistry::get();
+    let registry = commands::registry();
 
     let orders_create = registry.find_path(&["orders", "create"]).unwrap();
     assert!(orders_create.dangerous);
@@ -292,7 +292,7 @@ fn registry_explicitly_classifies_critical_command_classes() {
 
 #[test]
 fn authenticated_reads_do_not_inherit_mutating_preview_policy() {
-    let registry = CommandRegistry::get();
+    let registry = commands::registry();
 
     for path in [
         &["api-wallet", "list"][..],
@@ -352,7 +352,7 @@ fn suggested_command_exists(command: &str) -> bool {
     let words: Vec<&str> = words.collect();
     (1..=words.len())
         .rev()
-        .any(|length| CommandRegistry::get().find_path(&words[..length]).is_some())
+        .any(|length| commands::registry().find_path(&words[..length]).is_some())
 }
 
 #[test]
@@ -399,7 +399,7 @@ fn every_suggested_command_names_a_command_that_exists() {
 
 #[test]
 fn every_secret_arg_a_command_declares_is_redacted_from_a_payload() {
-    let secret_ids: Vec<&str> = CommandRegistry::get()
+    let secret_ids: Vec<&str> = commands::registry()
         .commands()
         .iter()
         .flat_map(|contract| contract.spec.args.iter())
