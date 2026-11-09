@@ -1,11 +1,17 @@
+//! Planning: turn validated arguments into the orders and actions to send.
+//!
+//! A plan is built once and read by every later stage: the dry-run preview
+//! renders it, the confirmation prompt summarizes it, and submission sends it.
+
+use std::collections::HashMap;
+
 use super::validation::{
-    protocol_price, protocol_size, reject_spot_buy_builder_fee, reject_spot_reduce_only,
-    reject_spot_tpsl_grouping, reject_spot_trigger_order, require_decimal,
+    AttachedTpsl, BuilderRequest, MarketPrecision, MarketSizing, OrderKind, OrderSpec,
+    validate_order_for_market, validate_twap_create_args,
 };
 use super::*;
-use crate::assets::PerpAsset;
 
-pub struct OrderDryRunPlan {
+pub(super) struct OrderDryRunPlan {
     command: &'static str,
     would_execute: &'static str,
     args: serde_json::Value,
@@ -24,331 +30,346 @@ impl OrderDryRunPlan {
         }
     }
 
+    /// Record the acting account the command was given.
+    fn acting_for(mut self, on_behalf_of: &Option<String>) -> Self {
+        if let Some(object) = self.args.as_object_mut() {
+            object.insert("on_behalf_of".to_string(), serde_json::json!(on_behalf_of));
+        }
+        self
+    }
+
     #[must_use]
-    pub fn command(&self) -> &'static str {
+    pub(super) fn command(&self) -> &'static str {
         self.command
     }
 
     #[must_use]
-    pub fn would_execute(&self) -> &'static str {
+    pub(super) fn would_execute(&self) -> &'static str {
         self.would_execute
     }
 
     #[must_use]
-    pub fn into_args(self) -> serde_json::Value {
+    pub(super) fn into_args(self) -> serde_json::Value {
         self.args
     }
 }
 
-pub(crate) struct CancelOrderPlan {
-    pub(crate) action: Action,
-    pub(crate) coin: String,
-    pub(crate) order_id: Option<u64>,
-    pub(crate) cloid: Option<String>,
+pub(super) struct CancelOrderPlan {
+    pub(super) action: Action,
+    pub(super) coin: String,
+    pub(super) order_id: Option<u64>,
+    pub(super) cloid: Option<String>,
 }
 
-pub(crate) struct CancelAllOrdersPlan {
-    pub(crate) action: Option<Action>,
-    pub(crate) cancelled_orders: usize,
-    pub(crate) summary_coin: String,
+pub(super) struct CancelAllOrdersPlan {
+    pub(super) action: Option<Action>,
+    pub(super) cancelled_orders: usize,
+    pub(super) summary_coin: String,
 }
 
-pub(crate) struct ModifyOrderPlan {
-    pub(crate) action: Action,
-    pub(crate) confirmation: ModifyConfirmation,
+pub(super) struct ModifyOrderPlan {
+    pub(super) action: Action,
+    pub(super) confirmation: ModifyConfirmation,
 }
 
-pub(crate) enum CreateOrderSubmission {
+/// A planned `orders create`: one order, or an entry order with attached TP/SL.
+pub(super) enum CreateOrderSubmission {
     Single(PreparedOrder),
-    NormalTpsl(PreparedTpslBatch),
+    NormalTpsl(NormalTpslOrder),
 }
 
-pub(crate) struct CreateOrderPlan {
-    pub(crate) submission: CreateOrderSubmission,
-    dry_run_args: serde_json::Value,
+pub(super) struct NormalTpslOrder {
+    pub(super) parent: PreparedOrder,
+    pub(super) batch: PreparedTpslBatch,
 }
 
-impl CreateOrderPlan {
-    fn into_dry_run_args(self) -> serde_json::Value {
-        self.dry_run_args
+impl CreateOrderSubmission {
+    /// The entry order, which sizes the HIP-3 margin helper and names the market.
+    pub(super) fn parent(&self) -> &PreparedOrder {
+        match self {
+            Self::Single(prepared) => prepared,
+            Self::NormalTpsl(order) => &order.parent,
+        }
     }
 }
 
-pub(crate) struct BatchCreateOrderPlan {
-    pub(crate) prepared: PreparedOrderBatch,
-    dry_run_args: serde_json::Value,
+pub(super) struct TwapCreatePlan {
+    pub(super) action: TwapExchangeAction,
+    pub(super) perp: PerpAsset,
+    pub(super) coin: String,
+    pub(super) side: String,
+    pub(super) size: Decimal,
+    pub(super) duration_seconds: u64,
+    pub(super) duration_minutes: u64,
+    pub(super) randomize: bool,
+    /// The margin mode the account's position must already use.
+    pub(super) margin_mode: Option<MarginModeArg>,
 }
 
-impl BatchCreateOrderPlan {
-    fn into_dry_run_args(self) -> serde_json::Value {
-        self.dry_run_args
+pub(super) struct TwapCancelPlan {
+    pub(super) action: TwapExchangeAction,
+    pub(super) coin: String,
+    pub(super) twap_id: u64,
+}
+
+/// `orders schedule-cancel`: arm the dead man's switch a duration from now, or clear it.
+pub(super) enum ScheduleCancelPlan {
+    Set {
+        delay: chrono::Duration,
+        in_seconds: u64,
+    },
+    Clear,
+}
+
+/// The moment a [`ScheduleCancelPlan::Set`] fires when sent at a given time.
+pub(super) struct ScheduledCancel {
+    pub(super) at: chrono::DateTime<Utc>,
+    pub(super) in_seconds: u64,
+}
+
+impl ScheduledCancel {
+    pub(super) fn at_ms(&self) -> u64 {
+        self.at.timestamp_millis() as u64
     }
 }
 
-pub(crate) struct TwapCreatePlan {
-    pub(crate) action: TwapExchangeAction,
-    pub(crate) coin: String,
-    pub(crate) asset: usize,
-    pub(crate) side: String,
-    pub(crate) size: Decimal,
-    pub(crate) duration_seconds: u64,
-    pub(crate) duration_minutes: u64,
-    pub(crate) randomize: bool,
-}
-impl TwapCreatePlan {
-    fn dry_run_args(&self, raw_coin: &str, dex: Option<&str>) -> serde_json::Value {
-        serde_json::json!({
-            "coin": raw_coin,
-            "dex": dex,
-            "side": self.side,
-            "size": self.size.to_string(),
-            "duration": self.duration_seconds,
-            "duration_minutes": self.duration_minutes,
-            "randomize": self.randomize,
-            "asset_id": self.asset,
-            "resolved_asset": self.coin,
-        })
+impl ScheduleCancelPlan {
+    /// When the cancel fires if the plan is sent at `now`; `None` when clearing.
+    pub(super) fn scheduled(&self, now: chrono::DateTime<Utc>) -> Option<ScheduledCancel> {
+        match self {
+            Self::Set { delay, in_seconds } => Some(ScheduledCancel {
+                at: now + *delay,
+                in_seconds: *in_seconds,
+            }),
+            Self::Clear => None,
+        }
     }
 }
 
-fn insert_margin_mode(preview: &mut serde_json::Value, margin_mode: MarginModeArg) {
+fn insert_margin_mode(preview: &mut serde_json::Value, margin_mode: Option<MarginModeArg>) {
     if let Some(object) = preview.as_object_mut() {
         object.insert(
             "margin_mode".to_string(),
-            serde_json::json!(margin_mode.to_string()),
+            serde_json::json!(margin_mode.unwrap_or(MarginModeArg::Cross).to_string()),
         );
     }
 }
 
-pub(crate) struct TwapCancelPlan {
-    pub(crate) action: TwapExchangeAction,
-    pub(crate) coin: String,
-    pub(crate) twap_id: u64,
-}
-
-impl TwapCancelPlan {
-    fn dry_run_args(&self, raw_coin: &str, dex: Option<&str>) -> serde_json::Value {
-        serde_json::json!({
-            "twap_id": self.twap_id,
-            "coin": raw_coin,
-            "dex": dex,
-            "resolved_asset": self.coin,
-        })
-    }
-}
-
-pub(crate) struct ScheduleCancelPlan {
-    pub(crate) action: Action,
-    pub(crate) scheduled_at: Option<chrono::DateTime<Utc>>,
-    pub(crate) in_seconds: Option<u64>,
-}
-
-impl ScheduleCancelPlan {
-    fn dry_run_args(&self) -> serde_json::Value {
-        match (&self.scheduled_at, self.in_seconds) {
-            (Some(scheduled_at), Some(in_seconds)) => serde_json::json!({
-                "mode": "set",
-                "in_duration_ms": in_seconds * 1000,
-                "scheduled_time": scheduled_at.to_rfc3339(),
-                "scheduled_time_ms": scheduled_at.timestamp_millis() as u64,
-            }),
-            _ => serde_json::json!({
-                "mode": "clear",
-            }),
-        }
-    }
-}
-
-pub(crate) async fn prepare_order(
+/// The perp for `--coin` / `--dex`, fetching a HIP-3 market the resolver does
+/// not list yet. Command code obtains a perp only here, and planners take the
+/// resulting [`PerpAsset`], so none can run against an unresolved market.
+pub(super) async fn resolve_perp(
     client: &HttpClient,
     resolver: &AssetResolver,
-    args: &CreateArgs,
-) -> Result<PreparedOrder, CliError> {
-    validate_create_args(args)?;
+    dex: Option<&str>,
+    coin: &str,
+) -> Result<PerpAsset, CliError> {
+    Ok(resolver
+        .resolve_perp_or_fetch(client, &qualify_dex_asset(dex, coin))
+        .await?)
+}
 
-    let query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
-    let asset = resolve_tradable_asset(client, resolver, &query, args).await?;
-    let (coin, index, sz_decimals, mid_lookup, price_tick, asset_kind, amount_unit) = match asset {
-        Market::Perp(perp) => {
-            let coin = perp.display_name();
-            (
-                coin.clone(),
-                perp.index,
-                perp.sz_decimals,
-                MidLookup {
-                    coin,
-                    dex: perp.dex,
-                    original_coin: query.clone(),
-                },
-                PriceTick::for_perp(i64::from(perp.sz_decimals)),
-                TradableAssetKind::Perp,
-                perp.collateral,
-            )
+/// The market `spec` trades, fetching a HIP-3 market the resolver does not list yet.
+async fn resolve_tradable_asset(
+    client: &HttpClient,
+    resolver: &AssetResolver,
+    spec: &OrderSpec,
+) -> Result<Market, CliError> {
+    if let AssetQuery::Outcome(notation) = parse_asset_query(&spec.coin) {
+        if spec.dex.is_some() {
+            return Err(CliError::Unsupported(format!(
+                "outcome notation '{notation}' cannot be used with --dex; omit --dex for outcome orders"
+            )));
         }
-        Market::Spot(spot) => (
-            spot.symbol,
-            spot.index,
-            spot.base_sz_decimals,
-            MidLookup {
-                coin: spot_coin_key(spot.index),
-                dex: None,
-                original_coin: args.coin.clone(),
-            },
-            PriceTick::for_spot(i64::from(spot.base_sz_decimals)),
-            TradableAssetKind::Spot,
-            spot.quote,
-        ),
+        return Ok(Market::Outcome(OutcomeAsset::new(notation)));
+    }
+
+    let query = qualify_dex_asset(spec.dex.as_deref(), &spec.coin);
+    let perp_err = match resolver.resolve_perp_or_fetch(client, &query).await {
+        Ok(perp) => return Ok(Market::Perp(perp)),
+        Err(err) => err,
+    };
+    if !matches!(parse_asset_query(&query), AssetQuery::Hip3 { .. })
+        && let Ok(spot) = resolver.resolve_spot(&query)
+    {
+        return Ok(Market::Spot(spot));
+    }
+    Err(perp_err.into())
+}
+
+/// Per-market facts every order on it reads.
+struct Venue {
+    coin: String,
+    index: usize,
+    precision: MarketPrecision,
+    quote: String,
+}
+
+fn venue(market: &Market) -> Result<Venue, CliError> {
+    let (coin, index, quote) = match market {
+        Market::Perp(perp) => (perp.display_name(), perp.index, perp.collateral.clone()),
+        Market::Spot(spot) => (spot.symbol.clone(), spot.index, spot.quote.clone()),
         Market::Outcome(outcome) => (
             outcome.notation().to_string(),
             outcome.asset_index()?,
-            0,
-            MidLookup {
-                coin: args.coin.clone(),
-                dex: None,
-                original_coin: args.coin.clone(),
-            },
-            PriceTick::for_spot(0),
-            TradableAssetKind::Outcome,
             "USDH".to_string(),
         ),
     };
+    Ok(Venue {
+        coin,
+        index,
+        precision: MarketPrecision::of(market),
+        quote,
+    })
+}
 
-    if !matches!(asset_kind, TradableAssetKind::Perp) && args.margin_mode.is_some() {
-        return Err(CliError::Configuration(
-            "orders create --margin-mode is only supported for perpetual orders".to_string(),
+async fn market_mid_price(
+    client: &HttpClient,
+    market: &Market,
+    spec: &OrderSpec,
+) -> Result<Decimal, CliError> {
+    let (key, dex, label) = match market {
+        Market::Perp(perp) => (
+            perp.display_name(),
+            perp.dex.clone(),
+            qualify_dex_asset(spec.dex.as_deref(), &spec.coin),
+        ),
+        Market::Spot(spot) => (spot_coin_key(spot.index), None, spec.coin.clone()),
+        Market::Outcome(_) => {
+            return Err(CliError::Unsupported(
+                "outcome orders do not support --type market because outcome size decimals are not verified; use an explicit --price and --size"
+                    .to_string(),
+            ));
+        }
+    };
+    let mids = client.all_mids(dex).await.map_err(from_sdk)?;
+    mids.get(&key).copied().ok_or_else(|| {
+        CliError::Unavailable(format!(
+            "mid price for {label} was not available. Retry after market data refresh."
+        ))
+    })
+}
+
+/// The builder fee an order carries. Builder codes apply to spot sells and
+/// both sides of perpetual orders: an explicit request on a spot buy is
+/// rejected, and the configured default is skipped for it.
+fn order_builder_fee(
+    request: &BuilderRequest,
+    market: &Market,
+    side: OrderSide,
+) -> Result<Option<OrderBuilderFee>, CliError> {
+    let spot_buy = matches!(market, Market::Spot(_)) && side == OrderSide::Buy;
+    let (address, fee) = match request {
+        BuilderRequest::Explicit { address, fee } => {
+            if spot_buy {
+                return Err(CliError::Unsupported(
+                    "spot buy orders do not support builder fees; Hyperliquid builder codes apply to spot sells and both sides of perpetual orders"
+                        .to_string(),
+                ));
+            }
+            (*address, *fee)
+        }
+        BuilderRequest::Default => {
+            if spot_buy {
+                return Ok(None);
+            }
+            match builder::resolve_default_builder_fee()? {
+                Some(default) => default,
+                None => return Ok(None),
+            }
+        }
+    };
+    if matches!(market, Market::Perp(_)) && fee > 100 {
+        return Err(CliError::Unsupported(
+            "perp order builder fee rate cannot exceed 0.1%".to_string(),
         ));
     }
+    Ok(Some(OrderBuilderFee {
+        // Hyperliquid's Python SDK lowercases builder addresses before hashing/signing
+        // L1 order actions. Checksum casing can change the msgpack action hash and
+        // recover a random nonexistent signer on exchange validation.
+        b: address.to_string().to_ascii_lowercase(),
+        f: fee,
+    }))
+}
 
-    if matches!(
-        asset_kind,
-        TradableAssetKind::Spot | TradableAssetKind::Outcome
-    ) {
-        if asset_kind == TradableAssetKind::Spot {
-            reject_spot_buy_builder_fee(args)?;
-        }
-        reject_spot_reduce_only(args)?;
-        reject_spot_trigger_order(args)?;
-        reject_spot_tpsl_grouping(args)?;
-    }
+pub(super) async fn prepare_order(
+    client: &HttpClient,
+    resolver: &AssetResolver,
+    spec: &OrderSpec,
+) -> Result<PreparedOrder, CliError> {
+    let market = resolve_tradable_asset(client, resolver, spec).await?;
+    prepare_order_in(client, &market, spec).await
+}
 
-    let (price, trigger_price, size, amount, warning, order_type, tif) = match args.order_type {
-        CreateOrderType::Limit => {
-            let price = protocol_price(
-                require_decimal(args.price, "--price", "limit orders")?,
-                asset_kind,
-                sz_decimals,
-                &coin,
-            )?;
-            let size = protocol_size(
-                require_decimal(args.size, "--size", "limit orders")?,
-                sz_decimals,
-                &coin,
-            )?;
+/// Plan one order on an already resolved market.
+async fn prepare_order_in(
+    client: &HttpClient,
+    market: &Market,
+    spec: &OrderSpec,
+) -> Result<PreparedOrder, CliError> {
+    validate_order_for_market(spec, market)?;
+    let builder = order_builder_fee(&spec.builder, market, spec.side)?;
+    let Venue {
+        coin,
+        index,
+        precision,
+        quote,
+    } = venue(market)?;
+
+    let (price, trigger_price, size, amount, warning, placement, tif) = match spec.kind {
+        OrderKind::Limit { price, size, tif } => (
+            precision.price(price, &coin)?,
+            None,
+            precision.size(size, &coin)?,
+            None,
+            None,
+            OrderTypePlacement::Limit { tif: tif.into() },
+            Some(tif),
+        ),
+        OrderKind::Trigger {
+            tpsl,
+            trigger_price,
+            limit_price,
+            size,
+        } => {
+            let trigger_px = precision.price(trigger_price, &coin)?;
+            let price = match limit_price {
+                Some(limit_price) => precision.price(limit_price, &coin)?,
+                None => trigger_px,
+            };
             (
                 price,
-                None,
-                size,
-                None,
-                None,
-                OrderTypePlacement::Limit {
-                    tif: args.tif.into(),
-                },
-                Some(args.tif),
-            )
-        }
-        CreateOrderType::StopLoss | CreateOrderType::TakeProfit => {
-            let trigger_price =
-                protocol_price(market_trigger_price(args)?, asset_kind, sz_decimals, &coin)?;
-            let size = protocol_size(
-                require_decimal(args.size, "--size", "market trigger orders")?,
-                sz_decimals,
-                &coin,
-            )?;
-            let tpsl = args
-                .order_type
-                .tpsl()
-                .expect("market trigger order type must map to TP/SL");
-            (
-                trigger_price,
-                Some(trigger_price),
-                size,
+                Some(trigger_px),
+                precision.size(size, &coin)?,
                 None,
                 None,
                 OrderTypePlacement::Trigger {
-                    is_market: true,
-                    trigger_px: trigger_price,
+                    is_market: limit_price.is_none(),
+                    trigger_px,
                     tpsl,
                 },
                 None,
             )
         }
-        CreateOrderType::StopLimit | CreateOrderType::TakeLimit => {
-            let price = protocol_price(
-                require_decimal(args.price, "--price", "limit trigger orders")?,
-                asset_kind,
-                sz_decimals,
-                &coin,
-            )?;
-            let trigger_price = protocol_price(
-                require_decimal(
-                    args.trigger_price,
-                    "--trigger-price",
-                    "limit trigger orders",
-                )?,
-                asset_kind,
-                sz_decimals,
-                &coin,
-            )?;
-            let size = protocol_size(
-                require_decimal(args.size, "--size", "limit trigger orders")?,
-                sz_decimals,
-                &coin,
-            )?;
-            let tpsl = args
-                .order_type
-                .tpsl()
-                .expect("limit trigger order type must map to TP/SL");
-            (
-                price,
-                Some(trigger_price),
-                size,
-                None,
-                None,
-                OrderTypePlacement::Trigger {
-                    is_market: false,
-                    trigger_px: trigger_price,
-                    tpsl,
-                },
-                None,
-            )
-        }
-        CreateOrderType::Market => {
-            let mid = market_mid_price(client, &mid_lookup).await?;
-            let price = market_limit_price(mid, args.side, args.max_slippage_bps, price_tick)?;
+        OrderKind::Market {
+            sizing,
+            max_slippage_bps,
+        } => {
+            let mid = market_mid_price(client, market, spec).await?;
+            let price = precision.marketable_price(mid, spec.side, max_slippage_bps)?;
             let warning = Some(format!(
-                "Slippage warning: market order uses a {} bps protective price around mid {}",
-                args.max_slippage_bps, mid
+                "Slippage warning: market order uses a {max_slippage_bps} bps protective price around mid {mid}"
             ));
-            let (size, amount) = match (args.size, args.amount) {
-                (Some(size), None) => (protocol_size(size, sz_decimals, &coin)?, None),
-                (None, Some(amount)) => {
-                    let size = (amount / mid).round_dp_with_strategy(
-                        sz_decimals,
-                        rust_decimal::RoundingStrategy::ToZero,
-                    );
-                    if size <= Decimal::ZERO {
-                        return Err(CliError::Configuration(format!(
+            let (size, amount) = match sizing {
+                MarketSizing::Size(size) => (precision.size(size, &coin)?, None),
+                MarketSizing::Amount(amount) => {
+                    let size = precision.size(amount / mid, &coin).map_err(|_| {
+                        CliError::Configuration(format!(
                             "amount is too small for {coin}; derived size rounds to zero"
-                        )));
-                    }
+                        ))
+                    })?;
                     (size, Some(amount))
-                }
-                _ => {
-                    return Err(CliError::Configuration(
-                        "orders create requires --amount or --size for market orders.\n  \
-                         hyperliquid --format json --dry-run buy --coin BTC --size 0.001"
-                            .to_string(),
-                    ));
                 }
             };
             (
@@ -365,172 +386,217 @@ pub(crate) async fn prepare_order(
         }
     };
 
+    let implicit_reduce_only = matches!(
+        spec.kind,
+        OrderKind::Trigger {
+            limit_price: None,
+            ..
+        }
+    );
     Ok(PreparedOrder {
         request: OrderRequest {
             asset: index,
-            is_buy: args.side.is_buy(),
+            is_buy: spec.side.is_buy(),
             limit_px: price,
             sz: size,
-            reduce_only: args.reduce_only || args.order_type.uses_implicit_reduce_only(),
-            order_type,
-            cloid: args
-                .cloid
-                .as_deref()
-                .map(parse_cloid)
-                .transpose()?
-                .unwrap_or_default(),
+            reduce_only: spec.reduce_only || implicit_reduce_only,
+            order_type: placement,
+            cloid: wire_cloid(spec.cloid),
         },
-        asset_kind,
-        sz_decimals,
+        market: market.clone(),
+        precision,
         coin,
-        side: args.side,
-        order_type: args.order_type,
+        side: spec.side,
+        order_type: spec.kind.order_type(),
         tif,
         price,
         trigger_price,
         size,
         amount,
-        amount_unit,
+        amount_unit: quote,
         warning,
-        builder: order_builder_fee(args, asset_kind, args.side)?,
+        builder,
+        margin_mode: spec.margin_mode,
     })
 }
 
-pub(crate) async fn prepare_scale_batch(
+/// Plan an order and its attached TP/SL children, if any.
+pub(super) async fn prepare_create_order(
+    client: &HttpClient,
+    resolver: &AssetResolver,
+    spec: &OrderSpec,
+) -> Result<CreateOrderSubmission, CliError> {
+    let parent = prepare_order(client, resolver, spec).await?;
+    match &spec.tpsl {
+        Some(tpsl) => {
+            let batch = prepare_normal_tpsl_batch(&parent, tpsl)?;
+            Ok(CreateOrderSubmission::NormalTpsl(NormalTpslOrder {
+                parent,
+                batch,
+            }))
+        }
+        None => Ok(CreateOrderSubmission::Single(parent)),
+    }
+}
+
+/// [`prepare_create_order`] for orders the CLI generates from `CreateArgs`.
+pub(super) async fn prepare_create_order_plan(
+    client: &HttpClient,
+    resolver: &AssetResolver,
+    args: &CreateArgs,
+) -> Result<CreateOrderSubmission, CliError> {
+    prepare_create_order(client, resolver, &OrderSpec::from_create(args)?).await
+}
+
+pub(super) async fn prepare_scale_batch(
     client: &HttpClient,
     resolver: &AssetResolver,
     args: &ScaleArgs,
 ) -> Result<PreparedOrderBatch, CliError> {
-    validate_scale_args(args)?;
     let prices = scale_prices(args.start_price, args.end_price, args.order_count)?;
     let sizes = scale_sizes(args.total_size, args.order_count)?;
-    let legs = prices
+    let specs = prices
         .into_iter()
         .zip(sizes)
-        .enumerate()
-        .map(|(index, (price, size))| {
-            (
-                index,
-                CreateArgs {
-                    coin: args.coin.clone(),
-                    dex: args.dex.clone(),
-                    side: args.side,
-                    price: Some(price),
-                    trigger_price: None,
-                    size: Some(size),
-                    amount: None,
-                    order_type: CreateOrderType::Limit,
-                    tif: args.tif,
-                    reduce_only: args.reduce_only,
-                    max_slippage_bps: DEFAULT_MARKET_ORDER_SLIPPAGE_BPS,
-                    take_profit: None,
-                    stop_loss: None,
-                    grouping: None,
-                    on_behalf_of: args.on_behalf_of.clone(),
-                    margin_mode: args.margin_mode,
-                    builder: None,
-                    builder_fee_rate: None,
-                    cloid: None,
-                    yes: args.yes,
-                },
+        .map(|(price, size)| {
+            OrderSpec::limit_leg(
+                &args.coin,
+                args.dex.as_deref(),
+                args.side,
+                price,
+                size,
+                args.tif,
             )
+            .map(|spec| {
+                spec.reduce_only(args.reduce_only)
+                    .with_margin_mode(args.margin_mode)
+            })
         })
-        .collect::<Vec<_>>();
-    prepare_order_batch_from_create_args(client, resolver, legs).await
+        .collect::<Result<Vec<_>, _>>()?;
+    let prepared = prepare_order_batch(client, resolver, specs).await?;
+
+    let placed_size: Decimal = prepared.legs.iter().map(|leg| leg.order.size).sum();
+    if placed_size != args.total_size {
+        return Err(CliError::Configuration(
+            "orders scale total size cannot be evenly distributed across requested orders at the market's lot size"
+                .to_string(),
+        ));
+    }
+    if prepared
+        .legs
+        .windows(2)
+        .any(|pair| pair[0].order.price == pair[1].order.price)
+    {
+        return Err(CliError::Configuration(format!(
+            "orders scale prices collapse onto the same tick for {}; use fewer --orders or a wider price range",
+            prepared.legs[0].order.coin
+        )));
+    }
+    Ok(prepared)
 }
 
-pub(crate) async fn prepare_batch_create_orders(
+pub(super) async fn prepare_batch_create_orders(
     client: &HttpClient,
     resolver: &AssetResolver,
-    args: &BatchCreateArgs,
     orders: Vec<BatchCreateOrder>,
 ) -> Result<PreparedOrderBatch, CliError> {
-    validate_batch_create_args(args)?;
-    let legs = orders
+    let specs = orders
         .into_iter()
-        .enumerate()
-        .map(|(index, order)| {
-            (
-                index,
-                CreateArgs {
-                    coin: order.coin,
-                    dex: order.dex,
-                    side: order.side,
-                    price: Some(order.price),
-                    trigger_price: None,
-                    size: Some(order.size),
-                    amount: None,
-                    order_type: CreateOrderType::Limit,
-                    tif: order.tif.unwrap_or(TifArg::Gtc),
-                    reduce_only: order.reduce_only,
-                    max_slippage_bps: DEFAULT_MARKET_ORDER_SLIPPAGE_BPS,
-                    take_profit: None,
-                    stop_loss: None,
-                    grouping: None,
-                    on_behalf_of: args.on_behalf_of.clone(),
-                    margin_mode: None,
-                    builder: None,
-                    builder_fee_rate: None,
-                    cloid: order.cloid,
-                    yes: args.yes,
-                },
-            )
+        .map(|order| {
+            let cloid = order.cloid.as_deref().map(parse_cloid).transpose()?;
+            Ok(OrderSpec::limit_leg(
+                &order.coin,
+                order.dex.as_deref(),
+                order.side,
+                order.price,
+                order.size,
+                order.tif.unwrap_or(TifArg::Gtc),
+            )?
+            .reduce_only(order.reduce_only)
+            .with_cloid(cloid))
         })
-        .collect::<Vec<_>>();
-    prepare_order_batch_from_create_args(client, resolver, legs).await
+        .collect::<Result<Vec<_>, CliError>>()?;
+    prepare_order_batch(client, resolver, specs).await
 }
 
-async fn prepare_order_batch_from_create_args(
+/// Plan generated legs, resolving each distinct market once.
+async fn prepare_order_batch(
     client: &HttpClient,
     resolver: &AssetResolver,
-    legs: Vec<(usize, CreateArgs)>,
+    specs: Vec<OrderSpec>,
 ) -> Result<PreparedOrderBatch, CliError> {
-    let mut prepared_legs = Vec::with_capacity(legs.len());
-    for (index, args) in legs {
-        let order = prepare_order(client, resolver, &args).await?;
-        prepared_legs.push(PreparedOrderLeg {
-            leg_index: index,
-            order,
-        });
+    let mut markets: HashMap<(String, Option<String>), Market> = HashMap::new();
+    let mut legs = Vec::with_capacity(specs.len());
+    for (leg_index, spec) in specs.iter().enumerate() {
+        let key = (spec.coin.clone(), spec.dex.clone());
+        if !markets.contains_key(&key) {
+            let market = resolve_tradable_asset(client, resolver, spec).await?;
+            markets.insert(key.clone(), market);
+        }
+        let order = prepare_order_in(client, &markets[&key], spec).await?;
+        legs.push(PreparedOrderLeg { leg_index, order });
     }
     let batch = BatchOrder {
-        orders: prepared_legs
-            .iter()
-            .map(|leg| leg.order.request.clone())
-            .collect(),
+        orders: legs.iter().map(|leg| leg.order.request.clone()).collect(),
         grouping: OrderGrouping::Na,
         builder: None,
     };
-    Ok(PreparedOrderBatch {
-        batch,
-        legs: prepared_legs,
-    })
+    Ok(PreparedOrderBatch { batch, legs })
 }
 
-pub(crate) fn create_has_tpsl_legs(args: &CreateArgs) -> bool {
-    args.take_profit.is_some() || args.stop_loss.is_some()
-}
-
-pub(crate) fn prepare_normal_tpsl_batch(
-    parent: PreparedOrder,
-    args: &CreateArgs,
-) -> Result<PreparedTpslBatch, CliError> {
-    if parent.asset_kind == TradableAssetKind::Spot {
-        return Err(CliError::Unsupported(
-            "orders create TP/SL grouping currently supports perpetual markets only".to_string(),
+fn scale_prices(
+    start_price: Decimal,
+    end_price: Decimal,
+    order_count: usize,
+) -> Result<Vec<Decimal>, CliError> {
+    if order_count == 0 {
+        return Err(CliError::Configuration(
+            "orders scale requires --orders greater than zero".to_string(),
         ));
     }
-    let grouping = TpslGroupingArg::NormalTpsl;
-    let child_side = parent.side.opposite();
-    let take_profit = args
-        .take_profit
-        .map(|price| protocol_price(price, parent.asset_kind, parent.sz_decimals, &parent.coin))
-        .transpose()?;
-    let stop_loss = args
-        .stop_loss
-        .map(|price| protocol_price(price, parent.asset_kind, parent.sz_decimals, &parent.coin))
-        .transpose()?;
-    validate_tpsl_price_ordering(child_side, take_profit, stop_loss, "orders create")?;
+    if order_count == 1 {
+        return Ok(vec![start_price]);
+    }
+    let steps = Decimal::from(order_count - 1);
+    let step = (end_price - start_price) / steps;
+    Ok((0..order_count)
+        .map(|index| start_price + step * Decimal::from(index))
+        .collect())
+}
+
+pub(super) fn scale_sizes(total_size: Decimal, order_count: usize) -> Result<Vec<Decimal>, CliError> {
+    if order_count == 0 {
+        return Err(CliError::Configuration(
+            "orders scale requires --orders greater than zero".to_string(),
+        ));
+    }
+    let count = Decimal::from(order_count);
+    let per_leg = total_size / count;
+    if per_leg <= Decimal::ZERO {
+        return Err(CliError::Configuration(
+            "orders scale total size is too small to distribute across requested orders"
+                .to_string(),
+        ));
+    }
+    if per_leg * count != total_size {
+        return Err(CliError::Configuration(
+            "orders scale total size cannot be evenly distributed across requested orders"
+                .to_string(),
+        ));
+    }
+    Ok(vec![per_leg; order_count])
+}
+
+pub(super) fn prepare_normal_tpsl_batch(
+    parent: &PreparedOrder,
+    tpsl: &AttachedTpsl,
+) -> Result<PreparedTpslBatch, CliError> {
+    let close_side = parent.side.opposite();
+    let truncate = |price: Decimal| parent.precision.price(price, &parent.coin);
+    let take_profit = tpsl.take_profit.map(truncate).transpose()?;
+    let stop_loss = tpsl.stop_loss.map(truncate).transpose()?;
+    validate_tpsl_price_ordering(close_side, take_profit, stop_loss, "orders create")?;
+
     let mut legs = vec![PreparedTpslLeg {
         request: parent.request.clone(),
         leg: TpslLegKind::Parent,
@@ -543,94 +609,213 @@ pub(crate) fn prepare_normal_tpsl_batch(
         reduce_only: parent.request.reduce_only,
         warning: parent.warning.clone(),
     }];
-
-    push_tpsl_child_leg(
-        &mut legs,
-        TpslLegKind::TakeProfit,
-        &parent,
-        child_side,
-        take_profit,
-        &mut None,
-    );
-    push_tpsl_child_leg(
-        &mut legs,
-        TpslLegKind::StopLoss,
-        &parent,
-        child_side,
-        stop_loss,
-        &mut None,
-    );
-
-    Ok(batch_from_legs(grouping, legs))
+    let children = TpslChildren {
+        asset: parent.request.asset,
+        coin: &parent.coin,
+        size: parent.request.sz,
+        side: close_side,
+    };
+    children.push_legs(&mut legs, take_profit, stop_loss, None);
+    Ok(batch_from_legs(tpsl.grouping.into(), legs))
 }
 
-pub(crate) async fn prepare_position_tpsl_batch(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    user: Address,
-    args: &TpslArgs,
-) -> Result<PreparedTpslBatch, CliError> {
-    validate_tpsl_args(args)?;
-    let resolved = resolve_dex_perp(resolver, args.dex.as_deref(), &args.coin)?;
-    let (side, size, entry) = match (args.side, args.size) {
-        (Some(side), Some(size)) => {
-            let entry =
-                if trigger_specs_need_entry(args.take_profit.as_ref(), args.stop_loss.as_ref()) {
-                    let position = lookup_position_for_tpsl(
-                        client,
-                        user,
-                        resolved.dex.clone(),
-                        &resolved.name,
-                    )
-                    .await
-                    .map_err(|_| {
-                        CliError::Unsupported(format!(
-                            "percent and entry TP/SL require an open {} position",
-                            resolved.name
-                        ))
-                    })?;
-                    position.position.entry_px
-                } else {
-                    None
-                };
-            (side, size, entry)
+/// What a TP/SL child order is for: the market, the size, and the side that closes it.
+struct TpslChildren<'a> {
+    asset: usize,
+    coin: &'a str,
+    size: Decimal,
+    side: OrderSide,
+}
+
+impl TpslChildren<'_> {
+    /// Append the take-profit then the stop-loss leg, for whichever is set.
+    /// `cloid` goes to the first leg appended.
+    fn push_legs(
+        &self,
+        legs: &mut Vec<PreparedTpslLeg>,
+        take_profit: Option<Decimal>,
+        stop_loss: Option<Decimal>,
+        cloid: Option<Cloid>,
+    ) {
+        let mut cloids = cloid.into_iter();
+        for (tpsl, price) in [(TpSl::Tp, take_profit), (TpSl::Sl, stop_loss)] {
+            if let Some(price) = price {
+                legs.push(self.leg(tpsl, price, cloids.next()));
+            }
         }
-        (None, None) => {
-            let position =
-                lookup_position_for_tpsl(client, user, resolved.dex.clone(), &resolved.name)
-                    .await?;
-            let (side, size) = position_close_side_and_size(&position)?;
-            (side, size, position.position.entry_px)
+    }
+
+    fn leg(&self, tpsl: TpSl, price: Decimal, cloid: Option<Cloid>) -> PreparedTpslLeg {
+        PreparedTpslLeg {
+            request: OrderRequest {
+                asset: self.asset,
+                is_buy: self.side.is_buy(),
+                limit_px: price,
+                sz: self.size,
+                reduce_only: true,
+                order_type: OrderTypePlacement::Trigger {
+                    is_market: true,
+                    trigger_px: price,
+                    tpsl,
+                },
+                cloid: wire_cloid(cloid),
+            },
+            leg: TpslLegKind::of(tpsl),
+            coin: self.coin.to_string(),
+            side: self.side,
+            order_type: CreateOrderType::market_trigger(tpsl),
+            price,
+            size: self.size,
+            tif: None,
+            reduce_only: true,
+            warning: None,
         }
-        _ => unreachable!("validate_tpsl_args rejects partial side/size"),
+    }
+}
+
+fn batch_from_legs(grouping: TpslGroupingArg, legs: Vec<PreparedTpslLeg>) -> PreparedTpslBatch {
+    let batch = BatchOrder {
+        orders: legs.iter().map(|leg| leg.request.clone()).collect(),
+        grouping: grouping.into(),
+        builder: None,
     };
+    PreparedTpslBatch {
+        batch,
+        grouping,
+        legs,
+    }
+}
+
+/// Reduce-only TP/SL orders that close `size` of a position on `perp`.
+pub(super) fn position_tpsl_batch(
+    perp: &PerpAsset,
+    close_side: OrderSide,
+    size: Decimal,
+    take_profit: Option<Decimal>,
+    stop_loss: Option<Decimal>,
+    cloid: Option<Cloid>,
+) -> PreparedTpslBatch {
+    let coin = perp.display_name();
+    let children = TpslChildren {
+        asset: perp.index,
+        coin: &coin,
+        size,
+        side: close_side,
+    };
+    let mut legs = Vec::new();
+    children.push_legs(&mut legs, take_profit, stop_loss, cloid);
+    batch_from_legs(TpslGroupingArg::PositionTpsl, legs)
+}
+
+/// TP/SL trigger prices truncated to the market's tick grid.
+fn truncate_triggers(
+    perp: &PerpAsset,
+    take_profit: Option<Decimal>,
+    stop_loss: Option<Decimal>,
+) -> Result<(Option<Decimal>, Option<Decimal>), CliError> {
+    let precision = MarketPrecision::perp(perp.sz_decimals);
+    let coin = perp.display_name();
+    let truncate = |price: Decimal| precision.price(price, &coin);
+    Ok((
+        take_profit.map(truncate).transpose()?,
+        stop_loss.map(truncate).transpose()?,
+    ))
+}
+
+/// The TP/SL trigger prices of `args` as they would be sent to close a
+/// position with `entry` as its entry price. The shared rule behind both the
+/// live order and its dry-run preview.
+fn position_tpsl_triggers(
+    perp: &PerpAsset,
+    args: &TpslArgs,
+    close_side: OrderSide,
+    entry: Option<Decimal>,
+) -> Result<(Option<Decimal>, Option<Decimal>), CliError> {
     let (take_profit, stop_loss) = resolve_trigger_prices(
         args.take_profit.as_ref(),
         args.stop_loss.as_ref(),
         entry,
-        side.opposite(),
+        close_side.opposite(),
     )?;
-    let coin = resolved.display_name();
-    let take_profit = take_profit
-        .map(|price| protocol_price(price, TradableAssetKind::Perp, resolved.sz_decimals, &coin))
-        .transpose()?;
-    let stop_loss = stop_loss
-        .map(|price| protocol_price(price, TradableAssetKind::Perp, resolved.sz_decimals, &coin))
-        .transpose()?;
-    validate_tpsl_price_ordering(side, take_profit, stop_loss, "orders tpsl")?;
+    let (take_profit, stop_loss) = truncate_triggers(perp, take_profit, stop_loss)?;
+    validate_tpsl_price_ordering(close_side, take_profit, stop_loss, "orders tpsl")?;
+    Ok((take_profit, stop_loss))
+}
 
-    let parsed_cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
+/// The user's position on `perp`, if they hold one.
+async fn fetch_position(
+    client: &HttpClient,
+    user: Address,
+    perp: &PerpAsset,
+) -> Result<Option<AssetPosition>, CliError> {
+    Ok(client
+        .clearinghouse_state(user, perp.dex.clone())
+        .await
+        .map_err(from_sdk)?
+        .asset_positions
+        .into_iter()
+        .find(|position| position.position.coin.eq_ignore_ascii_case(&perp.name)))
+}
 
-    Ok(build_position_tpsl_batch(
-        TpslGroupingArg::PositionTpsl,
-        resolved.display_name(),
-        resolved.index,
-        resolved.collateral,
-        side,
-        size,
-        take_profit,
-        stop_loss,
-        parsed_cloid,
+fn position_close_side_and_size(
+    position: &AssetPosition,
+) -> Result<(OrderSide, Decimal), CliError> {
+    let szi = position.position.szi;
+    if szi > Decimal::ZERO {
+        Ok((OrderSide::Sell, szi))
+    } else if szi < Decimal::ZERO {
+        Ok((OrderSide::Buy, szi.abs()))
+    } else {
+        Err(CliError::Configuration(format!(
+            "orders tpsl requires a non-zero {} position",
+            position.position.coin
+        )))
+    }
+}
+
+pub(super) async fn prepare_position_tpsl_batch(
+    client: &HttpClient,
+    perp: &PerpAsset,
+    user: Address,
+    args: &TpslArgs,
+) -> Result<PreparedTpslBatch, CliError> {
+    let (close_side, size, entry) = match (args.side, args.size) {
+        (Some(side), Some(size)) => {
+            let entry = if trigger_specs_need_entry(args.take_profit.as_ref(), args.stop_loss.as_ref())
+            {
+                let position = fetch_position(client, user, perp).await?.ok_or_else(|| {
+                    CliError::Unsupported(format!(
+                        "percent and entry TP/SL require an open {} position",
+                        perp.name
+                    ))
+                })?;
+                position.position.entry_px
+            } else {
+                None
+            };
+            (side, size, entry)
+        }
+        (None, None) => {
+            let position = fetch_position(client, user, perp).await?.ok_or_else(|| {
+                CliError::Configuration(format!(
+                    "orders tpsl requires an open {} position or both --side and --size for a fixed-size TP/SL",
+                    perp.name
+                ))
+            })?;
+            let (side, size) = position_close_side_and_size(&position)?;
+            (side, size, position.position.entry_px)
+        }
+        _ => {
+            return Err(CliError::Configuration(
+                "orders tpsl needs --side and --size together".to_string(),
+            ));
+        }
+    };
+    let size = MarketPrecision::perp(perp.sz_decimals).size(size, &perp.display_name())?;
+    let (take_profit, stop_loss) = position_tpsl_triggers(perp, args, close_side, entry)?;
+    let cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
+    Ok(position_tpsl_batch(
+        perp, close_side, size, take_profit, stop_loss, cloid,
     ))
 }
 
@@ -644,7 +829,7 @@ fn trigger_specs_need_entry(
         .any(|spec| matches!(spec, TriggerPriceSpec::Percent(_) | TriggerPriceSpec::Entry))
 }
 
-pub(crate) fn resolve_trigger_prices(
+pub(super) fn resolve_trigger_prices(
     take_profit: Option<&TriggerPriceSpec>,
     stop_loss: Option<&TriggerPriceSpec>,
     entry: Option<Decimal>,
@@ -682,128 +867,7 @@ fn absolute_trigger_prices(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn build_position_tpsl_batch(
-    grouping: TpslGroupingArg,
-    coin: String,
-    asset: usize,
-    amount_unit: String,
-    side: OrderSide,
-    size: Decimal,
-    take_profit: Option<Decimal>,
-    stop_loss: Option<Decimal>,
-    cloid: Option<Cloid>,
-) -> PreparedTpslBatch {
-    let resolved_cloid = cloid.unwrap_or_default();
-    let parent = PreparedOrder {
-        request: OrderRequest {
-            asset,
-            is_buy: side.is_buy(),
-            limit_px: Decimal::ZERO,
-            sz: size,
-            reduce_only: true,
-            order_type: OrderTypePlacement::Limit {
-                tif: TimeInForce::Ioc,
-            },
-            cloid: resolved_cloid,
-        },
-        asset_kind: TradableAssetKind::Perp,
-        sz_decimals: 0,
-        coin,
-        side,
-        order_type: CreateOrderType::Limit,
-        tif: None,
-        price: Decimal::ZERO,
-        trigger_price: None,
-        size,
-        amount: None,
-        amount_unit,
-        warning: None,
-        builder: None,
-    };
-    let mut legs = Vec::new();
-    let mut remaining_cloid = cloid;
-    push_tpsl_child_leg(
-        &mut legs,
-        TpslLegKind::TakeProfit,
-        &parent,
-        side,
-        take_profit,
-        &mut remaining_cloid,
-    );
-    push_tpsl_child_leg(
-        &mut legs,
-        TpslLegKind::StopLoss,
-        &parent,
-        side,
-        stop_loss,
-        &mut remaining_cloid,
-    );
-    batch_from_legs(grouping, legs)
-}
-
-fn push_tpsl_child_leg(
-    legs: &mut Vec<PreparedTpslLeg>,
-    leg: TpslLegKind,
-    parent: &PreparedOrder,
-    side: OrderSide,
-    price: Option<Decimal>,
-    cloid: &mut Option<Cloid>,
-) {
-    let Some(price) = price else {
-        return;
-    };
-    let leg_cloid = cloid.take().unwrap_or_default();
-    let tpsl = match leg {
-        TpslLegKind::TakeProfit => TpSl::Tp,
-        TpslLegKind::StopLoss => TpSl::Sl,
-        TpslLegKind::Parent => return,
-    };
-    let order_type = match leg {
-        TpslLegKind::TakeProfit => CreateOrderType::TakeProfit,
-        TpslLegKind::StopLoss => CreateOrderType::StopLoss,
-        TpslLegKind::Parent => parent.order_type,
-    };
-    legs.push(PreparedTpslLeg {
-        request: OrderRequest {
-            asset: parent.request.asset,
-            is_buy: side.is_buy(),
-            limit_px: price,
-            sz: parent.request.sz,
-            reduce_only: true,
-            order_type: OrderTypePlacement::Trigger {
-                is_market: true,
-                trigger_px: price,
-                tpsl,
-            },
-            cloid: leg_cloid,
-        },
-        leg,
-        coin: parent.coin.clone(),
-        side,
-        order_type,
-        price,
-        size: parent.request.sz,
-        tif: None,
-        reduce_only: true,
-        warning: None,
-    });
-}
-
-fn batch_from_legs(grouping: TpslGroupingArg, legs: Vec<PreparedTpslLeg>) -> PreparedTpslBatch {
-    let batch = BatchOrder {
-        orders: legs.iter().map(|leg| leg.request.clone()).collect(),
-        grouping: grouping.to_sdk(),
-        builder: None,
-    };
-    PreparedTpslBatch {
-        batch,
-        grouping,
-        legs,
-    }
-}
-
-pub(crate) fn validate_tpsl_price_ordering(
+pub(super) fn validate_tpsl_price_ordering(
     close_side: OrderSide,
     take_profit: Option<Decimal>,
     stop_loss: Option<Decimal>,
@@ -831,242 +895,34 @@ pub(crate) fn validate_tpsl_price_ordering(
     }
 }
 
-fn resolve_dex_perp(
-    resolver: &AssetResolver,
-    dex: Option<&str>,
-    coin: &str,
-) -> Result<PerpAsset, CliError> {
-    Ok(resolver.resolve_perp(&qualify_dex_asset(dex, coin))?)
-}
-
-/// Build the dry-run argument object from the same prepared order used for submission.
-pub async fn create_dry_run_args(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    args: &CreateArgs,
-) -> Result<serde_json::Value, CliError> {
-    Ok(prepare_create_order_plan(client, resolver, args)
-        .await?
-        .into_dry_run_args())
-}
-
-/// Build `orders create` dry-run argument details, including grouped child payloads.
-pub async fn create_dry_run_preview(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    args: &CreateArgs,
-) -> Result<serde_json::Value, CliError> {
-    create_dry_run_args(client, resolver, args).await
-}
-
-pub async fn create_dry_run_plan(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    args: &CreateArgs,
-) -> Result<OrderDryRunPlan, CliError> {
-    let mut preview = create_dry_run_preview(client, resolver, args).await?;
-    if let Some(args_object) = preview.as_object_mut() {
-        args_object.insert(
-            "on_behalf_of".to_string(),
-            serde_json::json!(args.on_behalf_of),
-        );
+/// How an order shows up in a cancel or modify: its identifier, parsed once.
+pub(super) fn order_identifier(
+    order_id: Option<u64>,
+    cloid: Option<&str>,
+    command: &str,
+    parse: fn(&str) -> Result<Cloid, CliError>,
+) -> Result<OrderIdentifier, CliError> {
+    if let Some(order_id) = order_id {
+        return Ok(OrderIdentifier::Oid(order_id));
     }
-    Ok(OrderDryRunPlan::new(
-        "orders create",
-        "submit_order",
-        preview,
-    ))
+    let raw = cloid.ok_or_else(|| {
+        CliError::Configuration(format!("orders {command} requires ORDER_ID or --cloid"))
+    })?;
+    Ok(OrderIdentifier::Cloid {
+        raw: raw.to_string(),
+        parsed: parse(raw)?,
+    })
 }
 
-/// Build the dry-run argument object for generated scale orders.
-pub async fn scale_dry_run_args(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    args: &ScaleArgs,
-) -> Result<serde_json::Value, CliError> {
-    let prepared = prepare_scale_batch(client, resolver, args).await?;
-    Ok(order_batch_dry_run_args(&prepared))
-}
-
-pub async fn scale_dry_run_plan(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    args: &ScaleArgs,
-) -> Result<OrderDryRunPlan, CliError> {
-    let mut preview = scale_dry_run_args(client, resolver, args).await?;
-    insert_margin_mode(
-        &mut preview,
-        args.margin_mode.unwrap_or(MarginModeArg::Cross),
-    );
-    if let Some(args_object) = preview.as_object_mut() {
-        args_object.insert(
-            "on_behalf_of".to_string(),
-            serde_json::json!(args.on_behalf_of),
-        );
-    }
-    Ok(OrderDryRunPlan::new(
-        "orders scale",
-        "submit_order_batch",
-        preview,
-    ))
-}
-
-/// Build the dry-run argument object for explicit JSON order batches.
-pub async fn batch_create_dry_run_args(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    args: &BatchCreateArgs,
-    orders: Vec<BatchCreateOrder>,
-) -> Result<serde_json::Value, CliError> {
-    Ok(
-        prepare_batch_create_order_plan(client, resolver, args, orders)
-            .await?
-            .into_dry_run_args(),
-    )
-}
-
-pub async fn batch_create_dry_run_plan(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    args: &BatchCreateArgs,
-    orders: Vec<BatchCreateOrder>,
-) -> Result<OrderDryRunPlan, CliError> {
-    let mut preview = batch_create_dry_run_args(client, resolver, args, orders).await?;
-    if let Some(args_object) = preview.as_object_mut() {
-        args_object.insert(
-            "orders_file".to_string(),
-            serde_json::json!(args.orders_file),
-        );
-        args_object.insert(
-            "on_behalf_of".to_string(),
-            serde_json::json!(args.on_behalf_of),
-        );
-    }
-    Ok(OrderDryRunPlan::new(
-        "orders batch-create",
-        "submit_order_batch",
-        preview,
-    ))
-}
-
-pub fn twap_create_dry_run_plan(
-    resolver: &AssetResolver,
-    args: &TwapCreateArgs,
-) -> Result<OrderDryRunPlan, CliError> {
-    let plan = prepare_twap_create_plan(resolver, args)?;
-    let mut preview = plan.dry_run_args(&args.coin, args.dex.as_deref());
-    insert_margin_mode(
-        &mut preview,
-        args.margin_mode.unwrap_or(MarginModeArg::Cross),
-    );
-    if let Some(args_object) = preview.as_object_mut() {
-        args_object.insert(
-            "on_behalf_of".to_string(),
-            serde_json::json!(args.on_behalf_of),
-        );
-    }
-    Ok(OrderDryRunPlan::new(
-        "orders twap-create",
-        "create_twap_order",
-        preview,
-    ))
-}
-
-pub fn twap_cancel_dry_run_plan(
-    resolver: &AssetResolver,
-    args: &TwapCancelArgs,
-) -> Result<OrderDryRunPlan, CliError> {
-    let plan = prepare_twap_cancel_plan(resolver, args)?;
-    let mut preview = plan.dry_run_args(&args.coin, args.dex.as_deref());
-    if let Some(args_object) = preview.as_object_mut() {
-        args_object.insert(
-            "on_behalf_of".to_string(),
-            serde_json::json!(args.on_behalf_of),
-        );
-    }
-    Ok(OrderDryRunPlan::new(
-        "orders twap-cancel",
-        "cancel_twap_order",
-        preview,
-    ))
-}
-
-pub fn schedule_cancel_dry_run_plan(
-    args: &ScheduleCancelArgs,
-) -> Result<OrderDryRunPlan, CliError> {
-    let plan = prepare_schedule_cancel_plan(args, Utc::now())?;
-    let mut preview = plan.dry_run_args();
-    if let Some(args_object) = preview.as_object_mut() {
-        args_object.insert(
-            "on_behalf_of".to_string(),
-            serde_json::json!(args.on_behalf_of),
-        );
-    }
-    Ok(OrderDryRunPlan::new(
-        "orders schedule-cancel",
-        "schedule_dead_mans_switch",
-        preview,
-    ))
-}
-
-pub fn modify_dry_run_plan(args: &ModifyArgs) -> Result<OrderDryRunPlan, CliError> {
-    validate_modify_args(args)?;
-    Ok(OrderDryRunPlan::new(
-        "orders modify",
-        "modify_order",
-        serde_json::json!({
-            "order_id": args.order_id,
-            "cloid": args.cloid,
-            "on_behalf_of": args.on_behalf_of,
-            "price": args.price.map(|value| value.to_string()),
-            "trigger_price": args.trigger_price.map(|value| value.to_string()),
-            "size": args.size.map(|value| value.to_string()),
-            "always_place": args.always_place,
-        }),
-    ))
-}
-
-pub fn cancel_dry_run_plan(args: &CancelArgs) -> Result<OrderDryRunPlan, CliError> {
-    let identifier = parse_cancel_identifier(args)?;
-    Ok(OrderDryRunPlan::new(
-        "orders cancel",
-        "cancel_order",
-        serde_json::json!({
-            "order_id": args.order_id,
-            "cloid": args.cloid,
-            "on_behalf_of": args.on_behalf_of,
-            "identifier": identifier.display(),
-        }),
-    ))
-}
-
-pub fn cancel_all_dry_run_plan(
-    resolver: &AssetResolver,
-    args: &CancelAllArgs,
-) -> Result<OrderDryRunPlan, CliError> {
-    let coin_filter =
-        resolve_cancel_all_coin_filter(resolver, args.coin.as_deref(), args.dex.as_deref())?;
-    Ok(OrderDryRunPlan::new(
-        "orders cancel-all",
-        "cancel_open_orders",
-        serde_json::json!({
-            "coin": args.coin,
-            "dex": args.dex,
-            "on_behalf_of": args.on_behalf_of,
-            "resolved_coin_filter": coin_filter,
-        }),
-    ))
-}
-
-pub(crate) async fn prepare_cancel_order_plan(
+pub(super) async fn prepare_cancel_order_plan(
     client: &HttpClient,
     resolver: &AssetResolver,
     user: Address,
     args: &CancelArgs,
 ) -> Result<CancelOrderPlan, CliError> {
-    let identifier = parse_cancel_identifier(args)?;
+    let identifier = cancel_identifier(args)?;
     let order = lookup_order(client, user, &identifier).await?;
-    let asset = asset_index_for_order(client, resolver, &order).await?;
+    let asset = order_asset(client, resolver, &order).await?.index;
 
     let action = match &identifier {
         OrderIdentifier::Oid(oid) => Action::Cancel(BatchCancel {
@@ -1094,53 +950,84 @@ pub(crate) async fn prepare_cancel_order_plan(
     })
 }
 
-pub(crate) async fn prepare_create_order_plan(
+/// A cancel looks the order up leniently: a short or unprefixed CLOID is padded.
+fn cancel_identifier(args: &CancelArgs) -> Result<OrderIdentifier, CliError> {
+    order_identifier(
+        args.order_id,
+        args.cloid.as_deref(),
+        "cancel",
+        parse_lookup_cloid,
+    )
+}
+
+/// The protocol asset an existing order trades, and how its prices and sizes are
+/// constrained when the market is known.
+struct OrderAsset {
+    index: usize,
+    precision: Option<MarketPrecision>,
+}
+
+impl OrderAsset {
+    fn price(&self, price: Decimal, coin: &str) -> Result<Decimal, CliError> {
+        self.precision
+            .map_or(Ok(price), |precision| precision.price(price, coin))
+    }
+
+    fn size(&self, size: Decimal, coin: &str) -> Result<Decimal, CliError> {
+        self.precision
+            .map_or(Ok(size), |precision| precision.size(size, coin))
+    }
+}
+
+async fn order_asset(
     client: &HttpClient,
     resolver: &AssetResolver,
-    args: &CreateArgs,
-) -> Result<CreateOrderPlan, CliError> {
-    let prepared = prepare_order(client, resolver, args).await?;
-    let mut dry_run_args = prepared_order_dry_run_args(&prepared, args);
-    let submission = if create_has_tpsl_legs(args) {
-        let prepared_batch = prepare_normal_tpsl_batch(prepared, args)?;
-        append_tpsl_preview(&mut dry_run_args, &prepared_batch)?;
-        CreateOrderSubmission::NormalTpsl(prepared_batch)
-    } else {
-        CreateOrderSubmission::Single(prepared)
-    };
-    Ok(CreateOrderPlan {
-        submission,
-        dry_run_args,
+    order: &BasicOrder,
+) -> Result<OrderAsset, CliError> {
+    if let Some(internal_id) = parse_spot_coin_key(&order.coin) {
+        return Ok(
+            match resolver.spot_by_protocol_asset_id(spot_asset_index(internal_id)) {
+                Some(spot) => OrderAsset {
+                    index: spot.index,
+                    precision: Some(MarketPrecision::spot(spot.base_sz_decimals)),
+                },
+                None => OrderAsset {
+                    index: internal_id,
+                    precision: None,
+                },
+            },
+        );
+    }
+
+    let market = resolver.resolve_or_fetch(client, &order.coin).await?;
+    Ok(OrderAsset {
+        index: market.asset_index()?,
+        precision: Some(MarketPrecision::of(&market)),
     })
 }
 
-pub(crate) async fn prepare_batch_create_order_plan(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    args: &BatchCreateArgs,
-    orders: Vec<BatchCreateOrder>,
-) -> Result<BatchCreateOrderPlan, CliError> {
-    let prepared = prepare_batch_create_orders(client, resolver, args, orders).await?;
-    let dry_run_args = order_batch_dry_run_args(&prepared);
-    Ok(BatchCreateOrderPlan {
-        prepared,
-        dry_run_args,
-    })
-}
-
-pub(crate) async fn prepare_modify_order_plan(
+pub(super) async fn prepare_modify_order_plan(
     client: &HttpClient,
     resolver: &AssetResolver,
     user: Address,
     args: &ModifyArgs,
 ) -> Result<ModifyOrderPlan, CliError> {
-    validate_modify_args(args)?;
-    let identifier = parse_modify_identifier(args)?;
+    let identifier = order_identifier(args.order_id, args.cloid.as_deref(), "modify", parse_cloid)?;
     let order = lookup_order(client, user, &identifier).await?;
-    let asset = asset_index_for_order(client, resolver, &order).await?;
-    let price = args.price.unwrap_or(order.limit_px);
-    let size = args.size.unwrap_or(order.sz);
-    let order_type = order_type_placement(&order, args.trigger_price, args.price)?;
+    let asset = order_asset(client, resolver, &order).await?;
+    let coin = resolver.display_coin(&order.coin);
+    let new_price = args
+        .price
+        .map(|price| asset.price(price, &coin))
+        .transpose()?;
+    let new_trigger = args
+        .trigger_price
+        .map(|price| asset.price(price, &coin))
+        .transpose()?;
+    let new_size = args.size.map(|size| asset.size(size, &coin)).transpose()?;
+    let price = new_price.unwrap_or(order.limit_px);
+    let size = new_size.unwrap_or(order.sz);
+    let order_type = order_type_placement(&order, new_trigger, new_price)?;
     // The exchange rejects an action hashed with `a: false` unless the
     // replacement is a non-trigger ALO or a non-executable GTC order, so fail
     // here rather than after the cancel succeeds.
@@ -1159,13 +1046,13 @@ pub(crate) async fn prepare_modify_order_plan(
         }
     }
     let replacement = OrderRequest {
-        asset,
+        asset: asset.index,
         is_buy: matches!(order.side, Side::Bid),
         limit_px: price,
         sz: size,
         reduce_only: order.reduce_only,
         order_type,
-        cloid: order.cloid.unwrap_or_default(),
+        cloid: wire_cloid(order.cloid),
     };
     Ok(ModifyOrderPlan {
         action: Action::BatchModify(BatchModify {
@@ -1176,7 +1063,7 @@ pub(crate) async fn prepare_modify_order_plan(
             always_place: args.always_place,
         }),
         confirmation: ModifyConfirmation {
-            coin: resolver.display_coin(&order.coin),
+            coin,
             status: "modified".to_string(),
             order_id: Some(order.oid),
             cloid: args
@@ -1189,7 +1076,7 @@ pub(crate) async fn prepare_modify_order_plan(
     })
 }
 
-pub(crate) async fn prepare_cancel_all_orders_plan(
+pub(super) async fn prepare_cancel_all_orders_plan(
     client: &HttpClient,
     resolver: &AssetResolver,
     user: Address,
@@ -1206,7 +1093,7 @@ pub(crate) async fn prepare_cancel_all_orders_plan(
         let mut cancels = Vec::with_capacity(orders.len());
         for order in &orders {
             cancels.push(Cancel {
-                asset: asset_index_for_order(client, resolver, order).await?,
+                asset: order_asset(client, resolver, order).await?.index,
                 oid: order.oid,
             });
         }
@@ -1223,52 +1110,48 @@ pub(crate) async fn prepare_cancel_all_orders_plan(
     })
 }
 
-pub(crate) fn prepare_twap_create_plan(
-    resolver: &AssetResolver,
+pub(super) fn prepare_twap_create_plan(
+    perp: &PerpAsset,
     args: &TwapCreateArgs,
 ) -> Result<TwapCreatePlan, CliError> {
-    validate_twap_create_args(args)?;
-    let resolved = resolve_dex_perp(resolver, args.dex.as_deref(), &args.coin)?;
-    let minutes = duration_seconds_to_minutes(args.duration);
+    let minutes = validate_twap_create_args(args)?;
+    let coin = perp.display_name();
+    let size = MarketPrecision::perp(perp.sz_decimals).size(args.size, &coin)?;
     Ok(TwapCreatePlan {
         action: TwapExchangeAction::TwapOrder {
             twap: TwapOrderAction {
-                a: resolved.index,
+                a: perp.index,
                 b: args.side.is_buy(),
-                s: args.size.normalize().to_string(),
+                s: size.normalize().to_string(),
                 r: false,
                 m: minutes,
                 t: args.randomize,
             },
         },
-        coin: resolved.display_name(),
-        asset: resolved.index,
+        perp: perp.clone(),
+        coin,
         side: args.side.to_string(),
-        size: args.size,
+        size,
         duration_seconds: args.duration,
         duration_minutes: minutes,
         randomize: args.randomize,
+        margin_mode: args.margin_mode,
     })
 }
 
-pub(crate) fn prepare_twap_cancel_plan(
-    resolver: &AssetResolver,
-    args: &TwapCancelArgs,
-) -> Result<TwapCancelPlan, CliError> {
-    let resolved = resolve_dex_perp(resolver, args.dex.as_deref(), &args.coin)?;
-    Ok(TwapCancelPlan {
+pub(super) fn prepare_twap_cancel_plan(perp: &PerpAsset, args: &TwapCancelArgs) -> TwapCancelPlan {
+    TwapCancelPlan {
         action: TwapExchangeAction::TwapCancel {
-            a: resolved.index,
+            a: perp.index,
             t: args.twap_id,
         },
-        coin: resolved.display_name(),
+        coin: perp.display_name(),
         twap_id: args.twap_id,
-    })
+    }
 }
 
-pub(crate) fn prepare_schedule_cancel_plan(
+pub(super) fn prepare_schedule_cancel_plan(
     args: &ScheduleCancelArgs,
-    now: chrono::DateTime<Utc>,
 ) -> Result<ScheduleCancelPlan, CliError> {
     match (args.in_duration, args.clear) {
         (Some(in_duration), false) => {
@@ -1277,22 +1160,14 @@ pub(crate) fn prepare_schedule_cancel_plan(
                     "orders schedule-cancel --in must be at least 5s".to_string(),
                 ));
             }
-            let chrono_duration = chrono::Duration::from_std(in_duration)
+            let delay = chrono::Duration::from_std(in_duration)
                 .map_err(|err| CliError::Configuration(format!("invalid --in duration: {err}")))?;
-            let scheduled_at = now + chrono_duration;
-            Ok(ScheduleCancelPlan {
-                action: Action::ScheduleCancel(ScheduleCancel {
-                    time: Some(scheduled_at.timestamp_millis() as u64),
-                }),
-                scheduled_at: Some(scheduled_at),
-                in_seconds: Some(in_duration.as_secs()),
+            Ok(ScheduleCancelPlan::Set {
+                delay,
+                in_seconds: in_duration.as_secs(),
             })
         }
-        (None, true) => Ok(ScheduleCancelPlan {
-            action: Action::ScheduleCancel(ScheduleCancel { time: None }),
-            scheduled_at: None,
-            in_seconds: None,
-        }),
+        (None, true) => Ok(ScheduleCancelPlan::Clear),
         (None, false) => Err(CliError::Configuration(
             "either --in <DURATION> or --clear is required".to_string(),
         )),
@@ -1302,7 +1177,159 @@ pub(crate) fn prepare_schedule_cancel_plan(
     }
 }
 
-fn prepared_order_dry_run_args(prepared: &PreparedOrder, args: &CreateArgs) -> serde_json::Value {
+// Dry-run: each preview renders a plan; nothing here plans anything itself.
+
+/// `orders create` dry-run details for the planned order and its TP/SL children.
+pub(super) fn create_dry_run_preview(
+    submission: &CreateOrderSubmission,
+    args: &CreateArgs,
+) -> Result<serde_json::Value, CliError> {
+    let mut preview = prepared_order_dry_run_args(submission.parent(), args)?;
+    if let CreateOrderSubmission::NormalTpsl(order) = submission {
+        append_tpsl_preview(&mut preview, &order.batch)?;
+    }
+    Ok(preview)
+}
+
+pub(super) fn create_dry_run_plan(
+    submission: &CreateOrderSubmission,
+    args: &CreateArgs,
+) -> Result<OrderDryRunPlan, CliError> {
+    Ok(OrderDryRunPlan::new(
+        "orders create",
+        "submit_order",
+        create_dry_run_preview(submission, args)?,
+    )
+    .acting_for(&args.on_behalf_of))
+}
+
+pub(super) fn scale_dry_run_plan(prepared: &PreparedOrderBatch, args: &ScaleArgs) -> OrderDryRunPlan {
+    let mut preview = order_batch_dry_run_args(prepared);
+    insert_margin_mode(&mut preview, args.margin_mode);
+    OrderDryRunPlan::new("orders scale", "submit_order_batch", preview)
+        .acting_for(&args.on_behalf_of)
+}
+
+pub(super) fn batch_create_dry_run_plan(
+    prepared: &PreparedOrderBatch,
+    args: &BatchCreateArgs,
+) -> OrderDryRunPlan {
+    let mut preview = order_batch_dry_run_args(prepared);
+    if let Some(object) = preview.as_object_mut() {
+        object.insert(
+            "orders_file".to_string(),
+            serde_json::json!(args.orders_file),
+        );
+    }
+    OrderDryRunPlan::new("orders batch-create", "submit_order_batch", preview)
+        .acting_for(&args.on_behalf_of)
+}
+
+pub(super) fn twap_create_dry_run_plan(plan: &TwapCreatePlan, args: &TwapCreateArgs) -> OrderDryRunPlan {
+    let mut preview = serde_json::json!({
+        "coin": args.coin,
+        "dex": args.dex,
+        "side": plan.side,
+        "size": plan.size.to_string(),
+        "duration": plan.duration_seconds,
+        "duration_minutes": plan.duration_minutes,
+        "randomize": plan.randomize,
+        "asset_id": plan.perp.index,
+        "resolved_asset": plan.coin,
+    });
+    insert_margin_mode(&mut preview, plan.margin_mode);
+    OrderDryRunPlan::new("orders twap-create", "create_twap_order", preview)
+        .acting_for(&args.on_behalf_of)
+}
+
+pub(super) fn twap_cancel_dry_run_plan(plan: &TwapCancelPlan, args: &TwapCancelArgs) -> OrderDryRunPlan {
+    OrderDryRunPlan::new(
+        "orders twap-cancel",
+        "cancel_twap_order",
+        serde_json::json!({
+            "twap_id": plan.twap_id,
+            "coin": args.coin,
+            "dex": args.dex,
+            "resolved_asset": plan.coin,
+        }),
+    )
+    .acting_for(&args.on_behalf_of)
+}
+
+pub(super) fn schedule_cancel_dry_run_plan(
+    plan: &ScheduleCancelPlan,
+    args: &ScheduleCancelArgs,
+    now: chrono::DateTime<Utc>,
+) -> OrderDryRunPlan {
+    let preview = match plan.scheduled(now) {
+        Some(scheduled) => serde_json::json!({
+            "mode": "set",
+            "in_duration_ms": scheduled.in_seconds * 1000,
+            "scheduled_time": scheduled.at.to_rfc3339(),
+            "scheduled_time_ms": scheduled.at_ms(),
+        }),
+        None => serde_json::json!({ "mode": "clear" }),
+    };
+    OrderDryRunPlan::new(
+        "orders schedule-cancel",
+        "schedule_dead_mans_switch",
+        preview,
+    )
+    .acting_for(&args.on_behalf_of)
+}
+
+pub(super) fn modify_dry_run_plan(args: &ModifyArgs) -> OrderDryRunPlan {
+    OrderDryRunPlan::new(
+        "orders modify",
+        "modify_order",
+        serde_json::json!({
+            "order_id": args.order_id,
+            "cloid": args.cloid,
+            "on_behalf_of": args.on_behalf_of,
+            "price": args.price.map(|value| value.to_string()),
+            "trigger_price": args.trigger_price.map(|value| value.to_string()),
+            "size": args.size.map(|value| value.to_string()),
+            "always_place": args.always_place,
+        }),
+    )
+}
+
+pub(super) fn cancel_dry_run_plan(args: &CancelArgs) -> Result<OrderDryRunPlan, CliError> {
+    let identifier = cancel_identifier(args)?;
+    Ok(OrderDryRunPlan::new(
+        "orders cancel",
+        "cancel_order",
+        serde_json::json!({
+            "order_id": args.order_id,
+            "cloid": args.cloid,
+            "on_behalf_of": args.on_behalf_of,
+            "identifier": identifier.display(),
+        }),
+    ))
+}
+
+pub(super) fn cancel_all_dry_run_plan(
+    resolver: &AssetResolver,
+    args: &CancelAllArgs,
+) -> Result<OrderDryRunPlan, CliError> {
+    let coin_filter =
+        resolve_cancel_all_coin_filter(resolver, args.coin.as_deref(), args.dex.as_deref())?;
+    Ok(OrderDryRunPlan::new(
+        "orders cancel-all",
+        "cancel_open_orders",
+        serde_json::json!({
+            "coin": args.coin,
+            "dex": args.dex,
+            "on_behalf_of": args.on_behalf_of,
+            "resolved_coin_filter": coin_filter,
+        }),
+    ))
+}
+
+fn prepared_order_dry_run_args(
+    prepared: &PreparedOrder,
+    args: &CreateArgs,
+) -> Result<serde_json::Value, CliError> {
     let (is_market, trigger_px, tpsl) = match &prepared.request.order_type {
         OrderTypePlacement::Trigger {
             is_market,
@@ -1336,7 +1363,7 @@ fn prepared_order_dry_run_args(prepared: &PreparedOrder, args: &CreateArgs) -> s
         "max_slippage_bps": args.max_slippage_bps,
         "take_profit": args.take_profit.map(|value| value.to_string()),
         "stop_loss": args.stop_loss.map(|value| value.to_string()),
-        "grouping": args.grouping.map(|grouping| grouping.to_string()),
+        "grouping": args.grouping.map(|grouping| TpslGroupingArg::from(grouping).to_string()),
         "builder": prepared.builder.as_ref().map(|builder| serde_json::json!({
             "b": builder.b.to_string(),
             "f": builder.f,
@@ -1344,23 +1371,24 @@ fn prepared_order_dry_run_args(prepared: &PreparedOrder, args: &CreateArgs) -> s
         "builder_address": args.builder.clone(),
         "builder_fee_rate": args.builder_fee_rate.clone(),
     });
-    if prepared.asset_kind == TradableAssetKind::Outcome
-        && let Some(object) = value.as_object_mut()
-        && let Ok(notation) = crate::assets::asset_id::parse_outcome_notation(&args.coin)
-    {
-        object.insert("outcome".to_string(), serde_json::json!({
-            "outcome": notation.outcome,
-            "side": notation.side,
-            "encoding": notation.encoding,
-            "asset_id": prepared.request.asset,
-            "notation": args.coin,
-            "live_submission": "enabled: outcome order encoding is verified; use explicit --price and --size"
-        }));
+    match &prepared.market {
+        Market::Outcome(outcome) => {
+            let notation = outcome.parse()?;
+            if let Some(object) = value.as_object_mut() {
+                object.insert("outcome".to_string(), serde_json::json!({
+                    "outcome": notation.outcome,
+                    "side": notation.side,
+                    "encoding": notation.encoding,
+                    "asset_id": prepared.request.asset,
+                    "notation": args.coin,
+                    "live_submission": "enabled: outcome order encoding is verified; use explicit --price and --size"
+                }));
+            }
+        }
+        Market::Perp(_) => insert_margin_mode(&mut value, args.margin_mode),
+        Market::Spot(_) => {}
     }
-    if prepared.asset_kind == TradableAssetKind::Perp {
-        insert_margin_mode(&mut value, args.margin_mode.unwrap_or(MarginModeArg::Cross));
-    }
-    value
+    Ok(value)
 }
 
 fn order_batch_dry_run_args(prepared: &PreparedOrderBatch) -> serde_json::Value {
@@ -1398,11 +1426,7 @@ fn order_batch_dry_run_args(prepared: &PreparedOrderBatch) -> serde_json::Value 
                 "amount_unit": order.amount.as_ref().map(|_| order.amount_unit.clone()),
                 "tif": order.tif.map(|tif| tif.to_string()),
                 "reduce_only": order.request.reduce_only,
-                "cloid": if order.request.cloid == Cloid::default() {
-                    None
-                } else {
-                    Some(order.request.cloid.to_string())
-                },
+                "cloid": cloid_from_wire(order.request.cloid).map(|cloid| cloid.to_string()),
             })
         })
         .collect::<Vec<_>>();
@@ -1420,95 +1444,68 @@ fn tpsl_to_str(tpsl: TpSl) -> &'static str {
     }
 }
 
-/// Build `orders tpsl` dry-run argument details without requiring a signer.
-pub fn tpsl_dry_run_preview(
-    resolver: &AssetResolver,
-    args: &TpslArgs,
-) -> Result<serde_json::Value, CliError> {
-    validate_tpsl_args(args)?;
-    let resolved = resolve_dex_perp(resolver, args.dex.as_deref(), &args.coin)?;
-    let coin = resolved.display_name();
-    let normalize_price = |price: Decimal| {
-        protocol_price(price, TradableAssetKind::Perp, resolved.sz_decimals, &coin)
-    };
+/// `orders tpsl` dry-run details: what the live command would send, without a
+/// signer or a position lookup. The legs come from the same
+/// [`position_tpsl_triggers`] and [`position_tpsl_batch`] the live order uses.
+pub(super) fn tpsl_dry_run_plan(perp: &PerpAsset, args: &TpslArgs) -> Result<OrderDryRunPlan, CliError> {
     let (absolute_tp, absolute_sl) =
         absolute_trigger_prices(args.take_profit.as_ref(), args.stop_loss.as_ref());
-    let absolute_tp = absolute_tp.map(normalize_price).transpose()?;
-    let absolute_sl = absolute_sl.map(normalize_price).transpose()?;
+    let (absolute_tp, absolute_sl) = truncate_triggers(perp, absolute_tp, absolute_sl)?;
     let inferred_side = args
         .side
         .or_else(|| infer_close_side_from_tpsl_prices(absolute_tp, absolute_sl));
+    let needs_entry = trigger_specs_need_entry(args.take_profit.as_ref(), args.stop_loss.as_ref());
     let mut preview = serde_json::json!({
         "coin": args.coin,
         "dex": args.dex,
         "on_behalf_of": args.on_behalf_of,
         "take_profit": args.take_profit.as_ref().map(TriggerPriceSpec::display),
         "stop_loss": args.stop_loss.as_ref().map(TriggerPriceSpec::display),
-        "grouping": args.grouping.to_string(),
-        "grouping_wire": args.grouping.wire_value(),
-        "resolved_asset": resolved.display_name(),
+        "grouping": TpslGroupingArg::from(args.grouping).to_string(),
+        "grouping_wire": TpslGroupingArg::from(args.grouping).wire_value(),
+        "resolved_asset": perp.display_name(),
         "side": inferred_side.map(|side| side.to_string()),
         "size": args.size.map(|value| value.to_string()),
         "size_mode": if args.size.is_some() { "fixed" } else { "current_position" },
     });
-    insert_margin_mode(
-        &mut preview,
-        args.margin_mode.unwrap_or(MarginModeArg::Cross),
-    );
+    insert_margin_mode(&mut preview, args.margin_mode);
 
-    if trigger_specs_need_entry(args.take_profit.as_ref(), args.stop_loss.as_ref())
-        && (args.side.is_none() || args.size.is_none())
-    {
-        preview.as_object_mut().expect("preview object").insert(
-            "resolution".to_string(),
-            serde_json::json!("percent_or_entry_requires_live_position"),
-        );
-    }
-    if let (Some(side), Some(size)) = (args.side, args.size) {
-        if let Ok((take_profit, stop_loss)) = resolve_trigger_prices(
-            args.take_profit.as_ref(),
-            args.stop_loss.as_ref(),
-            None,
-            side.opposite(),
-        ) {
-            let take_profit = take_profit.map(normalize_price).transpose()?;
-            let stop_loss = stop_loss.map(normalize_price).transpose()?;
-            validate_tpsl_price_ordering(side, take_profit, stop_loss, "orders tpsl")?;
-            let parsed_cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
-            let prepared = build_position_tpsl_batch(
-                TpslGroupingArg::PositionTpsl,
-                resolved.display_name(),
-                resolved.index,
-                resolved.collateral,
-                side,
-                size,
-                take_profit,
-                stop_loss,
-                parsed_cloid,
-            );
-            append_tpsl_preview(&mut preview, &prepared)?;
+    match (args.side, args.size) {
+        (Some(close_side), Some(size)) => {
+            // Percent and entry triggers need the position's entry price, which
+            // a dry run does not read: it previews no legs for them.
+            if !needs_entry {
+                let size =
+                    MarketPrecision::perp(perp.sz_decimals).size(size, &perp.display_name())?;
+                let (take_profit, stop_loss) =
+                    position_tpsl_triggers(perp, args, close_side, None)?;
+                let cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
+                let batch =
+                    position_tpsl_batch(perp, close_side, size, take_profit, stop_loss, cloid);
+                append_tpsl_preview(&mut preview, &batch)?;
+            }
         }
-    } else {
-        append_position_sized_tpsl_preview(
-            &mut preview,
-            resolved.index,
-            inferred_side,
-            absolute_tp,
-            absolute_sl,
-        );
+        _ => {
+            if needs_entry {
+                preview.as_object_mut().expect("preview object").insert(
+                    "resolution".to_string(),
+                    serde_json::json!("percent_or_entry_requires_live_position"),
+                );
+            }
+            append_position_sized_tpsl_preview(
+                &mut preview,
+                perp.index,
+                inferred_side,
+                absolute_tp,
+                absolute_sl,
+            );
+        }
     }
 
-    Ok(preview)
-}
-
-pub fn tpsl_dry_run_plan(
-    resolver: &AssetResolver,
-    args: &TpslArgs,
-) -> Result<OrderDryRunPlan, CliError> {
     Ok(OrderDryRunPlan::new(
         "orders tpsl",
         "submit_position_tpsl",
-        tpsl_dry_run_preview(resolver, args)?,
+        preview,
     ))
 }
 
@@ -1570,6 +1567,8 @@ fn append_tpsl_preview(
     Ok(())
 }
 
+/// Preview of a TP/SL sized to the position the live command will read. The
+/// size is not known yet, so the legs show `current_position` instead.
 fn append_position_sized_tpsl_preview(
     preview: &mut serde_json::Value,
     asset: usize,
@@ -1577,19 +1576,17 @@ fn append_position_sized_tpsl_preview(
     take_profit: Option<Decimal>,
     stop_loss: Option<Decimal>,
 ) {
+    let grouping = TpslGroupingArg::PositionTpsl;
     let mut position_tp_order = serde_json::Value::Null;
     let mut position_sl_order = serde_json::Value::Null;
     let mut orders = Vec::new();
     let mut legs = Vec::new();
     let mut children = Vec::new();
-    for (leg, price, tpsl) in [
-        (TpslLegKind::TakeProfit, take_profit, "tp"),
-        (TpslLegKind::StopLoss, stop_loss, "sl"),
-    ] {
+    for (tpsl, price) in [(TpSl::Tp, take_profit), (TpSl::Sl, stop_loss)] {
         let Some(price) = price else {
             continue;
         };
-        let side_value = inferred_side.map(|side| side.to_string());
+        let tpsl_str = tpsl_to_str(tpsl);
         let child = serde_json::json!({
             "asset": asset,
             "is_buy": inferred_side.map(OrderSide::is_buy),
@@ -1598,29 +1595,24 @@ fn append_position_sized_tpsl_preview(
             "reduce_only": true,
             "trigger_px": price.to_string(),
             "is_market": true,
-            "tpsl": tpsl,
+            "tpsl": tpsl_str,
         });
-        match leg {
-            TpslLegKind::TakeProfit => position_tp_order = child.clone(),
-            TpslLegKind::StopLoss => position_sl_order = child.clone(),
-            TpslLegKind::Parent => {}
+        match tpsl {
+            TpSl::Tp => position_tp_order = child.clone(),
+            TpSl::Sl => position_sl_order = child.clone(),
         }
         legs.push(serde_json::json!({
-            "leg": leg.to_string(),
-            "side": side_value,
-            "type": match leg {
-                TpslLegKind::TakeProfit => "take-profit",
-                TpslLegKind::StopLoss => "stop-loss",
-                TpslLegKind::Parent => "parent",
-            },
+            "leg": TpslLegKind::of(tpsl).to_string(),
+            "side": inferred_side.map(|side| side.to_string()),
+            "type": CreateOrderType::market_trigger(tpsl).to_string(),
             "price": price.to_string(),
             "size": "current_position",
             "reduce_only": true,
-            "grouping": TpslGroupingArg::PositionTpsl.to_string(),
-            "grouping_wire": TpslGroupingArg::PositionTpsl.wire_value(),
+            "grouping": grouping.to_string(),
+            "grouping_wire": grouping.wire_value(),
             "order": child.clone(),
         }));
-        children.push(child.clone());
+        children.push(child);
         orders.push(serde_json::json!({
             "a": asset,
             "b": inferred_side.map(OrderSide::is_buy),
@@ -1631,7 +1623,7 @@ fn append_position_sized_tpsl_preview(
                 "trigger": {
                     "isMarket": true,
                     "triggerPx": price.to_string(),
-                    "tpsl": tpsl,
+                    "tpsl": tpsl_str,
                 }
             }
         }));
@@ -1640,11 +1632,11 @@ fn append_position_sized_tpsl_preview(
     if let Some(object) = preview.as_object_mut() {
         object.insert(
             "batch_grouping".to_string(),
-            serde_json::json!(TpslGroupingArg::PositionTpsl.to_string()),
+            serde_json::json!(grouping.to_string()),
         );
         object.insert(
             "batch_grouping_wire".to_string(),
-            serde_json::json!(TpslGroupingArg::PositionTpsl.wire_value()),
+            serde_json::json!(grouping.wire_value()),
         );
         object.insert("position_size_lookup".to_string(), serde_json::json!(true));
         object.insert(
@@ -1654,12 +1646,12 @@ fn append_position_sized_tpsl_preview(
         object.insert("legs".to_string(), serde_json::Value::Array(legs));
         object.insert(
             "tpsl_children".to_string(),
-            serde_json::Value::Array(children.clone()),
+            serde_json::Value::Array(children),
         );
         object.insert(
             "batch_order_preview".to_string(),
             serde_json::json!({
-                "grouping": TpslGroupingArg::PositionTpsl.wire_value(),
+                "grouping": grouping.wire_value(),
                 "orders": orders,
                 "size_source": "current_position",
             }),

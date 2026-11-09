@@ -5,6 +5,7 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::Cloid;
 use serde_json::json;
 
+use crate::assets::PerpAsset;
 use crate::commands::actions;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
@@ -14,12 +15,13 @@ use crate::response_sanitization::labelled_untrusted_text;
 use super::exchange::Placement;
 use super::live_order::LiveOrder;
 use super::planning::{
-    CreateOrderSubmission, prepare_create_order_plan, resolve_trigger_prices,
-    validate_tpsl_price_ordering,
+    CreateOrderSubmission, create_dry_run_preview, prepare_create_order_plan, resolve_perp,
+    resolve_trigger_prices, tpsl_dry_run_plan, validate_tpsl_price_ordering,
 };
+use super::validation::validate_tpsl_args;
 use super::{
     BracketArgs, CreateArgs, CreateOrderType, OrderExecutionContext, TifArg, TpslArgs,
-    place_prepared_single, validate_tpsl_args,
+    place_prepared_single, protect_position,
 };
 
 use super::live_order::DEFAULT_TRACKING_TIMEOUT;
@@ -69,9 +71,14 @@ pub async fn bracket_dry_run_plan(
     args: &BracketArgs,
 ) -> Result<serde_json::Value, CliError> {
     validate_bracket_args(args)?;
-    let entry =
-        super::create_dry_run_preview(client, resolver, &entry_create_args(args, None)).await?;
-    let protection = super::tpsl_dry_run_preview(resolver, &protection_tpsl_args(args, args.size))?;
+    let entry_args = entry_create_args(args, None);
+    let entry = create_dry_run_preview(
+        &prepare_create_order_plan(client, resolver, &entry_args).await?,
+        &entry_args,
+    )?;
+    let perp = resolve_perp(client, resolver, args.dex.as_deref(), &args.coin).await?;
+    let protection =
+        tpsl_dry_run_plan(&perp, &protection_tpsl_args(args, args.size))?.into_args();
     Ok(json!({
         "coin": args.coin,
         "dex": args.dex,
@@ -146,7 +153,7 @@ pub async fn bracket(
     let plan =
         prepare_create_order_plan(context.submission.api.sdk(), context.resolver, &entry_args)
             .await?;
-    let prepared = match plan.submission {
+    let prepared = match plan {
         CreateOrderSubmission::Single(prepared) => prepared,
         CreateOrderSubmission::NormalTpsl(_) => {
             return Err(CliError::Internal(anyhow::anyhow!(
@@ -162,6 +169,12 @@ pub async fn bracket(
         ))
     })?;
     let requested_size = prepared.size;
+    let perp = prepared.perp().cloned().ok_or_else(|| {
+        CliError::Unsupported(format!(
+            "orders bracket supports perpetual markets only; {} is not a perpetual market",
+            args.coin
+        ))
+    })?;
 
     // Fail fast before the entry executes: the protection legs must be
     // constructible and correctly ordered for the position side.
@@ -174,7 +187,7 @@ pub async fn bracket(
     )?;
     validate_tpsl_price_ordering(args.side.opposite(), est_tp, est_sl, "orders bracket")?;
 
-    let statuses = place_prepared_single(context, prepared, &entry_args, vault_address).await?;
+    let statuses = place_prepared_single(context, &prepared, vault_address).await?;
     let entry_status = statuses.into_iter().next().ok_or_else(|| {
         CliError::Internal(anyhow::anyhow!("bracket entry returned no order status"))
     })?;
@@ -187,6 +200,7 @@ pub async fn bracket(
             };
             return arm_protection(
                 context,
+                &perp,
                 args,
                 vault_address,
                 started,
@@ -241,6 +255,7 @@ pub async fn bracket(
             let filled = requested_size - tracking.open_size;
             return arm_protection(
                 context,
+                &perp,
                 args,
                 vault_address,
                 started,
@@ -270,6 +285,7 @@ pub async fn bracket(
     if filled > Decimal::ZERO {
         arm_protection(
             context,
+            &perp,
             args,
             vault_address,
             started,
@@ -347,6 +363,7 @@ fn report_unprotected(
 #[allow(clippy::too_many_arguments)]
 async fn arm_protection(
     context: OrderExecutionContext<'_>,
+    perp: &PerpAsset,
     args: &BracketArgs,
     vault_address: Option<Address>,
     started: Instant,
@@ -371,11 +388,11 @@ async fn arm_protection(
         ))
         .into());
     }
-    if let Err(err) = super::tpsl(
-        context,
+    if let Err(err) = protect_position(
+        context.submission,
+        perp,
         &protection_tpsl_args(args, Some(filled)),
         vault_address,
-        false,
     )
     .await
     {
