@@ -339,7 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_a_shape_mismatch_is_left_for_the_caller_to_read_raw() {
-        for (body, shape_mismatch) in [(r#"{"not":"a list"}"#, true), ("[1, 2", false)] {
+        for (body, shape_mismatch) in [(r#"{"not":"a list"}"#, true), ("not json", false)] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/info"))
