@@ -711,6 +711,7 @@ async fn vault_list_table_output_is_uncolored() {
 
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
+        .env("FORCE_COLOR", "1")
         .args(["--format", "table", "vault", "list", "--limit", "1"])
         .assert()
         .success()

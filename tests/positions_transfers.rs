@@ -273,6 +273,7 @@ async fn positions_list_table_and_json_keep_pnl_uncolored() {
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .env("FORCE_COLOR", "1")
         .args(["--format", "table", "positions", "list"])
         .assert()
         .success()
@@ -283,6 +284,7 @@ async fn positions_list_table_and_json_keep_pnl_uncolored() {
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .env("FORCE_COLOR", "1")
         .args(["--format", "json", "positions", "list"])
         .assert()
         .success()
@@ -312,6 +314,7 @@ async fn transfer_confirmation_prompts_are_yellow_only_in_pretty() {
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .env("FORCE_COLOR", "1")
         .write_stdin("n\n")
         .args([
             "--format",
