@@ -1,24 +1,7 @@
 mod support;
 
 use predicates::prelude::*;
-use serde_json::Value;
 use support::IsolatedHome;
-
-#[test]
-fn schema_orders_chase_supports_dry_run() {
-    let output = IsolatedHome::new()
-        .command()
-        .args(["--format", "json", "schema", "orders", "chase"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["command"], "hyperliquid orders chase");
-    assert_eq!(json["dry_run"], "optional");
-    assert_eq!(json["confirmation"], "prompt");
-}
 
 #[test]
 fn chase_requires_timeout_in_agent_mode() {

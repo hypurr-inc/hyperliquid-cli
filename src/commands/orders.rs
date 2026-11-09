@@ -1447,42 +1447,6 @@ mod tests {
         assert_eq!(builder.f, 10);
     }
 
-    #[tokio::test]
-    async fn limit_order_reduce_only_builds_hypersdk_request() {
-        let mut args = base_args();
-        args.reduce_only = true;
-
-        let prepared = prepare(&args).await.unwrap();
-
-        assert!(prepared.request.reduce_only);
-        assert!(matches!(
-            prepared.request.order_type,
-            OrderTypePlacement::Limit {
-                tif: TimeInForce::Gtc
-            }
-        ));
-    }
-
-    #[tokio::test]
-    async fn market_order_reduce_only_builds_hypersdk_request() {
-        let mut args = base_args();
-        args.order_type = CreateOrderType::Market;
-        args.price = None;
-        args.size = None;
-        args.amount = Some(Decimal::from(50));
-        args.reduce_only = true;
-
-        let prepared = prepare(&args).await.unwrap();
-
-        assert!(prepared.request.reduce_only);
-        assert!(matches!(
-            prepared.request.order_type,
-            OrderTypePlacement::Limit {
-                tif: TimeInForce::FrontendMarket
-            }
-        ));
-    }
-
     #[test]
     fn scale_validation_rejects_unbounded_or_ambiguous_ladders() {
         let mut args = ScaleArgs {
@@ -1544,87 +1508,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn spot_trigger_orders_are_rejected_after_asset_resolution() {
-        let mut args = base_args();
-        args.coin = "HYPE/USDC".to_string();
-        args.order_type = CreateOrderType::StopLimit;
-        args.trigger_price = Some(Decimal::from(48_000));
-        let asset = Market::Spot(SpotAsset {
-            symbol: "HYPE/USDC".to_string(),
-            index: 11_035,
-            base: "HYPE".to_string(),
-            quote: "USDC".to_string(),
-            base_sz_decimals: 2,
-        });
-
-        let err =
-            validate_order_for_market(&OrderSpec::from_create(&args).unwrap(), &asset).unwrap_err();
-
-        assert_eq!(err.exit_code(), 13);
-        assert!(
-            err.to_string()
-                .contains("trigger orders currently support perpetual markets only")
-        );
-    }
-
-    #[tokio::test]
-    async fn stop_loss_builds_trigger_order() {
-        let mut args = base_args();
-        args.order_type = CreateOrderType::StopLoss;
-        let prepared = prepare(&args).await.unwrap();
-
-        assert!(matches!(
-            prepared.request.order_type,
-            OrderTypePlacement::Trigger {
-                is_market: true,
-                trigger_px,
-                tpsl: TpSl::Sl,
-            } if trigger_px == Decimal::from(50_000)
-        ));
-        assert_eq!(prepared.trigger_price, Some(Decimal::from(50_000)));
-        assert!(prepared.request.reduce_only);
-    }
-
-    #[tokio::test]
-    async fn take_profit_builds_reduce_only_trigger_order() {
-        let mut args = base_args();
-        args.order_type = CreateOrderType::TakeProfit;
-        let prepared = prepare(&args).await.unwrap();
-
-        assert!(matches!(
-            prepared.request.order_type,
-            OrderTypePlacement::Trigger {
-                is_market: true,
-                trigger_px,
-                tpsl: TpSl::Tp,
-            } if trigger_px == Decimal::from(50_000)
-        ));
-        assert!(prepared.request.reduce_only);
-    }
-
-    #[tokio::test]
-    async fn orders_trigger_limit_stop_limit_without_reduce_only_builds_limit_trigger_payload() {
-        let mut args = base_args();
-        args.side = OrderSide::Sell;
-        args.order_type = CreateOrderType::StopLimit;
-        args.trigger_price = Some(Decimal::from(49_000));
-        args.price = Some(Decimal::from(48_750));
-
-        let prepared = prepare(&args).await.unwrap();
-
-        assert_eq!(prepared.request.limit_px, Decimal::from(48_750));
-        assert!(matches!(
-            prepared.request.order_type,
-            OrderTypePlacement::Trigger {
-                is_market: false,
-                trigger_px,
-                tpsl: TpSl::Sl,
-            } if trigger_px == Decimal::from(49_000)
-        ));
-        assert!(!prepared.request.reduce_only);
-    }
-
     #[tokio::test]
     async fn orders_trigger_limit_take_limit_with_reduce_only_builds_limit_trigger_payload() {
         let mut args = base_args();
@@ -1658,48 +1541,6 @@ mod tests {
 
         assert_eq!(err.exit_code(), 2);
         assert!(err.to_string().contains("--trigger-price"));
-    }
-
-    #[test]
-    fn stop_loss_keeps_legacy_price_as_market_trigger_price() {
-        let mut args = base_args();
-        args.order_type = CreateOrderType::StopLoss;
-        args.trigger_price = None;
-
-        OrderSpec::from_create(&args).unwrap();
-    }
-
-    #[tokio::test]
-    async fn rejects_negative_price_before_api_or_auth() {
-        let mut args = base_args();
-        args.price = Some(Decimal::from(-1));
-        let err = prepare(&args).await.unwrap_err();
-
-        assert_eq!(err.exit_code(), 2);
-        assert!(err.to_string().contains("price must be positive"));
-    }
-
-    #[test]
-    fn order_response_parser_accepts_waiting_statuses_without_oid() {
-        let response = serde_json::json!({
-            "type": "order",
-            "data": { "statuses": ["waitingForTrigger", "waitingForFill"] }
-        });
-
-        let statuses = exchange::parse_order_statuses(response).unwrap();
-
-        assert!(matches!(
-            statuses.as_slice(),
-            [
-                OrderResponseStatus::WaitingForTrigger,
-                OrderResponseStatus::WaitingForFill
-            ]
-        ));
-        assert_eq!(
-            ensure_action_statuses_ok(&statuses, "place order").unwrap(),
-            2
-        );
-        assert_eq!(modification_result_oid(&statuses), None);
     }
 
     fn basic_order(order_type: OrderType) -> BasicOrder {

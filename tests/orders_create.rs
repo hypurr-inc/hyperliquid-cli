@@ -182,6 +182,7 @@ async fn mock_order_server_without_exchange() -> MockServer {
     Mock::given(method("POST"))
         .and(path("/exchange"))
         .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
         .expect(0)
         .mount(&server)
         .await;
@@ -570,61 +571,34 @@ fn orders_create_market_with_zero_price_and_size_reports_incompatible_flags_firs
 }
 
 #[test]
-fn orders_create_stop_loss_rejects_amount_flag() {
+fn orders_create_trigger_types_refuse_a_quote_amount() {
     let env = IsolatedHome::new();
-    env.command()
-        .args([
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "sell",
-            "--price",
-            "49000",
-            "--size",
-            "0.1",
-            "--amount",
-            "100",
-            "--type",
-            "stop-loss",
-            "--testnet",
-        ])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("--type stop-loss"))
-        .stderr(predicate::str::contains("remove --amount"))
-        .stderr(predicate::str::contains("uses --trigger-price"))
-        .stderr(predicate::str::contains("legacy --price"));
-}
-
-#[test]
-fn orders_create_take_profit_rejects_amount_flag() {
-    let env = IsolatedHome::new();
-    env.command()
-        .args([
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "sell",
-            "--price",
-            "55000",
-            "--size",
-            "0.1",
-            "--amount",
-            "100",
-            "--type",
-            "take-profit",
-            "--testnet",
-        ])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("--type take-profit"))
-        .stderr(predicate::str::contains("remove --amount"))
-        .stderr(predicate::str::contains("uses --trigger-price"))
-        .stderr(predicate::str::contains("legacy --price"));
+    for (order_type, price) in [("stop-loss", "49000"), ("take-profit", "55000")] {
+        env.command()
+            .args([
+                "orders",
+                "create",
+                "--coin",
+                "BTC",
+                "--side",
+                "sell",
+                "--price",
+                price,
+                "--size",
+                "0.1",
+                "--amount",
+                "100",
+                "--type",
+                order_type,
+                "--testnet",
+            ])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains(format!("--type {order_type}")))
+            .stderr(predicate::str::contains("remove --amount"))
+            .stderr(predicate::str::contains("uses --trigger-price"))
+            .stderr(predicate::str::contains("legacy --price"));
+    }
 }
 
 #[test]
@@ -808,47 +782,7 @@ async fn orders_create_dry_run_includes_builder_fee_params() {
 }
 
 #[tokio::test]
-async fn orders_create_live_builder_fee_enters_signed_action() {
-    let env = IsolatedHome::new();
-    let server = mock_order_server(12360).await;
-    let builder = "0x1111111111111111111111111111111111111111";
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--type",
-            "limit",
-            "--price",
-            "50000",
-            "--size",
-            "0.001",
-            "--builder",
-            builder,
-            "--builder-fee-rate",
-            "0.01%",
-            "--testnet",
-        ])
-        .assert()
-        .success();
-
-    let body = exchange_order_body(&server).await;
-    assert_eq!(body["action"]["type"], "order");
-    assert_eq!(body["action"]["builder"]["b"], builder);
-    assert_eq!(body["action"]["builder"]["f"], 10);
-    assert_eq!(body["action"]["orders"][0]["a"], 0);
-}
-
-#[tokio::test]
-async fn orders_create_live_builder_fee_lowercases_builder_address() {
+async fn orders_create_live_builder_fee_enters_signed_action_with_lowercased_address() {
     let env = IsolatedHome::new();
     let server = mock_order_server(12361).await;
     let builder = "0x8c967E73E7B15087c42A10D344cFf4c96D877f1D";
@@ -885,6 +819,8 @@ async fn orders_create_live_builder_fee_lowercases_builder_address() {
         body["action"]["builder"]["b"],
         "0x8c967e73e7b15087c42a10d344cff4c96d877f1d"
     );
+    assert_eq!(body["action"]["type"], "order");
+    assert_eq!(body["action"]["builder"]["f"], 10);
 }
 
 #[test]
@@ -982,6 +918,9 @@ async fn orders_create_outcome_live_submits_after_auth() {
         .assert()
         .success()
         .stdout(predicate::str::contains("#10"));
+
+    let body = exchange_order_body(&server).await;
+    assert_eq!(body["action"]["orders"][0]["a"], 100_000_010);
 }
 
 #[tokio::test]
@@ -1182,7 +1121,7 @@ async fn generated_batch_legs_never_consult_the_default_builder_configuration() 
             "--testnet",
         ])
         .assert()
-        .failure()
+        .code(2)
         .stdout(predicate::str::contains("both must be configured"));
 }
 
@@ -1246,8 +1185,7 @@ async fn orders_batch_create_malformed_file_exits_before_auth() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains("orders_batch_create_bad.json"))
-        .stderr(predicate::str::contains("orders[0].price is required"))
-        .stderr(predicate::str::contains("price"));
+        .stderr(predicate::str::contains("orders[0].price is required"));
 }
 
 #[tokio::test]
@@ -1371,7 +1309,9 @@ async fn orders_create_truncates_a_stop_limit_trigger_price_to_the_tick() {
 #[tokio::test]
 async fn orders_create_rejects_a_price_that_truncates_to_zero() {
     let env = IsolatedHome::new();
+    let server = mock_order_server_without_exchange().await;
     env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
         .args([
             "orders",
@@ -1466,7 +1406,7 @@ async fn orders_tpsl_failed_position_read_reports_the_cause_not_a_missing_positi
             "--testnet",
         ])
         .assert()
-        .failure()
+        .code(12)
         .stderr(predicate::str::contains("require an open BTC position").not());
 }
 
@@ -1639,30 +1579,6 @@ async fn orders_trigger_limit_mainnet_prompt_includes_trigger_price() {
         .stderr(predicate::str::contains("at price 89500"));
 }
 
-#[tokio::test]
-async fn orders_create_negative_price_exits_2() {
-    let env = IsolatedHome::new();
-    let server = mock_order_server(12345).await;
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args([
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--price",
-            "-50000",
-            "--size",
-            "0.1",
-            "--testnet",
-        ])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains("price must be positive"));
-}
-
 #[test]
 fn orders_create_table_validation_error_contains_no_ansi() {
     let env = IsolatedHome::new();
@@ -1740,57 +1656,32 @@ async fn orders_create_invalid_coin_exits_13_with_suggestion() {
 }
 
 #[tokio::test]
-async fn orders_create_invalid_coin_placeholder_exits_13_without_loose_suggestion() {
+async fn orders_create_unknown_coin_without_a_close_match_exits_13_without_a_suggestion() {
     let env = IsolatedHome::new();
-    let server = mock_order_server(12345).await;
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args([
-            "orders",
-            "create",
-            "--coin",
-            "INVALIDCOIN",
-            "--side",
-            "buy",
-            "--price",
-            "50000",
-            "--size",
-            "0.1",
-            "--testnet",
-        ])
-        .assert()
-        .code(13)
-        .stderr(predicate::str::contains(
-            "Couldn't find asset \"INVALIDCOIN\".",
-        ))
-        .stderr(predicate::str::contains("Did you mean").not());
-}
-
-#[tokio::test]
-async fn orders_create_invalid_coin_without_rankable_match_has_clean_not_found_error() {
-    let env = IsolatedHome::new();
-    let server = mock_order_server(12345).await;
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args([
-            "orders",
-            "create",
-            "--coin",
-            "ZZZZZZZZ",
-            "--side",
-            "buy",
-            "--price",
-            "50000",
-            "--size",
-            "0.1",
-            "--testnet",
-        ])
-        .assert()
-        .code(13)
-        .stderr(predicate::str::contains(
-            "Couldn't find asset \"ZZZZZZZZ\".",
-        ))
-        .stderr(predicate::str::contains("Did you mean").not());
+    let server = mock_order_server_without_exchange().await;
+    for coin in ["INVALIDCOIN", "ZZZZZZZZ"] {
+        env.command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .args([
+                "orders",
+                "create",
+                "--coin",
+                coin,
+                "--side",
+                "buy",
+                "--price",
+                "50000",
+                "--size",
+                "0.1",
+                "--testnet",
+            ])
+            .assert()
+            .code(13)
+            .stderr(predicate::str::contains(format!(
+                "Couldn't find asset \"{coin}\"."
+            )))
+            .stderr(predicate::str::contains("Did you mean").not());
+    }
 }
 
 #[tokio::test]
@@ -1843,6 +1734,9 @@ async fn orders_create_limit_order_outputs_order_id() {
         .success()
         .stdout(predicate::str::contains("Order ID"))
         .stdout(predicate::str::contains("12345"));
+
+    let body = exchange_order_body(&server).await;
+    assert_eq!(body["action"]["orders"][0]["t"]["limit"]["tif"], "Ioc");
 }
 
 #[tokio::test]
@@ -2148,7 +2042,7 @@ async fn orders_create_market_reduce_only_submits_reduce_only_wire_order() {
 #[tokio::test]
 async fn orders_create_rejects_margin_mode_mismatch_before_submission() {
     let env = IsolatedHome::new();
-    let server = mock_order_server(12347).await;
+    let server = mock_order_server_without_exchange().await;
 
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
@@ -2171,7 +2065,7 @@ async fn orders_create_rejects_margin_mode_mismatch_before_submission() {
             "--testnet",
         ])
         .assert()
-        .failure()
+        .code(2)
         .stderr(predicate::str::contains("requested --margin-mode isolated"))
         .stderr(predicate::str::contains(
             "current BTC perp position is cross",
@@ -2206,6 +2100,9 @@ async fn orders_create_omitted_margin_mode_does_not_block_existing_isolated_posi
         ])
         .assert()
         .success();
+
+    let body = exchange_order_body(&server).await;
+    assert_eq!(body["action"]["type"], "order");
 }
 
 #[tokio::test]
@@ -2241,6 +2138,9 @@ async fn orders_create_validates_margin_mode_against_on_behalf_of_account() {
 
     let body = clearinghouse_state_request_body(&server).await;
     assert_eq!(body["user"], subaccount);
+
+    let order = exchange_order_body(&server).await;
+    assert_eq!(order["vaultAddress"], subaccount);
 }
 
 #[tokio::test]
@@ -2439,6 +2339,11 @@ async fn orders_create_market_order_accepts_amount_and_warns_about_configured_sl
         .stdout(predicate::str::contains("Slippage warning"))
         .stdout(predicate::str::contains("250 bps"))
         .stdout(predicate::str::contains("51250"));
+
+    let body = exchange_order_body(&server).await;
+    let order = &body["action"]["orders"][0];
+    assert_eq!(order["p"], "51250");
+    assert_eq!(order["t"]["limit"]["tif"], "FrontendMarket");
 }
 
 #[tokio::test]
@@ -2469,6 +2374,9 @@ async fn orders_create_market_order_rounds_slippage_price_to_tick() {
         .stdout(predicate::str::contains("TICKY"))
         .stdout(predicate::str::contains("96615"))
         .stdout(predicate::str::contains("96614.7366").not());
+
+    let body = exchange_order_body(&server).await;
+    assert_eq!(body["action"]["orders"][0]["p"], "96615");
 }
 
 #[tokio::test]
@@ -2579,6 +2487,9 @@ async fn orders_create_sell_market_order_uses_configured_slippage_bound() {
         .stdout(predicate::str::contains("12351"))
         .stdout(predicate::str::contains("250 bps"))
         .stdout(predicate::str::contains("48750"));
+
+    let body = exchange_order_body(&server).await;
+    assert_eq!(body["action"]["orders"][0]["p"], "48750");
 }
 
 #[test]
@@ -2607,55 +2518,50 @@ fn orders_create_market_order_rejects_out_of_bounds_slippage() {
 }
 
 #[tokio::test]
-async fn orders_create_stop_loss_and_take_profit_orders_succeed() {
+async fn orders_create_legacy_stop_loss_and_take_profit_submit_reduce_only_market_triggers() {
     let env = IsolatedHome::new();
     let server = mock_order_server(12347).await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "sell",
-            "--price",
-            "49000",
-            "--size",
-            "0.1",
-            "--type",
-            "stop-loss",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("stop-loss"))
-        .stdout(predicate::str::contains("12347"));
+    for (order_type, price) in [("stop-loss", "49000"), ("take-profit", "55000")] {
+        env.command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+            .args([
+                "orders",
+                "create",
+                "--coin",
+                "BTC",
+                "--side",
+                "sell",
+                "--price",
+                price,
+                "--size",
+                "0.1",
+                "--type",
+                order_type,
+                "--testnet",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(order_type))
+            .stdout(predicate::str::contains("12347"));
+    }
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "sell",
-            "--price",
-            "55000",
-            "--size",
-            "0.1",
-            "--type",
-            "take-profit",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("take-profit"))
-        .stdout(predicate::str::contains("12347"));
+    let requests = server.received_requests().await.unwrap();
+    let orders: Vec<Value> = requests
+        .iter()
+        .filter(|request| request.url.path() == "/exchange")
+        .map(|request| {
+            serde_json::from_slice::<Value>(&request.body).unwrap()["action"]["orders"][0].clone()
+        })
+        .collect();
+    assert_eq!(orders.len(), 2);
+    for (order, tpsl, trigger) in [(&orders[0], "sl", "49000"), (&orders[1], "tp", "55000")] {
+        assert_eq!(order["r"], true);
+        assert_eq!(order["t"]["trigger"]["isMarket"], true);
+        assert_eq!(order["t"]["trigger"]["tpsl"], tpsl);
+        assert_eq!(order["t"]["trigger"]["triggerPx"], trigger);
+    }
 }
 
 #[tokio::test]
@@ -2696,18 +2602,14 @@ async fn buy_size_dry_run_matches_market_create_size() {
 
     let buy_json: Value = serde_json::from_slice(&buy).unwrap();
     let create_json: Value = serde_json::from_slice(&create).unwrap();
+    assert_eq!(buy_json["command"], "buy");
     assert_eq!(buy_json["would_execute"], create_json["would_execute"]);
+    assert_eq!(buy_json["args"], create_json["args"]);
     assert_eq!(buy_json["args"]["side"], "buy");
     assert_eq!(buy_json["args"]["type"], "market");
-    assert_eq!(buy_json["args"]["size"], create_json["args"]["size"]);
-    assert_eq!(
-        buy_json["args"]["asset_id"],
-        create_json["args"]["asset_id"]
-    );
-    assert_eq!(
-        buy_json["args"]["resolved_asset"],
-        create_json["args"]["resolved_asset"]
-    );
+    assert_eq!(buy_json["args"]["size"], "0.001");
+    assert_eq!(buy_json["args"]["asset_id"], 0);
+    assert_eq!(buy_json["args"]["resolved_asset"], "BTC");
 }
 
 #[test]

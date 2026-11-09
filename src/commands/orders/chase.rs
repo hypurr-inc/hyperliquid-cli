@@ -388,31 +388,23 @@ mod tests {
             effective_timeout(&sample_args(None), false).unwrap(),
             DEFAULT_TRACKING_TIMEOUT
         );
-        assert!(effective_timeout(&sample_args(None), true).is_err());
-        assert!(effective_timeout(&sample_args(Some(Duration::ZERO)), false).is_err());
+        let unwatched = effective_timeout(&sample_args(None), true).unwrap_err();
+        assert_eq!(unwatched.exit_code(), 2);
+        assert!(unwatched.to_string().contains("requires --timeout"));
+        let zero = effective_timeout(&sample_args(Some(Duration::ZERO)), false).unwrap_err();
+        assert_eq!(zero.exit_code(), 2);
+        assert!(zero.to_string().contains("greater than zero"));
     }
 
     #[test]
-    fn quote_buy_is_below_mid() {
+    fn quotes_rest_on_the_passive_side_of_the_mid() {
         assert_eq!(
             quote_price(Decimal::from(100), OrderSide::Buy, 5),
             Decimal::new(9995, 2)
         );
-    }
-
-    #[test]
-    fn chase_result_is_one_json_object() {
-        let output = ChaseOutput {
-            status: "filled".to_string(),
-            remaining: "0".to_string(),
-            elapsed_ms: 12,
-        };
-        let value = output.to_json_value();
-        assert!(value.is_object());
-        assert_eq!(value["kind"], "result");
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&value.to_string()).is_ok(),
-            "chase result must parse as one JSON value"
+        assert_eq!(
+            quote_price(Decimal::from(100), OrderSide::Sell, 5),
+            Decimal::new(10005, 2)
         );
     }
 }

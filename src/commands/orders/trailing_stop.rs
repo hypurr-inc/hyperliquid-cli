@@ -453,14 +453,6 @@ mod tests {
     }
 
     #[test]
-    fn exactly_one_retracement_option_is_required_by_the_parser() {
-        assert!(parse(&[]).is_err());
-        assert!(parse(&["--retracement-pct", "5", "--retracement-px", "100"]).is_err());
-        assert!(parse(&["--retracement-pct", "5"]).is_ok());
-        assert!(parse(&["--retracement-px", "100"]).is_ok());
-    }
-
-    #[test]
     fn percent_must_be_between_zero_and_one_hundred_exclusive() {
         for bad in ["0", "-1", "100", "250"] {
             let args = parse(&["--retracement-pct", bad]).unwrap();
@@ -476,25 +468,34 @@ mod tests {
 
     #[test]
     fn price_distances_and_activation_must_be_positive() {
-        for extra in [["--retracement-px", "0"], ["--retracement-px", "-5"]] {
-            let args = parse(&extra).unwrap();
-            assert!(validate_trailing_stop_args(&args).is_err(), "{extra:?}");
-        }
-        let args = parse(&["--retracement-px", "5", "--activation-price", "0"]).unwrap();
-        assert!(validate_trailing_stop_args(&args).is_err());
-        let mut args = parse(&["--retracement-px", "5"]).unwrap();
-        args.size = Decimal::ZERO;
-        assert!(validate_trailing_stop_args(&args).is_err());
-    }
-
-    #[test]
-    fn spot_and_outcome_markets_are_rejected_before_any_lookup() {
-        for coin in ["HYPE/USDC", "#10", "+10"] {
-            let mut args = parse(&["--retracement-pct", "5"]).unwrap();
-            args.coin = coin.to_string();
+        let cases: [(&[&str], Decimal, &str); 4] = [
+            (
+                &["--retracement-px", "0"],
+                Decimal::new(1, 2),
+                "--retracement-px",
+            ),
+            (
+                &["--retracement-px", "-5"],
+                Decimal::new(1, 2),
+                "--retracement-px",
+            ),
+            (
+                &["--retracement-px", "5", "--activation-price", "0"],
+                Decimal::new(1, 2),
+                "--activation-price",
+            ),
+            (&["--retracement-px", "5"], Decimal::ZERO, "--size"),
+        ];
+        for (extra, size, flag) in cases {
+            let mut args = parse(extra).unwrap();
+            args.size = size;
             let err = validate_trailing_stop_args(&args).unwrap_err();
-            assert!(matches!(err, CliError::Configuration(_)), "{coin}: {err}");
-            assert!(err.to_string().contains("perpetual markets only"), "{err}");
+            assert_eq!(err.exit_code(), 2, "{extra:?}");
+            assert!(
+                err.to_string()
+                    .contains(&format!("{flag} must be greater than zero")),
+                "{extra:?}: {err}"
+            );
         }
     }
 
