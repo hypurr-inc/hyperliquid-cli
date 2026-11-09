@@ -363,6 +363,27 @@ hyperliquid --format json perps list --dex xyz
 hyperliquid --format json perps get TSLA --dex xyz
 ```
 
+Reads take the same two forms, so a HIP-3 book, tape and account state are reachable
+without switching commands:
+
+```bash
+hyperliquid --format json book xyz:TSLA
+hyperliquid --format json candles xyz:TSLA --interval 1h --limit 24
+hyperliquid --format json spread xyz:TSLA
+hyperliquid --format json funding xyz:TSLA
+hyperliquid --format json subscribe trades --asset xyz:TSLA --max-events 5
+hyperliquid --format json mids --dex xyz
+hyperliquid --format json --ows-signer 0x... positions list --dex xyz
+hyperliquid --format json --ows-signer 0x... orders open --dex xyz
+hyperliquid --format json account portfolio 0x... --dex xyz
+```
+
+`account portfolio --dex` reads that DEX's perp account only; spot balances and
+vault equities are account-wide and are reported by the default-dex run. A
+`--dex` name is checked against `perpDexs` first: an unknown name fails with
+"Unknown DEX" instead of reading an empty account, and the canonical spelling is
+what every request uses.
+
 Trade by DEX-qualified symbol or `--dex`:
 
 ```bash

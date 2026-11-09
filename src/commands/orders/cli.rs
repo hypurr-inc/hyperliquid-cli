@@ -21,6 +21,9 @@ pub const GROUP: GroupSpec = GroupSpec::new(&["orders"], "Manage orders").aliase
 pub struct OpenOrdersArgs {
     #[command(flatten)]
     pub watch: SnapshotWatchArgs,
+    /// Perp dex name (HIP-3). Defaults to the first dex.
+    #[arg(long)]
+    pub dex: Option<String>,
 }
 
 pub struct OrdersOpen;
@@ -43,15 +46,20 @@ impl CliCommand for OrdersOpen {
             .kind(InputKind::Boolean)
             .describe("Watch live snapshots. Use max_ticks to bound automation calls."),
         arg("max_ticks").describe("Stop after this many watch snapshots."),
+        arg("dex").describe("Perp dex name (HIP-3). Defaults to the first dex."),
     ]);
 
     async fn run(inv: &Invocation, args: &OpenOrdersArgs) -> Result<(), anyhow::Error> {
+        // Validate once, before either path: a watch must not start on a dex that
+        // cannot be read, and both paths send the canonical spelling.
+        let client = inv.remote()?.api().sdk();
+        let dex = canonical_dex(client, args.dex.as_deref()).await?;
         if args.watch.watch {
-            watch_open_orders(inv, args.watch.max_ticks).await
+            watch_open_orders(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
             let resolver = inv.asset_resolver().await?;
             let user = inv.resolve_signer()?.query_address();
-            open(inv, &resolver, user).await
+            open(inv, &resolver, user, dex.as_deref()).await
         }
     }
 }
@@ -1064,6 +1072,13 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
         validate_bracket_args(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
+        // The protection legs resolve the perp without a client, so a HIP-3
+        // market has to be in the resolver before either leg is planned.
+        let coin_query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
+        let (resolver, _) = resolver
+            .with_resolved_perp(client, &coin_query)
+            .await
+            .map_err(CliError::from)?;
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
@@ -1278,6 +1293,7 @@ hyperliquid --format json outcome-sell --coin #10 --size 1 --yes")
 
 async fn watch_open_orders(
     inv: &Invocation,
+    dex: Option<&str>,
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
@@ -1285,6 +1301,7 @@ async fn watch_open_orders(
     let resolver = std::sync::Arc::new(inv.asset_resolver().await?);
     let resolved = inv.resolve_signer()?;
     let user = resolved.query_address();
+    let dex = dex.map(str::to_string);
 
     crate::watch::run_snapshot_watch(
         inv.session(),
@@ -1294,7 +1311,8 @@ async fn watch_open_orders(
         max_ticks,
         move || {
             let resolver = std::sync::Arc::clone(&resolver);
-            async move { open_snapshot(client, &resolver, user).await }
+            let dex = dex.clone();
+            async move { open_snapshot(client, &resolver, user, dex.as_deref()).await }
         },
     )
     .await

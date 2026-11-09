@@ -12,7 +12,9 @@ use hypersdk::hypercore::types::{Action, AssetPosition, LeverageType};
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, StreamBound, arg,
 };
-use crate::commands::support::{dry_run_signed_details, dry_run_signing_addresses, print_dry_run};
+use crate::commands::support::{
+    canonical_dex, dry_run_signed_details, dry_run_signing_addresses, print_dry_run,
+};
 use crate::signing::SelectedSigner;
 use crate::stream::SnapshotWatchArgs;
 use serde::Serialize;
@@ -353,8 +355,8 @@ impl TableData for PositionActionOutput {
 }
 
 /// List authenticated user's open positions.
-pub async fn list(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    inv.print(&list_snapshot(inv.remote()?.api().sdk(), user).await?);
+pub async fn list(inv: &Invocation, user: Address, dex: Option<&str>) -> Result<(), anyhow::Error> {
+    inv.print(&list_snapshot(inv.remote()?.api().sdk(), user, dex).await?);
     Ok(())
 }
 
@@ -362,9 +364,10 @@ pub async fn list(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> 
 pub async fn list_snapshot(
     client: &HttpClient,
     user: Address,
+    dex: Option<&str>,
 ) -> Result<PositionsOutput, anyhow::Error> {
     let rows = client
-        .clearinghouse_state(user, None)
+        .clearinghouse_state(user, dex.map(str::to_string))
         .await
         .map_err(from_sdk)?
         .asset_positions
@@ -498,6 +501,9 @@ pub const GROUP: GroupSpec =
 pub struct PositionsListArgs {
     #[command(flatten)]
     pub watch: SnapshotWatchArgs,
+    /// Perp dex name (HIP-3). Defaults to the first dex.
+    #[arg(long)]
+    pub dex: Option<String>,
 }
 
 pub struct PositionsList;
@@ -520,15 +526,20 @@ impl CliCommand for PositionsList {
             .kind(InputKind::Boolean)
             .describe("Watch live snapshots. Use max_ticks to bound automation calls."),
         arg("max_ticks").describe("Stop after this many watch snapshots."),
+        arg("dex").describe("Perp dex name (HIP-3). Defaults to the first dex."),
     ])
     .cli_aliases(&["ls"]);
 
     async fn run(inv: &Invocation, args: &PositionsListArgs) -> Result<(), anyhow::Error> {
+        // Validate once, before either path: a watch must not start on a dex that
+        // cannot be read, and both paths send the canonical spelling.
+        let client = inv.remote()?.api().sdk();
+        let dex = canonical_dex(client, args.dex.as_deref()).await?;
         if args.watch.watch {
-            watch_positions(inv, args.watch.max_ticks).await
+            watch_positions(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
             let user = inv.resolve_signer()?.query_address();
-            list(inv, user).await
+            list(inv, user, dex.as_deref()).await
         }
     }
 }
@@ -633,11 +644,16 @@ impl CliCommand for PositionsUpdateMargin {
     }
 }
 
-async fn watch_positions(inv: &Invocation, max_ticks: Option<usize>) -> Result<(), anyhow::Error> {
+async fn watch_positions(
+    inv: &Invocation,
+    dex: Option<&str>,
+    max_ticks: Option<usize>,
+) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let client = remote.api().sdk();
     let resolved = inv.resolve_signer()?;
     let user = resolved.query_address();
+    let dex = dex.map(str::to_string);
 
     crate::watch::run_snapshot_watch(
         inv.session(),
@@ -645,7 +661,10 @@ async fn watch_positions(inv: &Invocation, max_ticks: Option<usize>) -> Result<(
         remote.chain(),
         vec![Subscription::WebData3 { user }],
         max_ticks,
-        move || async move { list_snapshot(client, user).await },
+        move || {
+            let dex = dex.clone();
+            async move { list_snapshot(client, user, dex.as_deref()).await }
+        },
     )
     .await
 }

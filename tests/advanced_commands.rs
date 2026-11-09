@@ -597,3 +597,43 @@ async fn prio_bid_compares_decimal_current_gas_after_converting_to_wei() {
         "decimal current gas must be compared as wei before bidding"
     );
 }
+
+/// `orders bracket` resolves a HIP-3 market for the entry and both protection legs.
+#[tokio::test]
+async fn orders_bracket_dry_run_resolves_hip3_dex_markets() {
+    let server = mock_advanced_server().await;
+
+    let output = Command::cargo_bin("hyperliquid")
+        .unwrap()
+        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+        .args([
+            "--format",
+            "json",
+            "--dry-run",
+            "orders",
+            "bracket",
+            "--coin",
+            "xyz:TOKEN",
+            "--side",
+            "buy",
+            "--size",
+            "0.5",
+            "--take-profit",
+            "+5%",
+            "--stop-loss",
+            "-2%",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    // Entry and both protection legs must resolve the HIP-3 market.
+    assert_eq!(json["args"]["entry_plan"]["resolved_asset"], "xyz:TOKEN");
+    assert_eq!(
+        json["args"]["protection_plan"]["resolved_asset"],
+        "xyz:TOKEN"
+    );
+}

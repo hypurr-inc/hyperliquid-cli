@@ -8,8 +8,9 @@ pub async fn open(
     inv: &Invocation,
     resolver: &AssetResolver,
     user: Address,
+    dex: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    inv.print(&open_snapshot(inv.remote()?.api().sdk(), resolver, user).await?);
+    inv.print(&open_snapshot(inv.remote()?.api().sdk(), resolver, user, dex).await?);
     Ok(())
 }
 
@@ -18,9 +19,10 @@ pub async fn open_snapshot(
     client: &HttpClient,
     resolver: &AssetResolver,
     user: Address,
+    dex: Option<&str>,
 ) -> Result<OrderListOutput, anyhow::Error> {
     let rows = client
-        .open_orders(user, None)
+        .open_orders(user, dex.map(str::to_string))
         .await
         .map_err(from_sdk)?
         .into_iter()

@@ -18,6 +18,35 @@ pub fn parse_address(raw: &str) -> Result<Address, CliError> {
         .map_err(|_| CliError::Unsupported(format!("Invalid address: {}", raw.trim())))
 }
 
+/// A `--dex` value, or `None` for the default dex.
+///
+/// The exchange treats the empty dex name as the first perp dex, so a blank
+/// flag must behave like no flag.
+#[must_use]
+pub(crate) fn normalize_dex(dex: Option<&str>) -> Option<&str> {
+    dex.map(str::trim).filter(|dex| !dex.is_empty())
+}
+
+/// Validate a `--dex` value against the exchange and return its canonical name.
+///
+/// An unknown DEX is explicit invalid input: it fails here instead of reading an
+/// empty account or an empty mid map, and the canonical spelling is what every
+/// later request uses.
+pub(crate) async fn canonical_dex(
+    client: &hypersdk::hypercore::HttpClient,
+    dex: Option<&str>,
+) -> Result<Option<String>, CliError> {
+    match normalize_dex(dex) {
+        Some(dex) => Ok(Some(
+            crate::assets::find_perp_dex(client, dex)
+                .await?
+                .name()
+                .to_string(),
+        )),
+        None => Ok(None),
+    }
+}
+
 /// URL encode a UTF-8 string for query parameters.
 pub fn urlencoding(input: &str) -> String {
     let mut out = String::new();
