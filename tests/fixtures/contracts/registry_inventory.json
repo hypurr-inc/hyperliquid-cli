@@ -1903,6 +1903,19 @@
           "positional_index": null,
           "required": false,
           "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "List the lowest outcome ids first instead of the newest.",
+          "enum_values": [],
+          "id": "oldest_first",
+          "input_kind": "boolean",
+          "long": "oldest-first",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
         }
       ],
       "auth_required": false,
@@ -1918,7 +1931,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "List active outcome market sides from outcomeMeta. Use orders create with #<encoding> or +<encoding> notation for verified outcome limit orders.",
+      "description": "List active outcome market sides from outcomeMeta, newest outcome first (--oldest-first reverses). Template names are resolved; each row carries its quote token, venue, deployer fee scale, question (with its role: named or fallback) and any warnings. Use orders create with #<encoding> or +<encoding> notation for verified outcome limit orders.",
       "dry_run": "not_supported",
       "group": "market",
       "lifecycle": "read_only",
@@ -1962,7 +1975,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "Show outcome side metadata by #N coin notation or +N token notation.",
+      "description": "Show outcome side metadata by #N coin notation or +N token notation, including its quote token, question and warnings.",
       "dry_run": "not_supported",
       "group": "market",
       "lifecycle": "read_only",
@@ -1971,6 +1984,456 @@
       "ows_signer": "not_required",
       "raw_payload": "unsupported",
       "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "integer",
+          "default": "100",
+          "description": "Maximum number of questions to return.",
+          "enum_values": [],
+          "id": "limit",
+          "input_kind": null,
+          "long": "limit",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "List the lowest question ids first instead of the newest.",
+          "enum_values": [],
+          "id": "oldest_first",
+          "input_kind": "boolean",
+          "long": "oldest-first",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid outcomes questions",
+      "command_path": [
+        "outcomes",
+        "questions"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "List questions from outcomeMeta, newest first. A question is a set of outcomes of which exactly one settles to Yes: named_outcomes, the protocol-created fallback_outcome, and settled_named_outcomes. Merge or negate them with `outcomes merge-question` and `outcomes negate`.",
+      "dry_run": "not_supported",
+      "group": "market",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Outcome id.",
+          "enum_values": [],
+          "id": "outcome",
+          "input_kind": "identifier",
+          "long": null,
+          "multiple": false,
+          "positional_index": 0,
+          "required": true,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid outcomes settled <OUTCOME>",
+      "command_path": [
+        "outcomes",
+        "settled"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Show how a settled outcome resolved: settle_fraction, what each side pays per share (settlement converts shares to quote tokens automatically, there is nothing to claim), the deployer's details and the question it belonged to. Fails for an outcome that has not settled or does not exist.",
+      "dry_run": "not_supported",
+      "group": "market",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid outcomes templates",
+      "command_path": [
+        "outcomes",
+        "templates"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "List the validator-approved outcome templates from outcomeTemplates: id, role (standalone_outcome, question, question_outcome), parent question template, side names, the {keyword} name and description text, and each keyword's type. Outcomes named template:<id> take their text from these.",
+      "dry_run": "not_supported",
+      "group": "market",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Outcome id from `outcomes list`.",
+          "enum_values": [],
+          "id": "outcome",
+          "input_kind": "identifier",
+          "long": "outcome",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Quote tokens to split (the outcome's quote token, see `outcomes get`).",
+          "enum_values": [],
+          "id": "amount",
+          "input_kind": "amount",
+          "long": "amount",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Skip the mainnet confirmation prompt for deliberate automation. Testnet runs never prompt.",
+          "enum_values": [],
+          "id": "yes",
+          "input_kind": "boolean",
+          "long": "yes",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": "y"
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid outcomes split",
+      "command_path": [
+        "outcomes",
+        "split"
+      ],
+      "confirmation": "prompt",
+      "confirmation_bypass": {
+        "arg": "yes",
+        "supported": true
+      },
+      "dangerous": true,
+      "description": "Split X quote tokens into X shares of each side of an outcome (HIP-4 userOutcome splitOutcome). Dry-run first. Mainnet runs prompt for confirmation unless --yes is passed; --testnet runs without a prompt.",
+      "dry_run": "optional",
+      "group": "trade",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Outcome id from `outcomes list`.",
+          "enum_values": [],
+          "id": "outcome",
+          "input_kind": "identifier",
+          "long": "outcome",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Shares of each side to merge.",
+          "enum_values": [],
+          "id": "amount",
+          "input_kind": "amount",
+          "long": "amount",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Merge the maximum available instead of an amount.",
+          "enum_values": [],
+          "id": "max",
+          "input_kind": "boolean",
+          "long": "max",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Skip the mainnet confirmation prompt for deliberate automation. Testnet runs never prompt.",
+          "enum_values": [],
+          "id": "yes",
+          "input_kind": "boolean",
+          "long": "yes",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": "y"
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid outcomes merge",
+      "command_path": [
+        "outcomes",
+        "merge"
+      ],
+      "confirmation": "prompt",
+      "confirmation_bypass": {
+        "arg": "yes",
+        "supported": true
+      },
+      "dangerous": true,
+      "description": "Merge X shares of each side of an outcome back into X quote tokens (HIP-4 userOutcome mergeOutcome); --max merges the maximum available. Dry-run first. Mainnet runs prompt for confirmation unless --yes is passed; --testnet runs without a prompt.",
+      "dry_run": "optional",
+      "group": "trade",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Question id from `outcomes questions`.",
+          "enum_values": [],
+          "id": "question",
+          "input_kind": "identifier",
+          "long": "question",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Yes shares of each outcome of the question to merge.",
+          "enum_values": [],
+          "id": "amount",
+          "input_kind": "amount",
+          "long": "amount",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Merge the maximum available instead of an amount.",
+          "enum_values": [],
+          "id": "max",
+          "input_kind": "boolean",
+          "long": "max",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Skip the mainnet confirmation prompt for deliberate automation. Testnet runs never prompt.",
+          "enum_values": [],
+          "id": "yes",
+          "input_kind": "boolean",
+          "long": "yes",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": "y"
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid outcomes merge-question",
+      "command_path": [
+        "outcomes",
+        "merge-question"
+      ],
+      "confirmation": "prompt",
+      "confirmation_bypass": {
+        "arg": "yes",
+        "supported": true
+      },
+      "dangerous": true,
+      "description": "Merge X Yes shares from each outcome of a question into X quote tokens (HIP-4 userOutcome mergeQuestion); --max merges the maximum available. Dry-run first. Mainnet runs prompt for confirmation unless --yes is passed; --testnet runs without a prompt.",
+      "dry_run": "optional",
+      "group": "trade",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Question id from `outcomes questions`.",
+          "enum_values": [],
+          "id": "question",
+          "input_kind": "identifier",
+          "long": "question",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Outcome id of the question whose No shares are converted.",
+          "enum_values": [],
+          "id": "outcome",
+          "input_kind": "identifier",
+          "long": "outcome",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "No shares to convert.",
+          "enum_values": [],
+          "id": "amount",
+          "input_kind": "amount",
+          "long": "amount",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Skip the mainnet confirmation prompt for deliberate automation. Testnet runs never prompt.",
+          "enum_values": [],
+          "id": "yes",
+          "input_kind": "boolean",
+          "long": "yes",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": "y"
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid outcomes negate",
+      "command_path": [
+        "outcomes",
+        "negate"
+      ],
+      "confirmation": "prompt",
+      "confirmation_bypass": {
+        "arg": "yes",
+        "supported": true
+      },
+      "dangerous": true,
+      "description": "Convert X No shares of an outcome of a question into X Yes shares of every other outcome of the question (HIP-4 userOutcome negateOutcome). Dry-run first. Mainnet runs prompt for confirmation unless --yes is passed; --testnet runs without a prompt.",
+      "dry_run": "optional",
+      "group": "trade",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
       "stream_bounds": null,
       "transport": [
         "cli_process"

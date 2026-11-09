@@ -452,7 +452,9 @@
       "dangerous": false,
       "dry_run": "not_supported",
       "group": "market",
-      "input_kinds": {},
+      "input_kinds": {
+        "oldest_first": "boolean"
+      },
       "mutability": "read_only",
       "output_contract": "json_value",
       "raw_payload": "unsupported",
@@ -477,6 +479,169 @@
       "output_contract": "json_value",
       "raw_payload": "unsupported",
       "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid outcomes questions",
+      "command_path": [
+        "outcomes",
+        "questions"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "market",
+      "input_kinds": {
+        "oldest_first": "boolean"
+      },
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid outcomes settled <OUTCOME>",
+      "command_path": [
+        "outcomes",
+        "settled"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "market",
+      "input_kinds": {
+        "outcome": "identifier"
+      },
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid outcomes templates",
+      "command_path": [
+        "outcomes",
+        "templates"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "market",
+      "input_kinds": {},
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid outcomes split",
+      "command_path": [
+        "outcomes",
+        "split"
+      ],
+      "confirmation": "prompt",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "trade",
+      "input_kinds": {
+        "amount": "amount",
+        "outcome": "identifier",
+        "yes": "boolean"
+      },
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid outcomes merge",
+      "command_path": [
+        "outcomes",
+        "merge"
+      ],
+      "confirmation": "prompt",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "trade",
+      "input_kinds": {
+        "amount": "amount",
+        "max": "boolean",
+        "outcome": "identifier",
+        "yes": "boolean"
+      },
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid outcomes merge-question",
+      "command_path": [
+        "outcomes",
+        "merge-question"
+      ],
+      "confirmation": "prompt",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "trade",
+      "input_kinds": {
+        "amount": "amount",
+        "max": "boolean",
+        "question": "identifier",
+        "yes": "boolean"
+      },
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid outcomes negate",
+      "command_path": [
+        "outcomes",
+        "negate"
+      ],
+      "confirmation": "prompt",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "trade",
+      "input_kinds": {
+        "amount": "amount",
+        "outcome": "identifier",
+        "question": "identifier",
+        "yes": "boolean"
+      },
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
       "transport": [
         "cli_process"
       ]

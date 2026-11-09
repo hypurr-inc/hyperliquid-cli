@@ -12,6 +12,7 @@ pub mod mcp;
 pub mod meta;
 pub mod orderbook;
 pub mod orders;
+pub mod outcome_actions;
 pub mod outcomes;
 pub mod perps;
 pub mod positions;
@@ -52,6 +53,13 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<asset::AssetSearch>(),
             Entry::of::<outcomes::OutcomesList>(),
             Entry::of::<outcomes::OutcomesGet>(),
+            Entry::of::<outcomes::OutcomesQuestions>(),
+            Entry::of::<outcomes::OutcomesSettled>(),
+            Entry::of::<outcomes::OutcomesTemplates>(),
+            Entry::of::<outcome_actions::OutcomesSplit>(),
+            Entry::of::<outcome_actions::OutcomesMerge>(),
+            Entry::of::<outcome_actions::OutcomesMergeQuestion>(),
+            Entry::of::<outcome_actions::OutcomesNegate>(),
             Entry::of::<orderbook::Book>(),
             Entry::of::<orderbook::Mids>(),
             Entry::of::<orderbook::Candles>(),

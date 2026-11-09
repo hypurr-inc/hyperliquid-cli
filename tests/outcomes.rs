@@ -82,7 +82,15 @@ async fn outcomes_list_returns_encoded_side_rows() {
 
     let out = env
         .command_with_server(&server)
-        .args(["--format", "json", "outcomes", "list", "--limit", "2"])
+        .args([
+            "--format",
+            "json",
+            "outcomes",
+            "list",
+            "--limit",
+            "2",
+            "--oldest-first",
+        ])
         .assert()
         .success()
         .get_output()

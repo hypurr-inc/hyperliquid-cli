@@ -1,0 +1,211 @@
+{
+ "outcomes": [
+  {
+   "outcome": 23745,
+   "name": "template:binaryPrice",
+   "description": "perp:xyz:SPCX|priceDescription:1-minute candle|seconds:300|threshold:150|time:20261130-2100",
+   "sideSpecs": [
+    {
+     "name": "template:Yes"
+    },
+    {
+     "name": "template:No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "txyz"
+  },
+  {
+   "outcome": 27949,
+   "name": "template:sportsContestWinner",
+   "description": "competition:NBA|contestType:Game|countedPlay:the full game including overtime|officialSource:National Basketball Association (NBA)|participantA:Phoenix Suns|participantB:San Antonio Spurs|resolutionDeadline:20261117-0200|scheduledStart:20261110-0200|season:2026/27|shortNameA:PHX|shortNameB:SAS|sport:Basketball|stage:Regular Season",
+   "sideSpecs": [
+    {
+     "name": "template:{shortNameA}"
+    },
+    {
+     "name": "template:{shortNameB}"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "out",
+   "deployerFeeScale": "1.0"
+  },
+  {
+   "outcome": 29101,
+   "name": "template fallback",
+   "description": "other",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "out",
+   "deployerFeeScale": "1.0"
+  },
+  {
+   "outcome": 29102,
+   "name": "template:sportsContestParticipant2",
+   "description": "participant:Bulgaria",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "out",
+   "deployerFeeScale": "1.0"
+  },
+  {
+   "outcome": 29103,
+   "name": "template:sportsContestDraw2",
+   "description": "",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "out",
+   "deployerFeeScale": "1.0"
+  },
+  {
+   "outcome": 29104,
+   "name": "template:sportsContestParticipant2",
+   "description": "participant:Iceland",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "out",
+   "deployerFeeScale": "1.0"
+  },
+  {
+   "outcome": 30011,
+   "name": "Recurring",
+   "description": "class:priceBinary|underlying:BTC|expiry:20261110-0600|targetPrice:74456|period:1d",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC"
+  },
+  {
+   "outcome": 30015,
+   "name": "Recurring Fallback",
+   "description": "other",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC"
+  },
+  {
+   "outcome": 30016,
+   "name": "Recurring Named Outcome",
+   "description": "index:0",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC"
+  },
+  {
+   "outcome": 30017,
+   "name": "Recurring Named Outcome",
+   "description": "index:1",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC"
+  },
+  {
+   "outcome": 30018,
+   "name": "Recurring Named Outcome",
+   "description": "index:2",
+   "sideSpecs": [
+    {
+     "name": "Yes"
+    },
+    {
+     "name": "No"
+    }
+   ],
+   "quoteToken": "USDC"
+  },
+  {
+   "outcome": 30337,
+   "name": "template:binaryPrice",
+   "description": "perp:BTC|priceDescription:the Hyperliquid BTC perp trade|seconds:90|threshold:74402|time:20261109-1600",
+   "sideSpecs": [
+    {
+     "name": "template:Yes"
+    },
+    {
+     "name": "template:No"
+    }
+   ],
+   "quoteToken": "USDC",
+   "venue": "skew",
+   "deployerFeeScale": "1.0"
+  }
+ ],
+ "questions": [
+  {
+   "question": 620,
+   "name": "template:sportsContestResult",
+   "description": "competition:UEFA Nations League|contestType:Match|countedPlay:regulation time, 90 minutes plus stoppage time|officialSource:Union of European Football Associations|participantA:Bulgaria|participantB:Iceland|resolutionDeadline:20261120-1945|scheduledStart:20261113-1945|season:2026/27|sport:Soccer|stage:C, Matchday 5",
+   "fallbackOutcome": 29101,
+   "namedOutcomes": [
+    29102,
+    29103,
+    29104
+   ],
+   "settledNamedOutcomes": []
+  },
+  {
+   "question": 627,
+   "name": "Recurring",
+   "description": "class:priceBucket|underlying:BTC|expiry:20261110-0600|priceThresholds:72967,75945|period:1d",
+   "fallbackOutcome": 30015,
+   "namedOutcomes": [
+    30016,
+    30017,
+    30018
+   ],
+   "settledNamedOutcomes": []
+  }
+ ]
+}

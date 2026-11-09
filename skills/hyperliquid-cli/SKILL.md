@@ -446,7 +446,13 @@ Use outcome notation and inspect before trading:
 ```bash
 hyperliquid --format json outcomes list --limit 20
 hyperliquid --format json outcomes get +70030
+hyperliquid --format json outcomes questions --limit 20
+hyperliquid --format json outcomes settled 95
+hyperliquid --format json outcomes templates
+hyperliquid --format json --dry-run outcomes split --outcome 12 --amount 10
 ```
+
+`outcomes list` shows the newest outcomes first (`--oldest-first` reverses), with `quote_token`, `venue`, `question` and `question_role` (`named` or `fallback`); check each row's `warnings`. `outcomes split|merge|merge-question|negate` move funds between quote tokens and shares: dry-run first, mainnet runs need `--yes` from a human-approved run. Settled outcomes pay out automatically (`outcomes settled <ID>` shows how).
 
 Outcome orders require explicit price and size, not `--type market`:
 
