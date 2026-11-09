@@ -1,5 +1,6 @@
 //! JSON error envelope.
 
+use super::spec::{self, Spec};
 use super::{CliError, NextCommand};
 
 /// A JSON-serializable error envelope.
@@ -25,6 +26,20 @@ pub struct ErrorEnvelope {
 }
 
 impl ErrorEnvelope {
+    /// The core keys for `spec` with `error` as the headline and nothing optional.
+    fn core(spec: &Spec, error: String) -> Self {
+        Self {
+            error,
+            category: spec.category,
+            exit_code: spec.exit_code,
+            reason: spec.reason,
+            retryable: None,
+            retry_after: None,
+            next: Vec::new(),
+            data: serde_json::Map::new(),
+        }
+    }
+
     /// Create from a [`CliError`], using its Display representation as the headline.
     pub fn from_cli_error(err: &CliError) -> Self {
         let mut data = serde_json::Map::new();
@@ -42,14 +57,11 @@ impl ErrorEnvelope {
             .map(|recovery| recovery.commands)
             .unwrap_or_default();
         Self {
-            error: err.to_string(),
-            category: err.category(),
-            exit_code: err.exit_code(),
-            reason: err.reason(),
             retryable: err.retryable(),
             retry_after: err.retry_after(),
             next,
             data,
+            ..Self::core(err.spec(), err.to_string())
         }
     }
 
@@ -69,30 +81,53 @@ impl ErrorEnvelope {
         if let Some(suggestion) = parsed.suggestion {
             data.insert("suggestion".into(), suggestion.into());
         }
-        let reason = if parsed.headline.contains("unrecognized subcommand") {
-            "unknown_command"
+        let spec = if parsed.headline.contains("unrecognized subcommand") {
+            &spec::UNKNOWN_COMMAND
         } else {
-            "invalid_arguments"
+            &spec::INVALID_ARGUMENTS
         };
         Self {
-            error: parsed.headline,
-            category: "usage",
-            exit_code: 2,
-            reason,
-            retryable: None,
-            retry_after: None,
             next: parsed
                 .help_command
                 .map(|command| vec![NextCommand::new(command)])
                 .unwrap_or_default(),
             data,
+            ..Self::core(spec, parsed.headline)
         }
     }
 
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).unwrap_or_else(|_| {
-            r#"{"error":"serialization failed","category":"internal","exit_code":1,"reason":"internal_error"}"#.to_string()
+            let internal = &spec::INTERNAL;
+            format!(
+                r#"{{"error":"serialization failed","category":"{}","exit_code":{},"reason":"{}"}}"#,
+                internal.category, internal.exit_code, internal.reason
+            )
         })
+    }
+}
+
+/// The envelope keys (`error`, `category`, `exit_code`, `reason`, and `next`
+/// when non-empty) for a batch that partly failed, to merge into the one JSON
+/// document the command prints itself.
+///
+/// [`CliError::PartialResults`] ends the run with exit code 15 and prints no
+/// envelope of its own ([`StdoutDocument::CommandResult`](super::StdoutDocument)),
+/// so the command's document must carry these keys. `headline` is the
+/// document's `error` text, without the `Partial results:` prefix of the
+/// error's `Display`; `next` is the commands that show what is live.
+#[must_use]
+pub fn partial_results_fields(
+    headline: impl Into<String>,
+    next: Vec<NextCommand>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let envelope = ErrorEnvelope {
+        next,
+        ..ErrorEnvelope::core(&spec::PARTIAL_FAILURE, headline.into())
+    };
+    match serde_json::to_value(envelope) {
+        Ok(serde_json::Value::Object(fields)) => fields,
+        other => unreachable!("an error envelope serializes to an object, got {other:?}"),
     }
 }
 
@@ -334,5 +369,37 @@ mod tests {
         assert_eq!(value["reason"], "unknown_command");
         assert_eq!(value["data"]["suggestion"], "orders");
         assert!(!value["error"].as_str().unwrap().starts_with("error:"));
+    }
+
+    #[test]
+    fn partial_results_fields_are_the_envelope_keys_of_a_command_document() {
+        let fields = partial_results_fields(
+            "2 of 3 orders failed",
+            vec![NextCommand::new("hyperliquid orders open")],
+        );
+
+        assert_eq!(
+            serde_json::Value::Object(fields),
+            serde_json::json!({
+                "error": "2 of 3 orders failed",
+                "category": "partial_results",
+                "exit_code": 15,
+                "reason": "partial_failure",
+                "next": [{"command": "hyperliquid orders open"}],
+            })
+        );
+
+        let err = CliError::PartialResults("x".into());
+        let envelope = envelope_value(&err);
+        let fields = partial_results_fields("x", Vec::new());
+        for key in ["category", "exit_code", "reason"] {
+            assert_eq!(fields[key], envelope[key], "{key} follows the error's spec");
+        }
+    }
+
+    #[test]
+    fn partial_results_fields_omit_next_when_there_is_nothing_to_run() {
+        let fields = partial_results_fields("half done", Vec::new());
+        assert!(!fields.contains_key("next"));
     }
 }
