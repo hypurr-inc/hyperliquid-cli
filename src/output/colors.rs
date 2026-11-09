@@ -1,5 +1,3 @@
-//! ANSI styling for the CLI color theme.
-//!
 //! Every helper returns plain text unless styling is enabled for the stream it
 //! writes to. Use the top-level helpers for stdout content and the [`stderr`]
 //! set for notices, warnings, prompts, and errors.
@@ -50,7 +48,6 @@ pub fn red(text: &str) -> String {
     styled(stdout_enabled(), RED, text)
 }
 
-/// Muted, secondary text.
 #[must_use]
 pub fn gray(text: &str) -> String {
     styled(stdout_enabled(), GRAY, text)
@@ -61,7 +58,6 @@ pub fn yellow(text: &str) -> String {
     styled(stdout_enabled(), YELLOW, text)
 }
 
-/// Styling helpers for text written to stderr (notices, warnings, prompts, errors).
 pub mod stderr {
     use super::{GRAY, YELLOW, stderr_enabled, styled};
 
@@ -143,7 +139,6 @@ fn streams() -> (bool, bool) {
     *STREAMS.get_or_init(|| resolve(false, &EnvSource::Process))
 }
 
-/// Run `f` with the given `(stdout, stderr)` color decision on this thread.
 #[cfg(test)]
 pub fn with_streams_for_test<T>(stdout: bool, stderr: bool, f: impl FnOnce() -> T) -> T {
     struct Restore(Option<(bool, bool)>);
@@ -156,13 +151,11 @@ pub fn with_streams_for_test<T>(stdout: bool, stderr: bool, f: impl FnOnce() -> 
     f()
 }
 
-/// Whether styling may be written to stdout.
 #[must_use]
 pub fn stdout_enabled() -> bool {
     streams().0
 }
 
-/// Whether styling may be written to stderr.
 #[must_use]
 pub fn stderr_enabled() -> bool {
     streams().1

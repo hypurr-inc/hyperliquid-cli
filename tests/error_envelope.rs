@@ -1,6 +1,3 @@
-// Integration tests for the JSON error envelope, human error blocks, and
-// exchange failure classification.
-
 mod support;
 
 use assert_cmd::Command;

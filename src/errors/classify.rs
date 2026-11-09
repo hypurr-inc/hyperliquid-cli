@@ -43,7 +43,6 @@ fn contains_any(text: &str, phrases: &[&str]) -> bool {
     phrases.iter().any(|phrase| lower.contains(phrase))
 }
 
-/// Whether an HTTP status means the server failed rather than the request.
 pub fn is_server_status(status: u16) -> bool {
     (500..600).contains(&status)
 }
@@ -110,8 +109,6 @@ fn code_indicates_rate_limit(code: &str) -> bool {
     )
 }
 
-/// Rate limit or rejected credentials, the two meanings every remote message
-/// source shares.
 fn rate_limit_or_auth(message: &str) -> Option<CliError> {
     if looks_like_rate_limit_text(message) {
         Some(CliError::rate_limited())
@@ -140,7 +137,6 @@ pub enum Rejection {
     Other(Untrusted),
 }
 
-/// Classify the text of an answered exchange rejection.
 pub fn classify_rejection(message: &str) -> Rejection {
     if looks_like_rate_limit_text(message) {
         return Rejection::RateLimited;
@@ -184,13 +180,10 @@ impl Rejection {
     }
 }
 
-/// Map an exchange `status: err` message to a [`CliError`] with
-/// [`Rejection::into_error`].
 pub fn from_exchange_rejection(message: &str, context: &'static str) -> CliError {
     classify_rejection(message).into_error(context)
 }
 
-/// Rate limit, rejected credentials, or an `HTTP <5xx> body=<text>` failure.
 fn classify_known(message: &str) -> Option<CliError> {
     rate_limit_or_auth(message).or_else(|| server_error_from_text(message))
 }
@@ -217,7 +210,6 @@ fn server_error_from_text(text: &str) -> Option<CliError> {
     Some(CliError::api_status(code, body))
 }
 
-/// Recover a typed [`CliError`] that travelled through `anyhow`.
 fn recover_typed(err: anyhow::Error) -> Result<CliError, anyhow::Error> {
     err.downcast::<CliError>()
 }
@@ -269,8 +261,6 @@ pub fn from_sdk(err: anyhow::Error) -> CliError {
 mod tests {
     use super::*;
 
-    // ── rate-limit detection ────────────────────────────────────────
-
     #[test]
     fn http_rate_limit_detection_always_accepts_429() {
         assert!(http_response_indicates_rate_limit(
@@ -306,8 +296,6 @@ mod tests {
             r#"{"status":"ok","message":"read the rate-limit docs","code":"RATE-LIMIT-DOCS"}"#
         ));
     }
-
-    // ── exchange rejections ─────────────────────────────────────────
 
     #[test]
     fn exchange_user_state_rejections_are_not_internal_errors() {
@@ -406,8 +394,6 @@ mod tests {
             assert!(matches!(err, CliError::AuthRejected(_)));
         }
     }
-
-    // ── SDK errors ──────────────────────────────────────────────────
 
     fn api_error(msg: &str) -> anyhow::Error {
         anyhow::Error::new(hypersdk::hypercore::ApiError(msg.to_string()))

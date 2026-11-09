@@ -1,5 +1,3 @@
-//! Hyperliquid WebSocket construction and one-shot reads.
-
 use std::time::Duration;
 
 use futures::StreamExt;

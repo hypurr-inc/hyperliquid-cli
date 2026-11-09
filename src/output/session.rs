@@ -23,7 +23,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// A session that starts timing now.
     #[must_use]
     pub fn new(format: OutputFormat, json: JsonRenderOptions, env: OutputEnv) -> Self {
         Self {

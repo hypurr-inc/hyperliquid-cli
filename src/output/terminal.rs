@@ -42,25 +42,21 @@ fn probe(stream: Stream) -> bool {
     }
 }
 
-/// Whether stdin is an interactive terminal.
 #[must_use]
 pub fn stdin_is_terminal() -> bool {
     probe(Stream::Stdin)
 }
 
-/// Whether stdout is connected to a terminal.
 #[must_use]
 pub fn stdout_is_terminal() -> bool {
     probe(Stream::Stdout)
 }
 
-/// Whether stderr is connected to a terminal.
 #[must_use]
 pub fn stderr_is_terminal() -> bool {
     probe(Stream::Stderr)
 }
 
-/// Run `f` with the given `(stdout, stderr)` terminal state on this thread.
 #[cfg(test)]
 pub fn with_tty_for_test<T>(stdout: bool, stderr: bool, f: impl FnOnce() -> T) -> T {
     struct Restore(Option<(bool, bool)>);
@@ -135,7 +131,6 @@ impl OutputEnv {
             // An invalid `HYPERLIQUID_AGENT` counts as off here;
             // [`crate::mode::validate_env`] rejects it.
             agent: env_flag(env, settings_env::AGENT) == EnvFlag::On,
-            // `CI` is set to anything but an explicit off value.
             ci: env_flag(env, settings_env::CI).on_unless_off(),
             explicit_format,
         }

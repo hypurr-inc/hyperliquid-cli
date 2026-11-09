@@ -1,7 +1,3 @@
-//! What the notifier and the self-updater both need to know about releases:
-//! where they live, how versions compare, which archive fits this platform, and
-//! how the running binary was installed.
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -58,7 +54,6 @@ impl ReleaseClient {
         Err(CliError::failed_reply(status, &body))
     }
 
-    /// The tag of the latest published release.
     pub async fn latest_version(&self) -> Result<String, CliError> {
         let release = self
             .get(

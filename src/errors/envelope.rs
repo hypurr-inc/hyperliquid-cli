@@ -1,5 +1,3 @@
-//! JSON error envelope.
-
 use super::spec::{self, Spec};
 use super::{CliError, NextCommand};
 

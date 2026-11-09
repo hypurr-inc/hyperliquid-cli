@@ -1,6 +1,4 @@
-//! Output formatting system for Hyperliquid CLI.
-//!
-//! Supports three output formats:
+//! The three output formats:
 //! - `Pretty`: human-readable, tabwriter-aligned, styled only when stdout styling is enabled (default)
 //! - `Table`: bordered tables on a terminal, tab-separated header and rows on a pipe
 //! - `Json`: stable JSON output with snake_case keys, indented on a terminal and compact on a pipe
@@ -37,8 +35,6 @@ pub mod colors;
 pub mod format;
 pub mod terminal;
 
-// ── OutputFormat enum ───────────────────────────────────────────────────
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     #[default]
@@ -56,8 +52,6 @@ impl fmt::Display for OutputFormat {
         }
     }
 }
-
-// ── JSON projection options ─────────────────────────────────────────────
 
 /// `--select`, `--results-only` and `--max-results`, applied to JSON output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,13 +82,11 @@ impl JsonRenderOptions {
         self.selected_fields.as_deref()
     }
 
-    /// Whether any projection flag was given.
     #[must_use]
     pub fn is_active(&self) -> bool {
         self.selected_fields.is_some() || self.results_only || self.max_results.is_some()
     }
 
-    /// Project one JSON document.
     #[must_use]
     pub fn apply(&self, value: serde_json::Value) -> serde_json::Value {
         self.project(value, limit_json_results, project_selected_fields)
@@ -329,18 +321,9 @@ fn alias_value_for_field<'a>(
         .map(|value| (*canonical, value))
 }
 
-// ── Table data trait ────────────────────────────────────────────────────
-
-/// Trait for data that can be rendered in all output formats.
-///
-/// Implement this trait for any data type that needs to be displayed
-/// through the output system. Each method returns a string representation
-/// suitable for the corresponding format.
 pub trait TableData {
-    /// Column headers for the data.
     fn headers(&self) -> Vec<&str>;
 
-    /// Row data as string vectors. Each inner Vec is one row.
     fn rows(&self) -> Vec<Vec<String>>;
 
     /// Row data for pretty output.
@@ -351,7 +334,6 @@ pub trait TableData {
         self.rows()
     }
 
-    /// Convert to a JSON-serializable value.
     fn to_json_value(&self) -> serde_json::Value;
 
     /// Sentence for stderr when [`Self::rows`] is empty, for example `No orders.`.
@@ -542,8 +524,6 @@ fn to_snake_case(input: &str) -> String {
     output.trim_matches('_').to_string()
 }
 
-// ── Cell sanitization ───────────────────────────────────────────────────
-
 /// Characters that render as nothing or reorder text without being C0/C1
 /// controls: every Unicode format character plus the line and paragraph
 /// separators.
@@ -598,9 +578,6 @@ fn sanitize_cell(cell: &str, keep_styles: bool) -> String {
     out
 }
 
-// ── Rendering functions ─────────────────────────────────────────────────
-
-/// Text for stdout plus notices that belong on stderr.
 struct Rendered {
     text: String,
     notices: Vec<String>,
@@ -777,8 +754,6 @@ pub fn warn(message: &str) {
     eprintln!("{}", warning_line(message));
 }
 
-// ── Unit tests ──────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,7 +785,6 @@ mod tests {
         render(data, OutputFormat::Table)
     }
 
-    /// Simple test data struct for testing the output system.
     struct TestData {
         headers: Vec<String>,
         rows: Vec<Vec<String>>,
@@ -961,7 +935,6 @@ mod tests {
     #[test]
     fn test_render_table_has_borders_on_terminal() {
         let output = render_with(&sample_data(), OutputFormat::Table, tty_env());
-        // Rounded table style uses these border characters
         assert!(output.contains('│'));
         assert!(output.contains('╭'));
         assert!(output.contains('╯'));
@@ -971,7 +944,6 @@ mod tests {
     fn test_render_table_no_ansi_colors() {
         let data = sample_data();
         let output = render_table(&data);
-        // Table mode should NOT contain ANSI color codes
         assert!(!output.contains(colors::CYAN));
     }
 

@@ -25,7 +25,6 @@ impl Scale {
         Self(places)
     }
 
-    /// Decimal places of one whole unit.
     pub(crate) const fn decimals(self) -> u32 {
         self.0
     }

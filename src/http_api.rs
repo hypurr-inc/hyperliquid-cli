@@ -49,7 +49,6 @@ enum Disposition {
     Mutation,
 }
 
-/// Status, body and `Retry-After` of one answered request.
 struct Reply {
     status: StatusCode,
     body: String,
@@ -92,7 +91,6 @@ impl InfoReply {
     }
 }
 
-/// Everything one run needs to talk to one Hyperliquid network.
 pub struct ApiClient {
     chain: Chain,
     base_url: reqwest::Url,
@@ -115,7 +113,6 @@ impl std::fmt::Debug for ApiClient {
 }
 
 impl ApiClient {
-    /// A client for `network`, pointed at `api_override` when given.
     #[must_use]
     pub fn new(network: Network, api_override: Option<reqwest::Url>) -> Self {
         let has_override = api_override.is_some();
@@ -154,7 +151,6 @@ impl ApiClient {
         self.chain
     }
 
-    /// The `hypersdk` client for the typed SDK calls.
     #[must_use]
     pub fn sdk(&self) -> &HttpClient {
         &self.sdk
