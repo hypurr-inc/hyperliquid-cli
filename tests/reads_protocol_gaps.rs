@@ -968,3 +968,54 @@ async fn account_rate_limit_reads_the_request_budget() {
     assert_eq!(limit["n_requests_surplus"], 0);
     assert_eq!(limit["cum_vlm"], "2.0");
 }
+
+#[tokio::test]
+async fn portfolio_cumulative_funding_reports_each_horizon() {
+    let server = MockServer::start().await;
+    support::mount_override_healthcheck(&server).await;
+    support::mount_account_state(&server, vec![], vec![], "9000", "100", 5).await;
+    let mut state = support::fixture_clearinghouse_state("9000", 5);
+    state["assetPositions"][0]["position"]["cumFunding"] =
+        json!({"allTime": "-12.5", "sinceOpen": "3.25", "sinceChange": "0.5"});
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(wiremock::matchers::body_partial_json(
+            json!({"type": "clearinghouseState"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(state))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    let portfolio = json_of(&server, &["account", "portfolio", USER]);
+
+    assert_eq!(
+        portfolio["positions"][0]["cum_funding"],
+        json!({"all_time": "-12.5", "since_open": "3.25", "since_change": "0.5"})
+    );
+}
+
+#[tokio::test]
+async fn spot_get_matches_a_pair_to_its_context_by_the_at_index_key() {
+    let server = ExchangeFixture::start().await;
+    server
+        .override_info(json!({"type": "spotMeta"}), spot_meta_with_hype())
+        .await;
+    server
+        .mount_info(
+            json!({"type": "spotMetaAndAssetCtxs"}),
+            json!([
+                {"universe": [], "tokens": []},
+                [
+                    {"coin": "PURR/USDC", "markPx": "0.1", "midPx": "0.1"},
+                    {"coin": "@107", "markPx": "73.724", "midPx": "73.7235", "dayNtlVlm": "5.5"}
+                ]
+            ]),
+        )
+        .await;
+
+    let pair = json_of(&server, &["spot", "get", "HYPE/USDC"]);
+
+    assert_eq!(pair["mark_price"], "73.724");
+    assert_eq!(pair["day_notional_volume"], "5.5");
+}
