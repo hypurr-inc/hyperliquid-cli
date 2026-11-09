@@ -89,7 +89,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "List perpetual markets. margin_mode is cross_or_isolated, isolated_only (legacy onlyIsolated flag), no_cross (isolated only, margin removable) or strict_isolated (isolated only, margin not removable).",
+      "description": "List perpetual markets, delisted ones included (delisted flags them; nothing is hidden). margin_mode is cross_or_isolated, isolated_only (legacy onlyIsolated flag), no_cross (isolated only, margin removable) or strict_isolated (isolated only, margin not removable).",
       "dry_run": "not_supported",
       "group": "market",
       "lifecycle": "read_only",
@@ -147,6 +147,251 @@
       },
       "dangerous": false,
       "description": "Get details for a perpetual market. margin_mode is cross_or_isolated, isolated_only (legacy onlyIsolated flag), no_cross (isolated only, margin removable) or strict_isolated (isolated only, margin not removable).",
+      "dry_run": "not_supported",
+      "group": "market",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perpetual coin, for example BTC or xyz:XYZ100.",
+          "enum_values": [],
+          "id": "coin",
+          "input_kind": "market_symbol",
+          "long": null,
+          "multiple": false,
+          "positional_index": 0,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "RFC3339 or epoch-millisecond start time.",
+          "enum_values": [],
+          "id": "start",
+          "input_kind": null,
+          "long": "start",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "RFC3339 or epoch-millisecond end time.",
+          "enum_values": [],
+          "id": "end",
+          "input_kind": null,
+          "long": "end",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Page through the whole window.",
+          "enum_values": [],
+          "id": "all",
+          "input_kind": "boolean",
+          "long": "all",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid perps funding-history <COIN>",
+      "command_path": [
+        "perps",
+        "funding-history"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "List the funding rates applied to a perpetual since a start time, oldest first. The API returns 500 rates per request; when a page is full a notice on stderr names the start that continues, or pass all to read the whole window.",
+      "dry_run": "not_supported",
+      "group": "market",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Only this coin, for example BTC.",
+          "enum_values": [],
+          "id": "coin",
+          "input_kind": "market_symbol",
+          "long": "coin",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid perps funding-predicted",
+      "command_path": [
+        "perps",
+        "funding-predicted"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Show the funding rate each venue (HlPerp, BinPerp, BybitPerp) predicts for each coin's next funding time, with the venue's funding interval in hours when it states one.",
+      "dry_run": "not_supported",
+      "group": "market",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "HIP-3 DEX name.",
+          "enum_values": [],
+          "id": "dex",
+          "input_kind": "venue_selector",
+          "long": "dex",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid perps at-oi-cap",
+      "command_path": [
+        "perps",
+        "at-oi-cap"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "List the perpetuals whose open interest is at its cap, so new positions that grow it are refused.",
+      "dry_run": "not_supported",
+      "group": "market",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid perps dexs",
+      "command_path": [
+        "perps",
+        "dexs"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "List the HIP-3 perp dexes with their deployer, fee recipient, deployer fee scale, per-market open interest caps and funding multipliers.",
+      "dry_run": "not_supported",
+      "group": "market",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "HIP-3 DEX name.",
+          "enum_values": [],
+          "id": "dex",
+          "input_kind": "venue_selector",
+          "long": null,
+          "multiple": false,
+          "positional_index": 0,
+          "required": true,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid perps dex-limits <DEX>",
+      "command_path": [
+        "perps",
+        "dex-limits"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Show a HIP-3 dex's total open interest cap, per-perp size cap, maximum transfer notional, per-market open interest caps and total net deposit.",
       "dry_run": "not_supported",
       "group": "market",
       "lifecycle": "read_only",
@@ -220,7 +465,51 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "Get details for a spot pair.",
+      "description": "Get details for a spot pair, with its mark, mid and previous-day price and 24-hour volume.",
+      "dry_run": "not_supported",
+      "group": "market",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Token name, for example HYPE, or 0x token id.",
+          "enum_values": [],
+          "id": "token",
+          "input_kind": "identifier",
+          "long": null,
+          "multiple": false,
+          "positional_index": 0,
+          "required": true,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid spot token <TOKEN>",
+      "command_path": [
+        "spot",
+        "token"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Show a spot token's details: supply, decimals, mid, mark and previous-day price, deployer, deploy time and genesis balances. Takes the token name or its 0x token id.",
       "dry_run": "not_supported",
       "group": "market",
       "lifecycle": "read_only",
@@ -2794,6 +3083,19 @@
           "positional_index": null,
           "required": false,
           "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Page through the whole window (requires start). Without it one page is returned and a notice on stderr names the start that continues.",
+          "enum_values": [],
+          "id": "all",
+          "input_kind": "boolean",
+          "long": "all",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
         }
       ],
       "auth_required": false,
@@ -2926,6 +3228,19 @@
           "positional_index": 0,
           "required": true,
           "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "input_kind": null,
+          "long": "dex",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
         }
       ],
       "auth_required": false,
@@ -2941,7 +3256,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "Query public open orders for an address or wallet.",
+      "description": "Query public open orders for an address or wallet. Pass dex for a HIP-3 dex's orders; the default dex's orders do not include them.",
       "dry_run": "not_supported",
       "group": "account",
       "lifecycle": "read_only",
@@ -3141,6 +3456,19 @@
           "positional_index": null,
           "required": false,
           "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Page through the whole window. Without it one page is returned and a notice on stderr names the start that continues.",
+          "enum_values": [],
+          "id": "all",
+          "input_kind": "boolean",
+          "long": "all",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
         }
       ],
       "auth_required": false,
@@ -3207,6 +3535,19 @@
           "id": "end",
           "input_kind": null,
           "long": "end",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Page through the whole window. Without it one page is returned and a notice on stderr names the start that continues.",
+          "enum_values": [],
+          "id": "all",
+          "input_kind": "boolean",
+          "long": "all",
           "multiple": false,
           "positional_index": null,
           "required": false,
@@ -3380,6 +3721,151 @@
           "long": null,
           "multiple": false,
           "positional_index": 0,
+          "required": true,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid account role <ADDRESS>",
+      "command_path": [
+        "account",
+        "role"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Query an address's protocol role. A subaccount names its master and an agent its owner.",
+      "dry_run": "not_supported",
+      "group": "account",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Ethereum address, wallet name, or wallet id.",
+          "enum_values": [],
+          "id": "address",
+          "input_kind": "public_user_selector",
+          "long": null,
+          "multiple": false,
+          "positional_index": 0,
+          "required": true,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid account multisig-signers <ADDRESS>",
+      "command_path": [
+        "account",
+        "multisig-signers"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Query the authorized signers and signature threshold of a multi-sig account. The exchange answers nothing for an address that is not multi-sig.",
+      "dry_run": "not_supported",
+      "group": "account",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Ethereum address, wallet name, or wallet id.",
+          "enum_values": [],
+          "id": "address",
+          "input_kind": "public_user_selector",
+          "long": null,
+          "multiple": false,
+          "positional_index": 0,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perpetual coin, for example BTC or xyz:XYZ100.",
+          "enum_values": [],
+          "id": "coin",
+          "input_kind": "market_symbol",
+          "long": "coin",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid account asset-data <ADDRESS>",
+      "command_path": [
+        "account",
+        "asset-data"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Query an account's active asset data for a perpetual: leverage, maximum trade sizes and size available to trade (buy side first, sell side second) and the mark price. Works with no open position.",
+      "dry_run": "not_supported",
+      "group": "account",
+      "lifecycle": "read_only",
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Ethereum address, wallet name, or wallet id.",
+          "enum_values": [],
+          "id": "address",
+          "input_kind": "public_user_selector",
+          "long": null,
+          "multiple": false,
+          "positional_index": 0,
           "required": false,
           "short": null
         }
@@ -3473,63 +3959,6 @@
       },
       "dangerous": true,
       "description": "Set account abstraction for the signer or one of its subaccounts (userSetAbstraction); an API wallet sets its master account's mode with agentSetAbstraction. `disabled` is Standard: separate perp and spot balances. Cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode; unified-account and portfolio-margin accounts are limited to 50k actions per day. Use --dry-run to preview; confirm or pass -y for live submit.",
-      "dry_run": "optional",
-      "group": "account",
-      "lifecycle": "live_mutating",
-      "mutability": "live_mutating",
-      "output_contract": "command_result_or_dry_run_envelope",
-      "ows_signer": "experimental_feature_gated",
-      "raw_payload": "dry_run_only",
-      "risk": "account_state",
-      "stream_bounds": null,
-      "transport": [
-        "cli_process"
-      ]
-    },
-    {
-      "aliases": [],
-      "args": [
-        {
-          "arg_type": "boolean",
-          "default": null,
-          "description": "Route HyperEVM transactions to big blocks.",
-          "enum_values": [],
-          "id": "enable",
-          "input_kind": "boolean",
-          "long": "enable",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        },
-        {
-          "arg_type": "boolean",
-          "default": null,
-          "description": "Route HyperEVM transactions back to small blocks.",
-          "enum_values": [],
-          "id": "disable",
-          "input_kind": "boolean",
-          "long": "disable",
-          "multiple": false,
-          "positional_index": null,
-          "required": false,
-          "short": null
-        }
-      ],
-      "auth_required": true,
-      "bankr_signer": "supported",
-      "command": "hyperliquid account evm-big-blocks",
-      "command_path": [
-        "account",
-        "evm-big-blocks"
-      ],
-      "confirmation": "none",
-      "confirmation_bypass": {
-        "arg": null,
-        "supported": false
-      },
-      "dangerous": true,
-      "description": "Set the HyperCore user flag that routes the account's HyperEVM transactions to big blocks (--enable) or small blocks (--disable) (evmUserModify). Big blocks are for large contract deployments; the flag stays set until it is unset again. The account must already exist on HyperCore.",
       "dry_run": "optional",
       "group": "account",
       "lifecycle": "live_mutating",
@@ -3652,6 +4081,63 @@
       "ows_signer": "experimental_feature_gated",
       "raw_payload": "dry_run_only",
       "risk": "funds_movement",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Route HyperEVM transactions to big blocks.",
+          "enum_values": [],
+          "id": "enable",
+          "input_kind": "boolean",
+          "long": "enable",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Route HyperEVM transactions back to small blocks.",
+          "enum_values": [],
+          "id": "disable",
+          "input_kind": "boolean",
+          "long": "disable",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid account evm-big-blocks",
+      "command_path": [
+        "account",
+        "evm-big-blocks"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": true,
+      "description": "Set the HyperCore user flag that routes the account's HyperEVM transactions to big blocks (--enable) or small blocks (--disable) (evmUserModify). Big blocks are for large contract deployments; the flag stays set until it is unset again. The account must already exist on HyperCore.",
+      "dry_run": "optional",
+      "group": "account",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "account_state",
       "stream_bounds": null,
       "transport": [
         "cli_process"
@@ -5317,7 +5803,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Optional user address for user-specific deposit context when available.",
+          "description": "Optional user address; adds that user's deposit to each vault they hold.",
           "enum_values": [],
           "id": "user",
           "input_kind": null,
@@ -5372,7 +5858,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "List vault summaries with filtering, sorting, and limits.",
+      "description": "List vaults from the exchange's public stats dataset (stats-data.hyperliquid.xyz; /info vaultSummaries answers nothing on either network), with filtering, sorting, and limits.",
       "dry_run": "not_supported",
       "group": "vault",
       "lifecycle": "read_only",
@@ -5407,7 +5893,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Optional user address for user-specific deposit context when available.",
+          "description": "Optional user address; adds that user's deposit to each vault they hold.",
           "enum_values": [],
           "id": "user",
           "input_kind": null,
@@ -5462,7 +5948,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "Search vault summaries by name, leader, or address.",
+      "description": "Search vaults by name, leader, or address in the exchange's public stats dataset (stats-data.hyperliquid.xyz).",
       "dry_run": "not_supported",
       "group": "vault",
       "lifecycle": "read_only",
@@ -5493,6 +5979,19 @@
           "positional_index": 0,
           "required": true,
           "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Optional user address; adds follower_state with that user's stake.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
         }
       ],
       "auth_required": false,
@@ -5508,7 +6007,7 @@
         "supported": false
       },
       "dangerous": false,
-      "description": "Show vault details.",
+      "description": "Show vault details. followers_returned counts the followers the API listed (at most 100, so followers_truncated marks a larger vault); user adds that user's stake as follower_state.",
       "dry_run": "not_supported",
       "group": "vault",
       "lifecycle": "read_only",

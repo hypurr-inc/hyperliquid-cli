@@ -78,6 +78,7 @@ fn sample_meta_output() -> MetaOutput {
         vec![DexRow {
             name: "test-dex".to_string(),
             deployer_fee_scale: None,
+            deployer_fee_scale_by_market: Vec::new(),
         }],
     )
 }
@@ -98,6 +99,10 @@ fn account_fills_projection_selects_requested_fields() {
         liquidity: "taker".to_string(),
         trade_id: 7,
         cloid: None,
+        hash: "0xabc".to_string(),
+        builder_fee: None,
+        liquidation: None,
+        twap_id: None,
     }]);
     let rendered = json_session(Some("coin,time")).render(&output);
     let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();
@@ -154,6 +159,8 @@ fn perps_list_projection_selects_requested_fields() {
         isolated_margin: false,
         margin_mode: "cross_or_isolated",
         tick_size_at_price_1: Some("1".to_string()),
+        delisted: false,
+        deployer_fee_scale: None,
     }]);
     let rendered = json_session(Some("name,index")).render(&output);
     let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();

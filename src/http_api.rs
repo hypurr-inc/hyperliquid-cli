@@ -28,6 +28,10 @@ use crate::response_sanitization::Untrusted;
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// The mainnet vault list is a ~14 MB file: allow for a slow link.
+const STATS_TIMEOUT: Duration = Duration::from_secs(60);
+/// The public host of the exchange's stats datasets (`/<Network>/<dataset>`).
+const STATS_BASE_URL: &str = "https://stats-data.hyperliquid.xyz";
 
 /// Backoff before each automatic read retry (the read is retried at most this many times).
 const READ_RETRY_BACKOFF: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(750)];
@@ -311,19 +315,68 @@ impl ApiClient {
         timeout: Duration,
         disposition: Disposition,
     ) -> Result<Reply, AttemptError> {
+        self.dispatch(
+            |client| client.post(url.clone()).timeout(timeout).json(request),
+            timeout,
+            disposition,
+        )
+        .await
+    }
+
+    /// GET `dataset` from the public stats host and decode the JSON answer.
+    ///
+    /// The stats host serves read-only datasets the `/info` endpoint does not
+    /// (the vault list). It is a static file host: one attempt, a longer
+    /// timeout for the large files, and nothing to rate-limit against.
+    pub async fn stats<T: DeserializeOwned>(
+        &self,
+        dataset: &str,
+        context: &'static str,
+    ) -> Result<T, CliError> {
+        let url = self.stats_endpoint(dataset);
+        let reply = self
+            .dispatch(
+                |client| client.get(url.clone()).timeout(STATS_TIMEOUT),
+                STATS_TIMEOUT,
+                Disposition::Read,
+            )
+            .await
+            .map_err(|attempt| attempt.error)?;
+        ensure_success(&reply, Disposition::Read)?;
+        decode_json(&reply.body, context)
+    }
+
+    /// `<stats host>/<Network>/<dataset>`; under a loopback override the same
+    /// path hangs off the override as `/stats-data/<Network>/<dataset>`.
+    fn stats_endpoint(&self, dataset: &str) -> reqwest::Url {
+        let name = match Network::from(self.chain) {
+            Network::Mainnet => "Mainnet",
+            Network::Testnet => "Testnet",
+        };
+        if self.has_override {
+            self.endpoint(&format!("/stats-data/{name}/{dataset}"))
+        } else {
+            let mut url = STATS_BASE_URL
+                .parse::<reqwest::Url>()
+                .expect("a literal URL");
+            url.set_path(&format!("/{name}/{dataset}"));
+            url
+        }
+    }
+
+    async fn dispatch(
+        &self,
+        build: impl FnOnce(&reqwest::Client) -> reqwest::RequestBuilder,
+        timeout: Duration,
+        disposition: Disposition,
+    ) -> Result<Reply, AttemptError> {
         let classify = |err: reqwest::Error| classify_transport_error(&err, timeout, disposition);
         let client = self.http().map_err(|error| AttemptError {
             error,
             transient: false,
         })?;
 
-        let response = client
-            .post(url.clone())
-            .timeout(timeout)
-            .json(request)
-            .send()
-            .await
-            .map_err(classify)?;
+        let response = build(client).send().await.map_err(classify)?;
         let status = response.status();
         let retry_after = retry_after_seconds(response.headers());
         let body = response.text().await.map_err(|err| {

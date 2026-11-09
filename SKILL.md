@@ -207,6 +207,9 @@ hyperliquid --format json spot list --max-results 20
 hyperliquid --format json book BTC
 hyperliquid --format json candles BTC --limit 10
 hyperliquid --format json funding BTC
+hyperliquid --format json perps funding-history BTC --start 2026-11-01T00:00:00Z --all
+hyperliquid --format json perps funding-predicted --coin BTC
+hyperliquid --format json spot token HYPE
 ```
 
 Account overview:
@@ -214,12 +217,16 @@ Account overview:
 ```bash
 hyperliquid --format json account portfolio USER
 hyperliquid --format json account fills USER --max-results 20
+hyperliquid --format json account fills USER --start 2026-11-01T00:00:00Z --all
+hyperliquid --format json account asset-data USER --coin BTC
 hyperliquid --format json account orders USER
 hyperliquid --format json orders open
 hyperliquid --format json positions list
 ```
 
 Use `USER` for a protocol user address or account lookup target, not a transfer recipient alias.
+
+History reads (`account fills|ledger|funding`, `perps funding-history`) return one API page (2000 fills or ledger rows, 500 funding rows). A full page prints a `{"warning":{"code":"truncated",...,"next_start":N}}` line on stderr in JSON runs; pass `--all` with `--start` to read the whole window, or continue with `--start N`.
 
 ## Bounded Streaming Tasks
 

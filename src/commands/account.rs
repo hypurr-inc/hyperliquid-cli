@@ -5,16 +5,17 @@ use hypersdk::Address;
 use hypersdk::Decimal;
 use hypersdk::hypercore::types::Action;
 use hypersdk::hypercore::{
-    AbstractionMode, ClearinghouseState, Fill, SubAccount, UserRole, UserVaultEquity,
+    AbstractionMode, AssetPosition, ClearinghouseState, SubAccount, UserRole, UserVaultEquity,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::assets::canonical_dex;
+use crate::assets::{AssetResolver, canonical_dex};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
 use crate::commands::abstraction::{AccountMode, fetch_abstraction};
 use crate::commands::actions;
 use crate::commands::confirm;
-use crate::commands::orders::OrderListOutput;
+use crate::commands::orders;
+use crate::commands::paging::{self, Endpoint};
 use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
 use crate::commands::rows::{ListRow, One, Row, Rows, or_missing, style_column};
 use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
@@ -55,6 +56,27 @@ pub struct FillsArgs {
     /// Combine partial fills from the same crossing order where supported by the API.
     #[arg(long, requires = "start")]
     pub aggregate_by_time: bool,
+    /// Keep reading until the window is exhausted, instead of stopping at the API's 2000-fill page.
+    #[arg(long, requires = "start")]
+    pub all: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct OrdersArgs {
+    #[command(flatten)]
+    pub user: OptionalAddressArgs,
+    /// Perp dex name (HIP-3). Defaults to the first dex.
+    #[arg(long)]
+    pub dex: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AssetDataArgs {
+    #[command(flatten)]
+    pub user: OptionalAddressArgs,
+    /// Perpetual coin, for example BTC or xyz:XYZ100.
+    #[arg(long)]
+    pub coin: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -67,6 +89,9 @@ pub struct TimeRangeArgs {
     /// End time as RFC3339 or epoch milliseconds.
     #[arg(long, value_parser = parse_time_millis)]
     pub end: Option<u64>,
+    /// Keep reading until the window is exhausted, instead of stopping at the API's page limit.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -355,7 +380,10 @@ async fn set_abstraction(
     Ok(())
 }
 
-fn validate_optional_time_range(start: Option<u64>, end: Option<u64>) -> Result<(), CliError> {
+pub(crate) fn validate_optional_time_range(
+    start: Option<u64>,
+    end: Option<u64>,
+) -> Result<(), CliError> {
     if let (Some(start), Some(end)) = (start, end)
         && end < start
     {
@@ -381,6 +409,33 @@ async fn print_info_value(
     Ok(())
 }
 
+/// Print a time-windowed history as the raw rows the API sent (keys
+/// snake_cased), saying on stderr when the page was cut off at the API's cap.
+async fn print_window(
+    inv: &Invocation,
+    endpoint: Endpoint,
+    args: &TimeRangeArgs,
+    request: impl Fn(u64) -> InfoRequest,
+    context: &'static str,
+    empty_message: &'static str,
+) -> Result<(), anyhow::Error> {
+    let window = paging::read_window(
+        inv.remote()?.api(),
+        endpoint,
+        args.start,
+        args.all,
+        request,
+        context,
+    )
+    .await?;
+    paging::announce_truncation(inv, endpoint, &window, args.all);
+    inv.print(&JsonValueOutput::new(
+        serde_json::Value::Array(window.rows),
+        empty_message,
+    ));
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FillRow {
     pub coin: String,
@@ -400,16 +455,84 @@ pub struct FillRow {
     pub liquidity: String,
     pub trade_id: u64,
     pub cloid: Option<String>,
+    pub hash: String,
+    /// Only fills that paid a builder fee carry one.
+    #[serde(
+        with = "rust_decimal::serde::str_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub builder_fee: Option<Decimal>,
+    /// Only liquidation fills carry one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liquidation: Option<FillLiquidation>,
+    /// Only TWAP slice fills carry one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twap_id: Option<u64>,
 }
 
-impl From<Fill> for FillRow {
-    fn from(fill: Fill) -> Self {
+/// The liquidation a fill took part in, as the API reports it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
+pub struct FillLiquidation {
+    pub liquidated_user: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub mark_px: Decimal,
+    pub method: String,
+}
+
+/// A fill as `userFills` and `userFillsByTime` send it. `dir` stays a string:
+/// the SDK's closed `FillDirection` would fail every fill listing the day the
+/// exchange adds a direction.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawFill {
+    coin: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    px: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    sz: Decimal,
+    side: FillSide,
+    time: u64,
+    dir: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    closed_pnl: Decimal,
+    hash: String,
+    oid: u64,
+    crossed: bool,
+    #[serde(with = "rust_decimal::serde::str")]
+    fee: Decimal,
+    tid: u64,
+    #[serde(default)]
+    cloid: Option<String>,
+    fee_token: String,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    builder_fee: Option<Decimal>,
+    #[serde(default)]
+    liquidation: Option<FillLiquidation>,
+    #[serde(default)]
+    twap_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum FillSide {
+    #[serde(rename = "B")]
+    Bid,
+    #[serde(rename = "A")]
+    Ask,
+}
+
+impl From<RawFill> for FillRow {
+    fn from(fill: RawFill) -> Self {
         Self {
             coin: fill.coin,
-            side: fill.side.to_string(),
+            side: match fill.side {
+                FillSide::Bid => "Bid",
+                FillSide::Ask => "Ask",
+            }
+            .to_string(),
             price: fill.px,
             size: fill.sz,
-            direction: fill.dir.to_string(),
+            direction: fill.dir,
             closed_pnl: fill.closed_pnl,
             fee: fill.fee,
             fee_token: fill.fee_token,
@@ -417,9 +540,38 @@ impl From<Fill> for FillRow {
             time: fill.time,
             liquidity: if fill.crossed { "taker" } else { "maker" }.to_string(),
             trade_id: fill.tid,
-            cloid: fill.cloid.map(|cloid| cloid.to_string()),
+            cloid: fill.cloid,
+            hash: fill.hash,
+            builder_fee: fill.builder_fee,
+            liquidation: fill.liquidation,
+            twap_id: fill.twap_id,
         }
     }
+}
+
+/// Decode fill rows, naming spot pairs as the markets list them (`@107` is
+/// `HYPE/USDC`). The metadata is read only when a spot coin needs it.
+async fn fill_rows(
+    inv: &Invocation,
+    raw: Vec<serde_json::Value>,
+) -> Result<Vec<FillRow>, anyhow::Error> {
+    let mut rows = raw
+        .into_iter()
+        .map(|fill| {
+            serde_json::from_value::<RawFill>(fill)
+                .map(FillRow::from)
+                .map_err(|err| {
+                    CliError::Internal(anyhow::anyhow!("decode failed while reading fills: {err}"))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.iter().any(|row| row.coin.starts_with('@')) {
+        let resolver: AssetResolver = inv.asset_resolver().await?;
+        for row in &mut rows {
+            row.coin = resolver.display_coin(&row.coin);
+        }
+    }
+    Ok(rows)
 }
 
 pub type FillsOutput = Rows<FillRow>;
@@ -537,10 +689,35 @@ pub struct PositionRow {
     #[serde(with = "rust_decimal::serde::str_option")]
     pub liquidation_price: Option<Decimal>,
     pub leverage: String,
+    /// Unrealized PnL over the margin put into the position, as a fraction.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub return_on_equity: Decimal,
+    /// The market's maximum leverage, not this position's.
+    pub max_leverage: u32,
+    pub cum_funding: CumFundingRow,
 }
 
-impl From<positions::PositionRow> for PositionRow {
-    fn from(row: positions::PositionRow) -> Self {
+/// A position's cumulative funding over the three horizons the API reports.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CumFundingRow {
+    #[serde(with = "rust_decimal::serde::str")]
+    pub all_time: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub since_open: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub since_change: Decimal,
+}
+
+impl From<AssetPosition> for PositionRow {
+    fn from(asset: AssetPosition) -> Self {
+        let position = &asset.position;
+        let (return_on_equity, max_leverage) = (position.return_on_equity, position.max_leverage);
+        let cum_funding = CumFundingRow {
+            all_time: position.cum_funding.all_time,
+            since_open: position.cum_funding.since_open,
+            since_change: position.cum_funding.since_change,
+        };
+        let row = positions::PositionRow::from(asset);
         Self {
             coin: row.coin,
             side: row.side.to_string(),
@@ -550,6 +727,9 @@ impl From<positions::PositionRow> for PositionRow {
             unrealized_pnl: row.unrealized_pnl,
             liquidation_price: row.liquidation_price,
             leverage: format!("{}x {}", row.leverage.value, row.leverage.kind),
+            return_on_equity,
+            max_leverage,
+            cum_funding,
         }
     }
 }
@@ -621,7 +801,6 @@ impl PortfolioOutput {
         let positions = state
             .asset_positions
             .into_iter()
-            .map(positions::PositionRow::from)
             .map(PositionRow::from)
             .collect::<Vec<_>>();
         let vault_equities = vault_equities
@@ -834,33 +1013,45 @@ impl CliCommand for AccountFills {
         arg("aggregate_by_time")
             .kind(InputKind::Boolean)
             .describe("Ask the API to aggregate fills by time where supported."),
+        arg("all").kind(InputKind::Boolean).describe(
+            "Page through the whole window (requires start). Without it one page is returned and a notice on stderr names the start that continues.",
+        ),
     ]);
 
     async fn run(inv: &Invocation, args: &FillsArgs) -> Result<(), anyhow::Error> {
         let user = args.user.resolve(inv).await?;
         let api = inv.remote()?.api();
         validate_optional_time_range(args.start, args.end)?;
-        let fills = match args.start {
-            Some(start) => {
-                let request = InfoRequest::user("userFillsByTime", user)
-                    .time_range(Some(start), args.end)
-                    .field_if("aggregateByTime", args.aggregate_by_time.then_some(true));
-                api.info::<Vec<Fill>>(&request, "loading user fills by time")
-                    .await?
-                    .into_iter()
-                    .map(FillRow::from)
-                    .collect()
-            }
-            None => api
-                .sdk()
-                .user_fills(user)
-                .await
-                .map_err(from_sdk)?
-                .into_iter()
-                .map(FillRow::from)
-                .collect(),
+        let (endpoint, window) = match args.start {
+            Some(start) => (
+                paging::USER_FILLS_BY_TIME,
+                paging::read_window(
+                    api,
+                    paging::USER_FILLS_BY_TIME,
+                    start,
+                    args.all,
+                    |from| {
+                        InfoRequest::user("userFillsByTime", user)
+                            .time_range(Some(from), args.end)
+                            .field_if("aggregateByTime", args.aggregate_by_time.then_some(true))
+                    },
+                    "loading user fills by time",
+                )
+                .await?,
+            ),
+            None => (
+                paging::USER_FILLS_RECENT,
+                paging::read_recent(
+                    api,
+                    paging::USER_FILLS_RECENT,
+                    &InfoRequest::user("userFills", user),
+                    "loading user fills",
+                )
+                .await?,
+            ),
         };
-        inv.print(&FillsOutput::new(fills));
+        paging::announce_truncation(inv, endpoint, &window, args.all);
+        inv.print(&FillsOutput::new(fill_rows(inv, window.rows).await?));
         Ok(())
     }
 }
@@ -918,26 +1109,25 @@ impl CliCommand for AccountRateLimit {
 pub struct AccountOrders;
 
 impl CliCommand for AccountOrders {
-    type Args = OptionalAddressArgs;
+    type Args = OrdersArgs;
 
     const SPEC: CommandSpec = CommandSpec::read(
         &["account", "orders"],
         "account",
         "List open orders for an address or wallet",
-        "Query public open orders for an address or wallet.",
+        "Query public open orders for an address or wallet. Pass dex for a HIP-3 dex's orders; the default dex's orders do not include them.",
     )
-    .args(&[USER_SELECTOR.schema_required()]);
+    .args(&[
+        USER_SELECTOR.schema_required(),
+        arg("dex").describe("Perp dex name (HIP-3). Defaults to the first dex."),
+    ]);
 
-    async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        let user = args.resolve(inv).await?;
-        let orders = inv
-            .remote()?
-            .api()
-            .sdk()
-            .open_orders(user, None)
-            .await
-            .map_err(from_sdk)?;
-        inv.print(&OrderListOutput::new(orders, "No orders."));
+    async fn run(inv: &Invocation, args: &OrdersArgs) -> Result<(), anyhow::Error> {
+        let user = args.user.resolve(inv).await?;
+        let api = inv.remote()?.api();
+        let dex = canonical_dex(api.sdk(), args.dex.as_deref()).await?;
+        let resolver = inv.asset_resolver().await?;
+        inv.print(&orders::open_orders_output(api, &resolver, user, dex.as_deref()).await?);
         Ok(())
     }
 }
@@ -1055,15 +1245,22 @@ impl CliCommand for AccountLedger {
         arg("end")
             .schema_string()
             .describe("RFC3339 or epoch-millisecond end time."),
+        arg("all").kind(InputKind::Boolean).describe(
+            "Page through the whole window. Without it one page is returned and a notice on stderr names the start that continues.",
+        ),
     ]);
 
     async fn run(inv: &Invocation, args: &TimeRangeArgs) -> Result<(), anyhow::Error> {
         let user = args.user.resolve(inv).await?;
         validate_optional_time_range(Some(args.start), args.end)?;
-        print_info_value(
+        print_window(
             inv,
-            InfoRequest::user("userNonFundingLedgerUpdates", user)
-                .time_range(Some(args.start), args.end),
+            paging::USER_LEDGER,
+            args,
+            |from| {
+                InfoRequest::user("userNonFundingLedgerUpdates", user)
+                    .time_range(Some(from), args.end)
+            },
             "userNonFundingLedgerUpdates",
             "No ledger updates.",
         )
@@ -1090,16 +1287,105 @@ impl CliCommand for AccountFunding {
         arg("end")
             .schema_string()
             .describe("RFC3339 or epoch-millisecond end time."),
+        arg("all").kind(InputKind::Boolean).describe(
+            "Page through the whole window. Without it one page is returned and a notice on stderr names the start that continues.",
+        ),
     ]);
 
     async fn run(inv: &Invocation, args: &TimeRangeArgs) -> Result<(), anyhow::Error> {
         let user = args.user.resolve(inv).await?;
         validate_optional_time_range(Some(args.start), args.end)?;
-        print_info_value(
+        print_window(
             inv,
-            InfoRequest::user("userFunding", user).time_range(Some(args.start), args.end),
+            paging::USER_FUNDING,
+            args,
+            |from| InfoRequest::user("userFunding", user).time_range(Some(from), args.end),
             "userFunding",
             "No funding history.",
+        )
+        .await
+    }
+}
+
+pub struct AccountRole;
+
+impl CliCommand for AccountRole {
+    type Args = OptionalAddressArgs;
+
+    const SPEC: CommandSpec = CommandSpec::read(
+        &["account", "role"],
+        "account",
+        "Show an address's role: user, agent, vault, subaccount or missing",
+        "Query an address's protocol role. A subaccount names its master and an agent its owner.",
+    )
+    .args(&[USER_SELECTOR.schema_required()]);
+
+    async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
+        print_info_value(
+            inv,
+            InfoRequest::user("userRole", args.resolve(inv).await?),
+            "userRole",
+            "No role.",
+        )
+        .await
+    }
+}
+
+pub struct AccountMultisigSigners;
+
+impl CliCommand for AccountMultisigSigners {
+    type Args = OptionalAddressArgs;
+
+    const SPEC: CommandSpec = CommandSpec::read(
+        &["account", "multisig-signers"],
+        "account",
+        "Show the authorized signers of a multi-sig account",
+        "Query the authorized signers and signature threshold of a multi-sig account. The exchange answers nothing for an address that is not multi-sig.",
+    )
+    .args(&[USER_SELECTOR.schema_required()]);
+
+    async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
+        print_info_value(
+            inv,
+            InfoRequest::user("userToMultiSigSigners", args.resolve(inv).await?),
+            "userToMultiSigSigners",
+            "Not a multi-sig account.",
+        )
+        .await
+    }
+}
+
+pub struct AccountAssetData;
+
+impl CliCommand for AccountAssetData {
+    type Args = AssetDataArgs;
+
+    const SPEC: CommandSpec = CommandSpec::read(
+        &["account", "asset-data"],
+        "account",
+        "Show an account's leverage and trade capacity on one perpetual",
+        "Query an account's active asset data for a perpetual: leverage, maximum trade sizes and size available to trade (buy side first, sell side second) and the mark price. Works with no open position.",
+    )
+    .args(&[
+        USER_SELECTOR.schema_required(),
+        arg("coin")
+            .kind(InputKind::MarketSymbol)
+            .describe("Perpetual coin, for example BTC or xyz:XYZ100.")
+            .resource_id("coin"),
+    ]);
+
+    async fn run(inv: &Invocation, args: &AssetDataArgs) -> Result<(), anyhow::Error> {
+        let user = args.user.resolve(inv).await?;
+        let resolver = inv.asset_resolver().await?;
+        let perp = resolver
+            .resolve_perp_or_fetch(inv.remote()?.api().sdk(), &args.coin)
+            .await
+            .map_err(CliError::from)?;
+        print_info_value(
+            inv,
+            InfoRequest::user("activeAssetData", user).field("coin", perp.display_name()),
+            "activeAssetData",
+            "No asset data.",
         )
         .await
     }

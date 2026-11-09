@@ -148,6 +148,18 @@
     {
       "auth_required": true,
       "bankr_signer": "supported",
+      "command": "hyperliquid account evm-big-blocks",
+      "confirmation": "none",
+      "dangerous": true,
+      "dry_run": "optional",
+      "lifecycle": "live_mutating",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "account_state"
+    },
+    {
+      "auth_required": true,
+      "bankr_signer": "supported",
       "command": "hyperliquid subaccount create",
       "confirmation": "none",
       "dangerous": true,
@@ -412,6 +424,30 @@
     {
       "auth_required": true,
       "bankr_signer": "supported",
+      "command": "hyperliquid borrowlend repay <TOKEN> --amount <AMOUNT>",
+      "confirmation": "none",
+      "dangerous": true,
+      "dry_run": "optional",
+      "lifecycle": "live_mutating",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement"
+    },
+    {
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid borrowlend borrow <TOKEN> --amount <AMOUNT>",
+      "confirmation": "none",
+      "dangerous": true,
+      "dry_run": "optional",
+      "lifecycle": "live_mutating",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement"
+    },
+    {
+      "auth_required": true,
+      "bankr_signer": "supported",
       "command": "hyperliquid orders create",
       "confirmation": "prompt",
       "dangerous": true,
@@ -557,6 +593,18 @@
       "auth_required": true,
       "bankr_signer": "supported",
       "command": "hyperliquid positions update-margin",
+      "confirmation": "none",
+      "dangerous": true,
+      "dry_run": "optional",
+      "lifecycle": "live_mutating",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement"
+    },
+    {
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid positions top-up-margin",
       "confirmation": "none",
       "dangerous": true,
       "dry_run": "optional",

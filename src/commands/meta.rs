@@ -2,7 +2,12 @@ use hypersdk::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::assets::{RawPerpDex, SpotListing, load_raw_perp_dexes, load_spot_markets};
+use futures::future::try_join_all;
+
+use crate::assets::{
+    DeployerFeeScales, SpotListing, load_deployer_fee_scales, load_raw_perp_dexes,
+    load_spot_markets,
+};
 use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
 use crate::commands::rows::MISSING;
 use crate::errors::CliError;
@@ -54,15 +59,39 @@ impl AssetContextRow {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DexRow {
     pub name: String,
+    /// The deployer fee scale all of the dex's markets share; null when it
+    /// lists none or its markets differ (see `deployer_fee_scale_by_market`).
     #[serde(with = "rust_decimal::serde::str_option")]
     pub deployer_fee_scale: Option<Decimal>,
+    /// Each market's scale, listed only when the markets of the dex differ.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deployer_fee_scale_by_market: Vec<MarketFeeScaleRow>,
 }
 
-impl From<RawPerpDex> for DexRow {
-    fn from(dex: RawPerpDex) -> Self {
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct MarketFeeScaleRow {
+    pub coin: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub deployer_fee_scale: Decimal,
+}
+
+impl DexRow {
+    pub(crate) fn new(name: String, scales: &DeployerFeeScales) -> Self {
+        let uniform = scales.uniform();
         Self {
-            name: dex.name,
-            deployer_fee_scale: dex.deployer_fee_scale,
+            name,
+            deployer_fee_scale: uniform,
+            deployer_fee_scale_by_market: match uniform {
+                Some(_) => Vec::new(),
+                None => scales
+                    .by_market()
+                    .iter()
+                    .map(|(coin, scale)| MarketFeeScaleRow {
+                        coin: coin.clone(),
+                        deployer_fee_scale: *scale,
+                    })
+                    .collect(),
+            },
         }
     }
 }
@@ -220,7 +249,11 @@ async fn fetch_meta_and_asset_contexts(api: &ApiClient) -> Result<MetaAndAssetCo
 
 async fn fetch_dexes(api: &ApiClient) -> Result<Vec<DexRow>, CliError> {
     let dexes = load_raw_perp_dexes(api).await?;
-    Ok(dexes.into_iter().flatten().map(DexRow::from).collect())
+    try_join_all(dexes.into_iter().flatten().map(|dex| async move {
+        let scales = load_deployer_fee_scales(api, &dex.name).await?;
+        Ok(DexRow::new(dex.name, &scales))
+    }))
+    .await
 }
 
 async fn load_spot_universe(api: &ApiClient) -> Result<Vec<MetaSpotRow>, CliError> {

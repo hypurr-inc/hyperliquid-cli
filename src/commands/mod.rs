@@ -15,6 +15,7 @@ pub mod orderbook;
 pub mod orders;
 pub mod outcome_actions;
 pub mod outcomes;
+pub(crate) mod paging;
 pub mod perps;
 pub mod positions;
 pub mod prio;
@@ -49,8 +50,14 @@ pub fn entries() -> &'static [Entry] {
         vec![
             Entry::of::<perps::PerpsList>(),
             Entry::of::<perps::PerpsGet>(),
+            Entry::of::<perps::PerpsFundingHistory>(),
+            Entry::of::<perps::PerpsFundingPredicted>(),
+            Entry::of::<perps::PerpsAtOiCap>(),
+            Entry::of::<perps::PerpsDexs>(),
+            Entry::of::<perps::PerpsDexLimits>(),
             Entry::of::<spot::SpotList>(),
             Entry::of::<spot::SpotGet>(),
+            Entry::of::<spot::SpotToken>(),
             Entry::of::<asset::AssetDecode>(),
             Entry::of::<asset::AssetSearch>(),
             Entry::of::<outcomes::OutcomesList>(),
@@ -106,6 +113,9 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<account::AccountFunding>(),
             Entry::of::<account::AccountTwapHistory>(),
             Entry::of::<account::AccountTwapFills>(),
+            Entry::of::<account::AccountRole>(),
+            Entry::of::<account::AccountMultisigSigners>(),
+            Entry::of::<account::AccountAssetData>(),
             Entry::of::<account::AccountAbstraction>(),
             Entry::of::<account::AccountAbstractionSet>(),
             Entry::of::<invalidate_nonce::AccountInvalidateNonce>(),

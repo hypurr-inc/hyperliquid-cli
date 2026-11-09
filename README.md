@@ -267,10 +267,16 @@ Canonical top-level aliases accepted by the CLI:
 
 | Command | Description |
 | --- | --- |
-| `perps list [--dex <DEX>]` | List perpetual markets. `margin_mode` is `cross_or_isolated`, `isolated_only` (legacy `onlyIsolated` flag), `no_cross` (isolated only, margin removable) or `strict_isolated` (isolated only, margin not removable). |
+| `perps list [--dex <DEX>]` | List perpetual markets, delisted ones included and flagged `delisted`. `margin_mode` is `cross_or_isolated`, `isolated_only` (legacy `onlyIsolated` flag), `no_cross` (isolated only, margin removable) or `strict_isolated` (isolated only, margin not removable). |
 | `perps get <COIN> [--dex <DEX>]` | Show one perpetual market, including its `margin_mode`. |
+| `perps funding-history <COIN> --start <TIME> [--end <TIME>] [--all]` | List a perpetual's funding rates, oldest first. The API returns 500 per request; a full page is announced on stderr with the `--start` that continues, and `--all` reads the whole window. |
+| `perps funding-predicted [--coin <COIN>]` | Predicted funding rate per venue (`HlPerp`, `BinPerp`, `BybitPerp`) with the funding interval in hours when stated. |
+| `perps at-oi-cap [--dex <DEX>]` | List the perpetuals at their open interest cap. |
+| `perps dexs` | List builder-deployed (HIP-3) perp dexes: slot, deployer, fee recipient, deployer fee scale, open interest caps and funding multipliers. |
+| `perps dex-limits <DEX>` | Show a HIP-3 dex's open interest and transfer limits and its total net deposit. |
 | `spot list` | List spot markets. |
-| `spot get <PAIR>` | Show one spot pair, for example `PURR/USDC`. |
+| `spot get <PAIR>` | Show one spot pair, for example `PURR/USDC`, with its mark, mid and previous-day price and 24-hour volume. |
+| `spot token <TOKEN>` | Show a spot token's supply, prices, deployer and genesis by name or `0x` token id. |
 | `outcomes list [--limit <N>] [--oldest-first]` | List active outcome market sides from `outcomeMeta`, newest outcome first, with template names resolved, `quote_token`, `venue`, `deployer_fee_scale`, the `question` the outcome belongs to (`question_role` `named` or `fallback`) and per-row `warnings`. |
 | `outcomes get #<ENCODING>` / `outcomes get +<ENCODING>` | Show outcome side metadata and derived asset ID. |
 | `outcomes questions [--limit <N>] [--oldest-first]` | List questions: `named_outcomes`, the `fallback_outcome` and `settled_named_outcomes` of each. |
@@ -305,10 +311,13 @@ Canonical top-level aliases accepted by the CLI:
 | `wallet export <SELECTOR> [-y]` | Export wallet secret (mnemonic or private key). |
 | `wallet reset [-y]` | Delete the config file, clearing the default wallet, network, builder, and referral defaults. Wallets stay in the vault. |
 | `account fees [ADDRESS_OR_WALLET]` | Query fee schedule and volume context. |
-| `account fills [ADDRESS_OR_WALLET] [--start <TIME>] [--end <TIME>] [--aggregate-by-time]` | Query public fill history, optionally by time. |
-| `account ledger [ADDRESS_OR_WALLET] --start <TIME> [--end <TIME>]` | Query deposits, withdrawals, transfers, and other non-funding ledger updates. |
-| `account funding [ADDRESS_OR_WALLET] --start <TIME> [--end <TIME>]` | Query user funding payment history. |
-| `account orders [ADDRESS_OR_WALLET]` | Query public open orders. |
+| `account fills [ADDRESS_OR_WALLET] [--start <TIME>] [--end <TIME>] [--aggregate-by-time] [--all]` | Query public fill history, optionally by time. The API returns at most 2000 fills per request; a full page is announced on stderr with the `--start` that continues, and `--all` (with `--start`) reads the whole window. |
+| `account ledger [ADDRESS_OR_WALLET] --start <TIME> [--end <TIME>] [--all]` | Query deposits, withdrawals, transfers, and other non-funding ledger updates (2000 per request; see `account fills` for the truncation notice and `--all`). |
+| `account funding [ADDRESS_OR_WALLET] --start <TIME> [--end <TIME>] [--all]` | Query user funding payment history (500 per request; see `account fills` for the truncation notice and `--all`). |
+| `account orders [ADDRESS_OR_WALLET] [--dex <NAME>]` | Query public open orders. `--dex` reads a HIP-3 DEX's orders. |
+| `account role [ADDRESS_OR_WALLET]` | Show an address's role (user, agent, vault, subaccount, missing); a subaccount names its master. |
+| `account multisig-signers [ADDRESS_OR_WALLET]` | Show the authorized signers and threshold of a multi-sig account. |
+| `account asset-data [ADDRESS_OR_WALLET] --coin <COIN>` | Show an account's leverage, maximum trade sizes and size available to trade on one perpetual, with no position needed. |
 | `account portfolio [ADDRESS_OR_WALLET] [--dex <NAME>]` | Query public portfolio summary. `--dex` reads a HIP-3 DEX's perp account. |
 | `account portfolio-history [ADDRESS_OR_WALLET]` | Query frontend portfolio graph/history data. |
 | `account rate-limit [ADDRESS_OR_WALLET]` | Query user rate-limit context. |
@@ -415,7 +424,7 @@ Outcome market notation (`#N` spot coin and `+N` token name) is available for di
 | `staking summary [ADDRESS]` / `staking validators` / `staking rewards [ADDRESS]` / `staking history [ADDRESS]` | Read staking state and history. |
 | `staking delegate --validator <ADDRESS> --amount <AMOUNT>` / `staking undelegate --validator <ADDRESS> --amount <AMOUNT>` / `staking deposit --amount <AMOUNT>` / `staking withdraw --amount <AMOUNT>` / `staking claim-rewards` | Submit staking actions. |
 | `staking link initiate --user <ADDRESS>` / `staking link finalize --user <ADDRESS>` | Link trading and staking accounts for fee discount attribution. Dry-runs include permanence/control warnings; live commands require confirmation or `--yes`. |
-| `vault list [--kind protocol\|user\|normal\|child\|parent] [--user <ADDRESS>] [--limit <N>] [--sort tvl\|apr\|age\|name]` / `vault search <QUERY> [--user <ADDRESS>] [--limit <N>] [--sort tvl\|apr\|age\|name]` / `vault get <ADDRESS>` / `vault positions <ADDRESS>` | Discover and query vault state. `--user` includes user deposit context when the API returns it. |
+| `vault list [--kind protocol\|user\|normal\|child\|parent] [--user <ADDRESS>] [--limit <N>] [--sort tvl\|apr\|age\|name]` / `vault search <QUERY> [--user <ADDRESS>] [--limit <N>] [--sort tvl\|apr\|age\|name]` / `vault get <ADDRESS> [--user <ADDRESS>]` / `vault positions <ADDRESS>` | Discover and query vault state. The list comes from the exchange's public stats dataset (`stats-data.hyperliquid.xyz`), because `/info` `vaultSummaries` answers nothing. `vault list|search --user` adds that user's deposit to each vault; `vault get` reports `followers_returned` (the API lists at most 100 followers, `followers_truncated` marks a larger vault) and, with `--user`, that user's `follower_state`. |
 | `vault deposit --vault <ADDRESS> --amount <AMOUNT>` / `vault withdraw --vault <ADDRESS> --amount <AMOUNT>` | Submit vault transfers. |
 | `borrowlend rates` / `borrowlend get <TOKEN>` / `borrowlend user [ADDRESS]` | Query borrow/lend markets. |
 | `borrowlend supply <TOKEN> --amount <AMOUNT>` / `borrowlend withdraw <TOKEN> (--amount <AMOUNT>\|--max)` / `borrowlend repay <TOKEN> (--amount <AMOUNT>\|--max)` / `borrowlend borrow <TOKEN> --amount <AMOUNT>` | Submit verified wallet-signed exchange `borrowLend` actions; use `--dry-run` to inspect the action first. Manual `borrow` is refused for portfolio-margin accounts, which borrow automatically. |

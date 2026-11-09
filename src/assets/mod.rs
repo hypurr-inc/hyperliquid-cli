@@ -12,7 +12,10 @@ pub use market::{MarginRule, Market, OutcomeAsset, PerpAsset, SpotAsset};
 pub use metadata::{
     AssetMetadata, MetadataCache, SpotListing, canonical_dex, load_spot_markets, require_spot_token,
 };
-pub(crate) use metadata::{RawPerpDex, find_perp_dex, load_hip3_market, load_raw_perp_dexes};
+pub(crate) use metadata::{
+    DeployerFeeScales, find_perp_dex, load_deployer_fee_scales, load_hip3_market,
+    load_raw_perp_dexes,
+};
 pub use outcome_templates::{OutcomeTemplate, TemplateList, load_outcome_templates};
 #[cfg(test)]
 pub(crate) use outcomes::catalog_for_tests;
