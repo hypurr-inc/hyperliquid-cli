@@ -1,4 +1,3 @@
-use chrono::Utc;
 use hypersdk::hypercore::types::OrderGrouping;
 use hypersdk::{Address, Decimal};
 
@@ -7,6 +6,7 @@ use super::prepared::{
     PreparedOrder, PreparedOrderBatch, PreparedTpslBatch, QuoteAmount, TpslLegKind,
 };
 use crate::builder_fee::BuilderFee;
+use crate::clock;
 use crate::command_spec::YES_FLAG;
 use crate::consent::{self as policy, ConsentBlock, Tone};
 use crate::errors::CliError;
@@ -79,7 +79,7 @@ pub(super) fn confirm_schedule_cancel(
     plan: &ScheduleCancelPlan,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
-    let question = if let Some(scheduled) = plan.scheduled(Utc::now()) {
+    let question = if let Some(scheduled) = plan.scheduled(clock::now_utc()) {
         format!(
             "Schedule cancel-all for {} on {}?",
             scheduled.at.to_rfc3339(),

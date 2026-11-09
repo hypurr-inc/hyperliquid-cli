@@ -8,18 +8,20 @@ use serde::Serialize;
 use crate::auth;
 use crate::clock::{self, DurationError};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
+use crate::commands::common::support::action_json;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::exchange::actions;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
 use crate::output::{TableData, serialize_row};
+use crate::quantity;
 use crate::signing::{SelectedSigner, Signs};
 use crate::terminal::OutputFormat;
 use crate::wire::{AddressRole, address};
 
-const MAX_AGENT_EXPIRATION_MS: u64 = 180 * 24 * 60 * 60 * 1000;
-const REVOKE_REPLACEMENT_EXPIRATION_MS: u64 = 60 * 1000;
+const MAX_AGENT_EXPIRATION_MS: u64 = clock::DAY.ms(180);
+const REVOKE_REPLACEMENT_EXPIRATION_MS: u64 = clock::MINUTE.ms(1);
 const MAX_AGENT_NAME_LEN: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,11 +428,7 @@ fn approval_document(
     nonce: u64,
 ) -> Result<(ApproveAgent, serde_json::Value), CliError> {
     let approval = approval_action(chain, prepared, nonce);
-    let value = serde_json::to_value(Action::ApproveAgent(approval.clone())).map_err(|err| {
-        CliError::Internal(anyhow::anyhow!(
-            "failed to encode approveAgent action: {err}"
-        ))
-    })?;
+    let value = action_json(&Action::ApproveAgent(approval.clone()))?;
     Ok((approval, value))
 }
 
@@ -532,7 +530,7 @@ fn parse_expires_in(raw: &str) -> Result<u64, CliError> {
             DurationError::Empty | DurationError::Count(_) => {
                 refuse("--expires-in amount must be a positive integer")
             }
-            DurationError::Zero => refuse("--expires-in amount must be greater than zero"),
+            DurationError::Zero => refuse(&quantity::not_positive("--expires-in amount")),
             DurationError::Unit => refuse("--expires-in unit must be one of m, h, d, or w"),
             DurationError::TooLarge => overflowed(),
         })?;

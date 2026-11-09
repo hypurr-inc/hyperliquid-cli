@@ -3,11 +3,16 @@
 
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+
+#[must_use]
+pub fn now_utc() -> DateTime<Utc> {
+    Utc::now()
+}
 
 #[must_use]
 pub fn now_ms() -> u64 {
-    Utc::now().timestamp_millis() as u64
+    now_utc().timestamp_millis() as u64
 }
 
 /// A suffix a duration may end in, and how long one of it is.
@@ -21,10 +26,10 @@ pub struct Unit {
 
 pub const MILLISECOND: Unit = Unit::new("ms", "milliseconds", 1);
 pub const SECOND: Unit = Unit::new("s", "seconds", 1_000);
-pub const MINUTE: Unit = Unit::new("m", "minutes", 60 * 1_000);
-pub const HOUR: Unit = Unit::new("h", "hours", 60 * 60 * 1_000);
-pub const DAY: Unit = Unit::new("d", "days", 24 * 60 * 60 * 1_000);
-pub const WEEK: Unit = Unit::new("w", "weeks", 7 * 24 * 60 * 60 * 1_000);
+pub const MINUTE: Unit = Unit::new("m", "minutes", 60 * SECOND.millis);
+pub const HOUR: Unit = Unit::new("h", "hours", 60 * MINUTE.millis);
+pub const DAY: Unit = Unit::new("d", "days", 24 * HOUR.millis);
+pub const WEEK: Unit = Unit::new("w", "weeks", 7 * DAY.millis);
 
 impl Unit {
     const fn new(suffix: &'static str, name: &'static str, millis: u64) -> Self {
@@ -33,6 +38,18 @@ impl Unit {
             name,
             millis,
         }
+    }
+
+    /// `count` of this unit.
+    #[must_use]
+    pub const fn of(self, count: u64) -> Duration {
+        Duration::from_millis(self.millis * count)
+    }
+
+    /// `count` of this unit, in milliseconds.
+    #[must_use]
+    pub const fn ms(self, count: u64) -> u64 {
+        self.millis * count
     }
 }
 
