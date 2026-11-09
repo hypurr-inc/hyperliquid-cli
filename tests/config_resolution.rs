@@ -1,11 +1,7 @@
-// Integration tests for config resolution.
-//
 // Tests the priority chain:
 //   CLI flag > HYPERLIQUID_PRIVATE_KEY env > ~/.config/hyperliquid/config.json
 // And network selection:
 //   --testnet flag > HYPERLIQUID_NETWORK env > config file
-//
-// Run with: cargo test --test config_resolution
 
 use assert_cmd::Command;
 #[allow(dead_code)]
@@ -13,8 +9,6 @@ mod support;
 
 use std::fs;
 use tempfile::TempDir;
-
-// ── Helper: create a temp config directory with a config.json ───────
 
 const CLI_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000001";
 const ENV_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000002";
@@ -56,12 +50,8 @@ fn write_config_files(
     fs::write(mac_path, json).unwrap();
 }
 
-// ── Test: missing config does not crash read-only commands ───────────
-
 #[test]
 fn test_missing_config_no_crash() {
-    // With no config file and no env vars, the CLI should still work
-    // for read-only commands (e.g., --help, --version)
     Command::cargo_bin("hyperliquid")
         .unwrap()
         .env_remove("HYPERLIQUID_PRIVATE_KEY")
@@ -83,8 +73,6 @@ fn test_missing_config_help_works() {
         .success()
         .stdout(predicates::str::contains("perps"));
 }
-
-// ── CLI-level tests for config priority chain ────────────────────────
 
 #[test]
 fn test_cli_private_key_flag_overrides_env_and_config() {
@@ -356,8 +344,6 @@ async fn test_cli_missing_config_remains_non_fatal() {
     assert_eq!(resolved_network(&mut command).await, "mainnet");
 }
 
-// ── In-process tests over `Settings` ─────────────────────────────────
-//
 // Resolution order and edge cases are covered by unit tests in `src/settings.rs`;
 // these check the same contract through the public API with a real config file.
 

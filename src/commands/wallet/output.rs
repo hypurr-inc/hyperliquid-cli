@@ -1,5 +1,3 @@
-//! Rows and receipts printed by the wallet and account commands.
-
 use serde::Serialize;
 
 use crate::invocation::Invocation;
@@ -9,7 +7,6 @@ use ows_lib::types::WalletInfo as VaultWalletInfo;
 
 use crate::ows::vault::{HyperliquidAccount, Vault};
 
-/// `type` of every `account ls` row: all listed wallets live in the OWS vault.
 const OWS_WALLET_TYPE: &str = "ows-wallet";
 
 /// One `account ls` row. The shape predates the vault: `id` is a 1-based
@@ -183,7 +180,6 @@ impl TableData for StatusOutput {
     }
 }
 
-/// What a wallet command reports about one wallet.
 pub(super) struct Receipt {
     pub message: String,
     pub address: String,
@@ -257,7 +253,6 @@ pub(super) fn print_declined(inv: &Invocation, message: &str) {
     }
 }
 
-/// What `wallet login` and `wallet logout` report about the Bankr link.
 pub(super) struct BankrReceipt {
     pub status: &'static str,
     pub message: String,

@@ -27,11 +27,9 @@ macro_rules! env_vars {
         pub mod env {
             $($(#[$meta])* pub const $name: &str = $value;)*
 
-            /// Every variable the CLI reads.
             pub const ALL: &[&str] = &[$($value),*];
         }
 
-        /// The `Environment:` section of the root help, in display order.
         const ENV_HELP: &[(&str, &str)] = &[$(($value, $help)),*];
     };
 }
@@ -40,13 +38,9 @@ env_vars! {
     FORMAT = "HYPERLIQUID_FORMAT" => "Default output format: pretty, table, or json. --format overrides it.";
     AGENT = "HYPERLIQUID_AGENT" => "Set to 1 for JSON output and no prompts.";
     NETWORK = "HYPERLIQUID_NETWORK" => "Network to use: mainnet or testnet. --testnet overrides it.";
-    /// Override the home used for Bankr credentials and the default OWS vault.
     HOME_DIR = "HYPERLIQUID_HOME_DIR" => "Home used for Bankr credentials and the default OWS vault, instead of platform discovery.";
-    /// Override the CLI config directory, including the hyperliquid component.
     CONFIG_DIR = "HYPERLIQUID_CONFIG_DIR" => "Config directory, including the hyperliquid component, instead of platform discovery.";
-    /// Override the CLI data directory, including the hyperliquid component.
     DATA_DIR = "HYPERLIQUID_DATA_DIR" => "Data directory, including the hyperliquid component, instead of platform discovery.";
-    /// Shared with the Bankr CLI.
     BANKR_API_KEY = "BANKR_API_KEY" => "Bankr API key for --bankr, shared with the Bankr CLI. `wallet login` stores one instead.";
     BANKR_API_URL = "BANKR_API_URL" => "Bankr API host, for a local or alternate endpoint.";
     PRIVATE_KEY = "HYPERLIQUID_PRIVATE_KEY" => "Private key for signing. Prefer it over --private-key.";
@@ -108,7 +102,6 @@ pub const BUILD_DEFAULT_REFERRAL_CODE: &str = match option_env!("HYPERLIQUID_DEF
 
 const TESTNET_REFERRAL_FALLBACK: &str = "TESTNET";
 
-/// The `Environment:` block of the root help text.
 #[must_use]
 pub fn env_help_section() -> String {
     let advertised = || {
@@ -164,13 +157,11 @@ impl EnvSource {
         self.get_os(name).and_then(|value| value.into_string().ok())
     }
 
-    /// The value when set and non-empty.
     #[must_use]
     pub fn get_non_empty(&self, name: &str) -> Option<String> {
         self.get(name).filter(|value| !value.is_empty())
     }
 
-    /// The trimmed value when set and non-blank.
     #[must_use]
     pub fn get_trimmed(&self, name: &str) -> Option<String> {
         self.get(name)
@@ -216,7 +207,6 @@ struct ConfigCache {
     config: Option<Result<Option<Arc<Config>>, String>>,
 }
 
-/// Flags, environment and config file, resolved lazily.
 pub struct Settings {
     env: EnvSource,
     source: ConfigSource,
@@ -262,7 +252,6 @@ impl ConfigTransaction<'_> {
     }
 }
 
-/// The top-level config keys whose stored value differs between `before` and `after`.
 fn changed_keys(before: &Config, after: &Config) -> Vec<String> {
     let fields = |config: &Config| match serde_json::to_value(config) {
         Ok(serde_json::Value::Object(fields)) => fields,

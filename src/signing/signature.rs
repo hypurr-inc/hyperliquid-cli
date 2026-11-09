@@ -84,7 +84,6 @@ impl Provider {
         }
     }
 
-    /// Check that `signature` over `digest` recovers to `expected`.
     pub fn verify(
         self,
         signature: &Signature,

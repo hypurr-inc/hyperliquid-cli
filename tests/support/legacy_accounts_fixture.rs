@@ -49,7 +49,6 @@ impl<'a> Row<'a> {
     }
 }
 
-/// Which `accounts` table layout to create.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Schema {
     Current,
@@ -57,7 +56,6 @@ pub enum Schema {
     WithoutAgentColumns,
 }
 
-/// The AES key a store derives from raw key material.
 pub fn derive_key(material: &[u8]) -> [u8; 32] {
     Sha256::digest(material).into()
 }

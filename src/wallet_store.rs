@@ -15,14 +15,12 @@ fn vault_failure(err: CliError) -> anyhow::Error {
     anyhow::anyhow!("{err}")
 }
 
-/// How a new wallet is obtained.
 pub enum NewWallet<'a> {
     Create,
     ImportPrivateKey(&'a str),
     ImportMnemonic(&'a str),
 }
 
-/// The vault name for a new wallet.
 pub enum WalletName<'a> {
     Exact(&'a str),
     /// The first free name among `base`, `base-2`, `base-3`, ...
@@ -39,7 +37,6 @@ pub struct StoredWallet {
     pub config_keys_written: Vec<String>,
 }
 
-/// The vault and config of one run, borrowed from its settings.
 pub struct WalletStore<'a> {
     settings: &'a Settings,
     vault: Vault,
@@ -63,7 +60,6 @@ impl<'a> WalletStore<'a> {
         self.vault.list().map_err(vault_failure)
     }
 
-    /// The first free wallet name among `base`, `base-2`, `base-3`, ...
     pub fn next_name(&self, base: &str) -> Result<String, anyhow::Error> {
         let wallets = self.list()?;
         let taken = |name: &str| wallets.iter().any(|wallet| wallet.name == name);
@@ -76,7 +72,6 @@ impl<'a> WalletStore<'a> {
             .expect("an unbounded range always yields a free name"))
     }
 
-    /// Exact name or id match among `wallets`.
     pub fn find(wallets: Vec<WalletInfo>, selector: &str) -> Result<WalletInfo, CliError> {
         wallets
             .into_iter()
@@ -84,7 +79,6 @@ impl<'a> WalletStore<'a> {
             .ok_or_else(|| CliError::Unsupported(format!("wallet '{selector}' not found")))
     }
 
-    /// Whether the config names this wallet (by id or name) as its default.
     pub fn is_configured_default(&self, wallet: &WalletInfo) -> Result<bool, CliError> {
         Ok(Vault::is_default(
             self.settings.default_wallet_id()?.as_deref(),
@@ -165,7 +159,6 @@ impl<'a> WalletStore<'a> {
         }
     }
 
-    /// Make `wallet` the configured default.
     pub fn set_default(&self, wallet: &WalletInfo) -> Result<(), anyhow::Error> {
         self.settings
             .update_config(|config| config.default_wallet_id = Some(wallet.id.clone()))?;
@@ -194,7 +187,6 @@ impl<'a> WalletStore<'a> {
         self.vault.export(selector).map_err(vault_failure)
     }
 
-    /// The Hyperliquid account of a stored wallet.
     pub fn account_of(wallet: &WalletInfo) -> Result<HyperliquidAccount, anyhow::Error> {
         Vault::hyperliquid_account(wallet).map_err(vault_failure)
     }

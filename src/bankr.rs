@@ -49,7 +49,6 @@ pub enum KeySource {
     BankrCli,
 }
 
-/// One resolved set of Bankr credentials.
 #[derive(Clone)]
 pub struct BankrClient {
     http: reqwest::Client,
@@ -66,7 +65,6 @@ impl std::fmt::Debug for BankrClient {
     }
 }
 
-/// The wallet Bankr reports for an API key.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BankrWallet {
     pub address: Address,
@@ -155,7 +153,6 @@ impl BankrTypedData {
         Self::parse(document)
     }
 
-    /// The JSON document sent as `typedData`.
     #[must_use]
     pub fn document(&self) -> &Value {
         &self.document
@@ -320,7 +317,6 @@ impl BankrClient {
         &self.api_url
     }
 
-    /// The wallet linked to this API key.
     pub async fn wallet(&self) -> Result<BankrWallet, CliError> {
         let response = self
             .http
@@ -417,7 +413,6 @@ impl BankrClient {
         Ok(signature)
     }
 
-    /// Run a Bankr request from synchronous signing code.
     pub fn blocking_wallet(&self) -> Result<BankrWallet, CliError> {
         block_on(self.wallet())
     }
@@ -491,7 +486,6 @@ pub fn validate_api_url(raw: &str) -> Result<String, CliError> {
     Ok(url.as_str().trim_end_matches('/').to_string())
 }
 
-/// Read the key the Bankr CLI stores, when it exists.
 fn bankr_cli_credentials(env: &EnvSource) -> Option<(String, Option<String>)> {
     let text = std::fs::read_to_string(crate::paths::bankr_cli_config(env)?).ok()?;
     let value: Value = serde_json::from_str(&text).ok()?;

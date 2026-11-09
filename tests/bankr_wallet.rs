@@ -1,6 +1,3 @@
-//! `wallet login` / `wallet logout` against a stubbed Bankr API, plus the
-//! `--bankr` signer's missing-credential path.
-
 mod support;
 
 use alloy::signers::SignerSync;

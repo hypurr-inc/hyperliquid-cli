@@ -89,7 +89,6 @@ impl TableData for SetupSummary {
     }
 }
 
-/// Fail before asking anything when this run can't answer prompts and `--yes` wasn't given.
 fn ensure_setup_can_run(
     args: &SetupArgs,
     format: OutputFormat,
@@ -111,7 +110,6 @@ fn ensure_setup_can_run(
     }
 }
 
-/// Run the interactive first-time setup wizard.
 pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error> {
     let mode = inv.mode();
     let default_network = inv.remote()?.network();
@@ -285,7 +283,6 @@ struct AnswersSummary<'a> {
     referral: &'a str,
 }
 
-/// Print what setup is about to do, before anything changes.
 fn print_answers_summary(summary: &AnswersSummary<'_>) {
     eprintln!();
     eprintln!("Setup will:");

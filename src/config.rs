@@ -107,7 +107,6 @@ impl BankrLogin {
         trimmed(self.api_url.as_deref())
     }
 
-    /// The EVM address Bankr reported at login, if any.
     pub fn address(&self) -> Result<Option<Address>, CliError> {
         let Some(text) = trimmed(self.address.as_deref()) else {
             return Ok(None);
