@@ -254,11 +254,12 @@ impl CliCommand for OrdersScale {
             prepare_scale_batch(client, &resolver, inv.settings(), args, &ladder).await?;
         if inv.dry_run() {
             let plan = scale_dry_run_plan(&prepared, args);
-            let would_execute = plan.would_execute();
-            let mut details = plan.into_args();
-            let legs: Vec<&PreparedOrder> = prepared.legs.iter().collect();
-            add_hip3_side_effects(inv, vault_address, &legs, &mut details).await?;
-            return print_dry_run_acting_for(inv, would_execute, details, vault_address_string);
+            return print_dry_run_acting_for(
+                inv,
+                plan.would_execute(),
+                plan.into_args(),
+                vault_address_string,
+            );
         }
         let signer = inv.resolve_signer()?;
         scale(
@@ -311,11 +312,12 @@ impl CliCommand for OrdersBatchCreate {
             prepare_batch_create_orders(client, &resolver, inv.settings(), orders).await?;
         if inv.dry_run() {
             let plan = batch_create_dry_run_plan(&prepared, args);
-            let would_execute = plan.would_execute();
-            let mut details = plan.into_args();
-            let legs: Vec<&PreparedOrder> = prepared.legs.iter().collect();
-            add_hip3_side_effects(inv, vault_address, &legs, &mut details).await?;
-            return print_dry_run_acting_for(inv, would_execute, details, vault_address_string);
+            return print_dry_run_acting_for(
+                inv,
+                plan.would_execute(),
+                plan.into_args(),
+                vault_address_string,
+            );
         }
         let signer = inv.resolve_signer()?;
         batch_create(

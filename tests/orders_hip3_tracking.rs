@@ -757,43 +757,6 @@ async fn create_dry_run_previews_the_hip3_helper_transfer() {
 }
 
 #[tokio::test]
-async fn scale_dry_run_previews_one_helper_transfer_for_the_whole_ladder() {
-    let env = IsolatedHome::new();
-    let server = hip3_server(json!({"resting": {"oid": OID}})).await;
-    mount_unfunded_dex_account(&server).await;
-
-    let assert = command_against(
-        &env,
-        &server,
-        &[
-            "--dry-run",
-            "orders",
-            "scale",
-            "--coin",
-            "xyz:TOKEN",
-            "--side",
-            "buy",
-            "--start-price",
-            "1.2",
-            "--end-price",
-            "1.1",
-            "--total-size",
-            "20",
-            "--orders",
-            "2",
-        ],
-    )
-    .assert()
-    .success();
-
-    // 10 x 1.2 + 10 x 1.1 = 23 of notional: 23 / 10 x 1.2 = 2.76.
-    assert_eq!(
-        json_stdout(&assert)["args"]["side_effects"],
-        json!([helper_transfer("2.76")])
-    );
-}
-
-#[tokio::test]
 async fn a_unified_account_needs_no_helper_transfer() {
     let env = IsolatedHome::new();
     let server = hip3_server(json!({"resting": {"oid": OID}})).await;
@@ -804,19 +767,15 @@ async fn a_unified_account_needs_no_helper_transfer() {
         &[
             "--dry-run",
             "orders",
-            "scale",
+            "create",
             "--coin",
             "xyz:TOKEN",
             "--side",
             "buy",
-            "--start-price",
+            "--price",
             "1.2",
-            "--end-price",
-            "1.1",
-            "--total-size",
-            "20",
-            "--orders",
-            "2",
+            "--size",
+            "10",
         ],
     )
     .assert()
@@ -826,23 +785,12 @@ async fn a_unified_account_needs_no_helper_transfer() {
 }
 
 #[tokio::test]
-async fn scale_funds_the_hip3_dex_before_it_places_the_ladder() {
+async fn scale_on_a_hip3_market_never_moves_funds() {
     let env = IsolatedHome::new();
     let server = hip3_server(json!({"resting": {"oid": OID}})).await;
     mount_unfunded_dex_account(&server).await;
     Mock::given(method("POST"))
         .and(path("/exchange"))
-        .and(body_partial_json(json!({"action": {"type": "sendAsset"}})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "status": "ok",
-            "response": {"type": "default"}
-        })))
-        .with_priority(1)
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_partial_json(json!({"action": {"type": "order"}})))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "status": "ok",
             "response": {
@@ -853,44 +801,44 @@ async fn scale_funds_the_hip3_dex_before_it_places_the_ladder() {
         .with_priority(1)
         .mount(&server)
         .await;
+    let scale = [
+        "orders",
+        "scale",
+        "--coin",
+        "xyz:TOKEN",
+        "--side",
+        "buy",
+        "--start-price",
+        "1.2",
+        "--end-price",
+        "1.1",
+        "--total-size",
+        "20",
+        "--orders",
+        "2",
+    ];
 
-    command_against(
-        &env,
-        &server,
-        &[
-            "orders",
-            "scale",
-            "--coin",
-            "xyz:TOKEN",
-            "--side",
-            "buy",
-            "--start-price",
-            "1.2",
-            "--end-price",
-            "1.1",
-            "--total-size",
-            "20",
-            "--orders",
-            "2",
-            "--yes",
-        ],
-    )
-    .assert()
-    .success();
+    let dry_run = command_against(&env, &server, &[&["--dry-run"], &scale[..]].concat())
+        .assert()
+        .success();
+    assert!(json_stdout(&dry_run)["args"].get("side_effects").is_none());
 
-    let actions: Vec<Value> = server
+    command_against(&env, &server, &[&scale[..], &["--yes"]].concat())
+        .assert()
+        .success();
+
+    let types: Vec<String> = server
         .received_requests()
         .await
         .unwrap()
         .iter()
         .filter(|request| request.url.path() == "/exchange")
-        .map(|request| serde_json::from_slice::<Value>(&request.body).unwrap()["action"].clone())
+        .map(|request| {
+            serde_json::from_slice::<Value>(&request.body).unwrap()["action"]["type"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
         .collect();
-    let types: Vec<&str> = actions
-        .iter()
-        .map(|action| action["type"].as_str().unwrap())
-        .collect();
-    assert_eq!(types, ["sendAsset", "order"], "{actions:?}");
-    assert_eq!(actions[0]["amount"], "2.76");
-    assert_eq!(actions[1]["orders"].as_array().unwrap().len(), 2);
+    assert_eq!(types, ["order"]);
 }

@@ -75,7 +75,9 @@ struct Gate<'a> {
     kind: ConsentKind,
     /// A perp position that must already use this margin mode.
     margin: Option<(&'a PerpAsset, MarginModeArg)>,
-    /// The orders that draw on the margin of a HIP-3 dex.
+    /// The orders whose HIP-3 dex margin the helper transfer tops up. Only a
+    /// single order (`orders create`, a bracket entry) funds; every other
+    /// gate leaves this empty so it moves no money.
     funded: Vec<&'a PreparedOrder>,
     builder: Option<&'a OrderBuilderFee>,
 }
@@ -90,11 +92,13 @@ impl<'a> Gate<'a> {
         }
     }
 
+    /// A batch never moves funds on its own: `funded` stays empty, so the
+    /// helper transfer is never sent for scale or batch-create.
     fn for_batch(kind: ConsentKind, legs: &'a [PreparedOrder]) -> Self {
         Self {
             kind,
             margin: legs.first().and_then(|leg| leg.perp().zip(leg.margin_mode)),
-            funded: legs.iter().collect(),
+            funded: Vec::new(),
             builder: None,
         }
     }

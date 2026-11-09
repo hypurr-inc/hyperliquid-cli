@@ -47,7 +47,7 @@
 - `orders chase --dry-run` previews the first quote as the live chase sends it: the price truncated to the market's tick grid, and a `--size` below one lot is refused (exit `2`) like the live command.
 - `orders cancel-all --coin` fails (exit `13`) for a coin or HIP-3 market the exchange does not list instead of listing nothing to cancel, and validates `--dex` against `perpDexs` like `orders open`.
 - `orders create --grouping normal-tpsl --builder ...` (or a configured default builder) sends the builder fee with the grouped batch; before, the fee was shown in the preview and dropped from the signed action.
-- `orders scale` and `orders batch-create` on a HIP-3 dex run the same helper margin transfer as `orders create` for accounts that do not pool margin across dexes, one transfer per dex sized to the whole batch, and their `--dry-run` previews list it under `side_effects`. The transfer moves the dex's own collateral token instead of always `USDC`.
+- The HIP-3 helper margin transfer (`orders create`, `orders bracket` entry) moves the dex's own collateral token instead of always `USDC`; `orders create --dry-run` lists it under `side_effects`, as before.
 - `orders cancel-all` reports a cancel status other than `success` or an error as failed instead of cancelled.
 
 ## 0.17.0 - 2026-11-09
