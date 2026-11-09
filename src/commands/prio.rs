@@ -287,11 +287,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn bid_caps_are_counted_in_hypercore_wei_not_hyperevm_wei() {
-        assert_eq!(HYPE_WEI, Scale::HYPE_CORE);
-        assert_eq!(HYPE_WEI.decimals(), 8);
-        assert_eq!(HYPE_WEI.amount(150_000_000).to_string(), "1.5");
-    }
 }

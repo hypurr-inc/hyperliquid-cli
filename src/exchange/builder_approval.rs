@@ -1,5 +1,5 @@
-//! The `approveBuilderFee` action, which `builder approve` and `setup` both
-//! submit.
+//! The `approveBuilderFee` action, shared by every command that approves a
+//! builder.
 
 use alloy::sol;
 use hypersdk::Address;

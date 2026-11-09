@@ -2,8 +2,7 @@
 //! live under each mode and the unified account risk.
 //!
 //! Layer rule: below `commands`; it reads the API and never imports a command
-//! or a presentation type. `account abstraction` prints it, and order
-//! placement, transfers and `watch risk` decide by it.
+//! or a presentation type.
 
 use std::collections::BTreeMap;
 

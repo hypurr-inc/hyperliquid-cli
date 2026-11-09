@@ -1,9 +1,8 @@
 //! The typed core of a `sendAsset`: where an asset moves between, and signing
 //! and sending the move in the form the signer can sign.
 //!
-//! Layer rule: below `commands`. `transfer send-asset` parses its flags into
-//! an [`AssetMove`] and `orders` builds one for the HIP-3 helper transfers; both
-//! send it here.
+//! Layer rule: below `commands`; every caller builds an [`AssetMove`] and
+//! sends it here.
 
 use hypersdk::hypercore::types::{Action, AgentSendAsset, AssetTarget, SendAsset};
 use hypersdk::{Address, Decimal};
