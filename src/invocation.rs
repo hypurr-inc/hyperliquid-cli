@@ -323,7 +323,6 @@ mod tests {
     use crate::command_spec::{CliCommand, NoArgs};
     use crate::config::{BankrLogin, Config, ConfigFile};
     use crate::output::JsonRenderOptions;
-    use crate::output::terminal::OutputEnv;
     use crate::settings::{EnvSource, env};
     use crate::signing::Signs;
     use tempfile::TempDir;
@@ -345,14 +344,12 @@ mod tests {
         flags: InvocationFlags,
         command: &'static CommandSpec,
     ) -> Invocation {
-        let env = OutputEnv::default();
-        let session = Session::new(OutputFormat::Json, JsonRenderOptions::default(), env);
-        let mode = Mode::new(
+        let mode = Mode::default().running(
+            OutputFormat::Json,
             flags.non_interactive,
-            true,
             flags.payload_from_stdin(),
-            &env,
         );
+        let session = Session::new(JsonRenderOptions::default(), &mode);
         Invocation::new(settings, session, mode, flags, command)
     }
 

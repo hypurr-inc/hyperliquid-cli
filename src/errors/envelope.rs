@@ -63,34 +63,28 @@ impl ErrorEnvelope {
         }
     }
 
-    /// Create from raw clap usage-error text.
+    /// Create from a command-line usage error.
     ///
-    /// `error` keeps the headline (and clap's tip line, if any). The `Usage:`
-    /// block and the `For more information` line move to `data.usage`; a
-    /// "similar ... exists" tip also fills `data.suggestion`; a `See all
-    /// options:` pointer becomes the `next` help command.
-    pub fn usage(message: impl Into<String>) -> Self {
-        let raw = message.into();
-        let parsed = parse_clap_text(&raw);
+    /// `error` is the headline (with clap's tip line, if any); the usage line
+    /// goes to `data.usage`, a suggestion to `data.suggestion`, and the help
+    /// pointer becomes the `next` command.
+    pub fn usage(parts: UsageParts) -> Self {
         let mut data = serde_json::Map::new();
-        if let Some(usage) = parsed.usage {
+        if let Some(usage) = parts.usage {
             data.insert("usage".into(), usage.into());
         }
-        if let Some(suggestion) = parsed.suggestion {
+        if let Some(suggestion) = parts.suggestion {
             data.insert("suggestion".into(), suggestion.into());
         }
-        let spec = if parsed.headline.contains("unrecognized subcommand") {
+        let spec = if parts.unknown_command {
             &spec::UNKNOWN_COMMAND
         } else {
             &spec::INVALID_ARGUMENTS
         };
         Self {
-            next: parsed
-                .help_command
-                .map(|command| vec![NextCommand::new(command)])
-                .unwrap_or_default(),
+            next: vec![NextCommand::new(parts.help_command)],
             data,
-            ..Self::core(spec, parsed.headline)
+            ..Self::core(spec, parts.headline)
         }
     }
 
@@ -129,51 +123,18 @@ pub fn partial_results_fields(
     }
 }
 
-struct ClapText {
-    headline: String,
-    usage: Option<String>,
-    suggestion: Option<String>,
-    help_command: Option<String>,
-}
-
-fn parse_clap_text(raw: &str) -> ClapText {
-    let text = raw.trim();
-    let text = text.strip_prefix("error: ").unwrap_or(text);
-    let mut kept = Vec::new();
-    let mut usage = Vec::new();
-    let mut suggestion = None;
-    let mut help_command = None;
-    for paragraph in text.split("\n\n") {
-        let paragraph = paragraph.trim();
-        if paragraph.is_empty() {
-            continue;
-        }
-        if paragraph.starts_with("Usage:") || paragraph.starts_with("For more information") {
-            usage.push(paragraph);
-            continue;
-        }
-        if let Some(command) = paragraph.strip_prefix("See all options:") {
-            help_command = Some(command.trim().to_string());
-            continue;
-        }
-        if suggestion.is_none()
-            && let Some(tip) = paragraph.strip_prefix("tip: a similar")
-        {
-            suggestion = tip.split('\'').nth(1).map(str::to_string);
-        }
-        kept.push(paragraph);
-    }
-    let headline = if kept.is_empty() {
-        text.to_string()
-    } else {
-        kept.join("\n")
-    };
-    ClapText {
-        headline,
-        usage: (!usage.is_empty()).then(|| usage.join("\n\n")),
-        suggestion,
-        help_command,
-    }
+/// What a command-line usage error says, as the envelope carries it. Built by
+/// the shell from what clap reported: no text is parsed back out of a message
+/// written for people.
+pub struct UsageParts {
+    /// The message, and clap's tip line when it has one.
+    pub headline: String,
+    pub usage: Option<String>,
+    pub suggestion: Option<String>,
+    /// The command that prints the full options of the command that was reached.
+    pub help_command: String,
+    /// The first word of the command line named no command.
+    pub unknown_command: bool,
 }
 
 #[cfg(test)]
@@ -295,11 +256,22 @@ mod tests {
         assert_eq!(value["exit_code"], 12);
     }
 
+    fn usage_parts() -> UsageParts {
+        UsageParts {
+            headline:
+                "unexpected argument '--bogus' found\ntip: a similar argument exists: '--format'"
+                    .into(),
+            usage: Some("Usage: hyperliquid wallet show [OPTIONS]".into()),
+            suggestion: Some("--format".into()),
+            help_command: "hyperliquid wallet show --help".into(),
+            unknown_command: false,
+        }
+    }
+
     #[test]
     fn envelope_usage_moves_usage_block_into_data() {
-        let raw = "error: unexpected argument '--bogus' found\n\n  tip: a similar argument exists: '--format'\n\nUsage: hyperliquid wallet show [OPTIONS]\n\nFor more information, try '--help'.\n";
         let value: serde_json::Value =
-            serde_json::from_str(&ErrorEnvelope::usage(raw).to_json()).unwrap();
+            serde_json::from_str(&ErrorEnvelope::usage(usage_parts()).to_json()).unwrap();
 
         assert_eq!(
             value["error"],
@@ -310,20 +282,28 @@ mod tests {
         assert_eq!(value["reason"], "invalid_arguments");
         assert_eq!(
             value["data"]["usage"],
-            "Usage: hyperliquid wallet show [OPTIONS]\n\nFor more information, try '--help'."
+            "Usage: hyperliquid wallet show [OPTIONS]"
         );
         assert_eq!(value["data"]["suggestion"], "--format");
+        assert_eq!(
+            value["next"][0]["command"],
+            "hyperliquid wallet show --help"
+        );
     }
 
     #[test]
     fn envelope_usage_unknown_subcommand_reason() {
-        let raw = "error: unrecognized subcommand 'ordres'\n\n  tip: a similar subcommand exists: 'orders'\n\nUsage: hyperliquid [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n";
-        let value: serde_json::Value =
-            serde_json::from_str(&ErrorEnvelope::usage(raw).to_json()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(
+            &ErrorEnvelope::usage(UsageParts {
+                unknown_command: true,
+                ..usage_parts()
+            })
+            .to_json(),
+        )
+        .unwrap();
 
         assert_eq!(value["reason"], "unknown_command");
-        assert_eq!(value["data"]["suggestion"], "orders");
-        assert!(!value["error"].as_str().unwrap().starts_with("error:"));
+        assert_eq!(value["exit_code"], 2);
     }
 
     #[test]

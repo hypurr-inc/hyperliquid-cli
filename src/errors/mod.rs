@@ -2,15 +2,12 @@
 //!
 //! [`CliError`] is the one error type commands return. Each variant maps to a
 //! [`spec`] constant that gives it its exit code, category, reason, retry policy
-//! and agent guidance; the JSON envelope, human rendering, process exit and the
-//! checked-in `.claude/error-catalog.json` all read from those constants. The
+//! and agent guidance; the JSON envelope and the checked-in `.claude/error-catalog.json` all read from those constants. The
 //! exit-code table lives there and nowhere else.
 
 mod classify;
 mod envelope;
-mod last_error;
 mod recovery;
-mod render;
 mod spec;
 mod transport;
 
@@ -22,10 +19,8 @@ pub use classify::{
     Rejection, classify_rejection, from_anyhow, from_exchange_rejection, from_sdk,
     http_response_indicates_rate_limit, is_server_status,
 };
-pub use envelope::{ErrorEnvelope, partial_results_fields};
-pub use last_error::{LastError, command_path, set_command_path};
+pub use envelope::{ErrorEnvelope, UsageParts, partial_results_fields};
 pub use recovery::NextCommand;
-pub use render::{ErrorOutput, exit_with_error};
 pub use spec::StdoutDocument;
 pub use transport::{network_error, transport_cause};
 

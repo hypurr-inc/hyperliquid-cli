@@ -12,17 +12,42 @@ use crate::output::terminal;
 use crate::settings::{EnvSource, env};
 
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(20 * 60 * 60);
-const NOTICE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const NOTICE_INTERVAL_SECS: i64 = 24 * 60 * 60;
+/// Longest an automatic update may spend downloading.
+const AUTO_UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest a command waits for the background refresh before exiting.
 const REFRESH_GRACE: Duration = Duration::from_millis(150);
 
-/// `last_notified_at` is optional so caches written by older versions still load.
+/// The optional timestamps are absent from caches written by older versions,
+/// which still load.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct VersionCache {
     latest_version: String,
     last_checked_at: i64,
+    /// When the update notice last printed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_notified_at: Option<i64>,
+    /// When an automatic update was last attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_attempted_at: Option<i64>,
+}
+
+impl VersionCache {
+    /// The update notice may print: none printed in the last day. A timestamp
+    /// in the future (the clock moved back) counts as long ago, so a wrong
+    /// clock cannot silence the notice.
+    fn notice_due(&self, now: i64) -> bool {
+        !within_notice_interval(self.last_notified_at, now)
+    }
+
+    /// An automatic update may start: none attempted in the last day.
+    fn auto_update_due(&self, now: i64) -> bool {
+        !within_notice_interval(self.last_attempted_at, now)
+    }
+}
+
+fn within_notice_interval(last: Option<i64>, now: i64) -> bool {
+    last.is_some_and(|last| (0..NOTICE_INTERVAL_SECS).contains(&now.saturating_sub(last)))
 }
 
 /// Handle for one invocation's passive update check.
@@ -34,6 +59,8 @@ pub struct UpdateCheck {
     refresh: Option<tokio::task::JoinHandle<()>>,
     /// `HYPERLIQUID_AUTO_UPDATE` was on when the check started.
     auto_update: bool,
+    /// The environment the check started in, for locating the running install.
+    env: EnvSource,
 }
 
 impl UpdateCheck {
@@ -42,6 +69,7 @@ impl UpdateCheck {
             cache_path: None,
             refresh: None,
             auto_update: false,
+            env: EnvSource::default(),
         }
     }
 }
@@ -81,15 +109,20 @@ impl Suppression {
 /// is stale it spawns a detached background refresh. Nothing is printed here:
 /// pass the handle to [`flush_update_check`] after the command's result.
 pub fn maybe_start_update_check(mode: &Mode, disabled: bool, source: &EnvSource) -> UpdateCheck {
-    let mut check = start_update_check(
+    start_update_check(
         Suppression::current(mode, disabled, source),
         crate::paths::version_cache_file(source),
-    );
-    check.auto_update = terminal::env_flag(source, env::AUTO_UPDATE) == terminal::EnvFlag::On;
-    check
+        terminal::env_flag(source, env::AUTO_UPDATE) == terminal::EnvFlag::On,
+        source,
+    )
 }
 
-fn start_update_check(suppression: Suppression, cache_path: Option<PathBuf>) -> UpdateCheck {
+fn start_update_check(
+    suppression: Suppression,
+    cache_path: Option<PathBuf>,
+    auto_update: bool,
+    source: &EnvSource,
+) -> UpdateCheck {
     let Some(cache_path) = cache_path.filter(|_| suppression.allows_check()) else {
         return UpdateCheck::disabled();
     };
@@ -100,7 +133,8 @@ fn start_update_check(suppression: Suppression, cache_path: Option<PathBuf>) -> 
     UpdateCheck {
         cache_path: Some(cache_path),
         refresh,
-        auto_update: false,
+        auto_update,
+        env: source.clone(),
     }
 }
 
@@ -119,14 +153,14 @@ pub async fn flush_update_check(mut check: UpdateCheck) {
     settle_refresh(&mut check).await;
     if let Some(cache_path) = check.cache_path.as_deref() {
         if check.auto_update {
-            maybe_auto_update(cache_path).await;
+            maybe_auto_update(cache_path, &check.env).await;
         } else {
-            notify_if_due(cache_path);
+            notify_if_due(cache_path, &check.env);
         }
     }
 }
 
-async fn maybe_auto_update(cache_path: &Path) {
+async fn maybe_auto_update(cache_path: &Path, source: &EnvSource) {
     let Some(cache) = read_version_cache(cache_path) else {
         return;
     };
@@ -135,15 +169,13 @@ async fn maybe_auto_update(cache_path: &Path) {
         return;
     }
     let now = now_unix_seconds();
-    if let Some(last_attempt) = cache.last_notified_at
-        && now.saturating_sub(last_attempt) < NOTICE_INTERVAL.as_secs() as i64
-    {
+    if !cache.auto_update_due(now) {
         return;
     }
     let Ok(current_exe) = std::env::current_exe() else {
         return;
     };
-    let install_method = InstallMethod::detect(&current_exe);
+    let install_method = InstallMethod::detect(&current_exe, source);
     if install_method != InstallMethod::Standalone {
         return;
     }
@@ -157,12 +189,11 @@ async fn maybe_auto_update(cache_path: &Path) {
         "Automatically updating hyperliquid from {current_version} to {}...",
         cache.latest_version
     );
-    let auto_update_timeout = Some(Duration::from_secs(30));
     if let Err(e) = crate::update::download_and_replace_binary(
         &client,
         &cache.latest_version,
         &current_exe,
-        auto_update_timeout,
+        Some(AUTO_UPDATE_TIMEOUT),
     )
     .await
     {
@@ -179,13 +210,10 @@ async fn maybe_auto_update(cache_path: &Path) {
 fn claim_auto_update_attempt(cache_path: &Path, now: i64) -> Result<bool, anyhow::Error> {
     let mut claimed = false;
     update_version_cache(cache_path, |cache| {
-        if cache
-            .last_notified_at
-            .is_some_and(|last| now.saturating_sub(last) < NOTICE_INTERVAL.as_secs() as i64)
-        {
+        if !cache.auto_update_due(now) {
             return;
         }
-        cache.last_notified_at = Some(now);
+        cache.last_attempted_at = Some(now);
         claimed = true;
     })?;
     Ok(claimed)
@@ -207,11 +235,7 @@ fn update_notice(
     {
         return None;
     }
-    let notified_recently = cache.last_notified_at.is_some_and(|notified| {
-        let elapsed = now.saturating_sub(notified);
-        (0..NOTICE_INTERVAL.as_secs() as i64).contains(&elapsed)
-    });
-    if notified_recently {
+    if !cache.notice_due(now) {
         return None;
     }
     Some(format!(
@@ -220,12 +244,12 @@ fn update_notice(
     ))
 }
 
-fn notify_if_due(cache_path: &Path) {
+fn notify_if_due(cache_path: &Path, source: &EnvSource) {
     let Some(cache) = read_version_cache(cache_path) else {
         return;
     };
     let upgrade_command = std::env::current_exe()
-        .map(|exe| InstallMethod::detect(&exe))
+        .map(|exe| InstallMethod::detect(&exe, source))
         .unwrap_or(InstallMethod::Standalone)
         .upgrade_command();
     let now = now_unix_seconds();
@@ -289,6 +313,8 @@ fn now_unix_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::OutputFormat;
+    use crate::output::terminal::Terminal;
     use tempfile::TempDir;
 
     fn allowing() -> Suppression {
@@ -326,8 +352,11 @@ mod tests {
     #[test]
     fn suppression_follows_the_mode_of_the_run() {
         let terminal = Mode {
-            stdout_tty: true,
-            stderr_tty: true,
+            terminal: Terminal {
+                stdin: true,
+                stdout: true,
+                stderr: true,
+            },
             ..Mode::default()
         };
         assert!(
@@ -336,7 +365,7 @@ mod tests {
         );
         for mode in [
             Mode {
-                machine_format: true,
+                format: OutputFormat::Json,
                 ..terminal
             },
             Mode {
@@ -348,11 +377,17 @@ mod tests {
                 ..terminal
             },
             Mode {
-                stdout_tty: false,
+                terminal: Terminal {
+                    stdout: false,
+                    ..terminal.terminal
+                },
                 ..terminal
             },
             Mode {
-                stderr_tty: false,
+                terminal: Terminal {
+                    stderr: false,
+                    ..terminal.terminal
+                },
                 ..terminal
             },
         ] {
@@ -373,6 +408,8 @@ mod tests {
                 ..allowing()
             },
             Some(path.clone()),
+            false,
+            &EnvSource::default(),
         );
         assert!(check.cache_path.is_none());
         assert!(check.refresh.is_none());
@@ -388,7 +425,8 @@ mod tests {
             cache.last_checked_at = now_unix_seconds();
         })
         .unwrap();
-        let check = start_update_check(allowing(), Some(path.clone()));
+        let check =
+            start_update_check(allowing(), Some(path.clone()), false, &EnvSource::default());
         assert_eq!(check.cache_path.as_deref(), Some(path.as_path()));
         assert!(check.refresh.is_none());
     }
@@ -429,6 +467,7 @@ mod tests {
             latest_version: latest.to_string(),
             last_checked_at: 0,
             last_notified_at: notified,
+            last_attempted_at: None,
         }
     }
 
@@ -461,6 +500,35 @@ mod tests {
             due(now + 60),
             "a notification timestamp in the future is ignored"
         );
+    }
+
+    #[test]
+    fn the_notice_and_the_automatic_attempt_throttle_independently() {
+        let now = 10 * 24 * 60 * 60;
+        let notified = VersionCache {
+            last_notified_at: Some(now - 60),
+            ..cache_with("v0.12.0", None)
+        };
+        assert!(!notified.notice_due(now));
+        assert!(notified.auto_update_due(now));
+        let attempted = VersionCache {
+            last_attempted_at: Some(now - 60),
+            ..cache_with("v0.12.0", None)
+        };
+        assert!(attempted.notice_due(now));
+        assert!(!attempted.auto_update_due(now));
+    }
+
+    #[test]
+    fn a_timestamp_in_the_future_never_throttles_the_attempt_either() {
+        let now = 10 * 24 * 60 * 60;
+        let skewed = VersionCache {
+            last_notified_at: Some(now + 60),
+            last_attempted_at: Some(now + 60),
+            ..cache_with("v0.12.0", None)
+        };
+        assert!(skewed.notice_due(now));
+        assert!(skewed.auto_update_due(now));
     }
 
     #[test]
@@ -498,7 +566,11 @@ mod tests {
         let now = 1_000_000;
         assert!(claim_when_unlocked(&path, now));
         let cache = read_version_cache(&path).unwrap();
-        assert_eq!(cache.last_notified_at, Some(now));
+        assert_eq!(cache.last_attempted_at, Some(now));
+        assert_eq!(
+            cache.last_notified_at, None,
+            "an attempt is not a notification"
+        );
         assert_eq!(cache.latest_version, "v99.0.0");
         assert_eq!(cache.last_checked_at, 123);
         assert!(!claim_when_unlocked(&path, now + 1));

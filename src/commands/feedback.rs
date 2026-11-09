@@ -1,7 +1,7 @@
 use clap::Args;
 
 use super::issue_report::{IssueReport, environment_lines};
-use crate::command_spec::{CliCommand, CommandSpec, DryRunPolicy, InputKind, Lifecycle, Risk, arg};
+use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
 use crate::invocation::Invocation;
 
 #[derive(Args, Debug, Clone)]
@@ -28,16 +28,12 @@ pub struct Feedback;
 impl CliCommand for Feedback {
     type Args = FeedbackArgs;
 
-    const SPEC: CommandSpec = CommandSpec::read(
+    const SPEC: CommandSpec = CommandSpec::local_tool(
         &["feedback"],
         "system",
         "Generate or submit feedback and feature requests to GitHub",
         "Generates a pre-filled GitHub issue URL for user suggestions and feature requests with CLI version and platform context. Agents can read the issue URL and markdown body directly from JSON.",
     )
-    .lifecycle(Lifecycle::InteractiveLocal)
-    .risk(Risk::None)
-    .dry_run(DryRunPolicy::NotSupported)
-    .local()
     .args(&[
         arg("message").kind(InputKind::Identifier),
         arg("category").kind(InputKind::Identifier),
@@ -62,7 +58,13 @@ impl CliCommand for Feedback {
         );
 
         let labels = format!("feedback,{}", args.category);
-        inv.print(&IssueReport::new(title, body, &labels, args.open));
+        inv.print(&IssueReport::new(
+            title,
+            body,
+            &labels,
+            args.open,
+            inv.mode(),
+        ));
         Ok(())
     }
 }

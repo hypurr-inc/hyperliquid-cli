@@ -189,6 +189,34 @@ impl StreamBound {
             Self::Polled => None,
         }
     }
+
+    /// What a machine-context run is told when it declares no stop condition:
+    /// the flags and the environment variable that would bound it.
+    #[must_use]
+    pub fn unbounded_message(self) -> String {
+        let subject = match self {
+            Self::SnapshotWatch => "watch",
+            Self::Subscribe => "subscribe",
+            Self::Polled => {
+                return "watch risk requires --max-events or --idle-timeout-ms in agent mode.\n  \
+                        hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20"
+                    .to_string();
+            }
+        };
+        let mut ways: Vec<String> = self
+            .cli_args()
+            .iter()
+            .map(|id| format!("--{} <N>", id.replace('_', "-")))
+            .collect();
+        ways.extend(self.env().map(|env| env.name.to_string()));
+        let last = ways.pop().unwrap_or_default();
+        let joined = match ways.len() {
+            0 => last,
+            1 => format!("{} or {last}", ways[0]),
+            _ => format!("{}, or {last}", ways.join(", ")),
+        };
+        format!("JSON {subject} output must be bounded with {joined}")
+    }
 }
 
 /// Rejects a malformed value before the command runs.
@@ -329,6 +357,8 @@ pub struct CommandSpec {
     /// Runs without resolving the network, signer or API endpoint, so its
     /// dry-run preview names neither.
     pub local: bool,
+    /// The command is itself the update: the passive update check stays off.
+    pub skips_update_check: bool,
     pub stream: Option<StreamBound>,
     /// Error text for `--dry-run` on a command that does not preview, when it is
     /// not the generic one.
@@ -370,6 +400,7 @@ impl CommandSpec {
             testnet_unprompted: false,
             confirms_with_arg: None,
             local: false,
+            skips_update_check: false,
             stream: None,
             dry_run_refusal: None,
             cli_aliases: &[],
@@ -378,6 +409,21 @@ impl CommandSpec {
             one_of_required: &[],
             args: &[],
         }
+    }
+
+    /// An interactive command that runs on this machine alone: no network,
+    /// signer or API endpoint, and no risk until [`Self::risk`] says otherwise.
+    #[must_use]
+    pub const fn local_tool(
+        path: &'static [&'static str],
+        category: &'static str,
+        about: &'static str,
+        description: &'static str,
+    ) -> Self {
+        let mut spec = Self::read(path, category, about, description);
+        spec.lifecycle = Lifecycle::InteractiveLocal;
+        spec.local = true;
+        spec
     }
 
     /// A signed exchange action that moves funds, with a dry-run preview. It
@@ -494,6 +540,12 @@ impl CommandSpec {
     }
 
     #[must_use]
+    pub const fn skips_update_check(mut self) -> Self {
+        self.skips_update_check = true;
+        self
+    }
+
+    #[must_use]
     pub const fn stream(mut self, bound: StreamBound) -> Self {
         self.stream = Some(bound);
         self
@@ -569,14 +621,14 @@ impl CommandSpec {
     }
 
     /// Whether running the command changes state on the exchange or on this
-    /// machine. A local command that declares no risk (`feedback`, `mcp`) only
-    /// prints or serves.
+    /// machine. A local command that only reads (`account ls`, `wallet show`)
+    /// or declares no risk (`feedback`, `mcp`) changes nothing.
     #[must_use]
     pub const fn changes_state(&self) -> bool {
-        match self.mutability() {
-            Mutability::LiveMutating => true,
-            Mutability::LocalOnly => !matches!(self.risk, Risk::None),
-            Mutability::ReadOnly | Mutability::Streaming => false,
+        match self.lifecycle {
+            Lifecycle::LiveMutating => true,
+            Lifecycle::InteractiveLocal => !matches!(self.risk, Risk::None),
+            Lifecycle::ReadOnly | Lifecycle::Streaming => false,
         }
     }
 
@@ -587,9 +639,11 @@ impl CommandSpec {
         matches!(self.lifecycle, Lifecycle::ReadOnly) && matches!(self.risk, Risk::None)
     }
 
+    /// Whether running the command talks to the API. A [`Self::local`] command
+    /// never reaches the pipeline step that asks.
     #[must_use]
     pub const fn uses_api(&self) -> bool {
-        !self.local && !matches!(self.mutability(), Mutability::LocalOnly)
+        !matches!(self.mutability(), Mutability::LocalOnly)
     }
 
     /// Whether a `--dry-run` preview of the command names the signer.
@@ -717,10 +771,14 @@ impl Entry {
 pub fn check_args(spec: &CommandSpec, matches: &ArgMatches) -> Result<(), CliError> {
     for arg in spec.args {
         let Some(check) = arg.check else { continue };
-        let Ok(Some(values)) = matches.try_get_raw(arg.id) else {
-            continue;
-        };
-        for value in values {
+        let values = matches.try_get_raw(arg.id).map_err(|err| {
+            CliError::Internal(anyhow::anyhow!(
+                "{} declares a check on `{}`, which it does not define: {err}",
+                spec.key(),
+                arg.id
+            ))
+        })?;
+        for value in values.into_iter().flatten() {
             check.run(&value.to_string_lossy())?;
         }
     }

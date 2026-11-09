@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `feedback --open` and `report-incident --open` open the browser only for a person at a terminal (not under an agent, CI or JSON output), and `opened_in_browser` is `true` only when the opener exits successfully.
+- `account ls`, `wallet show`, `wallet address`, and `wallet list` no longer print a `Notes:` block claiming they change state or "run as soon as you invoke it" in `--help`.
+- Watch views (`--watch`) never draw the full-screen TUI under `HYPERLIQUID_AGENT`, `CI`, or `--non-interactive`, even on a terminal: a bounded run streams NDJSON and an unbounded one is refused with exit `13`.
+- The lost-connection notice of `subscribe` streams prints only for a person who could be prompted on a stderr terminal (not for JSON, agent, CI or `--non-interactive` runs).
+- An invalid `HYPERLIQUID_SUBSCRIBE_MAX_EVENTS` / `HYPERLIQUID_WATCH_MAX_TICKS` is rejected only when it is consulted (no flag bounds the stream), consistently for both variables.
+- The update notice and the automatic update attempt throttle independently (`last_attempted_at` joins `last_notified_at` in the version cache; old caches still load), and a timestamp in the future never suppresses either.
+- `report-incident` reads the recorded last error from the run's configured directory; the rest of the usage-error envelope is unchanged.
 - HIP-3 reads: `book`, `candles`, `spread`, `funding`, and `subscribe trades|orderbook|candles` accept a DEX-qualified market (`xyz:XYZ100`) by looking the market up on its dex, so a HIP-3 book, tape and funding rate no longer fail with `asset not found`.
 - `mids`, `positions list`, `orders open`, and `account portfolio` take `--dex <NAME>` to scope the read to a builder-deployed perp DEX. `account portfolio --dex` reports that dex's perp account only; spot balances and vault equities stay on the default-dex view.
 - A `--dex` name is validated against `perpDexs` before the read: an unknown DEX exits `13` with `Unknown DEX` instead of returning an empty account or empty mid map, and the canonical spelling is used in every request. A blank `--dex` behaves like no flag.

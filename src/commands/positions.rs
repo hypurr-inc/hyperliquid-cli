@@ -506,7 +506,7 @@ async fn watch_positions(
     let dex = dex.map(str::to_string);
 
     crate::watch::run_snapshot_watch(
-        inv.session(),
+        inv,
         "Live positions",
         remote.chain(),
         vec![Subscription::WebData3 { user }],

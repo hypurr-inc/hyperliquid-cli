@@ -20,6 +20,11 @@ pub struct Awaited {
     pub timed_out: &'static str,
 }
 
+/// The socket ended before it delivered `what` (for example "subscription events").
+pub fn closed_before(what: &str) -> CliError {
+    CliError::Unavailable(format!("WebSocket closed before receiving {what}."))
+}
+
 /// Subscribe on a fresh socket and return the first message `pick` accepts.
 pub async fn first_matching_message<T>(
     chain: Chain,
@@ -40,10 +45,7 @@ pub async fn first_matching_message<T>(
             }
         }
 
-        Err(CliError::Unavailable(format!(
-            "WebSocket closed before receiving {}.",
-            awaited.closed
-        )))
+        Err(closed_before(awaited.closed))
     })
     .await
     .map_err(|_| {

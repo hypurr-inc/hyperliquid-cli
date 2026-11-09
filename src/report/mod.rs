@@ -1,12 +1,17 @@
-use super::{CliError, ErrorEnvelope, StdoutDocument, last_error};
-use crate::output::colors;
+//! Reporting a failed run: print the error in the run's format, record it for
+//! `report-incident`, and exit with its code.
+//!
+//! [`crate::errors`] is the error data; this module is what reaches for the
+//! terminal's styling, the config directory and private file writes, so it
+//! sits above them.
 
-/// Where an error goes: the JSON envelope on stdout, or a human block on stderr.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ErrorOutput {
-    Json,
-    Human,
-}
+mod last_error;
+
+use crate::errors::{CliError, ErrorEnvelope, StdoutDocument};
+use crate::output::{OutputFormat, colors};
+use crate::settings::EnvSource;
+
+pub use last_error::LastError;
 
 /// Render a human-readable error block (no trailing newline).
 ///
@@ -54,13 +59,20 @@ fn print_human_error(err: &CliError) {
     eprintln!("{}", render_human_error(err, colors::stderr_enabled()));
 }
 
-/// Record the error for `report-incident`, print it, and terminate the process
-/// with its exit code.
-pub fn exit_with_error(err: CliError, output: ErrorOutput) -> ! {
-    last_error::record(&err);
-    match output {
-        ErrorOutput::Json => print_json_error(&err),
-        ErrorOutput::Human => print_human_error(&err),
+/// Record the error for `report-incident` (with the failing `command` path,
+/// such as `orders create`, when one was selected), print it in `format` (the
+/// JSON envelope on stdout, or a human block on stderr), and terminate the
+/// process with its exit code.
+pub fn exit_with_error(
+    err: CliError,
+    format: OutputFormat,
+    command: Option<&str>,
+    env: &EnvSource,
+) -> ! {
+    last_error::record(&err, command, env);
+    match format {
+        OutputFormat::Json => print_json_error(&err),
+        OutputFormat::Pretty | OutputFormat::Table => print_human_error(&err),
     }
     std::process::exit(err.exit_code())
 }

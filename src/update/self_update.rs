@@ -50,7 +50,7 @@ pub async fn update(inv: &Invocation) -> Result<(), anyhow::Error> {
         return Ok(());
     }
 
-    let install_method = InstallMethod::detect(&current_exe);
+    let install_method = InstallMethod::detect(&current_exe, inv.settings().env());
     if install_method != InstallMethod::Standalone {
         return Err(CliError::Unsupported(format!(
             "Can't update {} in place: it was installed with {}.\nUpgrade:\n    {}",

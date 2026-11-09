@@ -84,10 +84,10 @@ Use the mission `services.yaml` commands when working inside a Factory mission.
 - Add unit tests beside focused logic in `src/`.
 - Add CLI behavior tests in `tests/` using `assert_cmd`.
 - Mock Hyperliquid HTTP with `wiremock` when tests need API responses.
-- Use isolated `HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME` in tests that touch user state.
+- Spawn the CLI only through `tests/support`: `hermetic_command()` for a bare run, `IsolatedHome::command()` for one that touches user state (it points `HYPERLIQUID_HOME_DIR`, `HYPERLIQUID_CONFIG_DIR` and `HYPERLIQUID_DATA_DIR` at a temp directory and fails the test if the CLI writes elsewhere). `tests/hermetic_harness.rs` fails on a direct `cargo_bin` call.
 - Verify JSON output with `serde_json` or another Rust-native JSON parser.
 - Keep test layers distinct: unit tests own pure logic and private helpers; integration tests own CLI process behavior, prompts, auth boundaries, stdout/stderr routing, and mocked API behavior; QA matrix covers broad installed-binary compatibility.
-- Prefer shared helpers in `tests/support/mod.rs` for isolated command envs, opt-in account/passphrase setup, and common WireMock fixtures, but keep domain-specific mock behavior local when it makes a test's API contract clearer.
+- Prefer shared helpers in `tests/support/` for isolated command envs, opt-in account/passphrase setup, and common WireMock fixtures (`support::exchange::ExchangeFixture` mocks the default dex, spot metadata, `perpDexs`, HIP-3 dexes and the override probe; `IsolatedHome::live_command(&server)` adds the API override and a signing key), but keep domain-specific mock behavior local when it makes a test's API contract clearer.
 
 ## Agent-First Output Contract
 

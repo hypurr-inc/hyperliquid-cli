@@ -1102,7 +1102,7 @@ async fn watch_open_orders(
     let dex = dex.map(str::to_string);
 
     crate::watch::run_snapshot_watch(
-        inv.session(),
+        inv,
         "Live open orders",
         remote.chain(),
         vec![Subscription::OrderUpdates { user }],

@@ -482,7 +482,7 @@ pub fn account_remove(
         eprintln!("Back up first:");
         eprintln!("    hyperliquid wallet export {}", shell_arg(&wallet.name));
         eprintln!();
-        let confirmed = if out::terminal::stdin_is_terminal() {
+        let confirmed = if inv.mode().terminal.stdin {
             prompt::confirm_typed(
                 inv.mode(),
                 &format!("To confirm, type the wallet name \"{}\": ", wallet.name),
