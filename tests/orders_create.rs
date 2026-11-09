@@ -1119,6 +1119,74 @@ async fn orders_scale_dry_run_json_preserves_on_behalf_of_signing_context() {
 }
 
 #[tokio::test]
+async fn generated_batch_legs_never_consult_the_default_builder_configuration() {
+    // A half-configured default builder is a configuration error for orders
+    // that can carry a builder fee, but scale and batch-create legs are sent
+    // without one, so they must not fail on it.
+    let half_configured = "0x1111111111111111111111111111111111111111";
+    let server = mock_order_server_without_exchange().await;
+
+    for args in [
+        vec![
+            "orders",
+            "scale",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--start-price",
+            "80000",
+            "--end-price",
+            "90000",
+            "--total-size",
+            "0.005",
+            "--orders",
+            "5",
+        ],
+        vec![
+            "orders",
+            "batch-create",
+            "--orders-file",
+            "tests/fixtures/orders_batch_create.json",
+        ],
+    ] {
+        IsolatedHome::new()
+            .command()
+            .env(API_OVERRIDE_ENV, server.uri())
+            .env("HYPERLIQUID_DEFAULT_BUILDER_ADDRESS", half_configured)
+            .args(["--format", "json", "--dry-run"])
+            .args(args)
+            .arg("--testnet")
+            .assert()
+            .success();
+    }
+
+    IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env("HYPERLIQUID_DEFAULT_BUILDER_ADDRESS", half_configured)
+        .args([
+            "--format",
+            "json",
+            "--dry-run",
+            "orders",
+            "create",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--price",
+            "50000",
+            "--size",
+            "0.1",
+            "--testnet",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("both must be configured"));
+}
+
+#[tokio::test]
 async fn orders_batch_create_dry_run_reads_fixture() {
     let env = IsolatedHome::new();
     let server = mock_order_server_without_exchange().await;
@@ -1365,6 +1433,71 @@ async fn orders_tpsl_truncates_trigger_prices_to_the_tick() {
     let orders = &body["action"]["orders"];
     assert_eq!(orders[0]["t"]["trigger"]["triggerPx"], "6100.9");
     assert_eq!(orders[1]["t"]["trigger"]["triggerPx"], "4900.1");
+}
+
+#[tokio::test]
+async fn orders_tpsl_failed_position_read_reports_the_cause_not_a_missing_position() {
+    let env = IsolatedHome::new();
+    let server = mock_order_server_without_exchange().await;
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
+            serde_json::json!({"type": "clearinghouseState"}),
+        ))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "orders",
+            "tpsl",
+            "--coin",
+            "BTC",
+            "--side",
+            "sell",
+            "--size",
+            "0.1",
+            "--take-profit",
+            "+10%",
+            "--testnet",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("require an open BTC position").not());
+}
+
+#[tokio::test]
+async fn orders_create_with_an_address_only_ows_signer_fails_before_any_exchange_call() {
+    let env = IsolatedHome::new();
+    let server = mock_order_server_without_exchange().await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .args([
+            "--ows-signer",
+            "0x0000000000000000000000000000000000000001",
+            "orders",
+            "create",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--price",
+            "50000",
+            "--size",
+            "0.1",
+            "--yes",
+            "--testnet",
+        ])
+        .assert()
+        .code(13)
+        .stderr(predicate::str::contains(
+            "does not have a resolved wallet for live signing",
+        ));
 }
 
 #[tokio::test]

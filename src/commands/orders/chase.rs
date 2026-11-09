@@ -285,7 +285,7 @@ async fn place_chase_quote(
         &chase_create_args(args, size, price, cloid),
     )
     .await?;
-    let prepared = match plan.submission {
+    let prepared = match plan {
         CreateOrderSubmission::Single(prepared) => prepared,
         CreateOrderSubmission::NormalTpsl(_) => {
             return Err(CliError::Internal(anyhow::anyhow!(

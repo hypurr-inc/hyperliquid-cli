@@ -1,10 +1,37 @@
 //! The `orders ...` commands, `buy`, `sell`, `outcome-buy` and `outcome-sell`.
 
+use chrono::Utc;
 use clap::Args;
 use hypersdk::hypercore::Subscription;
 
-use super::*;
-use crate::assets::{AssetQuery, AssetResolver, Market, parse_asset_query, qualify_dex_asset};
+use super::args::{
+    BatchCreateArgs, BracketArgs, BuySellArgs, CancelAllArgs, CancelArgs, ChaseArgs, CreateArgs,
+    ModifyArgs, OrderSide, OutcomeOrderArgs, ScaleArgs, ScheduleCancelArgs, StatusArgs, TpslArgs,
+    TwapCancelArgs, TwapCreateArgs,
+};
+use super::bracket::{bracket, bracket_dry_run_plan, validate_bracket_args};
+use super::chase::{self, chase, chase_dry_run_plan};
+use super::hip3::plan_hip3_margin_transfer;
+use super::planning::{
+    batch_create_dry_run_plan, cancel_all_dry_run_plan, cancel_dry_run_plan, create_dry_run_plan,
+    modify_dry_run_plan, prepare_batch_create_orders, prepare_create_order, prepare_scale_batch,
+    prepare_schedule_cancel_plan, prepare_twap_cancel_plan, prepare_twap_create_plan, resolve_perp,
+    scale_dry_run_plan, schedule_cancel_dry_run_plan, tpsl_dry_run_plan, twap_cancel_dry_run_plan,
+    twap_create_dry_run_plan,
+};
+use super::queries::{history, open, open_snapshot, status};
+use super::trailing_stop::{
+    TrailingStopArgs, prepare_trailing_stop_plan, trailing_stop, validate_trailing_stop_args,
+};
+use super::validation::{
+    OrderSpec, read_validated_batch_create_orders, validate_batch_create_args,
+    validate_modify_args, validate_scale_args, validate_tpsl_args,
+};
+use super::{
+    OrderExecutionContext, OrderSubmissionContext, batch_create, cancel, cancel_all, create,
+    modify, scale, schedule_cancel, tpsl, twap_cancel, twap_create,
+};
+use crate::assets::{AssetResolver, qualify_dex_asset};
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk, StreamBound, arg,
 };
@@ -160,15 +187,15 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
     ]);
 
     async fn run(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error> {
-        validate_create_args(args)?;
+        let spec = OrderSpec::from_create(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let coin_query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
+        let submission = prepare_create_order(client, &resolver, &spec).await?;
         if inv.dry_run() {
-            let plan = create_dry_run_plan(client, &resolver, args).await?;
+            let plan = create_dry_run_plan(&submission, args)?;
             let command = plan.command();
             let would_execute = plan.would_execute();
             let (signer, acting_as, vault_address_string) =
@@ -178,10 +205,19 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
                 && let Some(object) = details.as_object_mut()
             {
                 let user = vault_address.unwrap_or_else(|| resolved.query_address());
-                if let Some(helper) =
-                    maybe_hip3_dry_run_side_effect(inv.remote()?.api(), user, args, object).await?
+                let parent = submission.parent();
+                if let Some(helper) = plan_hip3_margin_transfer(
+                    inv.remote()?.api(),
+                    user,
+                    parent.hip3_dex(),
+                    parent.notional(),
+                )
+                .await?
                 {
-                    object.insert("side_effects".to_string(), serde_json::json!([helper]));
+                    object.insert(
+                        "side_effects".to_string(),
+                        serde_json::json!([helper.to_json()]),
+                    );
                 }
             }
             return print_dry_run(
@@ -197,44 +233,12 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
                 ),
             );
         }
-        let margin_validation_target =
-            if !matches!(parse_asset_query(&args.coin), AssetQuery::Outcome(_)) {
-                let resolved = resolver
-                    .resolve_or_fetch(client, &coin_query)
-                    .await
-                    .map_err(CliError::from)?;
-                validate_create_resolved_asset(args, &resolved)?;
-                match resolved {
-                    Market::Perp(perp) => Some((perp.name, perp.dex)),
-                    Market::Spot(_) | Market::Outcome(_) => None,
-                }
-            } else if args.margin_mode.is_some() {
-                return Err(CliError::Configuration(
-                    "orders create --margin-mode is only supported for perpetual orders"
-                        .to_string(),
-                )
-                .into());
-            } else {
-                None
-            };
         let resolved_signer = inv.resolve_signer()?;
-        if let Some((coin, dex)) = margin_validation_target {
-            let margin_mode_user = vault_address.unwrap_or_else(|| resolved_signer.query_address());
-            validate_order_margin_mode(
-                client,
-                margin_mode_user,
-                coin.as_str(),
-                dex.as_deref(),
-                args.margin_mode,
-            )
-            .await?;
-        }
         let signer = resolved_signer.selected_signer();
         create(
-            order_execution_context(inv, &resolver, &signer, &Self::SPEC)?,
-            args,
+            order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
+            submission,
             vault_address,
-            true,
         )
         .await
     }
@@ -275,8 +279,9 @@ impl CliCommand for OrdersScale {
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
+        let prepared = prepare_scale_batch(client, &resolver, args).await?;
         if inv.dry_run() {
-            let plan = scale_dry_run_plan(client, &resolver, args).await?;
+            let plan = scale_dry_run_plan(&prepared, args);
             let (signer, acting_as, vault_address_string) =
                 dry_run_vault_signing_addresses(inv, vault_address_string);
             return print_dry_run(
@@ -292,50 +297,11 @@ impl CliCommand for OrdersScale {
                 ),
             );
         }
-        let coin_query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
-        let margin_validation_target =
-            if !matches!(parse_asset_query(&args.coin), AssetQuery::Outcome(_)) {
-                match resolver
-                    .resolve_or_fetch(client, &coin_query)
-                    .await
-                    .map_err(CliError::from)?
-                {
-                    Market::Perp(perp) => Some((perp.name, perp.dex)),
-                    Market::Spot(_) | Market::Outcome(_) => {
-                        if args.margin_mode.is_some() {
-                            return Err(CliError::Configuration(
-                                "orders scale --margin-mode is only supported for perpetual orders"
-                                    .to_string(),
-                            )
-                            .into());
-                        }
-                        None
-                    }
-                }
-            } else if args.margin_mode.is_some() {
-                return Err(CliError::Configuration(
-                    "orders scale --margin-mode is only supported for perpetual orders".to_string(),
-                )
-                .into());
-            } else {
-                None
-            };
         let resolved_signer = inv.resolve_signer()?;
-        if let Some((coin, dex)) = margin_validation_target {
-            let margin_mode_user = vault_address.unwrap_or_else(|| resolved_signer.query_address());
-            validate_order_margin_mode(
-                client,
-                margin_mode_user,
-                coin.as_str(),
-                dex.as_deref(),
-                args.margin_mode,
-            )
-            .await?;
-        }
         let signer = resolved_signer.selected_signer();
         scale(
-            order_execution_context(inv, &resolver, &signer, &Self::SPEC)?,
-            args,
+            order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
+            prepared,
             vault_address,
         )
         .await
@@ -380,8 +346,9 @@ impl CliCommand for OrdersBatchCreate {
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
+        let prepared = prepare_batch_create_orders(client, &resolver, orders).await?;
         if inv.dry_run() {
-            let plan = batch_create_dry_run_plan(client, &resolver, args, orders).await?;
+            let plan = batch_create_dry_run_plan(&prepared, args);
             let (signer, acting_as, vault_address_string) =
                 dry_run_vault_signing_addresses(inv, vault_address_string);
             return print_dry_run(
@@ -400,9 +367,8 @@ impl CliCommand for OrdersBatchCreate {
         let resolved_signer = inv.resolve_signer()?;
         let signer = resolved_signer.selected_signer();
         batch_create(
-            order_execution_context(inv, &resolver, &signer, &Self::SPEC)?,
-            args,
-            orders,
+            order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
+            prepared,
             vault_address,
         )
         .await
@@ -450,16 +416,12 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
         validate_tpsl_args(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let coin_query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
-        let (resolver, resolved_tpsl_perp) = resolver
-            .with_resolved_perp(client, &coin_query)
-            .await
-            .map_err(CliError::from)?;
+        let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
-            let plan = tpsl_dry_run_plan(&resolver, args)?;
+            let plan = tpsl_dry_run_plan(&perp, args)?;
             let (signer, acting_as, vault_address_string) =
                 dry_run_vault_signing_addresses(inv, vault_address_string);
             return print_dry_run(
@@ -476,21 +438,12 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
             );
         }
         let resolved_signer = inv.resolve_signer()?;
-        let margin_mode_user = vault_address.unwrap_or_else(|| resolved_signer.query_address());
-        validate_order_margin_mode(
-            client,
-            margin_mode_user,
-            resolved_tpsl_perp.name.as_str(),
-            resolved_tpsl_perp.dex.as_deref(),
-            args.margin_mode,
-        )
-        .await?;
         let signer = resolved_signer.selected_signer();
         tpsl(
-            order_execution_context(inv, &resolver, &signer, &Self::SPEC)?,
+            order_submission_context(inv, &signer, &Self::SPEC, args.yes)?,
+            &perp,
             args,
             vault_address,
-            true,
         )
         .await
     }
@@ -536,16 +489,13 @@ hyperliquid --format json orders trailing-stop --coin ETH --side sell --size 0.5
         validate_trailing_stop_args(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let coin_query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
-        let (resolver, _) = resolver
-            .with_resolved_perp(client, &coin_query)
-            .await
-            .map_err(CliError::from)?;
-        let dry_run_plan = trailing_stop_dry_run_plan(&resolver, args)?;
+        let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
+        let plan = prepare_trailing_stop_plan(&perp, args)?;
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
+            let dry_run_plan = plan.dry_run_plan(args);
             let (signer, acting_as, vault_address_string) =
                 dry_run_vault_signing_addresses(inv, vault_address_string);
             return print_dry_run(
@@ -564,8 +514,8 @@ hyperliquid --format json orders trailing-stop --coin ETH --side sell --size 0.5
         let resolved = inv.resolve_signer()?;
         let signer = resolved.selected_signer();
         trailing_stop(
-            order_submission_context(inv, &signer, &Self::SPEC)?,
-            &resolver,
+            order_submission_context(inv, &signer, &Self::SPEC, args.yes)?,
+            &plan,
             args,
             vault_address,
         )
@@ -624,7 +574,7 @@ impl CliCommand for OrdersCancel {
         let user = vault_address.unwrap_or_else(|| resolved.query_address());
         let signer = resolved.selected_signer();
         cancel(
-            order_execution_context(inv, &resolver, &signer, &Self::SPEC)?,
+            order_execution_context(inv, &resolver, &signer, &Self::SPEC, false)?,
             user,
             args,
             vault_address,
@@ -689,7 +639,7 @@ impl CliCommand for OrdersCancelAll {
         let user = vault_address.unwrap_or_else(|| resolved.query_address());
         let signer = resolved.selected_signer();
         cancel_all(
-            order_execution_context(inv, &resolver, &signer, &Self::SPEC)?,
+            order_execution_context(inv, &resolver, &signer, &Self::SPEC, false)?,
             user,
             args,
             vault_address,
@@ -739,7 +689,7 @@ impl CliCommand for OrdersModify {
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
-            let plan = modify_dry_run_plan(args)?;
+            let plan = modify_dry_run_plan(args);
             let (signer, acting_as, vault_address_string) =
                 dry_run_vault_signing_addresses(inv, vault_address_string);
             return print_dry_run(
@@ -760,7 +710,7 @@ impl CliCommand for OrdersModify {
         let user = vault_address.unwrap_or_else(|| resolved.query_address());
         let signer = resolved.selected_signer();
         modify(
-            order_execution_context(inv, &resolver, &signer, &Self::SPEC)?,
+            order_execution_context(inv, &resolver, &signer, &Self::SPEC, false)?,
             user,
             args,
             vault_address,
@@ -797,16 +747,13 @@ impl CliCommand for OrdersTwapCreate {
     async fn run(inv: &Invocation, args: &TwapCreateArgs) -> Result<(), anyhow::Error> {
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let coin_query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
-        let (resolver, resolved_twap_perp) = resolver
-            .with_resolved_perp(client, &coin_query)
-            .await
-            .map_err(CliError::from)?;
-        let dry_run_plan = twap_create_dry_run_plan(&resolver, args)?;
+        let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
+        let plan = prepare_twap_create_plan(&perp, args)?;
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
+            let dry_run_plan = twap_create_dry_run_plan(&plan, args);
             let (signer, acting_as, vault_address_string) =
                 dry_run_vault_signing_addresses(inv, vault_address_string);
             return print_dry_run(
@@ -823,20 +770,10 @@ impl CliCommand for OrdersTwapCreate {
             );
         }
         let resolved = inv.resolve_signer()?;
-        let margin_mode_user = vault_address.unwrap_or_else(|| resolved.query_address());
-        validate_order_margin_mode(
-            client,
-            margin_mode_user,
-            resolved_twap_perp.name.as_str(),
-            resolved_twap_perp.dex.as_deref(),
-            args.margin_mode,
-        )
-        .await?;
         let signer = resolved.selected_signer();
         twap_create(
-            order_submission_context(inv, &signer, &Self::SPEC)?,
-            &resolver,
-            args,
+            order_submission_context(inv, &signer, &Self::SPEC, args.yes)?,
+            plan,
             vault_address,
         )
         .await
@@ -874,16 +811,13 @@ impl CliCommand for OrdersTwapCancel {
     async fn run(inv: &Invocation, args: &TwapCancelArgs) -> Result<(), anyhow::Error> {
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let coin_query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
-        let (resolver, _) = resolver
-            .with_resolved_perp(client, &coin_query)
-            .await
-            .map_err(CliError::from)?;
-        let dry_run_plan = twap_cancel_dry_run_plan(&resolver, args)?;
+        let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
+        let plan = prepare_twap_cancel_plan(&perp, args);
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
+            let dry_run_plan = twap_cancel_dry_run_plan(&plan, args);
             let (signer, acting_as, vault_address_string) =
                 dry_run_vault_signing_addresses(inv, vault_address_string);
             return print_dry_run(
@@ -902,9 +836,8 @@ impl CliCommand for OrdersTwapCancel {
         let resolved = inv.resolve_signer()?;
         let signer = resolved.selected_signer();
         twap_cancel(
-            order_submission_context(inv, &signer, &Self::SPEC)?,
-            &resolver,
-            args,
+            order_submission_context(inv, &signer, &Self::SPEC, false)?,
+            plan,
             vault_address,
         )
         .await
@@ -932,20 +865,21 @@ impl CliCommand for OrdersScheduleCancel {
     ]);
 
     async fn run(inv: &Invocation, args: &ScheduleCancelArgs) -> Result<(), anyhow::Error> {
+        let plan = prepare_schedule_cancel_plan(args)?;
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
-            let plan = schedule_cancel_dry_run_plan(args)?;
+            let dry_run_plan = schedule_cancel_dry_run_plan(&plan, args, Utc::now());
             let (signer, acting_as, vault_address_string) =
                 dry_run_vault_signing_addresses(inv, vault_address_string);
             return print_dry_run(
                 inv,
-                plan.command(),
+                dry_run_plan.command(),
                 dry_run_signed_details(
                     inv,
-                    plan.would_execute(),
-                    plan.into_args(),
+                    dry_run_plan.would_execute(),
+                    dry_run_plan.into_args(),
                     signer,
                     acting_as,
                     vault_address_string,
@@ -955,8 +889,8 @@ impl CliCommand for OrdersScheduleCancel {
         let resolved = inv.resolve_signer()?;
         let signer = resolved.selected_signer();
         schedule_cancel(
-            order_submission_context(inv, &signer, &Self::SPEC)?,
-            args,
+            order_submission_context(inv, &signer, &Self::SPEC, args.yes)?,
+            plan,
             vault_address,
         )
         .await
@@ -1023,7 +957,7 @@ hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeou
         let resolved_signer = inv.resolve_signer()?;
         let signer = resolved_signer.selected_signer();
         chase(
-            order_execution_context(inv, &resolver, &signer, &Self::SPEC)?,
+            order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
             args,
             vault_address,
         )
@@ -1072,13 +1006,6 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
         validate_bracket_args(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        // The protection legs resolve the perp without a client, so a HIP-3
-        // market has to be in the resolver before either leg is planned.
-        let coin_query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
-        let (resolver, _) = resolver
-            .with_resolved_perp(client, &coin_query)
-            .await
-            .map_err(CliError::from)?;
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
@@ -1102,7 +1029,7 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
         let resolved_signer = inv.resolve_signer()?;
         let signer = resolved_signer.selected_signer();
         bracket(
-            order_execution_context(inv, &resolver, &signer, &Self::SPEC)?,
+            order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
             args,
             vault_address,
         )
@@ -1318,113 +1245,28 @@ async fn watch_open_orders(
     .await
 }
 
-async fn validate_order_margin_mode(
-    client: &hypersdk::hypercore::HttpClient,
-    user: hypersdk::Address,
-    coin: &str,
-    dex: Option<&str>,
-    margin_mode: Option<MarginModeArg>,
-) -> Result<(), anyhow::Error> {
-    let Some(margin_mode) = margin_mode else {
-        return Ok(());
-    };
-
-    let state = client
-        .clearinghouse_state(user, dex.map(ToOwned::to_owned))
-        .await?;
-    let Some(position) = state
-        .asset_positions
-        .into_iter()
-        .find(|position| position.position.coin.eq_ignore_ascii_case(coin))
-    else {
-        if matches!(margin_mode, MarginModeArg::Cross) {
-            return Ok(());
-        }
-        return Err(CliError::Configuration(format!(
-            "orders with --margin-mode {} require an open {} perp position so the mode can be verified; establish it first with `positions update-leverage --coin {} --leverage <N>{}`",
-            margin_mode,
-            coin,
-            coin,
-            if matches!(margin_mode, MarginModeArg::Isolated) {
-                " --isolated"
-            } else {
-                ""
-            }
-        ))
-        .into());
-    };
-
-    let actual_margin_mode = match position.position.leverage.leverage_type {
-        hypersdk::hypercore::types::LeverageType::Cross => MarginModeArg::Cross,
-        hypersdk::hypercore::types::LeverageType::Isolated => MarginModeArg::Isolated,
-    };
-    if actual_margin_mode != margin_mode {
-        return Err(CliError::Configuration(format!(
-            "orders requested --margin-mode {} but the current {} perp position is {}; use `positions update-leverage --coin {} --leverage <N>{}` first",
-            margin_mode,
-            coin,
-            actual_margin_mode,
-            coin,
-            if matches!(margin_mode, MarginModeArg::Isolated) {
-                " --isolated"
-            } else {
-                ""
-            }
-        ))
-        .into());
-    }
-
-    Ok(())
-}
-
-async fn maybe_hip3_dry_run_side_effect(
-    api: &crate::http_api::ApiClient,
-    user: hypersdk::Address,
-    args: &CreateArgs,
-    preview: &serde_json::Map<String, serde_json::Value>,
-) -> Result<Option<serde_json::Value>, anyhow::Error> {
-    let Some(dex) = hip3_dex_from_coin(&args.coin, args.dex.as_deref()) else {
-        return Ok(None);
-    };
-    let notional = preview_notional(preview).unwrap_or(hypersdk::Decimal::ZERO);
-    let plan = plan_hip3_margin_transfer(api, user, Some(dex.as_str()), notional).await?;
-    Ok(plan.map(|plan| plan.to_json()))
-}
-
-fn preview_notional(
-    preview: &serde_json::Map<String, serde_json::Value>,
-) -> Option<hypersdk::Decimal> {
-    let size = preview
-        .get("size")?
-        .as_str()?
-        .parse::<hypersdk::Decimal>()
-        .ok()?;
-    let price = preview
-        .get("limit_px")
-        .or_else(|| preview.get("price"))
-        .and_then(serde_json::Value::as_str)?
-        .parse::<hypersdk::Decimal>()
-        .ok()?;
-    Some(size * price)
-}
-
 fn ensure_outcome_coin(coin: &str) -> Result<(), CliError> {
     crate::assets::asset_id::parse_outcome_notation(coin)?;
     Ok(())
 }
 
+/// The context live commands run in. Fails before any side effect when the
+/// signer cannot sign live. `yes` waives the mainnet confirmation prompt.
 fn order_submission_context<'a>(
     inv: &'a Invocation,
     signer: &'a crate::signing::SelectedSigner,
     spec: &CommandSpec,
+    yes: bool,
 ) -> Result<OrderSubmissionContext<'a>, CliError> {
+    signer.ensure_can_attempt_live_signing()?;
     let remote = inv.remote()?;
     Ok(OrderSubmissionContext {
         inv,
         api: remote.api(),
         signer,
         require_mainnet_confirmation: spec.testnet_unprompted
-            && remote.network() == Network::Mainnet,
+            && remote.network() == Network::Mainnet
+            && !yes,
     })
 }
 
@@ -1433,9 +1275,10 @@ fn order_execution_context<'a>(
     resolver: &'a AssetResolver,
     signer: &'a crate::signing::SelectedSigner,
     spec: &CommandSpec,
+    yes: bool,
 ) -> Result<OrderExecutionContext<'a>, CliError> {
     Ok(OrderExecutionContext {
-        submission: order_submission_context(inv, signer, spec)?,
+        submission: order_submission_context(inv, signer, spec, yes)?,
         resolver,
     })
 }

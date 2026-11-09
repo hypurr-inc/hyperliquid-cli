@@ -3,7 +3,6 @@ use serde_json::json;
 
 use crate::commands::account::fetch_abstraction;
 use crate::commands::transfers::{self, SendAssetArgs};
-use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Remote;
 use crate::mode::Mode;
@@ -35,7 +34,7 @@ pub async fn plan_hip3_margin_transfer(
     user: Address,
     dex: Option<&str>,
     notional: Decimal,
-) -> Result<Option<Hip3MarginPlan>, CliError> {
+) -> Result<Option<Hip3MarginPlan>, anyhow::Error> {
     let Some(dest_dex) = dex.filter(|dex| !dex.is_empty()) else {
         return Ok(None);
     };
@@ -43,9 +42,7 @@ pub async fn plan_hip3_margin_transfer(
         return Ok(None);
     }
 
-    let Ok(abstraction) = fetch_abstraction(api, user).await else {
-        return Ok(None);
-    };
+    let abstraction = fetch_abstraction(api, user).await?;
     if matches!(
         abstraction.normalized_mode.as_str(),
         "unified-account" | "portfolio-margin"
@@ -64,9 +61,8 @@ pub async fn plan_hip3_margin_transfer(
     let dest_available = api
         .sdk()
         .clearinghouse_state(user, Some(dest_dex.to_string()))
-        .await
-        .map(|state| state.withdrawable)
-        .unwrap_or(Decimal::ZERO);
+        .await?
+        .withdrawable;
     if dest_available >= required {
         return Ok(None);
     }
@@ -100,13 +96,4 @@ pub async fn execute_hip3_margin_transfer(
     )
     .await
     .map(drop)
-}
-
-pub fn hip3_dex_from_coin(coin: &str, dex: Option<&str>) -> Option<String> {
-    if let Some(dex) = dex.filter(|dex| !dex.is_empty()) {
-        return Some(dex.to_string());
-    }
-    coin.split_once(':')
-        .map(|(dex, _)| dex.to_string())
-        .filter(|dex| !dex.is_empty())
 }
