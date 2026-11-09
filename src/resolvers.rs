@@ -28,12 +28,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_hex_addresses_reject_aliases_and_optionally_the_zero_address() {
-        let zero = "0x0000000000000000000000000000000000000000";
+    fn exact_hex_addresses_accept_only_a_bare_0x_40_hex_string() {
+        let valid = "0x00000000000000000000000000000000000000Ab";
         assert_eq!(
-            parse_exact_hex_address("main", false),
-            Err(HexAddressError::Format)
+            parse_exact_hex_address(valid, false)
+                .unwrap()
+                .to_string()
+                .to_lowercase(),
+            valid.to_lowercase()
         );
+        for rejected in [
+            "main",
+            "",
+            "0x",
+            "00000000000000000000000000000000000000ab",
+            "0X00000000000000000000000000000000000000ab",
+            " 0x00000000000000000000000000000000000000ab",
+            "0x00000000000000000000000000000000000000a",
+            "0x00000000000000000000000000000000000000abc",
+            "0x00000000000000000000000000000000000000zz",
+        ] {
+            assert_eq!(
+                parse_exact_hex_address(rejected, false),
+                Err(HexAddressError::Format),
+                "{rejected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_zero_address_is_rejected_only_when_asked() {
+        let zero = "0x0000000000000000000000000000000000000000";
         assert!(parse_exact_hex_address(zero, false).is_ok());
         assert_eq!(
             parse_exact_hex_address(zero, true),

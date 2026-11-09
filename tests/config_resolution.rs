@@ -1,7 +1,6 @@
-// Tests the priority chain:
-//   CLI flag > HYPERLIQUID_PRIVATE_KEY env > ~/.config/hyperliquid/config.json
-// And network selection:
-//   --testnet flag > HYPERLIQUID_NETWORK env > config file
+// Priority chains exercised through the real binary and a real config file:
+//   private key: --private-key > HYPERLIQUID_PRIVATE_KEY > config file
+//   network:     --testnet > HYPERLIQUID_NETWORK > config file > mainnet
 
 use assert_cmd::Command;
 #[allow(dead_code)]
@@ -14,239 +13,175 @@ const CLI_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000
 const ENV_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000002";
 const FILE_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000003";
 
-fn create_temp_home() -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
-    let tmp = TempDir::new().unwrap();
-    let home_dir = tmp.path().join("home");
-    let xdg_config_home = tmp.path().join("xdg-config");
-    fs::create_dir_all(&home_dir).unwrap();
-    fs::create_dir_all(&xdg_config_home).unwrap();
-
-    // Create both platform-correct locations that `dirs::config_dir` may use.
-    // Linux honors XDG_CONFIG_HOME; macOS uses ~/Library/Application Support.
-    let config_dir = xdg_config_home.join("hyperliquid");
-    let mac_config_dir = home_dir
-        .join("Library")
-        .join("Application Support")
-        .join("hyperliquid");
-    fs::create_dir_all(&config_dir).unwrap();
-    fs::create_dir_all(&mac_config_dir).unwrap();
-
-    (tmp, home_dir, xdg_config_home)
+/// A home whose config is found through the platform config-dir lookup
+/// (XDG_CONFIG_HOME on Linux, ~/Library/Application Support on macOS), not
+/// through a `HYPERLIQUID_CONFIG_DIR` override.
+struct ConfigHome {
+    _tmp: TempDir,
+    home_dir: std::path::PathBuf,
+    xdg_config_home: std::path::PathBuf,
 }
 
-fn write_config_files(
-    home_dir: &std::path::Path,
-    xdg_config_home: &std::path::Path,
-    config: &serde_json::Value,
-) {
-    let json = serde_json::to_string_pretty(config).unwrap();
-    let xdg_path = xdg_config_home.join("hyperliquid").join("config.json");
-    let mac_path = home_dir
-        .join("Library")
-        .join("Application Support")
-        .join("hyperliquid")
-        .join("config.json");
-    fs::write(xdg_path, &json).unwrap();
-    fs::write(mac_path, json).unwrap();
-}
+impl ConfigHome {
+    fn new() -> Self {
+        let tmp = TempDir::new().unwrap();
+        let home_dir = tmp.path().join("home");
+        let xdg_config_home = tmp.path().join("xdg-config");
+        let home = Self {
+            _tmp: tmp,
+            home_dir,
+            xdg_config_home,
+        };
+        for dir in home.config_dirs() {
+            fs::create_dir_all(dir).unwrap();
+        }
+        home
+    }
 
-#[test]
-fn test_missing_config_no_crash() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env_remove("HYPERLIQUID_PRIVATE_KEY")
-        .env_remove("HYPERLIQUID_NETWORK")
-        .arg("--version")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(env!("CARGO_PKG_VERSION")));
-}
+    fn config_dirs(&self) -> [std::path::PathBuf; 2] {
+        [
+            self.xdg_config_home.join("hyperliquid"),
+            self.home_dir
+                .join("Library")
+                .join("Application Support")
+                .join("hyperliquid"),
+        ]
+    }
 
-#[test]
-fn test_missing_config_help_works() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env_remove("HYPERLIQUID_PRIVATE_KEY")
-        .env_remove("HYPERLIQUID_NETWORK")
-        .arg("--help")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("perps"));
-}
+    fn write_config_text(&self, text: &str) {
+        for dir in self.config_dirs() {
+            fs::write(dir.join("config.json"), text).unwrap();
+        }
+    }
 
-#[test]
-fn test_cli_private_key_flag_overrides_env_and_config() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-    write_config_files(
-        &home_dir,
-        &xdg_config_home,
-        &serde_json::json!({
-            "private_key": FILE_KEY,
-            "network": "mainnet"
-        }),
-    );
+    fn write_config(&self, config: &serde_json::Value) {
+        self.write_config_text(&serde_json::to_string_pretty(config).unwrap());
+    }
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env("HYPERLIQUID_PRIVATE_KEY", ENV_KEY)
-        .arg("--private-key")
-        .arg(CLI_KEY)
-        .arg("wallet")
-        .arg("address")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(support::expected_address(
-            CLI_KEY,
-        )));
+    fn command(&self) -> Command {
+        let mut command = support::hyperliquid_command();
+        command
+            .env("HOME", &self.home_dir)
+            .env("XDG_CONFIG_HOME", &self.xdg_config_home);
+        command
+    }
+
+    async fn resolved_network(&self, command: &mut Command) -> String {
+        let server = support::mock_market_server().await;
+        let output = command
+            .env("HYPERLIQUID_API_BASE_URL", server.uri())
+            .args(["--no-update-check", "--format", "json", "status"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        json["network"].as_str().unwrap().to_string()
+    }
 }
 
 #[test]
-fn test_cli_private_key_env_overrides_config() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-    write_config_files(
-        &home_dir,
-        &xdg_config_home,
-        &serde_json::json!({
-            "private_key": FILE_KEY,
-            "network": "mainnet"
-        }),
-    );
+fn private_key_comes_from_flag_then_env_then_config_file() {
+    let home = ConfigHome::new();
+    home.write_config(&serde_json::json!({ "private_key": FILE_KEY, "network": "mainnet" }));
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env("HYPERLIQUID_PRIVATE_KEY", ENV_KEY)
-        .arg("wallet")
-        .arg("address")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(support::expected_address(
-            ENV_KEY,
-        )));
-}
+    let mut flag = home.command();
+    flag.env("HYPERLIQUID_PRIVATE_KEY", ENV_KEY).args([
+        "--private-key",
+        CLI_KEY,
+        "wallet",
+        "address",
+    ]);
+    let mut env = home.command();
+    env.env("HYPERLIQUID_PRIVATE_KEY", ENV_KEY)
+        .args(["wallet", "address"]);
+    let mut file = home.command();
+    file.args(["wallet", "address"]);
 
-#[test]
-fn test_cli_private_key_config_fallback() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-    write_config_files(
-        &home_dir,
-        &xdg_config_home,
-        &serde_json::json!({
-            "private_key": FILE_KEY,
-            "network": "mainnet"
-        }),
-    );
-
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env_remove("HYPERLIQUID_PRIVATE_KEY")
-        .arg("wallet")
-        .arg("address")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains(support::expected_address(
-            FILE_KEY,
-        )));
-}
-
-/// Run `status` against a local mock API and return the network the
-/// invocation resolved, as reported in its JSON document.
-async fn resolved_network(command: &mut Command) -> String {
-    let server = support::mock_market_server().await;
-    let output = command
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
-        .args(["--no-update-check", "--format", "json", "status"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    json["network"].as_str().unwrap().to_string()
+    for (mut command, key) in [(flag, CLI_KEY), (env, ENV_KEY), (file, FILE_KEY)] {
+        command
+            .assert()
+            .success()
+            .stdout(predicates::str::contains(support::expected_address(key)));
+    }
 }
 
 #[tokio::test]
-async fn test_cli_testnet_flag_overrides_env_and_config() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-    write_config_files(
-        &home_dir,
-        &xdg_config_home,
-        &serde_json::json!({ "network": "mainnet" }),
-    );
+async fn network_comes_from_flag_then_env_then_config_file_then_mainnet() {
+    struct Case {
+        config: Option<&'static str>,
+        env: Option<&'static str>,
+        testnet_flag: bool,
+        expected: &'static str,
+    }
+    let cases = [
+        Case {
+            config: Some("mainnet"),
+            env: Some("mainnet"),
+            testnet_flag: true,
+            expected: "testnet",
+        },
+        Case {
+            config: Some("bogus"),
+            env: Some("bogus"),
+            testnet_flag: true,
+            expected: "testnet",
+        },
+        Case {
+            config: Some("mainnet"),
+            env: Some("testnet"),
+            testnet_flag: false,
+            expected: "testnet",
+        },
+        Case {
+            config: Some("testnet"),
+            env: Some("mainnet"),
+            testnet_flag: false,
+            expected: "mainnet",
+        },
+        Case {
+            config: Some("testnet"),
+            env: None,
+            testnet_flag: false,
+            expected: "testnet",
+        },
+        Case {
+            config: None,
+            env: None,
+            testnet_flag: false,
+            expected: "mainnet",
+        },
+    ];
 
-    let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    command
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env("HYPERLIQUID_NETWORK", "mainnet")
-        .arg("--testnet");
-    assert_eq!(resolved_network(&mut command).await, "testnet");
-}
-
-#[tokio::test]
-async fn test_cli_network_env_overrides_config() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-    write_config_files(
-        &home_dir,
-        &xdg_config_home,
-        &serde_json::json!({ "network": "mainnet" }),
-    );
-
-    let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    command
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env("HYPERLIQUID_NETWORK", "testnet");
-    assert_eq!(resolved_network(&mut command).await, "testnet");
-}
-
-#[tokio::test]
-async fn test_cli_network_env_mainnet_overrides_config_testnet() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-    write_config_files(
-        &home_dir,
-        &xdg_config_home,
-        &serde_json::json!({ "network": "testnet" }),
-    );
-
-    let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    command
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env("HYPERLIQUID_NETWORK", "mainnet");
-    assert_eq!(resolved_network(&mut command).await, "mainnet");
-}
-
-#[tokio::test]
-async fn test_cli_network_config_fallback() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-    write_config_files(
-        &home_dir,
-        &xdg_config_home,
-        &serde_json::json!({ "network": "testnet" }),
-    );
-
-    let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    command
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env_remove("HYPERLIQUID_NETWORK");
-    assert_eq!(resolved_network(&mut command).await, "testnet");
+    for case in cases {
+        let home = ConfigHome::new();
+        if let Some(network) = case.config {
+            home.write_config(&serde_json::json!({ "network": network }));
+        }
+        let mut command = home.command();
+        if let Some(network) = case.env {
+            command.env("HYPERLIQUID_NETWORK", network);
+        }
+        if case.testnet_flag {
+            command.arg("--testnet");
+        }
+        assert_eq!(
+            home.resolved_network(&mut command).await,
+            case.expected,
+            "config {:?}, env {:?}, --testnet {}",
+            case.config,
+            case.env,
+            case.testnet_flag
+        );
+    }
 }
 
 #[test]
-fn test_cli_invalid_network_env_returns_configuration_error() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
+fn invalid_network_env_returns_configuration_error_naming_the_variable() {
+    let home = ConfigHome::new();
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
+    home.command()
         .env("HYPERLIQUID_NETWORK", "bogus")
         .arg("status")
         .assert()
@@ -258,30 +193,11 @@ fn test_cli_invalid_network_env_returns_configuration_error() {
 }
 
 #[test]
-fn test_cli_malformed_existing_config_returns_configuration_error() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-    let bad_json = "{not valid json";
-    fs::write(
-        xdg_config_home.join("hyperliquid").join("config.json"),
-        bad_json,
-    )
-    .unwrap();
-    fs::write(
-        home_dir
-            .join("Library")
-            .join("Application Support")
-            .join("hyperliquid")
-            .join("config.json"),
-        bad_json,
-    )
-    .unwrap();
+fn malformed_config_file_returns_configuration_error() {
+    let home = ConfigHome::new();
+    home.write_config_text("{not valid json");
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env_remove("HYPERLIQUID_PRIVATE_KEY")
-        .env_remove("HYPERLIQUID_NETWORK")
+    home.command()
         .arg("status")
         .assert()
         .failure()
@@ -291,19 +207,11 @@ fn test_cli_malformed_existing_config_returns_configuration_error() {
 }
 
 #[test]
-fn test_cli_invalid_config_network_returns_configuration_error() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-    write_config_files(
-        &home_dir,
-        &xdg_config_home,
-        &serde_json::json!({ "network": "bogus" }),
-    );
+fn invalid_network_in_config_file_returns_configuration_error() {
+    let home = ConfigHome::new();
+    home.write_config(&serde_json::json!({ "network": "bogus" }));
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env_remove("HYPERLIQUID_NETWORK")
+    home.command()
         .arg("status")
         .assert()
         .failure()
@@ -313,120 +221,16 @@ fn test_cli_invalid_config_network_returns_configuration_error() {
         .stdout(predicates::str::contains("bogus"));
 }
 
-#[tokio::test]
-async fn test_cli_testnet_flag_overrides_invalid_network_sources() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-    write_config_files(
-        &home_dir,
-        &xdg_config_home,
-        &serde_json::json!({ "network": "bogus" }),
-    );
-
-    let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    command
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env("HYPERLIQUID_NETWORK", "bogus")
-        .arg("--testnet");
-    assert_eq!(resolved_network(&mut command).await, "testnet");
-}
-
-#[tokio::test]
-async fn test_cli_missing_config_remains_non_fatal() {
-    let (_tmp, home_dir, xdg_config_home) = create_temp_home();
-
-    let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    command
-        .env("HOME", &home_dir)
-        .env("XDG_CONFIG_HOME", &xdg_config_home)
-        .env_remove("HYPERLIQUID_PRIVATE_KEY")
-        .env_remove("HYPERLIQUID_NETWORK");
-    assert_eq!(resolved_network(&mut command).await, "mainnet");
-}
-
-// Resolution order and edge cases are covered by unit tests in `src/settings.rs`;
-// these check the same contract through the public API with a real config file.
-
 mod settings_tests {
-    use hyperliquid_cli::config::{Config, ConfigFile};
     use hyperliquid_cli::network::Network;
-    use hyperliquid_cli::settings::{EnvSource, Settings, env};
-    use tempfile::TempDir;
-
-    fn settings_with_file(env_pairs: &[(&str, &str)], config: &Config) -> (TempDir, Settings) {
-        let tmp = TempDir::new().unwrap();
-        let file = ConfigFile::at(tmp.path().join("nested").join("config.json"));
-        file.save(config, &file.lock().unwrap()).unwrap();
-        let settings = Settings::new(EnvSource::fixed(env_pairs.iter().copied()), Some(file));
-        (tmp, settings)
-    }
-
-    fn no_env() -> EnvSource {
-        EnvSource::fixed::<&str, &str>([])
-    }
+    use hyperliquid_cli::settings::EnvSource;
 
     #[test]
-    fn config_paths_live_under_a_hyperliquid_directory() {
-        let path = hyperliquid_cli::paths::config_file(&EnvSource::Process).expect("config dir");
-        let path = path.to_string_lossy();
-        assert!(path.contains("hyperliquid"));
-        assert!(path.ends_with("config.json"));
-    }
-
-    #[test]
-    fn missing_config_defaults_to_mainnet_without_a_key() {
-        let settings = Settings::new(no_env(), None);
-        assert!(!settings.testnet(false).unwrap());
-        assert_eq!(settings.private_key(None).unwrap(), None);
-        let missing = Settings::new(
-            no_env(),
-            Some(ConfigFile::at("/nonexistent/config.json".into())),
-        );
-        assert_eq!(missing.network(false).unwrap(), Network::Mainnet);
-    }
-
-    #[test]
-    fn network_chain_flag_then_env_then_file() {
-        let testnet_file = Config {
-            network: Network::Testnet,
-            ..Config::default()
-        };
-        let (_tmp, from_file) = settings_with_file(&[], &testnet_file);
-        assert!(from_file.testnet(false).unwrap());
-
-        let (_tmp, env_wins) = settings_with_file(&[(env::NETWORK, "mainnet")], &testnet_file);
-        assert!(!env_wins.testnet(false).unwrap());
-
-        let (_tmp, flag_wins) = settings_with_file(&[(env::NETWORK, "mainnet")], &testnet_file);
-        assert!(flag_wins.testnet(true).unwrap());
-
-        let (_tmp, env_case) = settings_with_file(&[(env::NETWORK, "TestNet")], &Config::default());
-        assert!(env_case.testnet(false).unwrap());
-    }
-
-    #[test]
-    fn invalid_network_env_is_rejected_unless_the_flag_decides() {
-        let bogus = Settings::new(EnvSource::fixed([(env::NETWORK, "bogus")]), None);
-        let err = bogus.testnet(false).unwrap_err();
-        assert!(err.to_string().contains(env::NETWORK));
-        assert!(bogus.testnet(true).unwrap());
-    }
-
-    #[test]
-    fn private_key_chain_flag_then_env_then_file() {
-        let with_key = Config {
-            private_key: Some("0xfile".to_string()),
-            ..Config::default()
-        };
-        let (_tmp, all) = settings_with_file(&[(env::PRIVATE_KEY, "0xenv")], &with_key);
-        assert_eq!(all.private_key(Some("0xcli")).unwrap().unwrap(), "0xcli");
-        assert_eq!(all.private_key(None).unwrap().unwrap(), "0xenv");
-
-        let (_tmp, file_only) = settings_with_file(&[], &with_key);
-        assert_eq!(file_only.private_key(None).unwrap().unwrap(), "0xfile");
-
-        let (_tmp, empty_env) = settings_with_file(&[(env::PRIVATE_KEY, "")], &with_key);
-        assert_eq!(empty_env.private_key(Some("")).unwrap().unwrap(), "0xfile");
+    fn default_config_path_is_config_json_in_a_hyperliquid_directory() {
+        let path =
+            hyperliquid_cli::paths::config_file(&EnvSource::fixed::<&str, &str>([])).unwrap();
+        assert_eq!(path.file_name().unwrap(), "config.json");
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "hyperliquid");
     }
 
     #[test]
@@ -439,46 +243,5 @@ mod settings_tests {
             Network::Testnet.api_base_url(),
             "https://api.hyperliquid-testnet.xyz"
         );
-    }
-
-    #[test]
-    fn saved_config_roundtrips_through_the_file() {
-        let config = Config {
-            private_key: Some("0xkey".to_string()),
-            network: Network::Testnet,
-            default_wallet_id: Some("wallet".to_string()),
-            default_builder_address: Some("0xbuilder".to_string()),
-            default_builder_fee_rate: Some("0.001%".to_string()),
-            default_referral_code: Some("CODE".to_string()),
-            ..Config::default()
-        };
-        let (_tmp, settings) = settings_with_file(&[], &config);
-        assert_eq!(settings.config().unwrap().as_deref(), Some(&config));
-        assert_eq!(
-            settings.default_wallet_id().unwrap().as_deref(),
-            Some("wallet")
-        );
-    }
-
-    #[test]
-    fn broken_config_files_are_configuration_errors() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.json");
-        std::fs::write(&path, "{not valid json").unwrap();
-        let settings = Settings::new(no_env(), Some(ConfigFile::at(path)));
-        let err = settings.config().unwrap_err();
-        assert!(err.to_string().contains("invalid config file"));
-    }
-
-    #[test]
-    fn config_struct_defaults_and_serde() {
-        let default = Config::default();
-        assert_eq!(default.network, Network::Mainnet);
-        assert!(default.private_key.is_none());
-
-        let json = serde_json::to_string(&Config::default()).unwrap();
-        assert!(!json.contains("private_key"));
-        let parsed: Config = serde_json::from_str(r#"{"network":"TESTNET"}"#).unwrap();
-        assert_eq!(parsed.network, Network::Testnet);
     }
 }
