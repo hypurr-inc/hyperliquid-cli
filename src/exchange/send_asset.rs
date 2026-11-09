@@ -79,17 +79,16 @@ pub struct AssetMove {
 }
 
 impl AssetMove {
-    /// The agent form this move is signed in, given how the signer signs
-    /// ([`SelectedSigner::agent_form`]): `None` when it signs the master's `sendAsset`; an
-    /// error when the exchange would refuse the agent form for this move.
-    pub(crate) fn agent_form(
-        &self,
-        form: Option<AgentForm>,
-    ) -> Result<Option<AgentForm>, CliError> {
-        if let Some(form) = form {
-            ensure_agent_send_target(self.to, form.master, self.from_subaccount.as_deref())?;
+    /// Refuse a move the exchange would refuse in the agent form, given how the
+    /// signer signs ([`SelectedSigner::agent_form`]): the master's own
+    /// `sendAsset` has no such rule.
+    pub(crate) fn ensure_agent_target(&self, form: Option<AgentForm>) -> Result<(), CliError> {
+        match form {
+            Some(form) => {
+                ensure_agent_send_target(self.to, form.master, self.from_subaccount.as_deref())
+            }
+            None => Ok(()),
         }
-        Ok(form)
     }
 }
 
@@ -112,7 +111,7 @@ impl ResolvedMove {
         &self,
         api: &ApiClient,
         signer: &SelectedSigner,
-        form: Option<AgentForm>,
+        agent: bool,
     ) -> Result<(), anyhow::Error> {
         let chain = api.chain();
         let nonce = api.nonces().next();
@@ -127,7 +126,7 @@ impl ResolvedMove {
         let (destination, amount) = (*to, *amount);
         let from_sub_account = from_subaccount.clone().unwrap_or_default();
         let token = self.token.send_token();
-        let action = if form.is_some() {
+        let action = if agent {
             Action::AgentSendAsset(
                 AgentSendAsset {
                     destination,
@@ -166,8 +165,9 @@ pub async fn send_asset(
     mv: AssetMove,
 ) -> Result<(), anyhow::Error> {
     let resolved = ResolvedMove::resolve(api, mv).await?;
-    let form = resolved.mv.agent_form(signer.agent_form())?;
-    resolved.send(api, signer, form).await
+    let form = signer.agent_form();
+    resolved.mv.ensure_agent_target(form)?;
+    resolved.send(api, signer, form.is_some()).await
 }
 
 /// An API wallet cannot sign `sendAsset`; it signs `agentSendAsset`, which the
@@ -271,11 +271,17 @@ mod tests {
         let form = Some(AgentForm { master });
         let to_master = move_to(master);
 
-        assert_eq!(to_master.agent_form(None).unwrap(), None);
-        assert_eq!(to_master.agent_form(form).unwrap(), form);
+        assert!(to_master.ensure_agent_target(None).is_ok());
+        assert!(to_master.ensure_agent_target(form).is_ok());
         // The master's own form has no such rule.
         let to_stranger = move_to(Address::repeat_byte(9));
-        assert_eq!(to_stranger.agent_form(form).unwrap_err().exit_code(), 13);
-        assert_eq!(to_stranger.agent_form(None).unwrap(), None);
+        assert_eq!(
+            to_stranger
+                .ensure_agent_target(form)
+                .unwrap_err()
+                .exit_code(),
+            13
+        );
+        assert!(to_stranger.ensure_agent_target(None).is_ok());
     }
 }

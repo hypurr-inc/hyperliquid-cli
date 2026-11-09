@@ -26,17 +26,29 @@ impl UserSigned for ApproveBuilderFee {
     const ACTION_TYPE: &'static str = "approveBuilderFee";
 }
 
+/// The document `builder approve` signs, and previews, for `builder` and `max_fee_rate`.
+pub(crate) fn approval(
+    hyperliquid_chain: String,
+    builder: Address,
+    max_fee_rate: &MaxFeeRate,
+    nonce: u64,
+) -> ApproveBuilderFee {
+    ApproveBuilderFee {
+        hyperliquidChain: hyperliquid_chain,
+        maxFeeRate: max_fee_rate.percent().to_string(),
+        builder,
+        nonce,
+    }
+}
+
 pub(crate) async fn submit(
     api: &ApiClient,
     signer: &SelectedSigner,
     builder: Address,
     max_fee_rate: &MaxFeeRate,
 ) -> Result<(), CliError> {
-    user_signed::submit(api, signer, |hyperliquid_chain, nonce| ApproveBuilderFee {
-        hyperliquidChain: hyperliquid_chain,
-        maxFeeRate: max_fee_rate.percent().to_string(),
-        builder,
-        nonce,
+    user_signed::submit(api, signer, |hyperliquid_chain, nonce| {
+        approval(hyperliquid_chain, builder, max_fee_rate, nonce)
     })
     .await
 }

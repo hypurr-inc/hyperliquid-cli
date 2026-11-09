@@ -1,6 +1,4 @@
-use alloy::dyn_abi::{Eip712Types, Resolver, TypedData};
 use alloy::primitives::keccak256;
-use alloy::sol_types::SolStruct;
 use hypersdk::Address;
 use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::types::{Action, Response, Signature};
@@ -13,24 +11,12 @@ use crate::exchange_reply::{self, Reply};
 use crate::hints;
 use crate::http_api::ApiClient;
 use crate::response_sanitization::Untrusted;
-use crate::signable::{Signs, USER_SIGNED_PREFIX, ensure_supports_expires_after};
 use crate::signing::SelectedSigner;
 
+/// The body of a signed `/exchange` request, whatever the action is.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SignedJsonActionRequest {
-    action: serde_json::Value,
-    nonce: u64,
-    signature: Signature,
-    vault_address: Option<hypersdk::Address>,
-    /// A user-signed action has no expiry: the exchange refuses the field
-    /// there, so the key is always `null`.
-    expires_after: Option<u64>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RawL1ActionRequest<'a, A> {
+struct ActionRequest<'a, A> {
     action: &'a A,
     nonce: u64,
     signature: Signature,
@@ -135,27 +121,16 @@ async fn sign_and_post<T: DeserializeOwned>(
     post(api, &request, sent).await
 }
 
-pub(crate) fn sign_user_action<T: SolStruct>(
-    signer: &SelectedSigner,
-    chain: Chain,
-    message: &impl Serialize,
-) -> Result<Signature, CliError> {
-    let typed_data = typed_data::<T>(message, chain);
-    signer.sign_typed_data(&typed_data)
-}
-
-/// Send a user-signed JSON action that is not currently modeled in hypersdk's Action enum.
-pub(crate) async fn send_user_signed_json_action(
+/// Send a user-signed action, which has no expiry: the exchange refuses
+/// `expiresAfter` beside a document that cannot sign it, so the key is `null`.
+/// The exchange answers `default`, any other reply is an error.
+pub(super) async fn send_user_signed(
     api: &ApiClient,
-    action: serde_json::Value,
+    action: &serde_json::Value,
     nonce: u64,
     signature: Signature,
-    signs: Signs<'_>,
 ) -> Result<(), CliError> {
-    if api.request_lifetime().is_some() {
-        ensure_supports_expires_after(Some(signs))?;
-    }
-    let request = SignedJsonActionRequest {
+    let request = ActionRequest {
         action,
         nonce,
         signature,
@@ -189,7 +164,7 @@ pub(crate) async fn send_raw_l1_json_action<A: Serialize>(
         expires_after,
     )
     .await?;
-    let request = RawL1ActionRequest {
+    let request = ActionRequest {
         action,
         nonce,
         signature,
@@ -201,24 +176,6 @@ pub(crate) async fn send_raw_l1_json_action<A: Serialize>(
         expires_after,
     };
     post_json_raw(api, &request, sent, context).await
-}
-
-fn typed_data<T: SolStruct>(message: &impl Serialize, chain: Chain) -> TypedData {
-    let mut resolver = Resolver::from_struct::<T>();
-    resolver
-        .ingest_string(T::eip712_encode_type())
-        .expect("failed to ingest EIP-712 type");
-
-    let mut types = Eip712Types::from(&resolver);
-    let primary_type = types.remove(T::NAME).expect("missing primary EIP-712 type");
-    types.insert(format!("{USER_SIGNED_PREFIX}{}", T::NAME), primary_type);
-
-    TypedData {
-        domain: chain.domain(),
-        resolver: Resolver::from(types),
-        primary_type: format!("{USER_SIGNED_PREFIX}{}", T::NAME),
-        message: serde_json::to_value(message).expect("serialize typed-data message"),
-    }
 }
 
 async fn sign_raw_l1_action<A: Serialize>(

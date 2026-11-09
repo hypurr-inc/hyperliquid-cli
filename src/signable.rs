@@ -17,8 +17,13 @@ use serde::Serialize;
 
 use crate::errors::CliError;
 
-/// The prefix of a user-signed action's EIP-712 primary type.
-pub(crate) const USER_SIGNED_PREFIX: &str = "HyperliquidTransaction:";
+const USER_SIGNED_PREFIX: &str = "HyperliquidTransaction:";
+
+/// The EIP-712 primary type of the user-signed struct `name`: what is signed
+/// carries the exchange's prefix, the struct and its [`Signs`] do not.
+pub(crate) fn user_signed_primary_type(name: &str) -> String {
+    format!("{USER_SIGNED_PREFIX}{name}")
+}
 
 /// A user-signed action: an EIP-712 struct whose JSON is the action body, and
 /// the tag the exchange knows the action by. A command declares the struct once

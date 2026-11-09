@@ -7,12 +7,13 @@ use serde::{Deserialize, Serialize};
 use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, GroupSpec, NoArgs, OwsSupport, Risk, arg};
 use crate::commands::common::rows::{One, Row, or_missing};
-use crate::commands::common::support::print_dry_run;
+use crate::commands::common::support::{SUBMITTED, print_dry_run};
 use crate::dry_run::ActionReversibility;
 use crate::env;
 use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::invocation::Invocation;
+use crate::network::ChainExt;
 use crate::referral_code::{validate_referral_code, validate_referrer_code};
 use crate::signing::SelectedSigner;
 use crate::wire::InfoRequest;
@@ -120,7 +121,7 @@ struct ReferralSetRow {
     signer: String,
     query_address: String,
     code: String,
-    reversibility: String,
+    reversibility: ActionReversibility,
 }
 
 impl Row for ReferralSetRow {
@@ -142,7 +143,7 @@ impl Row for ReferralSetRow {
             self.signer.clone(),
             self.query_address.clone(),
             self.code.clone(),
-            self.reversibility.clone(),
+            self.reversibility.as_str().to_string(),
         ]
     }
 }
@@ -217,12 +218,12 @@ async fn run_code_action(
 
     inv.print(&One::new(ReferralSetRow {
         action: action.confirmation_action().to_string(),
-        status: "submitted".to_string(),
-        network: remote.chain().to_string(),
+        status: SUBMITTED.to_string(),
+        network: remote.chain().label().to_string(),
         signer: signer.address().to_string(),
         query_address: signer.query_address().to_string(),
         code: action.code().to_string(),
-        reversibility: REVERSIBILITY.as_str().to_string(),
+        reversibility: REVERSIBILITY,
     }));
     Ok(())
 }
@@ -233,7 +234,7 @@ fn referral_dry_run_value(
     action: &ReferrerAction,
 ) -> serde_json::Value {
     serde_json::json!({
-        "network": chain.to_string(),
+        "network": chain.label(),
         "signer": signer.map(|signer| signer.address().to_string()),
         "query_address": signer.map(|signer| signer.query_address().to_string()),
         "code": action.code(),

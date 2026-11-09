@@ -7,7 +7,7 @@ use crate::assets::{SpotTokenListing, USDC_NAME, require_spot_token};
 use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, GroupSpec, InputKind, YES_FOR_AUTOMATION, arg};
 use crate::commands::common::rows::{ListRow, Row, Rows};
-use crate::commands::common::support::print_dry_run;
+use crate::commands::common::support::{print_dry_run, require_token};
 use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
@@ -255,21 +255,16 @@ fn destination_address(raw: &str) -> Result<Address, CliError> {
     address(raw, AddressRole::Explicit(Some("--to")))
 }
 
-fn validate_send_args(args: &SendArgs) -> Result<Address, CliError> {
-    quantity::require_positive(args.amount, "amount")?;
-    destination_address(&args.to)
+/// The destination of a transfer of `amount` USDC, after the amount is checked.
+fn destination_and_amount(amount: Decimal, to: &str) -> Result<Address, CliError> {
+    quantity::require_positive(amount, "amount")?;
+    destination_address(to)
 }
 
 fn validate_spot_send_args(args: &SpotSendArgs) -> Result<Address, CliError> {
-    quantity::require_positive(args.amount, "amount")?;
-    let destination = destination_address(&args.to)?;
-    validate_token_symbol(&args.token)?;
+    let destination = destination_and_amount(args.amount, &args.to)?;
+    require_token(&args.token)?;
     Ok(destination)
-}
-
-fn validate_withdraw_args(args: &WithdrawArgs) -> Result<Address, CliError> {
-    quantity::require_positive(args.amount, "amount")?;
-    destination_address(&args.to)
 }
 
 async fn send(
@@ -368,7 +363,7 @@ async fn spot_send(
 fn asset_move(args: &SendAssetArgs) -> Result<AssetMove, CliError> {
     quantity::require_positive(args.amount, "amount")?;
     let to = destination_address(&args.to)?;
-    validate_token_symbol(&args.token)?;
+    require_token(&args.token)?;
     let source = AssetVenue::parse(&args.source, "--source")?;
     let dest = AssetVenue::parse(&args.dest, "--dest")?;
     if let Some(from_subaccount) = args.from_subaccount.as_deref() {
@@ -427,13 +422,6 @@ async fn withdraw(
     TransferConfirmation::new("withdraw", args.amount, USDC_NAME)
         .to(&args.to)
         .print(inv);
-    Ok(())
-}
-
-fn validate_token_symbol(token: &str) -> Result<(), CliError> {
-    if token.trim().is_empty() {
-        return Err(CliError::Configuration("token cannot be empty".to_string()));
-    }
     Ok(())
 }
 
@@ -617,7 +605,7 @@ impl CliCommand for TransferSend {
     ]);
 
     async fn run(inv: &Invocation, args: &SendArgs) -> Result<(), anyhow::Error> {
-        let destination = validate_send_args(args)?;
+        let destination = destination_and_amount(args.amount, &args.to)?;
         if inv.dry_run() {
             return print_dry_run(
                 inv,
@@ -738,14 +726,16 @@ impl CliCommand for TransferSendAsset {
                 "amount": quantity::wire_text(*amount),
                 "from_subaccount": from_subaccount,
             });
-            let form = inv.dry_run_signer()?.and_then(SelectedSigner::agent_form);
-            if resolved.mv.agent_form(form)?.is_some() {
+            let form = inv.dry_run_agent_form()?;
+            resolved.mv.ensure_agent_target(form)?;
+            if form.is_some() {
                 preview["action_type"] = "agentSendAsset".into();
             }
             return print_dry_run(inv, TransferActionKind::SendAsset.would_execute(), preview);
         }
         let signer = inv.resolve_signer()?;
-        let form = resolved.mv.agent_form(signer.agent_form())?;
+        let form = signer.agent_form();
+        resolved.mv.ensure_agent_target(form)?;
         let preview = TransferPreview {
             network: remote.chain(),
             signer: signer.address(),
@@ -767,7 +757,7 @@ impl CliCommand for TransferSendAsset {
             ),
             "send-asset transfer aborted",
         )?;
-        resolved.send(remote.api(), &signer, form).await?;
+        resolved.send(remote.api(), &signer, form.is_some()).await?;
         TransferConfirmation::new("send-asset", *amount, token.name.clone())
             .to(&args.to)
             .print(inv);
@@ -799,7 +789,7 @@ impl CliCommand for TransferWithdraw {
     ]);
 
     async fn run(inv: &Invocation, args: &WithdrawArgs) -> Result<(), anyhow::Error> {
-        let destination = validate_withdraw_args(args)?;
+        let destination = destination_and_amount(args.amount, &args.to)?;
         if inv.dry_run() {
             return print_dry_run(
                 inv,

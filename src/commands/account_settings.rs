@@ -12,13 +12,14 @@ use crate::account_mode::AccountMode;
 use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, InputKind, Risk, YES_FOR_LIVE_EXECUTION, arg};
 use crate::commands::common::rows::{One, Row};
-use crate::commands::common::support::{action_json, print_dry_run};
+use crate::commands::common::support::{SUBMITTED, action_json, print_dry_run};
 use crate::consent::{self, ConsentBlock};
 use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::exchange::user_signed;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::network::ChainExt;
 use crate::signable::{Signs, UserSigned};
 use crate::signing::{AgentForm, SelectedSigner};
 use crate::wire::InfoRequest;
@@ -173,18 +174,22 @@ fn abstraction_set_dry_run_value(
             abstraction: mode.sdk_mode(),
         })?
     } else {
-        serde_json::json!({
-            "type": UserSetAbstraction::ACTION_TYPE,
-            "hyperliquidChain": chain.to_string(),
-            "signatureChainId": chain.arbitrum_id().to_string(),
-            "user": user,
-            "abstraction": mode.protocol_value(),
-        })
+        let mut action = user_signed::preview(
+            &UserSetAbstraction {
+                hyperliquidChain: chain.label().to_string(),
+                user: plan.map_or(Address::ZERO, |plan| plan.user),
+                abstraction: mode.protocol_value().to_string(),
+                nonce: 0,
+            },
+            chain,
+        );
+        action["user"] = user.clone().into();
+        action
     };
     let mut preview = serde_json::json!({
         "mode": mode.cli_value(),
         "protocol_mode": mode.protocol_value(),
-        "network": chain.to_string(),
+        "network": chain.label(),
         "user": user,
         "action": action,
     });
@@ -239,13 +244,13 @@ async fn set_abstraction(
     }
 
     inv.print(&One::new(AbstractionSetRow {
-        status: "submitted".to_string(),
+        status: SUBMITTED.to_string(),
         action: "set-abstraction".to_string(),
         signer: signer.address().to_string(),
         user: user.to_string(),
         mode: args.mode.cli_value().to_string(),
         protocol_mode: protocol_mode.to_string(),
-        network: remote.chain().to_string(),
+        network: remote.chain().label().to_string(),
     }));
     Ok(())
 }
@@ -384,7 +389,7 @@ impl CliCommand for AccountEvmBigBlocks {
                 "set_evm_big_blocks",
                 serde_json::json!({
                     "using_big_blocks": using_big_blocks,
-                    "network": inv.remote()?.chain().to_string(),
+                    "network": inv.remote()?.chain().label(),
                     "action": action_json(&action)?,
                 }),
             );
@@ -393,12 +398,12 @@ impl CliCommand for AccountEvmBigBlocks {
         let remote = inv.remote()?;
         actions::send_default_l1_action(remote.api(), &signer, action).await?;
         inv.print(&One::new(EvmBigBlocksRow {
-            status: "submitted".to_string(),
+            status: SUBMITTED.to_string(),
             action: "evm-big-blocks".to_string(),
             signer: signer.address().to_string(),
             acting_as: signer.query_address().to_string(),
             using_big_blocks,
-            network: remote.chain().to_string(),
+            network: remote.chain().label().to_string(),
         }));
         Ok(())
     }

@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
 use crate::commands::common::rows::{ListRow, MISSING, Row, Rows};
-use crate::commands::common::support::print_dry_run;
+use crate::commands::common::support::{SUBMITTED, print_dry_run};
 use crate::errors::CliError;
 use crate::exchange::actions::send_l1_action;
 use crate::exchange_reply;
@@ -157,7 +157,7 @@ async fn bid(
     )
     .await?;
     let status = if exchange_reply::typed(&response).is_some_and(|typed| typed.kind == "default") {
-        "submitted".to_string()
+        SUBMITTED.to_string()
     } else {
         format!("submitted with response: {response}")
     };
