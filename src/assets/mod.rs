@@ -17,7 +17,7 @@ pub use asset_id::{
     split_outcome_encoding,
 };
 pub(crate) use dexes::{CoinDecimal, DexCollateral, DexMeta, PerpDex, PerpDexList};
-pub use dexes::{DeployerFeeScales, DexArg, DexCatalogue, MarketFeeScale, USDC_NAME, USDC_TOKEN};
+pub use dexes::{DeployerFeeScales, DexArg, USDC_NAME, USDC_TOKEN};
 #[cfg(test)]
 pub(crate) use market::test_support;
 pub use market::{
@@ -25,17 +25,17 @@ pub use market::{
 };
 pub(crate) use metadata::load_perp_markets;
 pub use metadata::{
-    AssetMetadata, SpotTokenListing, UnavailableDex, load_spot_markets,
-    load_spot_markets_with_contexts, load_spot_tokens, require_spot_token,
+    AssetMetadata, SpotTokenListing, load_spot_markets, load_spot_markets_with_contexts,
+    load_spot_tokens, require_spot_token,
 };
 pub use outcome_description::OutcomeDescription;
-pub use outcome_templates::{OutcomeTemplate, TemplateList, TemplateRole, load_outcome_templates};
+pub use outcome_templates::{OutcomeTemplate, load_outcome_templates};
 #[cfg(test)]
 pub(crate) use outcomes::catalog_for_tests;
 pub use outcomes::{
-    Names, OutcomeCatalog, OutcomeQuestionRow, OutcomeSideRow, QuestionRole, QuestionState,
-    SettledOutcomeRow, load_settled_outcome,
+    Names, OutcomeCatalog, OutcomeQuestionRow, OutcomeSideRow, QuestionState, SettledOutcomeRow,
+    load_settled_outcome,
 };
-pub use query::{AssetQuery, normalize_dex, parse_asset_query, qualify_dex_asset};
+pub use query::{AssetQuery, parse_asset_query, qualify_dex_asset};
 pub(crate) use query::{eq_asset_name, normalize_asset_name};
 pub use resolver::{AssetResolver, ListedSpot, MarketCache};

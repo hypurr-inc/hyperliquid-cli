@@ -5,6 +5,7 @@ use serde::Deserialize;
 
 use crate::env::{self, EnvSource};
 use crate::errors::{CliError, network_error};
+use crate::paths;
 
 /// The GitHub repository, as `owner/name`: the one spelling every release,
 /// download and issue URL derives from. Must match the repository and archive
@@ -52,7 +53,10 @@ impl ReleaseClient {
         if status.is_success() {
             return Ok(response);
         }
-        let body = response.text().await.unwrap_or_default();
+        let body = response
+            .text()
+            .await
+            .map_err(|err| network_error(&err, timeout))?;
         Err(CliError::failed_reply(status, &body))
     }
 
@@ -172,7 +176,7 @@ pub(super) enum InstallMethod {
 
 impl InstallMethod {
     pub fn detect(exe: &Path, source: &EnvSource) -> Self {
-        let home = dirs::home_dir();
+        let home = paths::home_dir(source);
         let cargo_home = source.get_os(env::CARGO_HOME).map(PathBuf::from);
         let resolved = std::fs::canonicalize(exe).ok();
         [Some(exe), resolved.as_deref()]
@@ -351,5 +355,42 @@ mod tests {
             classify("/usr/local/bin/hyperliquid", None),
             InstallMethod::Standalone
         );
+    }
+
+    #[test]
+    fn install_method_reads_the_home_the_environment_names() {
+        let source = EnvSource::fixed([(env::HOME_DIR, "/pinned-home")]);
+
+        assert_eq!(
+            InstallMethod::detect(Path::new("/pinned-home/.cargo/bin/hyperliquid"), &source),
+            InstallMethod::Cargo
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_reply_whose_body_cannot_be_read_is_a_network_error() {
+        use std::io::Write;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Promises 100 bytes, sends 5, then hangs up.
+            stream
+                .write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 100\r\n\r\nshort",
+                )
+                .unwrap();
+        });
+        let client = ReleaseClient::new().unwrap();
+
+        let error = client
+            .get(&format!("http://{addr}/latest"), None)
+            .await
+            .unwrap_err();
+        server.join().unwrap();
+
+        assert_eq!(error.reason(), "network_error");
+        assert_eq!(error.exit_code(), 12);
     }
 }

@@ -93,9 +93,9 @@ pub struct BuilderFee {
 }
 
 impl BuilderFee {
-    pub const MAX_SUB_BUILDERS: usize = 5;
+    const MAX_SUB_BUILDERS: usize = 5;
     /// The sub-builder shares sum to at most this: 100%.
-    pub const MAX_SUB_BUILDER_SHARES: u64 = 100_000;
+    const MAX_SUB_BUILDER_SHARES: u64 = 100_000;
 
     #[must_use]
     pub fn new(address: Address, tenths_bps: u64, subs: Vec<SubBuilder>) -> Self {
@@ -180,7 +180,7 @@ impl Serialize for BuilderFee {
 
 /// The sub-builders `--sub-builder ADDRESS:SHARE` names. A share is a percent
 /// of the builder's fee; the wire unit is 0.001% of it. The exchange accepts up
-/// to [`BuilderFee::MAX_SUB_BUILDERS`], each with a positive share, whose
+/// to `BuilderFee::MAX_SUB_BUILDERS`, each with a positive share, whose
 /// shares sum to at most 100%.
 pub fn parse_sub_builders(raw: &[String]) -> Result<Vec<SubBuilder>, CliError> {
     if raw.len() > BuilderFee::MAX_SUB_BUILDERS {

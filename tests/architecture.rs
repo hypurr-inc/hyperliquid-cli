@@ -475,7 +475,7 @@ fn the_scan_resolves_the_shared_layer_imports_commands_really_make() {
     assert!(importers >= 10, "found only {importers} importers");
 }
 
-/// The leaves the signing and command-spec graph hangs on keep pointing down:
+/// The leaves the signing, command-spec and asset graph hang on keep pointing down:
 /// each `(files, forbidden)` row says the files import none of the modules.
 /// What they would need from a forbidden module belongs in a leaf below both
 /// (`signable`, `signature`, `nonce`, `cli_command`), so the providers, the
@@ -501,6 +501,21 @@ fn the_signing_and_spec_leaves_import_nothing_above_them() {
             &["invocation", "bankr", "ows", "signing", "exchange"],
         ),
         (&["network.rs"], &["http_api", "ws"]),
+        (
+            &[
+                "assets/asset_id.rs",
+                "assets/dexes.rs",
+                "assets/market.rs",
+                "assets/metadata.rs",
+                "assets/mod.rs",
+                "assets/outcome_description.rs",
+                "assets/outcome_templates.rs",
+                "assets/outcomes.rs",
+                "assets/query.rs",
+                "assets/resolver.rs",
+            ],
+            &["output"],
+        ),
         (&["http_api.rs"], &["signing", "bankr", "ows"]),
         (
             &["bankr.rs", "ows/mod.rs", "ows/signing.rs", "ows/vault.rs"],

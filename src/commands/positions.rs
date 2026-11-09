@@ -237,10 +237,7 @@ impl CliCommand for PositionsList {
         // Validate once, before either path: a watch must not start on a dex that
         // cannot be read, and both paths send the canonical spelling.
         let client = inv.remote()?.api();
-        let dex = inv
-            .dex(args.dex.as_ref())
-            .await?
-            .map(|dex| dex.name.clone());
+        let dex = inv.dex_name(args.dex.as_ref()).await?;
         if args.watch.watch {
             watch_positions(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
@@ -506,7 +503,6 @@ async fn watch_positions(
     crate::watch::run_snapshot_watch(
         inv,
         "Live positions",
-        remote.chain(),
         vec![Subscription::WebData3 { user }],
         max_ticks,
         move || {

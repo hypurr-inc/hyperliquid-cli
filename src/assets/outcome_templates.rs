@@ -11,7 +11,6 @@ use serde_json::Value;
 
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
-use crate::output::warn;
 use crate::wire::InfoRequest;
 
 use super::outcome_description::OutcomeDescription;
@@ -93,7 +92,8 @@ impl TemplateList {
 }
 
 /// The templates `outcomeTemplates` lists. Entries that could not be read are
-/// named on stderr, not dropped silently and not fatal.
+/// named in `skipped` for the caller to report: not dropped silently and not
+/// fatal.
 pub async fn load_outcome_templates(api: &ApiClient) -> Result<TemplateList, CliError> {
     let entries = api
         .info::<Vec<Value>>(
@@ -101,16 +101,7 @@ pub async fn load_outcome_templates(api: &ApiClient) -> Result<TemplateList, Cli
             "loading outcome templates",
         )
         .await?;
-    let list = templates_from_entries(entries);
-    report_skipped(&list.skipped);
-    Ok(list)
-}
-
-/// One stderr warning per entry a loader could not turn into rows.
-pub(super) fn report_skipped(skipped: &[String]) {
-    for line in skipped {
-        warn(line);
-    }
+    Ok(templates_from_entries(entries))
 }
 
 pub(super) fn templates_from_entries(entries: Vec<Value>) -> TemplateList {

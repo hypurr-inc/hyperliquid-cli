@@ -18,7 +18,7 @@ use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::mode::Mode;
 use crate::network::Network;
-use crate::output::{TableData, sink};
+use crate::output::{TableData, serialize_row, sink};
 use crate::ows::vault::Vault;
 use crate::prompt;
 use crate::referral_code;
@@ -90,7 +90,7 @@ impl TableData for SetupSummary {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        serialize_row(self)
     }
 }
 

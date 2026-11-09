@@ -244,7 +244,8 @@ async fn cancel_all(
     args: &CancelAllArgs,
 ) -> Result<(), anyhow::Error> {
     let plan =
-        prepare_cancel_all_orders_plan(context.api, resolver, context.account(), args).await?;
+        prepare_cancel_all_orders_plan(context.inv, context.api, resolver, context.account(), args)
+            .await?;
     let order_ids = plan.order_ids();
 
     let Some(action) = plan.action() else {

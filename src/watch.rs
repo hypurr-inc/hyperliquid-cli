@@ -13,7 +13,7 @@ use crossterm::terminal::{
     enable_raw_mode, size as terminal_size,
 };
 use futures::StreamExt;
-use hypersdk::hypercore::{Chain, Subscription, WebSocket, ws::Event as WsEvent};
+use hypersdk::hypercore::{Subscription, WebSocket, ws::Event as WsEvent};
 
 use crate::env;
 use crate::errors::CliError;
@@ -24,7 +24,6 @@ use crate::output::{self, Session, TableData, sink};
 use crate::stream::{EXIT_SIGINT, StreamEnd, run_stream};
 use crate::stream_bounds::StreamBounds;
 use crate::terminal::OutputFormat;
-use crate::ws::websocket_for_chain;
 
 const WATCH_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const KEY_POLL_INTERVAL: Duration = Duration::from_millis(150);
@@ -180,7 +179,6 @@ impl WatchInput for RealWatchInput {
 pub async fn run_snapshot_watch<T, F, Fut>(
     inv: &Invocation,
     title: &str,
-    chain: Chain,
     subscriptions: Vec<Subscription>,
     max_ticks: Option<usize>,
     refresh: F,
@@ -205,8 +203,9 @@ where
         Notice::JsonLines(blocker).eprint();
     }
 
+    let api = inv.remote()?.api();
     run_stream(async move {
-        let ws = websocket_for_chain(chain);
+        let ws = api.websocket();
         for subscription in subscriptions {
             ws.subscribe(subscription);
         }

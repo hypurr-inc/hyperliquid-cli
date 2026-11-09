@@ -114,6 +114,7 @@ env_vars! {
 // runtime variable with the same name still overrides it. A variable unset at
 // build time bakes in no default.
 
+#[cfg(test)]
 #[must_use]
 pub fn kind(name: &str) -> Option<Kind> {
     TABLE

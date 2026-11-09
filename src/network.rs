@@ -82,15 +82,6 @@ impl Network {
     }
 }
 
-impl From<Chain> for Network {
-    fn from(chain: Chain) -> Self {
-        match chain {
-            Chain::Mainnet => Self::Mainnet,
-            Chain::Testnet => Self::Testnet,
-        }
-    }
-}
-
 impl std::fmt::Display for Network {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
@@ -162,7 +153,6 @@ mod tests {
                 format!("\"{name}\"")
             );
             assert_eq!(Network::parse(&name.to_uppercase()), Some(network));
-            assert_eq!(Network::from(network.chain()), network);
         }
         assert_eq!(Network::NAMES, ["mainnet", "testnet"]);
     }

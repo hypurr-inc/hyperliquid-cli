@@ -262,10 +262,7 @@ impl CliCommand for SubscribeAllMids {
     ]);
 
     async fn run(inv: &Invocation, args: &SubscribeAllMidsArgs) -> Result<(), anyhow::Error> {
-        let dex = inv
-            .dex(args.dex.as_ref())
-            .await?
-            .map(|dex| dex.name.clone());
+        let dex = inv.dex_name(args.dex.as_ref()).await?;
         stream(inv, SubscribeTarget::all_mids(dex), &args.stream).await
     }
 }
@@ -541,7 +538,7 @@ async fn dex_names(
 ) -> Result<Vec<Option<String>>, CliError> {
     let mut names = Vec::with_capacity(requested.len());
     for dex in requested {
-        names.push(inv.dex(Some(dex)).await?.map(|dex| dex.name.clone()));
+        names.push(inv.dex_name(Some(dex)).await?);
     }
     Ok(names)
 }
@@ -551,5 +548,5 @@ async fn stream(
     target: SubscribeTarget,
     bounds: &StreamBoundArgs,
 ) -> Result<(), anyhow::Error> {
-    crate::stream::stream_subscription(inv, inv.remote()?.chain(), target, bounds).await
+    crate::stream::stream_subscription(inv, target, bounds).await
 }

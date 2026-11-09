@@ -208,10 +208,7 @@ impl CliCommand for OrdersOpen {
     async fn run(inv: &Invocation, args: &OpenOrdersArgs) -> Result<(), anyhow::Error> {
         // Validate once, before either path: a watch must not start on a dex that
         // cannot be read, and both paths send the canonical spelling.
-        let dex = inv
-            .dex(args.dex.as_ref())
-            .await?
-            .map(|dex| dex.name.clone());
+        let dex = inv.dex_name(args.dex.as_ref()).await?;
         if args.watch.watch {
             watch_open_orders(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
@@ -625,7 +622,7 @@ impl CliCommand for OrdersCancelAll {
         let resolver = inv.asset_resolver().await?;
         if inv.dry_run() {
             let client = inv.remote()?.api();
-            return run.preview(cancel_all_dry_run_plan(client, &resolver, args).await?);
+            return run.preview(cancel_all_dry_run_plan(inv, client, &resolver, args).await?);
         }
         let signer = inv.resolve_signer()?;
         cancel_all(run.context(&signer)?, &resolver, args).await
@@ -1073,7 +1070,6 @@ async fn watch_open_orders(
     crate::watch::run_snapshot_watch(
         inv,
         "Live open orders",
-        remote.chain(),
         vec![Subscription::OrderUpdates { user }],
         max_ticks,
         move || {

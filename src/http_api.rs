@@ -14,7 +14,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use hypersdk::hypercore::{Chain, HttpClient};
+use hypersdk::hypercore::{self, Chain, HttpClient, WebSocket};
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde::Serialize;
@@ -167,7 +167,7 @@ impl ReadPolicy {
 /// already classified. The status is left for the caller to read, because
 /// some endpoints say "unsupported request" with a 4xx.
 #[derive(Debug, Clone)]
-pub struct InfoReply {
+pub(crate) struct InfoReply {
     status: StatusCode,
     body: String,
 }
@@ -193,7 +193,7 @@ impl InfoReply {
 }
 
 pub struct ApiClient {
-    chain: Chain,
+    network: Network,
     base_url: reqwest::Url,
     /// The base URL as shown to users: the override as parsed, else the public endpoint.
     label: String,
@@ -211,7 +211,7 @@ pub struct ApiClient {
 impl std::fmt::Debug for ApiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApiClient")
-            .field("chain", &self.chain)
+            .field("chain", &self.network.chain())
             .field("base_url", &self.label)
             .finish_non_exhaustive()
     }
@@ -235,7 +235,7 @@ impl ApiClient {
             None => (network.api_url(), network.api_base_url()),
         };
         Self {
-            chain: network.chain(),
+            network,
             base_url,
             label,
             has_override,
@@ -302,8 +302,23 @@ impl ApiClient {
     }
 
     #[must_use]
+    pub fn network(&self) -> Network {
+        self.network
+    }
+
+    #[must_use]
     pub fn chain(&self) -> Chain {
-        self.chain
+        self.network.chain()
+    }
+
+    /// A WebSocket for the network's public endpoint. The API endpoint
+    /// override does not apply to WebSockets.
+    #[must_use]
+    pub fn websocket(&self) -> WebSocket {
+        match self.network {
+            Network::Mainnet => hypercore::mainnet_ws(),
+            Network::Testnet => hypercore::testnet_ws(),
+        }
     }
 
     #[must_use]
@@ -326,7 +341,7 @@ impl ApiClient {
     }
 
     /// POST `request` to `/info` and return the answer without judging its status.
-    pub async fn info_raw(&self, request: &impl Serialize) -> Result<InfoReply, CliError> {
+    pub(crate) async fn info_raw(&self, request: &impl Serialize) -> Result<InfoReply, CliError> {
         let reply = self.read(request).await?;
         if let Some(err) = rate_limit_error(&reply, Disposition::Read) {
             return Err(err);
@@ -437,7 +452,7 @@ impl ApiClient {
     /// `<stats host>/<Network>/<dataset>`; under a loopback override the same
     /// path hangs off the override as `/stats-data/<Network>/<dataset>`.
     fn stats_endpoint(&self, dataset: &str) -> reqwest::Url {
-        let name = match Network::from(self.chain) {
+        let name = match self.network {
             Network::Mainnet => "Mainnet",
             Network::Testnet => "Testnet",
         };

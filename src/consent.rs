@@ -11,7 +11,7 @@
 //! | surface                                   | error                          |
 //! |-------------------------------------------|--------------------------------|
 //! | pipeline, run cannot ask, no `--yes`      | `ConfirmationRequired`         |
-//! | a command asks and the run cannot ask     | `MissingInput` ([`ensure_can_ask`]) |
+//! | a command asks and the run cannot ask     | `MissingInput` (`ensure_can_ask`) |
 //! | the user declines the prompt              | `Configuration` ([`declined`]) |
 //! | unattended command needs approval         | `Configuration` ([`unattended_refusal`]) |
 //! | wallet prompts: the user declines         | a "cancelled" receipt, exit 0  |
@@ -71,6 +71,7 @@ impl ConsentBlock {
     }
 
     /// The lines joined by newlines, without a trailing one.
+    #[cfg(test)]
     #[must_use]
     pub fn render(&self) -> String {
         self.lines.join("\n")
@@ -93,7 +94,7 @@ pub enum Tone {
 }
 
 /// A run that cannot prompt fails with `--yes` as the way to answer.
-pub fn ensure_can_ask(mode: &Mode) -> Result<(), CliError> {
+fn ensure_can_ask(mode: &Mode) -> Result<(), CliError> {
     prompt::ensure_can_prompt(mode, YES_FLAG)
 }
 

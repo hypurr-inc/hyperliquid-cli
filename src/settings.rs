@@ -85,7 +85,7 @@ impl ConfigTransaction<'_> {
     ) -> Result<Vec<String>, anyhow::Error> {
         let mut after = self.before.clone();
         edit(&mut after);
-        let changed = changed_keys(&self.before, &after);
+        let changed = changed_keys(&self.before, &after)?;
         if !changed.is_empty() {
             self.file.save(&after, &self.lock)?;
         }
@@ -94,12 +94,17 @@ impl ConfigTransaction<'_> {
     }
 }
 
-fn changed_keys(before: &Config, after: &Config) -> Vec<String> {
-    let fields = |config: &Config| match serde_json::to_value(config) {
-        Ok(serde_json::Value::Object(fields)) => fields,
-        _ => serde_json::Map::new(),
-    };
-    let (before, after) = (fields(before), fields(after));
+/// The top-level keys whose value differs between the two configs, sorted.
+fn changed_keys(before: &Config, after: &Config) -> Result<Vec<String>, anyhow::Error> {
+    fn fields(
+        config: &Config,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, anyhow::Error> {
+        match serde_json::to_value(config)? {
+            serde_json::Value::Object(fields) => Ok(fields),
+            other => anyhow::bail!("the config serialized to {other}, not an object"),
+        }
+    }
+    let (before, after) = (fields(before)?, fields(after)?);
     let mut keys: Vec<String> = after
         .iter()
         .filter(|(key, value)| before.get(*key) != Some(*value))
@@ -112,7 +117,7 @@ fn changed_keys(before: &Config, after: &Config) -> Vec<String> {
         )
         .collect();
     keys.sort();
-    keys
+    Ok(keys)
 }
 
 impl Settings {
