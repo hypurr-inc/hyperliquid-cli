@@ -19,7 +19,7 @@ use crate::mode::DisplayBlocker;
 const GLYPH: &str = "!";
 
 /// What an automatic retry or reconnect says it is doing.
-pub const RETRYING: &str = "Retrying automatically…";
+const RETRYING: &str = "Retrying automatically…";
 
 const STREAM_GAP: &str = "Connection was lost and restored. Events may have been missed.";
 

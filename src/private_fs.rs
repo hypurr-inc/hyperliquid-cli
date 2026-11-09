@@ -68,9 +68,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 
     let mut attempt = 0_u32;
     let (tmp_path, mut tmp) = loop {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.subsec_nanos());
+        let nanos = crate::clock::now_utc().timestamp_subsec_nanos();
         let tmp_path = parent.join(format!(
             ".{file_name}.{}.{nanos}.{attempt}.tmp",
             std::process::id()

@@ -475,6 +475,31 @@ fn the_scan_resolves_the_shared_layer_imports_commands_really_make() {
     assert!(importers >= 10, "found only {importers} importers");
 }
 
+/// Production code reads the wall clock through `clock`, so "now" is one
+/// definition and a test can see every place that asks. Test modules are cut
+/// at their `#[cfg(test)]`, the way the scan above reads a file.
+#[test]
+fn only_the_clock_reads_the_wall_clock() {
+    let mut offenders = Vec::new();
+    for file in rust_files(&src_dir()) {
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        if name == "clock.rs" || name == "tests.rs" {
+            continue;
+        }
+        let source = fs::read_to_string(&file).unwrap();
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        let code = code_only(production);
+        if code.contains("Utc::now(") || code.contains("SystemTime::now(") {
+            offenders.push(file.display().to_string());
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these read the wall clock directly; use clock::now_utc or clock::now_ms:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
 /// `source` as production code: comments and literals blanked, and the unit
 /// tests (the first `#[cfg(test)] mod`) cut off.
 fn production_code(source: &str) -> String {

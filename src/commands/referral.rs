@@ -148,49 +148,6 @@ impl Row for ReferralSetRow {
 
 const REVERSIBILITY: ActionReversibility = ActionReversibility::Irreversible;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReferralActionKind {
-    Set,
-    Register,
-}
-
-impl ReferralActionKind {
-    fn action(self, code: &str) -> ReferrerAction<'_> {
-        match self {
-            Self::Set => ReferrerAction::SetReferrer { code },
-            Self::Register => ReferrerAction::RegisterReferrer { code },
-        }
-    }
-
-    fn would_execute(self) -> &'static str {
-        match self {
-            Self::Set => "set_referral_code",
-            Self::Register => "register_referrer_code",
-        }
-    }
-
-    fn confirmation_action(self) -> &'static str {
-        match self {
-            Self::Set => "set-referrer",
-            Self::Register => "register-referrer",
-        }
-    }
-
-    fn submit_context(self) -> &'static str {
-        match self {
-            Self::Set => "set referrer",
-            Self::Register => "register referrer",
-        }
-    }
-
-    fn validate(self, code: &str) -> Result<(), CliError> {
-        match self {
-            Self::Set => validate_referral_code(code),
-            Self::Register => validate_referrer_code(code),
-        }
-    }
-}
-
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 enum ReferrerAction<'a> {
@@ -204,34 +161,66 @@ impl ReferrerAction<'_> {
             Self::SetReferrer { code } | Self::RegisterReferrer { code } => code,
         }
     }
+
+    fn would_execute(&self) -> &'static str {
+        match self {
+            Self::SetReferrer { .. } => "set_referral_code",
+            Self::RegisterReferrer { .. } => "register_referrer_code",
+        }
+    }
+
+    fn confirmation_action(&self) -> &'static str {
+        match self {
+            Self::SetReferrer { .. } => "set-referrer",
+            Self::RegisterReferrer { .. } => "register-referrer",
+        }
+    }
+
+    fn submit_context(&self) -> &'static str {
+        match self {
+            Self::SetReferrer { .. } => "set referrer",
+            Self::RegisterReferrer { .. } => "register referrer",
+        }
+    }
+
+    fn validate(&self) -> Result<(), CliError> {
+        match self {
+            Self::SetReferrer { code } => validate_referral_code(code),
+            Self::RegisterReferrer { code } => validate_referrer_code(code),
+        }
+    }
 }
 
 async fn run_code_action(
     inv: &Invocation,
-    kind: ReferralActionKind,
-    code: &str,
+    action: ReferrerAction<'_>,
 ) -> Result<(), anyhow::Error> {
-    kind.validate(code)?;
-    let action = kind.action(code);
+    action.validate()?;
     if inv.dry_run() {
         return print_dry_run(
             inv,
-            kind.would_execute(),
+            action.would_execute(),
             referral_dry_run_value(inv.remote()?.chain(), inv.dry_run_signer()?, &action),
         );
     }
     let signer = inv.resolve_signer()?;
     let remote = inv.remote()?;
-    actions::send_raw_l1_json_action(remote.api(), &signer, &action, None, kind.submit_context())
-        .await?;
+    actions::send_raw_l1_json_action(
+        remote.api(),
+        &signer,
+        &action,
+        None,
+        action.submit_context(),
+    )
+    .await?;
 
     inv.print(&One::new(ReferralSetRow {
-        action: kind.confirmation_action().to_string(),
+        action: action.confirmation_action().to_string(),
         status: "submitted".to_string(),
         network: remote.chain().to_string(),
         signer: signer.address().to_string(),
         query_address: signer.query_address().to_string(),
-        code: code.to_string(),
+        code: action.code().to_string(),
         reversibility: REVERSIBILITY.as_str().to_string(),
     }));
     Ok(())
@@ -295,7 +284,7 @@ impl CliCommand for ReferralSet {
                     ))
                 })?,
         };
-        run_code_action(inv, ReferralActionKind::Set, &code).await
+        run_code_action(inv, ReferrerAction::SetReferrer { code: &code }).await
     }
 }
 
@@ -313,7 +302,7 @@ impl CliCommand for ReferralRegister {
     .args(&[arg("code").resource_id("referrer code")]);
 
     async fn run(inv: &Invocation, args: &ReferralRegisterArgs) -> Result<(), anyhow::Error> {
-        run_code_action(inv, ReferralActionKind::Register, &args.code).await
+        run_code_action(inv, ReferrerAction::RegisterReferrer { code: &args.code }).await
     }
 }
 
@@ -406,12 +395,16 @@ mod tests {
 
     #[test]
     fn the_referrer_actions_keep_their_wire_shape() {
-        for (kind, tag) in [
-            (ReferralActionKind::Set, "setReferrer"),
-            (ReferralActionKind::Register, "registerReferrer"),
+        for (action, tag) in [
+            (
+                ReferrerAction::SetReferrer { code: "MYCODE" },
+                "setReferrer",
+            ),
+            (
+                ReferrerAction::RegisterReferrer { code: "MYCODE" },
+                "registerReferrer",
+            ),
         ] {
-            let action = kind.action("MYCODE");
-
             assert_eq!(
                 serde_json::to_value(&action).unwrap(),
                 serde_json::json!({"type": tag, "code": "MYCODE"})

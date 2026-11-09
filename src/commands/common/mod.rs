@@ -8,6 +8,7 @@
 //! module under the crate root.
 
 pub(crate) mod borrow_lend_state;
+pub mod direction;
 pub(crate) mod issue_report;
 pub(crate) mod market_input;
 pub(crate) mod order_list;

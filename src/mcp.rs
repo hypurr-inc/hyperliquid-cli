@@ -3,7 +3,7 @@
 //! Defaults to commands with read-only lifecycle and no risk. Set
 //! HYPERLIQUID_MCP_ALLOW_UNSAFE=1 to expose other commands (except mcp).
 //! Confirmation bypass arguments remain forbidden. HYPERLIQUID_MCP_TIMEOUT_MS
-//! sets a positive execution deadline in milliseconds (default 30000). A value
+//! sets a positive execution deadline in milliseconds ([`DEFAULT_DEADLINE`] when unset). A value
 //! of either variable the server cannot read is a configuration error (exit
 //! 2), never a silent default.
 
@@ -12,13 +12,14 @@ use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 use std::time::Duration;
 
+use crate::clock;
 use crate::command_registry::{ArgType, CommandContract, CommandRegistry};
 use crate::command_spec::YES_ARG;
 use crate::env::{self, EnvFlag, EnvSource};
 use crate::errors::CliError;
 use crate::output::sink;
 
-const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
+const DEFAULT_DEADLINE: Duration = clock::SECOND.of(30);
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -486,6 +487,16 @@ mod tests {
                 deadline: Duration::from_secs(30),
             }
         );
+    }
+
+    #[test]
+    fn the_env_help_states_the_default_deadline() {
+        let help = env::TABLE
+            .iter()
+            .find(|var| var.name == env::MCP_TIMEOUT_MS)
+            .unwrap()
+            .help;
+        assert!(help.contains(&format!("default {})", DEFAULT_DEADLINE.as_millis())));
     }
 
     #[test]

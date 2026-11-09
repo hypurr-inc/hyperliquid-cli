@@ -77,7 +77,7 @@ struct Cli {
     results_only: bool,
 
     /// Limit the top-level result count for JSON, table, and pretty output
-    #[arg(long, global = true, value_name = "N", value_parser = hyperliquid_cli::stream_bounds::parse_positive_usize, help_heading = GLOBAL_OPTIONS)]
+    #[arg(long, global = true, value_name = "N", value_parser = hyperliquid_cli::quantity::parse_positive_usize, help_heading = GLOBAL_OPTIONS)]
     max_results: Option<usize>,
 
     /// Validate and preview mutating commands without side effects

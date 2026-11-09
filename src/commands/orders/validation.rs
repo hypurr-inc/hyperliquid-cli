@@ -19,6 +19,7 @@ use crate::builder_fee::{MaxFeeRate, SubBuilder, parse_sub_builders};
 use crate::errors::CliError;
 use crate::input_hardening::{FilePolicy, read_json_file};
 use crate::margin::{MarginModeArg, MarginPlan};
+use crate::quantity::{not_positive, require_positive};
 use crate::wire::{self, AddressRole};
 
 pub(super) const MAX_BATCH_ORDER_COUNT: usize = 500;
@@ -764,7 +765,7 @@ pub(super) fn validate_twap_create_args(args: &TwapCreateArgs) -> Result<u64, Cl
                 .to_string(),
         ));
     }
-    if args.duration > 7 * 24 * 60 * 60 {
+    if args.duration > crate::clock::WEEK.of(1).as_secs() {
         return Err(CliError::Configuration(
             "TWAP duration cannot exceed 7 days (604800 seconds)".to_string(),
         ));
@@ -832,21 +833,17 @@ fn require_flags<const N: usize>(
     Ok(values.map(|(value, _)| value.unwrap_or_default()))
 }
 
-fn require_above_zero(value: Option<Decimal>, name: &str, must: &str) -> Result<(), CliError> {
+pub(super) fn positive_price(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
     match value {
         Some(value) if value <= Decimal::ZERO => {
-            Err(CliError::Configuration(format!("{name} {must}")))
+            Err(CliError::Configuration(format!("{name} must be positive")))
         }
         _ => Ok(()),
     }
 }
 
-pub(super) fn positive_price(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
-    require_above_zero(value, name, "must be positive")
-}
-
 pub(super) fn positive_quantity(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
-    require_above_zero(value, name, "must be greater than zero")
+    value.map_or(Ok(()), |value| require_positive(value, name))
 }
 
 fn validate_market_slippage(max_slippage_bps: u16) -> Result<(), CliError> {
@@ -944,7 +941,7 @@ fn parse_batch_modify_leg(
     ] {
         if value.is_some_and(|value| value <= Decimal::ZERO) {
             leg.problems
-                .push(format!("orders[{index}].{name} must be greater than zero"));
+                .push(not_positive(&format!("orders[{index}].{name}")));
         }
     }
     if price.is_none() && trigger_price.is_none() && size.is_none() {

@@ -1,9 +1,10 @@
-use clap::{Args, ValueEnum};
+use clap::Args;
 use hypersdk::hypercore::Chain;
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, YES, arg};
+use crate::commands::common::direction::TransferDirection;
 use crate::commands::common::rows::{ListRow, Row, Rows};
 use crate::commands::common::subaccount_list;
 use crate::commands::common::support::print_dry_run;
@@ -67,20 +68,6 @@ pub struct SpotTransferArgs {
     pub yes: bool,
 }
 
-/// Subaccount transfer direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TransferDirection {
-    Deposit,
-    Withdraw,
-}
-
-impl TransferDirection {
-    pub fn is_deposit(self) -> bool {
-        matches!(self, Self::Deposit)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubaccountActionKind {
     Create,
@@ -93,15 +80,6 @@ impl SubaccountActionKind {
         match self {
             Self::Create => ActionReversibility::Irreversible,
             Self::TransferUsdc | Self::TransferSpot => ActionReversibility::PartiallyReversible,
-        }
-    }
-}
-
-impl std::fmt::Display for TransferDirection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Deposit => write!(f, "deposit"),
-            Self::Withdraw => write!(f, "withdraw"),
         }
     }
 }

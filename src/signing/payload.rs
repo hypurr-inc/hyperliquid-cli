@@ -45,7 +45,7 @@ impl Signs<'_> {
     /// field, and the exchange rejects the request field beside it
     /// (<https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#expires-after>).
     #[must_use]
-    pub const fn carries_expires_after(self) -> bool {
+    const fn carries_expires_after(self) -> bool {
         matches!(self, Self::L1Action)
     }
 }
