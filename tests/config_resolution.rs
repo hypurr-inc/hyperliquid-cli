@@ -370,7 +370,7 @@ mod settings_tests {
     fn settings_with_file(env_pairs: &[(&str, &str)], config: &Config) -> (TempDir, Settings) {
         let tmp = TempDir::new().unwrap();
         let file = ConfigFile::at(tmp.path().join("nested").join("config.json"));
-        file.save(config).unwrap();
+        file.save(config, &file.lock().unwrap()).unwrap();
         let settings = Settings::new(EnvSource::fixed(env_pairs.iter().copied()), Some(file));
         (tmp, settings)
     }
@@ -381,7 +381,7 @@ mod settings_tests {
 
     #[test]
     fn config_paths_live_under_a_hyperliquid_directory() {
-        let file = ConfigFile::default_location().expect("config dir");
+        let file = ConfigFile::default_location(&EnvSource::Process).expect("config dir");
         let path = file.path().to_string_lossy();
         assert!(path.contains("hyperliquid"));
         assert!(path.ends_with("config.json"));
@@ -467,8 +467,11 @@ mod settings_tests {
             ..Config::default()
         };
         let (_tmp, settings) = settings_with_file(&[], &config);
-        assert_eq!(settings.config().unwrap(), Some(&config));
-        assert_eq!(settings.default_wallet_id().unwrap(), Some("wallet"));
+        assert_eq!(settings.config().unwrap().as_deref(), Some(&config));
+        assert_eq!(
+            settings.default_wallet_id().unwrap().as_deref(),
+            Some("wallet")
+        );
     }
 
     #[test]

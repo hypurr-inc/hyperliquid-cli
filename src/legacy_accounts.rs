@@ -29,13 +29,13 @@ const PASSPHRASE_DOMAIN: &[u8] = b"hyperliquid-cli account encryption passphrase
 /// Production uses the OS keychain. Tests, CI and headless systems inject a
 /// passphrase-derived key through `HYPERLIQUID_ACCOUNT_KEY_PASSPHRASE`.
 #[derive(Debug, Clone)]
-enum KeySource {
+enum EncryptionKeySource {
     Material(Vec<u8>),
     Unavailable,
     Keychain,
 }
 
-impl KeySource {
+impl EncryptionKeySource {
     fn from_settings(settings: &Settings) -> Result<Self, anyhow::Error> {
         let env = settings.env();
         if env.is_set(env::ACCOUNT_KEY_STORE_DIR) {
@@ -104,7 +104,7 @@ fn load_from_keychain() -> Result<Option<Vec<u8>>, anyhow::Error> {
 fn prompt_passphrase_after_keychain_error(
     keychain_error: &anyhow::Error,
     mode: &Mode,
-) -> Result<KeySource, anyhow::Error> {
+) -> Result<EncryptionKeySource, anyhow::Error> {
     if !mode.can_prompt() || !crate::output::terminal::stdin_is_terminal() {
         return Err(CliError::MissingInput(format!(
             "Can't unlock account encryption keys because the OS keychain is unavailable ({keychain_error}). Set {} to use a passphrase instead.",
@@ -121,7 +121,7 @@ fn prompt_passphrase_after_keychain_error(
         "Account encryption passphrase: ",
         env::ACCOUNT_KEY_PASSPHRASE,
     )?;
-    KeySource::from_passphrase(&passphrase)
+    EncryptionKeySource::from_passphrase(&passphrase)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,17 +166,17 @@ impl std::fmt::Debug for LegacyAccounts {
 impl LegacyAccounts {
     /// Open the default database for reading. `Ok(None)` when it doesn't exist.
     pub fn open_default(settings: &Settings, mode: &Mode) -> Result<Option<Self>, anyhow::Error> {
-        let db_path = crate::paths::legacy_accounts_db()
+        let db_path = crate::paths::legacy_accounts_db(settings.env())
             .ok_or_else(|| CliError::Configuration("Cannot determine data directory".into()))?;
         if !db_path.exists() {
             return Ok(None);
         }
-        let key_source = KeySource::from_settings(settings)?;
+        let key_source = EncryptionKeySource::from_settings(settings)?;
         Self::open(
             &db_path,
             &key_source,
             mode,
-            crate::paths::legacy_accounts_key().as_deref(),
+            crate::paths::legacy_accounts_key(settings.env()).as_deref(),
         )
         .map(Some)
     }
@@ -185,7 +185,7 @@ impl LegacyAccounts {
     /// but never migrated or removed.
     fn open(
         db_path: &Path,
-        key_source: &KeySource,
+        key_source: &EncryptionKeySource,
         mode: &Mode,
         legacy_key_path: Option<&Path>,
     ) -> Result<Self, anyhow::Error> {
@@ -233,7 +233,8 @@ impl LegacyAccounts {
             .map_err(Into::into)
     }
 
-    /// A numeric selector matches the account id first; otherwise the alias or address.
+    /// A numeric selector matches the account id first; otherwise the alias, or
+    /// the address in any letter case, as the vault's address match is.
     pub fn account_by_selector(
         &self,
         selector: &str,
@@ -245,7 +246,7 @@ impl LegacyAccounts {
             return Ok(Some(account));
         }
         self.query_one(
-            "WHERE alias = ?1 OR address = ?1 LIMIT 1",
+            "WHERE alias = ?1 OR lower(address) = lower(?1) LIMIT 1",
             params![selector],
         )
     }
@@ -279,7 +280,7 @@ fn unavailable_key_error() -> CliError {
 }
 
 fn load_encryption_key(
-    key_source: &KeySource,
+    key_source: &EncryptionKeySource,
     mode: &Mode,
     legacy_key_path: Option<&Path>,
 ) -> Result<[u8; 32], anyhow::Error> {
@@ -362,8 +363,8 @@ mod tests {
     const KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000007";
     const OTHER_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000008";
 
-    fn material() -> KeySource {
-        KeySource::Material(fixture::KEY_MATERIAL.to_vec())
+    fn material() -> EncryptionKeySource {
+        EncryptionKeySource::Material(fixture::KEY_MATERIAL.to_vec())
     }
 
     fn open_with_rows(rows: &[Row<'_>]) -> (TempDir, LegacyAccounts) {
@@ -389,6 +390,24 @@ mod tests {
         let backup = accounts.account_by_selector("2").unwrap().unwrap();
         assert_eq!(accounts.decrypt_private_key(&backup).unwrap(), OTHER_KEY);
         assert!(accounts.account_by_selector("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn address_selectors_match_in_any_letter_case() {
+        let (_tmp, accounts) = open_with_rows(&[Row::new(
+            "main",
+            "0xAbCdEf0000000000000000000000000000000001",
+            KEY,
+        )]);
+
+        for selector in [
+            "0xabcdef0000000000000000000000000000000001",
+            "0xABCDEF0000000000000000000000000000000001",
+        ] {
+            let account = accounts.account_by_selector(selector).unwrap().unwrap();
+            assert_eq!(account.alias, "main", "{selector}");
+        }
+        assert!(accounts.account_by_selector("MAIN").unwrap().is_none());
     }
 
     #[test]
@@ -470,7 +489,7 @@ mod tests {
         );
 
         let err =
-            LegacyAccounts::open(&db, &KeySource::Unavailable, &Mode::default(), None).unwrap_err();
+            LegacyAccounts::open(&db, &EncryptionKeySource::Unavailable, &Mode::default(), None).unwrap_err();
         assert!(err.to_string().contains("data directory alone"));
     }
 
@@ -488,7 +507,7 @@ mod tests {
 
         let accounts = LegacyAccounts::open(
             &db,
-            &KeySource::Unavailable,
+            &EncryptionKeySource::Unavailable,
             &Mode::default(),
             Some(&key_file),
         )
@@ -507,12 +526,12 @@ mod tests {
 
     #[test]
     fn passphrase_key_source_rejects_empty_and_trims_line_endings() {
-        assert!(KeySource::from_passphrase("\n").is_err());
-        let KeySource::Material(with_newline) = KeySource::from_passphrase("secret\r\n").unwrap()
+        assert!(EncryptionKeySource::from_passphrase("\n").is_err());
+        let EncryptionKeySource::Material(with_newline) = EncryptionKeySource::from_passphrase("secret\r\n").unwrap()
         else {
             panic!("expected key material");
         };
-        let KeySource::Material(plain) = KeySource::from_passphrase("secret").unwrap() else {
+        let EncryptionKeySource::Material(plain) = EncryptionKeySource::from_passphrase("secret").unwrap() else {
             panic!("expected key material");
         };
         assert_eq!(with_newline, plain);
@@ -524,7 +543,7 @@ mod tests {
             crate::settings::EnvSource::fixed([(env::ACCOUNT_KEY_STORE_DIR, "/tmp/keys")]),
             None,
         );
-        let err = KeySource::from_settings(&settings).unwrap_err();
+        let err = EncryptionKeySource::from_settings(&settings).unwrap_err();
         assert!(err.to_string().contains("no longer supported"));
     }
 

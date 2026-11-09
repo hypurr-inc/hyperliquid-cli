@@ -69,7 +69,7 @@ impl Vault {
     #[must_use]
     pub fn display_path(&self) -> String {
         self.path.as_deref().map_or_else(
-            || "~/.hyperliquid".to_string(),
+            || format!("~/{}", crate::paths::DEFAULT_VAULT_DIR),
             |path| path.display().to_string(),
         )
     }
@@ -200,17 +200,57 @@ impl Vault {
         })
     }
 
+    /// Whether the config's `default_wallet_id` (an id or a name) names `wallet`.
+    #[must_use]
+    fn is_configured_default(configured: &str, wallet: &WalletInfo) -> bool {
+        configured == wallet.id || configured == wallet.name
+    }
+
+    /// Which of the Hyperliquid-capable `wallets` are the default: the ones the
+    /// config names, or with no configured default, the only one. Signing and
+    /// listings both ask this, so they can never disagree about the default.
+    fn default_indices(wallets: &[WalletInfo], configured: Option<&str>) -> Vec<usize> {
+        match configured {
+            Some(id) => wallets
+                .iter()
+                .enumerate()
+                .filter(|(_, wallet)| Self::is_configured_default(id, wallet))
+                .map(|(index, _)| index)
+                .collect(),
+            None if wallets.len() == 1 => vec![0],
+            None => Vec::new(),
+        }
+    }
+
+    /// For each of the Hyperliquid-capable `wallets`, whether it is the default.
+    #[must_use]
+    pub fn default_markers(wallets: &[WalletInfo], configured: Option<&str>) -> Vec<bool> {
+        let defaults = Self::default_indices(wallets, configured);
+        (0..wallets.len())
+            .map(|index| defaults.contains(&index))
+            .collect()
+    }
+
+    /// Whether `wallet` is the wallet the config names as its default.
+    #[must_use]
+    pub fn is_default(configured: Option<&str>, wallet: &WalletInfo) -> bool {
+        configured.is_some_and(|id| Self::is_configured_default(id, wallet))
+    }
+
     /// The wallet that signs when no signer is named.
     ///
     /// A configured `default_wallet_id` must resolve to a Hyperliquid-capable
-    /// wallet; a stale id is an error naming it, never a silent substitution.
-    /// With no configured default, the only Hyperliquid-capable wallet in the
-    /// vault is used. An empty vault is `AuthRequired`; several wallets with no
-    /// default is an error that asks for `account set-default`.
-    pub fn default_wallet(&self, default_wallet_id: Option<&str>) -> Result<WalletInfo, CliError> {
-        if let Some(id) = default_wallet_id {
-            return match self.get(id) {
-                Ok(wallet) if Self::hyperliquid_account(&wallet).is_ok() => Ok(wallet),
+    /// wallet; a stale id is an error naming it, never a silent substitution, and
+    /// a name shared by several wallets is ambiguous, never a guess. With no
+    /// configured default, the only Hyperliquid-capable wallet in the vault is
+    /// used. An empty vault is `AuthRequired`; several wallets with no default is
+    /// an error that asks for `account set-default`.
+    pub fn default_wallet(&self, configured: Option<&str>) -> Result<WalletInfo, CliError> {
+        let mut wallets = self.hyperliquid_wallets()?;
+        let defaults = Self::default_indices(&wallets, configured);
+        match (configured, defaults.as_slice()) {
+            (_, [index]) => Ok(wallets.swap_remove(*index)),
+            (Some(id), []) => match self.get(id) {
                 Ok(_) => Err(CliError::InvalidAuth(format!(
                     "Default wallet {id} has no Hyperliquid account.\nPick another:\n    {SET_DEFAULT_HINT}"
                 ))),
@@ -218,14 +258,15 @@ impl Vault {
                     "Default wallet {id} isn't in the vault.\nPick another:\n    {SET_DEFAULT_HINT}"
                 ))),
                 Err(err) => Err(err),
-            };
-        }
-        let mut wallets = self.hyperliquid_wallets()?;
-        match wallets.len() {
-            0 => Err(CliError::AuthRequired),
-            1 => Ok(wallets.remove(0)),
-            count => Err(CliError::InvalidAuth(format!(
-                "No default wallet is set and the vault holds {count} wallets.\nPick one:\n    {SET_DEFAULT_HINT}"
+            },
+            (Some(id), many) => Err(CliError::InvalidAuth(format!(
+                "ows_ambiguous_wallet: OWS wallet selector '{id}' matched {} wallets; use the wallet id",
+                many.len()
+            ))),
+            (None, _) if wallets.is_empty() => Err(CliError::AuthRequired),
+            (None, _) => Err(CliError::InvalidAuth(format!(
+                "No default wallet is set and the vault holds {} wallets.\nPick one:\n    {SET_DEFAULT_HINT}",
+                wallets.len()
             ))),
         }
     }
@@ -327,6 +368,32 @@ mod tests {
         assert!(err.to_string().contains("holds 2 wallets"));
         assert!(err.to_string().contains(SET_DEFAULT_HINT));
         assert_eq!(vault.default_wallet(Some(&first.id)).unwrap().name, "first");
+    }
+
+    #[test]
+    fn listings_and_signing_agree_on_the_default() {
+        let tmp = TempDir::new().unwrap();
+        let vault = Vault::at(tmp.path());
+        let first = import_test_wallet(tmp.path(), "first");
+        let wallets = vault.hyperliquid_wallets().unwrap();
+        assert_eq!(Vault::default_markers(&wallets, None), [true]);
+
+        let second = import_test_wallet(tmp.path(), "second");
+        let wallets = vault.hyperliquid_wallets().unwrap();
+        assert_eq!(Vault::default_markers(&wallets, None), [false, false]);
+
+        for configured in [first.name.as_str(), first.id.as_str(), second.name.as_str()] {
+            let signing = vault.default_wallet(Some(configured)).unwrap();
+            let marked: Vec<_> = wallets
+                .iter()
+                .zip(Vault::default_markers(&wallets, Some(configured)))
+                .filter(|(_, marked)| *marked)
+                .map(|(wallet, _)| wallet.id.clone())
+                .collect();
+            assert_eq!(marked, [signing.id.clone()], "{configured}");
+            assert!(Vault::is_default(Some(configured), &signing));
+        }
+        assert_eq!(Vault::default_markers(&wallets, Some("gone")), [false, false]);
     }
 
     #[test]

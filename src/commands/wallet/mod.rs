@@ -12,21 +12,21 @@ pub use output::{AccountRow, AccountsOutput};
 use clap::Args;
 use ows_lib::types::WalletInfo;
 
-use crate::auth::{ResolvedSigner, SignerSelection, SignerSource};
+use crate::auth::ResolvedSigner;
 use crate::command_spec::{
     CliCommand, CommandSpec, DryRunPolicy, GroupSpec, InputKind, Lifecycle, NoArgs, OwsSupport,
     Risk, arg,
 };
 use crate::commands::support::print_dry_run;
 use crate::commands::{builder, referral};
-use crate::config::Config;
+use crate::config::{BankrLogin, Config};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::mode::Mode;
 use crate::output::{self as out, OutputFormat};
 use crate::ows::vault::{HyperliquidAccount, Vault};
 use crate::prompt;
-use crate::settings::Settings;
+use crate::settings::{Settings, env};
 use crate::wallet_store::{ConfigEdit, NewWallet, StoredWallet, WalletName, WalletStore};
 use output::{
     BankrReceipt, Receipt, print_bankr_receipt, print_declined, print_receipt, print_status,
@@ -57,33 +57,27 @@ fn no_stored_accounts_error() -> CliError {
 
 /// Apply packaged builder/referral defaults when the config does not already define them.
 ///
-/// Resolution failures are ignored: a bad default must not block wallet
-/// creation. Returns the config keys it wrote.
-fn apply_setup_defaults(config: &mut Config, settings: &Settings) -> Vec<String> {
-    let mut written = Vec::new();
+/// Resolution failures are ignored: a bad default must not block wallet creation.
+fn apply_setup_defaults(config: &mut Config, settings: &Settings) {
     if !config.has_builder_default()
         && let Ok(Some((address, fee))) = builder::suggested_default_builder(settings)
     {
         config.default_builder_address = Some(address);
         config.default_builder_fee_rate = Some(fee);
-        written.push("default_builder_address".to_string());
-        written.push("default_builder_fee_rate".to_string());
     }
     if !config.has_referral_default()
         && let Ok(Some(code)) =
             referral::suggested_default_referral_code(settings, config.network.is_testnet())
     {
         config.default_referral_code = Some(code);
-        written.push("default_referral_code".to_string());
     }
-    written
 }
 
 /// `wallet create|import|import-mnemonic`: the new wallet becomes the default and
 /// the config gains packaged builder/referral defaults it lacks.
 fn adopt_as_default(settings: &Settings) -> ConfigEdit<'_> {
     Box::new(move |config, wallet, _| {
-        let mut written = apply_setup_defaults(config, settings);
+        apply_setup_defaults(config, settings);
         if let Some(previous) = config.default_wallet_id.as_deref()
             && previous != wallet.id
         {
@@ -93,12 +87,10 @@ fn adopt_as_default(settings: &Settings) -> ConfigEdit<'_> {
             );
         }
         config.default_wallet_id = Some(wallet.id.clone());
-        written.insert(0, "default_wallet_id".to_string());
-        written
     })
 }
 
-fn print_new_wallet(inv: &Invocation, store: &WalletStore, message: &str, new: StoredWallet) {
+fn print_new_wallet(inv: &Invocation, store: &WalletStore<'_>, message: &str, new: StoredWallet) {
     let mut receipt = Receipt::new(
         message,
         &new.account.address_text,
@@ -107,12 +99,12 @@ fn print_new_wallet(inv: &Invocation, store: &WalletStore, message: &str, new: S
     );
     receipt.is_default = Some(true);
     receipt.config_keys_written = new.config_keys_written;
-    print_receipt(inv, store.settings(), store.vault(), receipt);
+    print_receipt(inv, store.settings(), receipt);
 }
 
 fn print_wallet_change(
     inv: &Invocation,
-    store: &WalletStore,
+    store: &WalletStore<'_>,
     message: &str,
     wallet: &WalletInfo,
 ) -> Result<(), anyhow::Error> {
@@ -123,7 +115,7 @@ fn print_wallet_change(
 
 fn print_wallet_change_with(
     inv: &Invocation,
-    store: &WalletStore,
+    store: &WalletStore<'_>,
     message: &str,
     wallet: &WalletInfo,
     account: &HyperliquidAccount,
@@ -134,23 +126,27 @@ fn print_wallet_change_with(
         Some(wallet.name.clone()),
         OWS_WALLET_SOURCE,
     );
-    print_receipt(inv, store.settings(), store.vault(), receipt);
+    print_receipt(inv, store.settings(), receipt);
 }
 
 /// Create a vault wallet and make it the default.
-pub fn create(inv: &Invocation) -> Result<(), anyhow::Error> {
-    let store = WalletStore::open();
+pub fn create(inv: &Invocation, settings: &Settings) -> Result<(), anyhow::Error> {
+    let store = WalletStore::new(settings);
     let new = store.add(
         &NewWallet::Create,
         &WalletName::Next("wallet"),
-        Some(adopt_as_default(store.settings())),
+        Some(adopt_as_default(settings)),
     )?;
     print_new_wallet(inv, &store, "Created wallet", new);
     Ok(())
 }
 
 /// Import a private key into the vault and make it the default.
-pub fn import(inv: &Invocation, private_key: Option<&str>) -> Result<(), anyhow::Error> {
+pub fn import(
+    inv: &Invocation,
+    settings: &Settings,
+    private_key: Option<&str>,
+) -> Result<(), anyhow::Error> {
     let private_key = match private_key {
         Some(private_key) => {
             out::warn(
@@ -161,11 +157,11 @@ pub fn import(inv: &Invocation, private_key: Option<&str>) -> Result<(), anyhow:
         None => prompt_private_key(inv.mode())?.trim().to_string(),
     };
 
-    let store = WalletStore::open();
+    let store = WalletStore::new(settings);
     let new = store.add(
         &NewWallet::ImportPrivateKey(&private_key),
         &WalletName::Next("imported"),
-        Some(adopt_as_default(store.settings())),
+        Some(adopt_as_default(settings)),
     )?;
     print_new_wallet(inv, &store, "Imported wallet", new);
     Ok(())
@@ -174,6 +170,7 @@ pub fn import(inv: &Invocation, private_key: Option<&str>) -> Result<(), anyhow:
 /// Import a BIP-39 mnemonic into the vault and make it the default.
 pub fn import_mnemonic(
     inv: &Invocation,
+    settings: &Settings,
     mnemonic: Option<&str>,
     alias: Option<&str>,
 ) -> Result<(), anyhow::Error> {
@@ -193,7 +190,7 @@ pub fn import_mnemonic(
         .to_string(),
     };
 
-    let store = WalletStore::open();
+    let store = WalletStore::new(settings);
     let alias = alias.map(str::trim);
     let name = match alias {
         Some(alias) => WalletName::Exact(alias),
@@ -202,7 +199,7 @@ pub fn import_mnemonic(
     let new = store.add(
         &NewWallet::ImportMnemonic(&mnemonic),
         &name,
-        Some(adopt_as_default(store.settings())),
+        Some(adopt_as_default(settings)),
     )?;
     print_new_wallet(inv, &store, "Imported wallet", new);
     Ok(())
@@ -210,8 +207,11 @@ pub fn import_mnemonic(
 
 /// `wallet login`: check a Bankr API key against the API, then store it with the
 /// wallet address it reports so later runs resolve the signer without a request.
-pub fn login(inv: &Invocation, args: &WalletLoginArgs) -> Result<(), anyhow::Error> {
-    let settings = Settings::from_process();
+pub fn login(
+    inv: &Invocation,
+    settings: &Settings,
+    args: &WalletLoginArgs,
+) -> Result<(), anyhow::Error> {
     let api_key = match args.api_key.as_deref() {
         Some(key) => {
             out::warn(
@@ -235,42 +235,30 @@ pub fn login(inv: &Invocation, args: &WalletLoginArgs) -> Result<(), anyhow::Err
         .map(str::trim)
         .filter(|url| !url.is_empty())
         .map(str::to_string)
-        .or_else(|| {
-            settings
-                .env()
-                .get_trimmed(crate::settings::env::BANKR_API_URL)
-        });
+        .or_else(|| settings.env().get_trimmed(env::BANKR_API_URL));
 
     let api_url = crate::bankr::validate_api_url(
-        &api_url
-            .clone()
-            .unwrap_or_else(|| crate::bankr::DEFAULT_API_URL.to_string()),
+        &api_url.unwrap_or_else(|| crate::bankr::DEFAULT_API_URL.to_string()),
     )?;
     let client = crate::bankr::BankrClient::new(api_url.clone(), api_key.clone());
     let wallet = client.blocking_wallet()?;
     let address = wallet.address.to_string();
 
-    let file = settings.require_config_file()?;
-    let lock = file.lock()?;
-    let mut config = settings.read_config_fresh()?.unwrap_or_default();
-    config.bankr_api_key = Some(api_key);
-    config.bankr_address = Some(address.clone());
-    let mut written = vec!["bankr_api_key".to_string(), "bankr_address".to_string()];
-    config.bankr_api_url = Some(api_url).filter(|url| url != crate::bankr::DEFAULT_API_URL);
-    if config.bankr_api_url.is_some() {
-        written.push("bankr_api_url".to_string());
-    }
-    file.save(&config)?;
-    drop(lock);
+    let login = BankrLogin::new(
+        &api_key,
+        Some(api_url.as_str()).filter(|url| *url != crate::bankr::DEFAULT_API_URL),
+        wallet.address,
+    );
+    let written = settings.update_config(|config| config.bankr = login)?;
 
     print_bankr_receipt(
         inv,
+        settings,
         BankrReceipt {
             status: "logged_in",
             message: format!("Logged in to Bankr as {address}"),
             address: Some(address),
             api_url: Some(client.api_url().to_string()),
-            config_path: file.path().display().to_string(),
             config_keys_written: written,
         },
     );
@@ -278,8 +266,7 @@ pub fn login(inv: &Invocation, args: &WalletLoginArgs) -> Result<(), anyhow::Err
 }
 
 /// `wallet logout`: forget the stored Bankr key and address.
-pub fn logout(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
-    let settings = Settings::from_process();
+pub fn logout(inv: &Invocation, settings: &Settings, yes: bool) -> Result<(), anyhow::Error> {
     let Some(file) = settings.config_file() else {
         print_status(inv, "noop", "No Bankr login is stored");
         return Ok(());
@@ -314,84 +301,39 @@ pub fn logout(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
         }
     }
 
-    let lock = file.lock()?;
-    let Some(mut config) = settings.read_config_fresh()? else {
-        print_status(inv, "noop", "No Bankr login is stored");
-        return Ok(());
-    };
-    let mut removed = Vec::new();
-    for (present, key) in [
-        (config.bankr_api_key.take().is_some(), "bankr_api_key"),
-        (config.bankr_api_url.take().is_some(), "bankr_api_url"),
-        (config.bankr_address.take().is_some(), "bankr_address"),
-    ] {
-        if present {
-            removed.push(key.to_string());
-        }
-    }
+    let removed = settings.update_config(|config| config.bankr = BankrLogin::default())?;
     if removed.is_empty() {
         print_status(inv, "noop", "No Bankr login is stored");
         return Ok(());
     }
-    file.save(&config)?;
-    drop(lock);
 
-    if settings
-        .env()
-        .get_trimmed(crate::settings::env::BANKR_API_KEY)
-        .is_some()
-    {
+    if settings.env().get_trimmed(env::BANKR_API_KEY).is_some() {
         out::warn("BANKR_API_KEY is still set in the environment, so --bankr keeps working.");
     }
     print_bankr_receipt(
         inv,
+        settings,
         BankrReceipt {
             status: "logged_out",
             message: "Logged out of Bankr".to_string(),
             address: None,
             api_url: None,
-            config_path: file.path().display().to_string(),
             config_keys_written: removed,
         },
     );
     Ok(())
 }
 
-fn signer_display(source: &SignerSource) -> (Option<String>, String) {
-    match source {
-        SignerSource::PrivateKey => (None, "private key/config/env".to_string()),
-        SignerSource::Keystore => (None, "keystore".to_string()),
-        SignerSource::StoredAccount { alias } => {
-            (Some(alias.clone()), "stored signing account".to_string())
-        }
-        SignerSource::Ows { selector } => (None, format!("OWS signer ({selector})")),
-        SignerSource::Bankr { address } => (None, format!("Bankr hosted wallet ({address})")),
-    }
-}
-
-/// `wallet show`: describe the resolved signer. A vault wallet picked by
-/// `--ows-signer` or by default is shown by name; any other signer by its source.
-pub fn show(
-    inv: &Invocation,
-    settings: &Settings,
-    selection: &SignerSelection,
-    signer: &ResolvedSigner,
-) {
-    let address = signer.address().to_string();
-    let vault = Vault::from_settings(settings);
-    let receipt = match signer.ows_wallet_name() {
-        Some(name) if selection.names_wallet_directly() => Receipt::new(
-            "Current wallet",
-            &address,
-            Some(name.to_string()),
-            &format!("OWS wallet ({name})"),
-        ),
-        _ => {
-            let (alias, source) = signer_display(signer.source());
-            Receipt::new("Current wallet", &address, alias, &source)
-        }
-    };
-    print_receipt(inv, settings, &vault, receipt);
+/// `wallet show`: describe the resolved signer.
+pub fn show(inv: &Invocation, settings: &Settings, signer: &ResolvedSigner) {
+    let description = signer.selected_signer().describe();
+    let receipt = Receipt::new(
+        "Current wallet",
+        &signer.address().to_string(),
+        description.alias,
+        &description.source,
+    );
+    print_receipt(inv, settings, receipt);
 }
 
 /// Print the selected signer's address.
@@ -400,8 +342,7 @@ pub fn address(inv: &Invocation, signer: &ResolvedSigner) {
 }
 
 /// Delete the config file, leaving vault wallets in place.
-pub fn reset(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
-    let settings = Settings::from_process();
+pub fn reset(inv: &Invocation, settings: &Settings, yes: bool) -> Result<(), anyhow::Error> {
     let Some(file) = settings.config_file().filter(|file| file.exists()) else {
         print_status(inv, "noop", "Nothing to reset");
         return Ok(());
@@ -424,8 +365,7 @@ pub fn reset(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
         }
     }
 
-    let _lock = file.lock()?;
-    file.remove()?;
+    settings.remove_config()?;
     print_status(inv, "reset", &format!("Deleted config file {path}"));
     Ok(())
 }
@@ -433,9 +373,9 @@ pub fn reset(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
 /// Add a signing wallet, prompted or from an explicit key.
 pub fn account_add(
     inv: &Invocation,
+    settings: &Settings,
     private_key: Option<&str>,
     alias: Option<&str>,
-    _account_type: Option<&str>,
     make_default: bool,
 ) -> Result<(), anyhow::Error> {
     let automation_mode = private_key.is_some() || alias.is_some() || make_default;
@@ -449,7 +389,7 @@ pub fn account_add(
         None => prompt_private_key(inv.mode())?.trim().to_string(),
     };
 
-    let store = WalletStore::open();
+    let store = WalletStore::new(settings);
     let name = match alias {
         Some(alias) => alias.trim().to_string(),
         None if automation_mode => String::new(),
@@ -470,7 +410,6 @@ pub fn account_add(
         Box::new(
             |config: &mut Config, wallet: &WalletInfo, _: &HyperliquidAccount| {
                 config.default_wallet_id = Some(wallet.id.clone());
-                Vec::new()
             },
         ) as ConfigEdit<'_>
     });
@@ -483,19 +422,27 @@ pub fn account_add(
     Ok(())
 }
 
-/// List the vault wallets that can sign for Hyperliquid.
-pub fn account_ls(inv: &Invocation) -> Result<(), anyhow::Error> {
-    let store = WalletStore::open();
+/// The vault wallets that can sign for Hyperliquid, with their accounts. Only
+/// wallets that genuinely lack a Hyperliquid/EVM account are skipped; malformed
+/// addresses and vault corruption propagate.
+fn signing_wallets(
+    store: &WalletStore<'_>,
+) -> Result<Vec<(WalletInfo, HyperliquidAccount)>, anyhow::Error> {
     let mut listed = Vec::new();
     for wallet in store.list()? {
         match Vault::hyperliquid_account(&wallet) {
             Ok(account) => listed.push((wallet, account)),
-            // Only wallets that genuinely lack a Hyperliquid/EVM account are skipped;
-            // malformed addresses and vault corruption propagate.
             Err(CliError::OwsNoChainAccount { .. }) => {}
             Err(err) => return Err(anyhow::anyhow!("{err}")),
         }
     }
+    Ok(listed)
+}
+
+/// List the vault wallets that can sign for Hyperliquid.
+pub fn account_ls(inv: &Invocation, settings: &Settings) -> Result<(), anyhow::Error> {
+    let store = WalletStore::new(settings);
+    let listed = signing_wallets(&store)?;
     let wallets: Vec<WalletInfo> = listed.iter().map(|(wallet, _)| wallet.clone()).collect();
     let markers = store.default_markers(&wallets)?;
     let rows = listed
@@ -514,7 +461,7 @@ pub fn account_ls(inv: &Invocation) -> Result<(), anyhow::Error> {
 /// Pick one stored wallet by selector, listing the choices when none was given.
 fn choose_wallet(
     inv: &Invocation,
-    store: &WalletStore,
+    store: &WalletStore<'_>,
     selector: Option<&str>,
 ) -> Result<WalletInfo, anyhow::Error> {
     if selector.is_none() {
@@ -527,7 +474,7 @@ fn choose_wallet(
     let selector = match selector {
         Some(selector) => selector.trim().to_string(),
         None => {
-            print_wallet_choices(&wallets)?;
+            print_wallet_choices(&signing_wallets(store)?)?;
             prompt::read_line(inv.mode(), "Select wallet by name or id: ", "<WALLET>")?
                 .trim()
                 .to_string()
@@ -537,8 +484,12 @@ fn choose_wallet(
 }
 
 /// Make one stored wallet the default signer.
-pub fn account_set_default(inv: &Invocation, selector: Option<&str>) -> Result<(), anyhow::Error> {
-    let store = WalletStore::open();
+pub fn account_set_default(
+    inv: &Invocation,
+    settings: &Settings,
+    selector: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    let store = WalletStore::new(settings);
     let wallet = choose_wallet(inv, &store, selector)?;
     store.set_default(&wallet)?;
     print_wallet_change(inv, &store, "Default account set", &wallet)
@@ -547,10 +498,11 @@ pub fn account_set_default(inv: &Invocation, selector: Option<&str>) -> Result<(
 /// Delete a wallet from the vault after confirmation.
 pub fn account_remove(
     inv: &Invocation,
+    settings: &Settings,
     selector: Option<&str>,
     yes: bool,
 ) -> Result<(), anyhow::Error> {
-    let store = WalletStore::open();
+    let store = WalletStore::new(settings);
     let wallet = choose_wallet(inv, &store, selector)?;
     let address = WalletStore::account_of(&wallet)
         .map(|account| account.address_text)
@@ -597,23 +549,18 @@ pub fn account_remove(
         Some(wallet.name.clone()),
         "OWS wallet",
     );
-    print_receipt(inv, store.settings(), store.vault(), receipt);
+    print_receipt(inv, settings, receipt);
     Ok(())
 }
 
-/// List all wallets in the OWS vault.
-pub fn list(inv: &Invocation) -> Result<(), anyhow::Error> {
-    account_ls(inv)
-}
-
-/// Delete an OWS wallet by name or id.
-pub fn delete(inv: &Invocation, selector: &str, yes: bool) -> Result<(), anyhow::Error> {
-    account_remove(inv, Some(selector), yes)
-}
-
 /// Rename a stored wallet.
-pub fn rename(inv: &Invocation, selector: &str, new_name: &str) -> Result<(), anyhow::Error> {
-    let store = WalletStore::open();
+pub fn rename(
+    inv: &Invocation,
+    settings: &Settings,
+    selector: &str,
+    new_name: &str,
+) -> Result<(), anyhow::Error> {
+    let store = WalletStore::new(settings);
     let wallet = store.rename(selector, new_name)?;
     print_wallet_change(inv, &store, "Wallet renamed", &wallet)
 }
@@ -625,7 +572,12 @@ pub fn rename(inv: &Invocation, selector: &str, new_name: &str) -> Result<(), an
 /// commit, or store plaintext private keys." The export is gated behind an
 /// explicit interactive confirmation prompt (or --yes flag) and a warning
 /// banner. The command's sole purpose is secret recovery/export.
-pub fn export(inv: &Invocation, selector: &str, yes: bool) -> Result<(), anyhow::Error> {
+pub fn export(
+    inv: &Invocation,
+    settings: &Settings,
+    selector: &str,
+    yes: bool,
+) -> Result<(), anyhow::Error> {
     if !yes {
         require_promptable("--yes", inv.format(), inv.mode())?;
         let question = format!(
@@ -637,8 +589,7 @@ pub fn export(inv: &Invocation, selector: &str, yes: bool) -> Result<(), anyhow:
         }
     }
 
-    let store = WalletStore::open();
-    let secret = store.export(selector)?;
+    let secret = WalletStore::new(settings).export(selector)?;
 
     out::warn("this output contains a plaintext private key or mnemonic. Do not share or log it.");
 
@@ -655,15 +606,7 @@ pub fn export(inv: &Invocation, selector: &str, yes: bool) -> Result<(), anyhow:
 }
 
 /// Print the Hyperliquid-capable wallets to choose from.
-fn print_wallet_choices(wallets: &[WalletInfo]) -> Result<(), anyhow::Error> {
-    let choices: Vec<_> = wallets
-        .iter()
-        .filter_map(|wallet| {
-            Vault::hyperliquid_account(wallet)
-                .ok()
-                .map(|account| (wallet, account))
-        })
-        .collect();
+fn print_wallet_choices(choices: &[(WalletInfo, HyperliquidAccount)]) -> Result<(), anyhow::Error> {
     if choices.is_empty() {
         return Err(no_stored_accounts_error().into());
     }
@@ -822,9 +765,9 @@ For controlled automation, pass PRIVATE_KEY with --alias, --type, and optionally
         }
         account_add(
             inv,
+            &Settings::from_process(),
             args.private_key.as_deref(),
             args.alias.as_deref(),
-            args.account_type.as_deref(),
             args.default,
         )
     }
@@ -847,7 +790,7 @@ impl CliCommand for AccountLs {
     .cli_aliases(&["list"]);
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
-        account_ls(inv)
+        account_ls(inv, &Settings::from_process())
     }
 }
 
@@ -884,7 +827,7 @@ impl CliCommand for AccountSetDefault {
                 }),
             );
         }
-        account_set_default(inv, args.selector.as_deref())
+        account_set_default(inv, &Settings::from_process(), args.selector.as_deref())
     }
 }
 
@@ -928,7 +871,12 @@ impl CliCommand for AccountRemove {
                 }),
             );
         }
-        account_remove(inv, args.selector.as_deref(), args.yes)
+        account_remove(
+            inv,
+            &Settings::from_process(),
+            args.selector.as_deref(),
+            args.yes,
+        )
     }
 }
 
@@ -958,7 +906,7 @@ impl CliCommand for WalletCreate {
                 serde_json::json!({"would_execute": "create_and_store_encrypted_wallet"}),
             );
         }
-        create(inv)
+        create(inv, &Settings::from_process())
     }
 }
 
@@ -1000,7 +948,7 @@ Warning: `hyperliquid wallet import <PRIVATE_KEY>` can expose the key in OS proc
                 }),
             );
         }
-        import(inv, args.private_key.as_deref())
+        import(inv, &Settings::from_process(), args.private_key.as_deref())
     }
 }
 
@@ -1043,7 +991,12 @@ Warning: passing a mnemonic as an argument can expose it in OS process listings 
                 }),
             );
         }
-        import_mnemonic(inv, args.mnemonic.as_deref(), args.alias.as_deref())
+        import_mnemonic(
+            inv,
+            &Settings::from_process(),
+            args.mnemonic.as_deref(),
+            args.alias.as_deref(),
+        )
     }
 }
 
@@ -1089,7 +1042,7 @@ Recommended for humans: run `hyperliquid wallet login` without --api-key and pas
                 }),
             );
         }
-        login(inv, args)
+        login(inv, &Settings::from_process(), args)
     }
 }
 
@@ -1120,7 +1073,7 @@ impl CliCommand for WalletLogout {
                 serde_json::json!({"would_execute": "remove_bankr_api_key"}),
             );
         }
-        logout(inv, args.yes)
+        logout(inv, &Settings::from_process(), args.yes)
     }
 }
 
@@ -1141,8 +1094,7 @@ impl CliCommand for WalletShow {
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         let signer = inv.resolve_signer()?;
-        let remote = inv.remote()?;
-        show(inv, remote.settings(), remote.selection(), &signer);
+        show(inv, inv.remote()?.settings(), &signer);
         Ok(())
     }
 }
@@ -1186,7 +1138,7 @@ impl CliCommand for WalletList {
     .cli_aliases(&["ls"]);
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
-        list(inv)
+        account_ls(inv, &Settings::from_process())
     }
 }
 
@@ -1210,7 +1162,12 @@ impl CliCommand for WalletRename {
     .args(&[arg("selector"), arg("new_name")]);
 
     async fn run(inv: &Invocation, args: &WalletRenameArgs) -> Result<(), anyhow::Error> {
-        rename(inv, &args.selector, &args.new_name)
+        rename(
+            inv,
+            &Settings::from_process(),
+            &args.selector,
+            &args.new_name,
+        )
     }
 }
 
@@ -1245,7 +1202,12 @@ impl CliCommand for WalletDelete {
                 }),
             );
         }
-        delete(inv, &args.selector, args.yes)
+        account_remove(
+            inv,
+            &Settings::from_process(),
+            Some(&args.selector),
+            args.yes,
+        )
     }
 }
 
@@ -1270,7 +1232,7 @@ impl CliCommand for WalletExport {
     .args(&[arg("selector"), arg("yes").kind(InputKind::Boolean)]);
 
     async fn run(inv: &Invocation, args: &WalletExportArgs) -> Result<(), anyhow::Error> {
-        export(inv, &args.selector, args.yes)
+        export(inv, &Settings::from_process(), &args.selector, args.yes)
     }
 }
 
@@ -1307,7 +1269,7 @@ impl CliCommand for WalletReset {
                 }),
             );
         }
-        reset(inv, args.yes)
+        reset(inv, &Settings::from_process(), args.yes)
     }
 }
 
@@ -1337,14 +1299,14 @@ mod tests {
         );
 
         let mut empty = Config::default();
-        let written = apply_setup_defaults(&mut empty, &settings);
+        apply_setup_defaults(&mut empty, &settings);
         assert_eq!(
-            written,
-            [
-                "default_builder_address",
-                "default_builder_fee_rate",
-                "default_referral_code"
-            ]
+            empty
+                .default_builder_address
+                .as_deref()
+                .map(str::to_lowercase)
+                .as_deref(),
+            Some("0x0000000000000000000000000000000000000abc")
         );
         assert_eq!(empty.default_builder_fee_rate.as_deref(), Some("0.001%"));
         assert_eq!(empty.default_referral_code.as_deref(), Some("FRIEND"));
@@ -1354,7 +1316,9 @@ mod tests {
             default_referral_code: Some("MINE".to_string()),
             ..Config::default()
         };
-        assert!(apply_setup_defaults(&mut configured, &settings).is_empty());
+        let before = configured.clone();
+        apply_setup_defaults(&mut configured, &settings);
+        assert_eq!(configured, before);
         assert_eq!(configured.default_referral_code.as_deref(), Some("MINE"));
     }
 }
