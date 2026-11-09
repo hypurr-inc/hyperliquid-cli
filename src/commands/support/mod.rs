@@ -26,10 +26,12 @@ pub(crate) fn print_dry_run_acting_for(
     args: serde_json::Value,
     vault_address: Option<String>,
 ) -> Result<(), anyhow::Error> {
-    let mut envelope = DryRunEnvelope::new(inv.command_key(), would_execute, args).with_payload(
-        inv.payload()
-            .map(|payload| crate::input_hardening::redact_sensitive_json(payload.clone())),
-    );
+    let mut envelope = DryRunEnvelope::new(inv.command_key(), would_execute, args)
+        .with_payload(
+            inv.payload()
+                .map(|payload| crate::input_hardening::redact_sensitive_json(payload.clone())),
+        )
+        .with_expires_after(inv.expires_after_ms());
     if inv.command().dry_run_names_signer() {
         envelope = envelope.with_signing(dry_run_signing(inv, vault_address)?);
     }

@@ -8,6 +8,7 @@
 //! local-only commands such as `wallet list` never read them.
 
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use hypersdk::hypercore::Chain;
 
@@ -33,6 +34,9 @@ pub struct InvocationFlags {
     /// `--payload-file`: a path, or `-` for stdin.
     pub payload_file: Option<String>,
     pub signer: SignerFlags,
+    /// `--expires-after`: how long after signing an L1 action the exchange
+    /// still accepts it.
+    pub expires_after: Option<Duration>,
 }
 
 impl InvocationFlags {
@@ -179,6 +183,15 @@ impl Invocation {
         self.flags.dry_run
     }
 
+    /// The `expiresAfter` timestamp (milliseconds) an L1 action signed now
+    /// would carry under `--expires-after`.
+    #[must_use]
+    pub fn expires_after_ms(&self) -> Option<u64> {
+        self.flags
+            .expires_after
+            .map(|lifetime| crate::clock::expires_at_ms(crate::clock::now_ms(), lifetime))
+    }
+
     /// The raw `--payload-json` / `--payload-file` document. `None` when none
     /// was given, and until the run pipeline has called [`Self::load_payload`].
     #[must_use]
@@ -214,7 +227,8 @@ impl Invocation {
     /// may pick another network than the run resolved. A person at a terminal
     /// is told when a read is retried.
     pub fn api_client_for(&self, network: Network) -> Result<ApiClient, CliError> {
-        let api = ApiClient::new(network, self.settings.api_base_url_override(network)?);
+        let api = ApiClient::new(network, self.settings.api_base_url_override(network)?)
+            .with_request_lifetime(self.flags.expires_after);
         Ok(if self.mode.person_on_stderr() {
             api.on_retry(|| eprintln!("Retrying automatically…"))
         } else {

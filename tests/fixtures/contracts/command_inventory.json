@@ -840,6 +840,49 @@
       ]
     },
     {
+      "auth_required": true,
+      "command": "hyperliquid account invalidate-nonce",
+      "command_path": [
+        "account",
+        "invalidate-nonce"
+      ],
+      "confirmation": "none",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "account",
+      "input_kinds": {},
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "raw_payload": "dry_run_only",
+      "risk": "account_state",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": true,
+      "command": "hyperliquid account reserve-weight",
+      "command_path": [
+        "account",
+        "reserve-weight"
+      ],
+      "confirmation": "prompt",
+      "dangerous": true,
+      "dry_run": "optional",
+      "group": "account",
+      "input_kinds": {
+        "destination": "raw_destination_address",
+        "yes": "boolean"
+      },
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
       "auth_required": false,
       "command": "hyperliquid subaccount list <ADDRESS>",
       "command_path": [

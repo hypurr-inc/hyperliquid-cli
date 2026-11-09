@@ -7,6 +7,7 @@ pub mod borrowlend;
 pub mod builder;
 pub(crate) mod confirm;
 pub mod feedback;
+pub mod invalidate_nonce;
 pub(crate) mod issue_report;
 pub mod mcp;
 pub mod meta;
@@ -18,6 +19,7 @@ pub mod positions;
 pub mod prio;
 pub mod referral;
 pub mod report_incident;
+pub mod reserve_weight;
 pub mod rows;
 pub mod schema;
 pub mod selector;
@@ -96,6 +98,8 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<account::AccountTwapFills>(),
             Entry::of::<account::AccountAbstraction>(),
             Entry::of::<account::AccountAbstractionSet>(),
+            Entry::of::<invalidate_nonce::AccountInvalidateNonce>(),
+            Entry::of::<reserve_weight::AccountReserveWeight>(),
             Entry::of::<wallet::AccountAdd>(),
             Entry::of::<wallet::AccountLs>(),
             Entry::of::<wallet::AccountSetDefault>(),

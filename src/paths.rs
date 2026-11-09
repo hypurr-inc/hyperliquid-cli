@@ -59,6 +59,12 @@ pub fn legacy_accounts_key(env: &EnvSource) -> Option<PathBuf> {
     data_dir(env).map(|dir| dir.join("accounts.key"))
 }
 
+/// The highest nonce this machine has signed with, shared by every process.
+#[must_use]
+pub fn nonce_high_water_file(env: &EnvSource) -> Option<PathBuf> {
+    data_dir(env).map(|dir| dir.join("nonce-high-water"))
+}
+
 /// Default OWS vault directory when `HYPERLIQUID_OWS_VAULT_PATH` is unset.
 #[must_use]
 pub fn default_vault_dir(env: &EnvSource) -> Option<PathBuf> {

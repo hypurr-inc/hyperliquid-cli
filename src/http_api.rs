@@ -116,6 +116,8 @@ pub struct ApiClient {
     /// Wait before each read retry that follows a 429 without `Retry-After`.
     rate_limit_backoff: &'static [Duration],
     on_retry: Option<fn()>,
+    /// `--expires-after`: how long after signing a signed action stays valid.
+    request_lifetime: Option<Duration>,
 }
 
 impl std::fmt::Debug for ApiClient {
@@ -146,6 +148,7 @@ impl ApiClient {
             retry_backoff: &READ_RETRY_BACKOFF,
             rate_limit_backoff: &RATE_LIMIT_RETRY_BACKOFF,
             on_retry: None,
+            request_lifetime: None,
         }
     }
 
@@ -155,6 +158,20 @@ impl ApiClient {
     pub fn on_retry(mut self, observer: fn()) -> Self {
         self.on_retry = Some(observer);
         self
+    }
+
+    /// Give every signed action sent through this client an `expiresAfter` of
+    /// `lifetime` after the moment it is signed.
+    #[must_use]
+    pub fn with_request_lifetime(mut self, lifetime: Option<Duration>) -> Self {
+        self.request_lifetime = lifetime;
+        self
+    }
+
+    /// The `--expires-after` lifetime, when one was asked for.
+    #[must_use]
+    pub fn request_lifetime(&self) -> Option<Duration> {
+        self.request_lifetime
     }
 
     #[cfg(test)]
