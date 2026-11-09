@@ -94,7 +94,6 @@ pub(crate) fn rejected_all(action: &str, failures: &[Rejected]) -> CliError {
     })
 }
 
-/// What an order-placement status means for a row or a live tracker.
 pub(crate) enum Placement {
     /// Accepted, waiting, or resting. `oid` is set only when the exchange
     /// assigned one (`resting`).
@@ -235,8 +234,6 @@ pub(crate) fn ensure_action_statuses_ok(
 pub(crate) fn modification_result_oid(statuses: &[OrderResponseStatus]) -> Option<u64> {
     statuses.iter().find_map(OrderResponseStatus::oid)
 }
-
-// What the CLI sends besides status reads, and how it reads the reply.
 
 pub(super) async fn place_order_batch_raw(
     api: &ApiClient,

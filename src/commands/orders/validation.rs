@@ -138,7 +138,6 @@ pub(crate) struct OrderSpec {
     pub(super) tpsl: Option<AttachedTpsl>,
 }
 
-/// What kind of order, with exactly the fields that kind needs.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum OrderKind {
     Limit {
@@ -222,7 +221,6 @@ impl BuilderRequest {
     }
 }
 
-/// Take-profit and stop-loss children attached to an entry order.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct AttachedTpsl {
     pub(super) grouping: CreateTpslGroupingArg,
@@ -231,7 +229,6 @@ pub(super) struct AttachedTpsl {
 }
 
 impl OrderSpec {
-    /// Validate `orders create` flags and turn them into the order to plan.
     pub(crate) fn from_create(args: &CreateArgs) -> Result<Self, CliError> {
         let cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
         validate_create_order_type_flags(args)?;
@@ -507,7 +504,6 @@ pub fn read_validated_batch_create_orders(
     Ok(orders)
 }
 
-/// How much of a position a TP/SL closes.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum ClosingSize {
     /// The whole position the account holds when the order is placed.
@@ -534,7 +530,6 @@ pub(crate) struct TpslSpec {
 }
 
 impl TpslSpec {
-    /// Validate `orders tpsl` flags and turn them into the TP/SL to plan.
     pub(crate) fn from_flags(args: &TpslArgs) -> Result<Self, CliError> {
         let cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
         validate_tpsl_triggers(
@@ -730,7 +725,6 @@ fn validate_trigger_price_spec(
     }
 }
 
-/// A price-like flag, when given, must be positive.
 fn positive_price(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
     match value {
         Some(value) if value <= Decimal::ZERO => {
@@ -740,7 +734,6 @@ fn positive_price(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
     }
 }
 
-/// A quantity flag, when given, must be greater than zero.
 fn positive_quantity(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
     match value {
         Some(value) if value <= Decimal::ZERO => Err(CliError::Configuration(format!(
@@ -760,7 +753,6 @@ fn validate_market_slippage(max_slippage_bps: u16) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Most problems listed in one batch-file error.
 const MAX_LISTED_LEG_PROBLEMS: usize = 5;
 
 fn read_batch_create_orders(path: &Path) -> Result<Vec<BatchCreateOrder>, CliError> {

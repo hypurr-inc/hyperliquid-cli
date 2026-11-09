@@ -478,7 +478,6 @@ impl CreateOrderType {
         )
     }
 
-    /// The standalone market trigger order for a TP/SL side.
     pub(super) fn market_trigger(tpsl: TpSl) -> Self {
         match tpsl {
             TpSl::Tp => Self::TakeProfit,
@@ -486,7 +485,6 @@ impl CreateOrderType {
         }
     }
 
-    /// The standalone limit trigger order for a TP/SL side.
     pub(super) fn limit_trigger(tpsl: TpSl) -> Self {
         match tpsl {
             TpSl::Tp => Self::TakeLimit,

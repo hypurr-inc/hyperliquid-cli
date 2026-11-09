@@ -57,7 +57,6 @@ impl LegOutcome {
     }
 }
 
-/// The rejections among a result's rows, in leg order.
 fn rejections<'a>(errors: impl Iterator<Item = &'a Option<Rejected>>) -> Vec<Rejected> {
     errors.filter_map(Option::clone).collect()
 }
@@ -66,7 +65,6 @@ fn id_cell(order_id: Option<u64>) -> String {
     order_id.map(|oid| oid.to_string()).unwrap_or_default()
 }
 
-/// `rows` with every cell under `header` painted when `applies` holds for it.
 fn paint_column(
     headers: &[&str],
     mut rows: Vec<Vec<String>>,
@@ -112,7 +110,6 @@ pub(super) struct OrderConfirmation {
 }
 
 impl OrderConfirmation {
-    /// Build the row for one leg.
     pub(super) fn from_leg_status(prepared: &PreparedOrder, status: OrderResponseStatus) -> Self {
         Self {
             coin: prepared.coin.clone(),
@@ -234,7 +231,6 @@ pub(super) struct TpslOrderConfirmation {
 }
 
 impl TpslOrderConfirmation {
-    /// Build the row for one leg.
     pub(super) fn from_tpsl_status(
         prepared: &PreparedTpslLeg,
         grouping: TpslGroupingArg,
@@ -390,7 +386,6 @@ impl TableData for CancelAllSummaryOutput {
     }
 }
 
-/// One order in a cancel-all result.
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct CancelLeg {
     pub(super) order_id: u64,

@@ -50,7 +50,6 @@ impl OrderDryRunPlan {
         }
     }
 
-    /// Record the acting account the command was given.
     fn acting_for(mut self, on_behalf_of: &Option<String>) -> Self {
         if let Some(object) = self.args.as_object_mut() {
             object.insert("on_behalf_of".to_string(), serde_json::json!(on_behalf_of));
@@ -87,7 +86,6 @@ pub(super) struct ModifyOrderPlan {
     pub(super) confirmation: ModifyConfirmation,
 }
 
-/// A planned `orders create`: one order, or an entry order with attached TP/SL.
 pub(super) enum CreateOrderSubmission {
     Single(PreparedOrder),
     NormalTpsl(NormalTpslOrder),
@@ -232,7 +230,6 @@ async fn resolve_tradable_asset(
     Err(perp_err.into())
 }
 
-/// Per-market facts every order on it reads.
 struct Venue {
     coin: String,
     index: usize,
@@ -479,7 +476,6 @@ async fn plan_order(
     })
 }
 
-/// Plan an order and its attached TP/SL children, if any.
 pub(super) async fn prepare_create_order(
     client: &HttpClient,
     resolver: &AssetResolver,
@@ -570,7 +566,6 @@ pub(super) async fn prepare_batch_create_orders(
     prepare_order_batch(client, resolver, specs).await
 }
 
-/// Plan generated legs, resolving each distinct market once.
 async fn prepare_order_batch(
     client: &HttpClient,
     resolver: &AssetResolver,
@@ -675,7 +670,6 @@ pub(super) fn prepare_normal_tpsl_batch(
     Ok(batch_from_legs(tpsl.grouping.into(), legs))
 }
 
-/// What a TP/SL child order is for: the market, the size, and the side that closes it.
 struct TpslChildren<'a> {
     asset: usize,
     coin: &'a str,
@@ -763,7 +757,6 @@ pub(super) fn position_tpsl_batch(
     batch_from_legs(TpslGroupingArg::PositionTpsl, legs)
 }
 
-/// TP/SL trigger prices truncated to the market's tick grid.
 fn truncate_triggers(
     perp: &PerpAsset,
     take_profit: Option<Decimal>,
@@ -798,7 +791,6 @@ fn position_tpsl_triggers(
     Ok((take_profit, stop_loss))
 }
 
-/// The user's position on `perp`, if they hold one.
 async fn fetch_position(
     client: &HttpClient,
     user: Address,
@@ -950,7 +942,6 @@ pub(super) fn validate_tpsl_price_ordering(
     }
 }
 
-/// How an order shows up in a cancel or modify: its identifier, parsed once.
 pub(super) fn order_identifier(
     order_id: Option<u64>,
     cloid: Option<&str>,
@@ -1241,9 +1232,6 @@ pub(super) fn prepare_schedule_cancel_plan(
     }
 }
 
-// Dry-run: each preview renders a plan; nothing here plans anything itself.
-
-/// `orders create` dry-run details for the planned order and its TP/SL children.
 pub(super) fn create_dry_run_preview(
     submission: &CreateOrderSubmission,
     args: &CreateArgs,

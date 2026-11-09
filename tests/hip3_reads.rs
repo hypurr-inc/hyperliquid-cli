@@ -143,7 +143,6 @@ async fn positions_list_scopes_clearinghouse_state_to_a_dex() {
     server.verify().await;
 }
 
-/// `orders open --dex` scopes `frontendOpenOrders`.
 #[tokio::test]
 async fn orders_open_scopes_frontend_open_orders_to_a_dex() {
     let env = IsolatedHome::new();
