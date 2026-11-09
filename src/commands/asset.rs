@@ -1029,7 +1029,16 @@ mod tests {
 
     #[test]
     fn strict_decimal_asset_id_parser_rejects_ambiguous_inputs() {
-        for raw in ["", "abc", "-1", "1.5", "0x10"] {
+        for raw in [
+            "",
+            "abc",
+            "-1",
+            "+5",
+            " 5",
+            "1.5",
+            "0x10",
+            "18446744073709551616",
+        ] {
             assert!(parse_asset_id(raw).is_err(), "{raw} should fail");
         }
         assert_eq!(parse_asset_id("100000400").unwrap(), 100_000_400);
