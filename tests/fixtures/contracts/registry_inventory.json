@@ -2881,6 +2881,120 @@
       ]
     },
     {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Millisecond timestamp nonce of the request to invalidate; within 2 days before to 1 day after now.",
+          "enum_values": [],
+          "id": "nonce",
+          "input_kind": null,
+          "long": "nonce",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid account invalidate-nonce",
+      "command_path": [
+        "account",
+        "invalidate-nonce"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": true,
+      "description": "Send a noop action that marks a nonce as used, so a signed request still in flight with that nonce is rejected. Sign with the same wallet as the request; the nonce is printed when a request's outcome is unknown. Moves no funds.",
+      "dry_run": "optional",
+      "group": "account",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "account_state",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Requests to reserve; each costs 0.0005 USDC.",
+          "enum_values": [],
+          "id": "weight",
+          "input_kind": null,
+          "long": "weight",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Existing address to credit instead of the signer. Wallet aliases are not resolved.",
+          "enum_values": [],
+          "id": "destination",
+          "input_kind": "raw_destination_address",
+          "long": "destination",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Skip confirmation prompt for deliberate automation.",
+          "enum_values": [],
+          "id": "yes",
+          "input_kind": "boolean",
+          "long": "yes",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": "y"
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid account reserve-weight",
+      "command_path": [
+        "account",
+        "reserve-weight"
+      ],
+      "confirmation": "prompt",
+      "confirmation_bypass": {
+        "arg": "yes",
+        "supported": true
+      },
+      "dangerous": true,
+      "description": "Reserve additional request weight at 0.0005 USDC per request, paid from the perps balance, for the signer or another existing address. Prompts for confirmation unless --yes is passed.",
+      "dry_run": "optional",
+      "group": "account",
+      "lifecycle": "live_mutating",
+      "mutability": "live_mutating",
+      "output_contract": "command_result_or_dry_run_envelope",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement",
+      "stream_bounds": null,
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
       "aliases": [
         "subaccounts"
       ],

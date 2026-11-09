@@ -125,6 +125,10 @@ struct Cli {
     #[arg(long, global = true, help_heading = GLOBAL_OPTIONS)]
     dry_run: bool,
 
+    /// Reject a signed L1 action the exchange has not processed this long after signing (for example 30s, 5m)
+    #[arg(long, global = true, value_name = "DURATION", value_parser = hyperliquid_cli::clock::parse_lifetime, help_heading = GLOBAL_OPTIONS)]
+    expires_after: Option<std::time::Duration>,
+
     /// Never prompt. Commands fail with the missing input named instead
     #[arg(long, global = true, help_heading = GLOBAL_OPTIONS)]
     non_interactive: bool,
@@ -185,6 +189,7 @@ async fn main() {
             account: cli.account,
             ows_signer: cli.ows_signer,
         },
+        expires_after: cli.expires_after,
     };
     let env = settings.env().clone();
     let mode = match startup(requested_format, &flags, terminal, &env) {

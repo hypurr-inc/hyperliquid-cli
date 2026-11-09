@@ -76,6 +76,30 @@
     {
       "auth_required": true,
       "bankr_signer": "supported",
+      "command": "hyperliquid account invalidate-nonce",
+      "confirmation": "none",
+      "dangerous": true,
+      "dry_run": "optional",
+      "lifecycle": "live_mutating",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "account_state"
+    },
+    {
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid account reserve-weight",
+      "confirmation": "prompt",
+      "dangerous": true,
+      "dry_run": "optional",
+      "lifecycle": "live_mutating",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement"
+    },
+    {
+      "auth_required": true,
+      "bankr_signer": "supported",
       "command": "hyperliquid subaccount create",
       "confirmation": "none",
       "dangerous": true,

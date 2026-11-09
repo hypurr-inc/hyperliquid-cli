@@ -57,6 +57,8 @@ const SCHEMA_ORDER: &[&str] = &[
     "account twap-fills",
     "account abstraction",
     "account abstraction set",
+    "account invalidate-nonce",
+    "account reserve-weight",
     "subaccount list",
     "subaccount create",
     "subaccount transfer",

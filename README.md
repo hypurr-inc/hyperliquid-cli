@@ -256,6 +256,7 @@ Canonical top-level aliases accepted by the CLI:
 | `--results-only` | Strip common JSON envelopes and return only data. |
 | `--max-results <N>` | Limit top-level list/map results client-side. |
 | `--dry-run` | Validate and preview mutating commands without side effects. |
+| `--expires-after <DURATION>` | Give signed L1 actions an `expiresAfter` of now plus the duration (for example `30s`, `5m`); the exchange rejects the request after that. Exit `13` for user-signed actions such as transfers and for commands that sign nothing. |
 | `--payload-json <JSON>` / `--payload-file <PATH\|->` | Provide raw JSON payload context for mutating dry-runs. |
 | `--no-update-check` | Disable release update checks for this invocation. |
 | `--non-interactive` | Never prompt. Commands fail with the missing input named. `CI`, `HYPERLIQUID_AGENT`, JSON output, and `--payload-file -` also disable prompts. |
@@ -309,6 +310,8 @@ Canonical top-level aliases accepted by the CLI:
 | `account twap-fills [ADDRESS_OR_WALLET] [--start <TIME>] [--end <TIME>] [--aggregate-by-time]` | Query user TWAP slice fills. |
 | `account abstraction [ADDRESS]` | Read account abstraction mode for an address, or the selected account when `ADDRESS` is omitted. |
 | `account abstraction set --mode disabled\|unified-account\|portfolio-margin` | Set account abstraction for the configured signer; prompts unless `-y`. |
+| `account invalidate-nonce --nonce <MS>` | Send a `noop` that burns a nonce, so a signed request still in flight with it is rejected. Sign with the same wallet as that request; an unknown-outcome error prints the nonce. Moves no funds, no prompt. |
+| `account reserve-weight --weight <N> [--destination <ADDRESS>] [-y]` | Reserve extra rate-limit capacity at 0.0005 USDC per request from the perps balance, for the signer or another existing address; prompts unless `-y`. |
 | `subaccount list [ADDRESS_OR_WALLET]` | Query public subaccounts for a master address. |
 | `subaccount create --name <NAME>` | Create a subaccount signed by the master account. |
 | `account add [PRIVATE_KEY] [--alias <ALIAS>] [--type <TYPE>] [--default]` / `account ls` / `account set-default [SELECTOR]` / `account remove [SELECTOR] [-y]` | Manage stored wallets. |
