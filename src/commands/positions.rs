@@ -531,12 +531,14 @@ impl CliCommand for PositionsList {
     .cli_aliases(&["ls"]);
 
     async fn run(inv: &Invocation, args: &PositionsListArgs) -> Result<(), anyhow::Error> {
+        // Validate once, before either path: a watch must not start on a dex that
+        // cannot be read, and both paths send the canonical spelling.
+        let client = inv.remote()?.api().sdk();
+        let dex = canonical_dex(client, args.dex.as_deref()).await?;
         if args.watch.watch {
-            watch_positions(inv, args.dex.as_deref(), args.watch.max_ticks).await
+            watch_positions(inv, dex.as_deref(), args.watch.max_ticks).await
         } else {
             let user = inv.resolve_signer()?.query_address();
-            let client = inv.remote()?.api().sdk();
-            let dex = canonical_dex(client, args.dex.as_deref()).await?;
             list(inv, user, dex.as_deref()).await
         }
     }
