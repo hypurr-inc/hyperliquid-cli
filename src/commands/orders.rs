@@ -374,9 +374,8 @@ async fn twap_create(
 ) -> Result<(), anyhow::Error> {
     clear_to_send(context, Gate::twap(&plan)).await?;
     // Both TWAP actions go out through `send_raw`: it posts the SDK action in
-    // the field order it serializes, as the hand-built one was posted, where
-    // `send` would post it through a JSON `Value`, which sorts the keys. The
-    // signed msgpack is the same either way.
+    // the field order it serializes, where `send` would post it through a JSON
+    // `Value`, which sorts the keys. The signed msgpack is the same either way.
     let twap_id = context
         .send_raw(&plan.action, Wording::TWAP_CREATE)
         .await?

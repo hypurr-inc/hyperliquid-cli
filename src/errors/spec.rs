@@ -171,8 +171,8 @@ pub(super) const RATE_LIMITED: Spec = Spec::new(
 /// The address-based limit (`Too many cumulative requests`): the exchange
 /// answers it with HTTP 200 and its own counts. It reports the reason
 /// `rate_limited` like any rate limit, so the catalog lists the two as one.
-/// A spent address may send one request every 10 seconds, and nothing says a
-/// resend is safe.
+/// A spent address may send one request per `retry_after_secs`, and nothing
+/// says a resend is safe.
 pub(super) const ADDRESS_RATE_LIMITED: Spec = Spec::new(
     11,
     "rate_limited",

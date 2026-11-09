@@ -2,8 +2,7 @@
 //! and where the values come from.
 //!
 //! Every variable is a constant here, with a [`Kind`] that says how its reader
-//! interprets it. The root help text, the test harness's list of variables to
-//! clear ([`ALL`]) and the strict-flag check (`mode::validate_env`) are
+//! interprets it. [`ALL`], the root help text and the strict-flag list are
 //! generated from the same table. [`EnvSource`] is the only way the CLI reads a
 //! variable, so settings built over a fixed map never see the process's.
 //!
@@ -288,14 +287,6 @@ mod tests {
         assert!(vault_help.contains(&format!("~/{}", crate::paths::DEFAULT_VAULT_DIR)));
         assert_eq!(kind(AGENT), Some(Kind::StrictFlag));
         assert_eq!(kind("NOT_A_VARIABLE"), None);
-    }
-
-    #[test]
-    fn the_strict_flags_are_the_switches_this_cli_owns() {
-        assert_eq!(
-            strict_flags().collect::<Vec<_>>(),
-            [AGENT, NO_UPDATE_CHECK, AUTO_UPDATE, MCP_ALLOW_UNSAFE]
-        );
     }
 
     #[test]

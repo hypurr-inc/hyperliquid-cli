@@ -636,21 +636,21 @@ fn twap_size_truncates_to_the_market_lot() {
 
 /// `twap-create` and `twap-cancel` send the SDK's `Action::TwapOrder` and
 /// `TwapCancel`. The exchange verifies the signature over their msgpack, so
-/// the bytes must be those of the structs this CLI hand-built before the SDK
-/// typed them (`s` a normalized decimal string, `m` a `u64`): `s` is a
-/// `Decimal` in the SDK and `m` a `u32`, which must not change a byte.
+/// the bytes must be those of the documented wire structs below (`s` a
+/// normalized decimal string, `m` a `u64`), although the SDK types `s` as a
+/// `Decimal` and `m` as a `u32`.
 #[test]
-fn the_sdk_twap_actions_serialize_to_the_bytes_the_hand_built_ones_did() {
+fn the_sdk_twap_actions_serialize_to_the_documented_wire_structs() {
     use serde::Serialize;
 
     #[derive(Serialize)]
     #[serde(tag = "type", rename_all = "camelCase")]
-    enum HandBuilt {
-        TwapOrder { twap: HandBuiltTwap },
+    enum Wire {
+        TwapOrder { twap: WireTwap },
         TwapCancel { a: usize, t: u64 },
     }
     #[derive(Serialize)]
-    struct HandBuiltTwap {
+    struct WireTwap {
         a: usize,
         b: bool,
         s: String,
@@ -675,8 +675,8 @@ fn the_sdk_twap_actions_serialize_to_the_bytes_the_hand_built_ones_did() {
             ..twap_args(size)
         };
         let plan = prepare_twap_create_plan(&btc(), &args).unwrap();
-        let hand_built = HandBuilt::TwapOrder {
-            twap: HandBuiltTwap {
+        let wire = Wire::TwapOrder {
+            twap: WireTwap {
                 a: 0,
                 b: side.is_buy(),
                 s: plan.size.normalize().to_string(),
@@ -687,12 +687,12 @@ fn the_sdk_twap_actions_serialize_to_the_bytes_the_hand_built_ones_did() {
         };
         assert_eq!(
             rmp_serde::to_vec_named(&plan.action).unwrap(),
-            rmp_serde::to_vec_named(&hand_built).unwrap(),
+            rmp_serde::to_vec_named(&wire).unwrap(),
             "msgpack of {size} over {duration}s"
         );
         assert_eq!(
             serde_json::to_string(&plan.action).unwrap(),
-            serde_json::to_string(&hand_built).unwrap(),
+            serde_json::to_string(&wire).unwrap(),
             "json of {size} over {duration}s"
         );
     }
@@ -706,17 +706,17 @@ fn the_sdk_twap_actions_serialize_to_the_bytes_the_hand_built_ones_did() {
             on_behalf_of: None,
         },
     );
-    let hand_built = HandBuilt::TwapCancel {
+    let wire = Wire::TwapCancel {
         a: 0,
         t: 77_738_308,
     };
     assert_eq!(
         rmp_serde::to_vec_named(&cancel.action).unwrap(),
-        rmp_serde::to_vec_named(&hand_built).unwrap()
+        rmp_serde::to_vec_named(&wire).unwrap()
     );
     assert_eq!(
         serde_json::to_string(&cancel.action).unwrap(),
-        serde_json::to_string(&hand_built).unwrap()
+        serde_json::to_string(&wire).unwrap()
     );
 }
 

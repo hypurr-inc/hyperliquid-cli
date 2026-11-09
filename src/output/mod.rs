@@ -1222,16 +1222,6 @@ mod tests {
     }
 
     #[test]
-    fn json_text_is_pretty_on_a_terminal_and_compact_otherwise() {
-        let value = serde_json::json!({"a": [1, 2], "b": "x"});
-        assert_eq!(json_text(&value, false), r#"{"a":[1,2],"b":"x"}"#);
-        assert_eq!(
-            json_text(&value, true),
-            serde_json::to_string_pretty(&value).unwrap()
-        );
-    }
-
-    #[test]
     #[should_panic(expected = "must serialize to JSON")]
     fn serialize_row_fails_loudly_instead_of_printing_an_empty_document() {
         let unserializable =

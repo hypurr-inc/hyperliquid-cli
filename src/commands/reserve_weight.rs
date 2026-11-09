@@ -1,6 +1,6 @@
 //! `account reserve-weight`: the exchange's `reserveRequestWeight` action, which
-//! buys extra address-based rate-limit capacity at 0.0005 USDC per request, paid
-//! from the perps balance, optionally for another existing user
+//! buys extra address-based rate-limit capacity, paid from the perps balance,
+//! optionally for another existing user
 //! (<https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#reserve-additional-actions>).
 //! An L1 action: hypersdk's `Action::ReserveRequestWeight` and the nktkas SDK
 //! (`executeL1Action`) agree, and the destination is hashed as lowercase hex
@@ -21,7 +21,7 @@ use crate::exchange::actions::send_l1_action;
 use crate::invocation::Invocation;
 use crate::wire::{AddressRole, address};
 
-/// USDC per reserved request: 0.0005.
+/// USDC per reserved request.
 const COST_PER_REQUEST: Decimal = Decimal::from_parts(5, 0, 0, false, 4);
 
 /// Arguments for `account reserve-weight`.

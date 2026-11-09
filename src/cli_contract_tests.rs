@@ -169,8 +169,8 @@ fn yes_belongs_to_commands_that_prompt() {
 /// Whether a command asks is decided in one place, `Invocation::requires_approval`
 /// (through `consent::approve` or `consent::ask`), so a command that prompts
 /// must call it, or its `--yes` would be read by nothing. The check is per
-/// source unit (a file or directory under `commands`): the order commands decide
-/// in `orders/run.rs`, the others in their own file.
+/// source unit (a file or directory under `commands`), since a command family
+/// may decide in a shared file.
 #[test]
 fn prompting_command_sources_consult_the_consent_api() {
     use std::path::{Path, PathBuf};
