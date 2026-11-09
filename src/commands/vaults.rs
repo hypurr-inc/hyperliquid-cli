@@ -18,8 +18,9 @@ use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::{self, TableData};
-use crate::quantity::{self, Scale};
+use crate::quantity;
 use crate::wire::{AddressRole, InfoRequest, address};
+use crate::wire_decimal;
 
 const TRANSFER_REVERSIBILITY: ActionReversibility = ActionReversibility::PartiallyReversible;
 
@@ -513,7 +514,7 @@ async fn run_transfer(
     action_kind: VaultTransferActionKind,
 ) -> Result<(), anyhow::Error> {
     let vault = parse_address(&args.vault)?;
-    let usd = validate_usdc_amount(args.amount)?;
+    let usd: u64 = quantity::usdc_units(args.amount)?;
     if inv.dry_run() {
         return print_dry_run(
             inv,
@@ -531,7 +532,8 @@ async fn run_transfer(
             is_deposit: action_kind.is_deposit(),
             usd,
         }),
-        actions::nonce_now(),
+        None,
+        actions::EXCHANGE_ACTION,
     )
     .await?;
 
@@ -622,10 +624,6 @@ fn parse_optional_user(raw: Option<&str>) -> Result<Option<Address>, CliError> {
 
 fn parse_address(input: &str) -> Result<Address, CliError> {
     address(input, AddressRole::Explicit(None))
-}
-
-fn validate_usdc_amount(amount: Decimal) -> Result<u64, CliError> {
-    quantity::positive(amount, Scale::USDC).map_err(|err| err.config("amount", Scale::USDC))
 }
 
 #[derive(Debug, Deserialize)]
@@ -787,25 +785,11 @@ impl RawVaultDetails {
 }
 
 fn decimal_field(value: &Value, field: &'static str) -> Result<Decimal, CliError> {
-    let raw = match value {
-        Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
-        _ => {
-            return Err(CliError::Internal(anyhow::anyhow!(
-                "decode failed while reading {field}: expected string or number"
-            )));
-        }
-    };
-    parse_decimal_text(&raw).map_err(|err| {
+    wire_decimal::from_value(value).map_err(|err| {
         CliError::Internal(anyhow::anyhow!(
             "decode failed while reading {field}: {err}"
         ))
     })
-}
-
-fn parse_decimal_text(raw: &str) -> Result<Decimal, rust_decimal::Error> {
-    raw.parse::<Decimal>()
-        .or_else(|_| Decimal::from_scientific(raw))
 }
 
 fn raw_portfolio_summary(portfolio: &Value) -> Result<(Vec<String>, Option<Decimal>), CliError> {
@@ -1013,12 +997,10 @@ mod tests {
 
     #[test]
     fn usdc_amount_validation_rejects_zero_negative_and_over_precise_amounts() {
-        assert!(validate_usdc_amount(Decimal::ZERO).is_err());
-        assert!(validate_usdc_amount("-1".parse::<Decimal>().unwrap()).is_err());
-        assert!(validate_usdc_amount("0.0000001".parse::<Decimal>().unwrap()).is_err());
-        assert_eq!(
-            validate_usdc_amount("1.5".parse::<Decimal>().unwrap()).unwrap(),
-            1_500_000
-        );
+        let usd = |amount: &str| quantity::usdc_units::<u64>(amount.parse().unwrap());
+        assert!(usd("0").is_err());
+        assert!(usd("-1").is_err());
+        assert!(usd("0.0000001").is_err());
+        assert_eq!(usd("1.5").unwrap(), 1_500_000);
     }
 }

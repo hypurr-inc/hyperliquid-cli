@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, Risk, arg};
-use crate::commands::actions::send_l1_action;
+use crate::commands::actions::{EXCHANGE_ACTION, send_l1_action_with_nonce};
 use crate::commands::rows::{One, Row};
 use crate::commands::support::print_dry_run;
 use crate::errors::CliError;
@@ -85,7 +85,15 @@ impl CliCommand for AccountInvalidateNonce {
             return print_dry_run(inv, "invalidate_nonce", serde_json::json!({"nonce": nonce}));
         }
         let signer = inv.resolve_signer()?;
-        send_l1_action(inv.remote()?.api(), &signer, Action::Noop, nonce).await?;
+        send_l1_action_with_nonce(
+            inv.remote()?.api(),
+            &signer,
+            Action::Noop,
+            nonce,
+            None,
+            EXCHANGE_ACTION,
+        )
+        .await?;
         inv.print(&One::new(InvalidatedNonce {
             action: "invalidate_nonce",
             status: "confirmed",

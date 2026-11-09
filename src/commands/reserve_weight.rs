@@ -12,7 +12,7 @@ use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
-use crate::commands::actions::{nonce_now, send_l1_action_raw};
+use crate::commands::actions::send_l1_action;
 use crate::commands::confirm;
 use crate::commands::rows::{One, Row};
 use crate::commands::support::print_dry_run;
@@ -135,14 +135,13 @@ Reversibility: irreversible",
             "reserve-weight aborted",
         )?;
 
-        send_l1_action_raw(
+        send_l1_action(
             remote.api(),
             &signer,
             Action::ReserveRequestWeight {
                 weight: args.weight,
                 destination,
             },
-            nonce_now(),
             None,
             "reserve request weight",
         )

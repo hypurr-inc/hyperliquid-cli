@@ -121,7 +121,7 @@ pub(super) async fn clear_to_send<'a>(
         warn_hip3_margin_helpers(&helpers)?;
         ask(target)
     })?;
-    execute_hip3_margin_transfers(context.inv.remote()?, context.signer, user, &helpers).await?;
+    execute_hip3_margin_transfers(context.inv, context.signer, user, &helpers).await?;
     Ok(Cleared {
         builder: gate.builder,
     })
@@ -203,18 +203,16 @@ pub(super) async fn submit_orders(
                 context.api,
                 context.signer,
                 &action,
-                actions::RawL1ActionMetadata::new(actions::nonce_now())
-                    .with_vault_address(context.vault_address),
+                context.vault_address,
                 label,
             )
             .await?
         }
         None => {
-            actions::send_l1_action_raw(
+            actions::send_l1_action(
                 context.api,
                 context.signer,
                 Action::Order(batch),
-                actions::nonce_now(),
                 context.vault_address,
                 label,
             )

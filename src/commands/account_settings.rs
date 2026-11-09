@@ -113,11 +113,14 @@ struct AbstractionPlan {
     agent_signed: bool,
 }
 
+/// `form` is how the run's signer signs ([`AgentForm::of`]); `signer` is its
+/// own address.
 fn abstraction_plan(
-    signer: &SelectedSigner,
+    form: Option<AgentForm>,
+    signer: Address,
     requested: Option<Address>,
 ) -> Result<AbstractionPlan, CliError> {
-    if let Some(AgentForm { master }) = AgentForm::of(signer) {
+    if let Some(AgentForm { master }) = form {
         if let Some(requested) = requested
             && requested != master
         {
@@ -131,7 +134,7 @@ fn abstraction_plan(
         });
     }
     Ok(AbstractionPlan {
-        user: requested.unwrap_or_else(|| signer.address()),
+        user: requested.unwrap_or(signer),
         agent_signed: false,
     })
 }
@@ -224,7 +227,8 @@ async fn set_abstraction(
             Action::AgentSetAbstraction {
                 abstraction: args.mode.sdk_mode(),
             },
-            actions::nonce_now(),
+            None,
+            actions::EXCHANGE_ACTION,
         )
         .await?;
     } else {
@@ -288,7 +292,11 @@ Use --dry-run to preview; confirm or pass -y for live submit.")
             .transpose()?;
         if inv.dry_run() {
             let plan = match inv.dry_run_signer()? {
-                Some(signer) => Some(abstraction_plan(signer, requested)?),
+                Some(signer) => Some(abstraction_plan(
+                    AgentForm::of(inv),
+                    signer.address(),
+                    requested,
+                )?),
                 None => requested.map(|user| AbstractionPlan {
                     user,
                     agent_signed: false,
@@ -301,7 +309,7 @@ Use --dry-run to preview; confirm or pass -y for live submit.")
             );
         }
         let signer = inv.resolve_signer()?;
-        let plan = abstraction_plan(&signer, requested)?;
+        let plan = abstraction_plan(AgentForm::of(inv), signer.address(), requested)?;
         set_abstraction(inv, &signer, plan, args).await
     }
 }
@@ -391,7 +399,8 @@ impl CliCommand for AccountEvmBigBlocks {
             remote.api(),
             &signer,
             Action::EvmUserModify { using_big_blocks },
-            actions::nonce_now(),
+            None,
+            actions::EXCHANGE_ACTION,
         )
         .await?;
         inv.print(&One::new(EvmBigBlocksRow {
@@ -409,43 +418,45 @@ impl CliCommand for AccountEvmBigBlocks {
 #[cfg(test)]
 mod tests {
     use clap::ValueEnum;
-    use hypersdk::hypercore::PrivateKeySigner;
 
     use super::*;
 
     #[test]
     fn an_api_wallet_sets_its_masters_mode_and_no_other_accounts() {
         let master = Address::repeat_byte(1);
-        let agent =
-            SelectedSigner::stored_account(PrivateKeySigner::random(), "bot".to_string(), master);
+        let agent = Address::repeat_byte(9);
+        let form = Some(AgentForm { master });
 
         assert_eq!(
-            abstraction_plan(&agent, None).unwrap(),
+            abstraction_plan(form, agent, None).unwrap(),
             AbstractionPlan {
                 user: master,
                 agent_signed: true
             }
         );
-        assert!(abstraction_plan(&agent, Some(master)).unwrap().agent_signed);
-        let err = abstraction_plan(&agent, Some(Address::repeat_byte(2))).unwrap_err();
+        assert!(
+            abstraction_plan(form, agent, Some(master))
+                .unwrap()
+                .agent_signed
+        );
+        let err = abstraction_plan(form, agent, Some(Address::repeat_byte(2))).unwrap_err();
         assert_eq!(err.exit_code(), 13);
     }
 
     #[test]
     fn any_other_signer_sets_its_own_or_a_named_account_with_the_user_signed_action() {
-        let key = PrivateKeySigner::random();
-        let signer = SelectedSigner::private_key(key.clone());
+        let own = Address::repeat_byte(9);
         let subaccount = Address::repeat_byte(2);
 
         assert_eq!(
-            abstraction_plan(&signer, None).unwrap(),
+            abstraction_plan(None, own, None).unwrap(),
             AbstractionPlan {
-                user: key.address(),
+                user: own,
                 agent_signed: false
             }
         );
         assert_eq!(
-            abstraction_plan(&signer, Some(subaccount)).unwrap(),
+            abstraction_plan(None, own, Some(subaccount)).unwrap(),
             AbstractionPlan {
                 user: subaccount,
                 agent_signed: false

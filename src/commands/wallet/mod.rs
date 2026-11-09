@@ -36,10 +36,6 @@ use output::{
     BankrStatusOutput, WalletReceipt, print_declined, print_status, print_wallet_address, shell_arg,
 };
 
-pub(crate) fn prompt_private_key(mode: &Mode) -> Result<String, CliError> {
-    prompt::read_private_key(mode)
-}
-
 /// What a secret passed as an argument exposes it to; `prefer` is the command
 /// to run without it and what to paste at its prompt, when there is one to
 /// recommend.
@@ -185,7 +181,7 @@ pub fn import(inv: &Invocation, private_key: Option<&str>) -> Result<(), anyhow:
         private_key,
         "a private key",
         Some((WALLET_IMPORT, "at the hidden prompt")),
-        || prompt_private_key(inv.mode()),
+        || prompt::read_private_key(inv.mode()),
     )?;
 
     let store = WalletStore::new(inv.settings());
@@ -366,7 +362,7 @@ pub fn account_add(
 ) -> Result<(), anyhow::Error> {
     let automation_mode = private_key.is_some() || alias.is_some() || make_default;
     let private_key = secret_arg_or_prompt(private_key, "a private key", None, || {
-        prompt_private_key(inv.mode())
+        prompt::read_private_key(inv.mode())
     })?;
 
     let store = WalletStore::new(inv.settings());

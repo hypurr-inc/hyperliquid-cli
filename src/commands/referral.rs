@@ -227,14 +227,8 @@ async fn run_code_action(
     }
     let signer = inv.resolve_signer()?;
     let remote = inv.remote()?;
-    actions::send_raw_l1_json_action(
-        remote.api(),
-        &signer,
-        &action,
-        actions::RawL1ActionMetadata::new(actions::nonce_now()),
-        kind.submit_context(),
-    )
-    .await?;
+    actions::send_raw_l1_json_action(remote.api(), &signer, &action, None, kind.submit_context())
+        .await?;
 
     inv.print(&One::new(ReferralSetRow {
         action: kind.confirmation_action().to_string(),

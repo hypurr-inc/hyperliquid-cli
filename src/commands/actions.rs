@@ -9,9 +9,12 @@ use serde::de::DeserializeOwned;
 
 use crate::clock;
 use crate::errors::{self, CliError};
+use crate::exchange_reply::{self, Reply};
 use crate::http_api::ApiClient;
 use crate::response_sanitization::Untrusted;
-use crate::signing::{SelectedSigner, USER_SIGNED_PREFIX, nonce};
+use crate::signing::{
+    SelectedSigner, Signs, USER_SIGNED_PREFIX, ensure_supports_expires_after, nonce,
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,26 +39,6 @@ struct RawL1ActionRequest<'a, A> {
     expires_after: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct RawL1ActionMetadata {
-    nonce: u64,
-    vault_address: Option<Address>,
-}
-
-impl RawL1ActionMetadata {
-    pub(crate) fn new(nonce: u64) -> Self {
-        Self {
-            nonce,
-            vault_address: None,
-        }
-    }
-
-    pub(crate) fn with_vault_address(mut self, vault_address: Option<Address>) -> Self {
-        self.vault_address = vault_address;
-        self
-    }
-}
-
 /// What a request carried, kept to name it if the exchange never answered.
 #[derive(Debug, Clone, Copy)]
 struct Sent {
@@ -63,13 +46,8 @@ struct Sent {
     expires_after: Option<u64>,
 }
 
-/// The nonce of an exchange action: the current time in milliseconds, raised
-/// above every nonce this process and every other `hyperliquid` process on this
-/// machine already signed with (see [`nonce`]).
-#[must_use]
-pub(crate) fn nonce_now() -> u64 {
-    nonce::next()
-}
+/// The `context` of an action whose rejection needs no more specific name.
+pub(crate) const EXCHANGE_ACTION: &str = "exchange action";
 
 /// The `expiresAfter` of an action signed now, when `--expires-after` was given.
 fn expires_after_now(api: &ApiClient) -> Option<u64> {
@@ -77,24 +55,25 @@ fn expires_after_now(api: &ApiClient) -> Option<u64> {
         .map(|lifetime| clock::expires_at_ms(clock::now_ms(), lifetime))
 }
 
+/// Sign and send an L1 action supported by hypersdk, returning the ok response
+/// payload. The sender takes the nonce (the current time in milliseconds,
+/// raised above every nonce this machine already signed with, see [`nonce`])
+/// and the expiry at the moment it signs, so a caller that returns early, as a
+/// dry run does, spends neither.
 pub(crate) async fn send_l1_action(
     api: &ApiClient,
     signer: &SelectedSigner,
     action: Action,
-    nonce: u64,
-) -> Result<(), CliError> {
-    let expires_after = expires_after_now(api);
-    let request = signer.sign_l1_action_sync(action, nonce, None, expires_after, api.chain())?;
-    let sent = Sent {
-        nonce,
-        expires_after,
-    };
-    let parsed = post(api, &request, sent).await?;
-    ensure_default_response(parsed, "exchange action")
+    vault_address: Option<Address>,
+    context: &'static str,
+) -> Result<serde_json::Value, CliError> {
+    send_l1_action_with_nonce(api, signer, action, nonce::next(), vault_address, context).await
 }
 
-/// Sign and send an L1 action supported by hypersdk, returning the raw ok response payload.
-pub(crate) async fn send_l1_action_raw(
+/// [`send_l1_action`] with a nonce the caller owns: one the person supplied
+/// (`account invalidate-nonce`) or one the signed document embeds (`usdSend`,
+/// `spotSend`, `sendAsset`, `approveAgent`).
+pub(crate) async fn send_l1_action_with_nonce(
     api: &ApiClient,
     signer: &SelectedSigner,
     action: Action,
@@ -127,9 +106,10 @@ pub(crate) async fn send_user_signed_json_action(
     action: serde_json::Value,
     nonce: u64,
     signature: Signature,
+    signs: Signs<'_>,
 ) -> Result<(), CliError> {
     if api.request_lifetime().is_some() {
-        return Err(crate::signing::expires_after_refusal());
+        ensure_supports_expires_after(Some(signs))?;
     }
     let request = SignedJsonActionRequest {
         action,
@@ -143,7 +123,7 @@ pub(crate) async fn send_user_signed_json_action(
         expires_after: None,
     };
     let parsed = post(api, &request, sent).await?;
-    ensure_default_response(parsed, "exchange action")
+    ensure_default_response(parsed, EXCHANGE_ACTION)
 }
 
 /// Sign and send a raw L1 action not currently modeled by hypersdk's [`Action`] enum.
@@ -151,28 +131,29 @@ pub(crate) async fn send_raw_l1_json_action<A: Serialize>(
     api: &ApiClient,
     signer: &SelectedSigner,
     action: &A,
-    metadata: RawL1ActionMetadata,
+    vault_address: Option<Address>,
     context: &'static str,
 ) -> Result<serde_json::Value, CliError> {
+    let nonce = nonce::next();
     let expires_after = expires_after_now(api);
     let signature = sign_raw_l1_action(
         signer,
         api.chain(),
         action,
-        metadata.nonce,
-        metadata.vault_address,
+        nonce,
+        vault_address,
         expires_after,
     )
     .await?;
     let request = RawL1ActionRequest {
         action,
-        nonce: metadata.nonce,
+        nonce,
         signature,
-        vault_address: metadata.vault_address,
+        vault_address,
         expires_after,
     };
     let sent = Sent {
-        nonce: metadata.nonce,
+        nonce,
         expires_after,
     };
     post_json_raw(api, &request, sent, context).await
@@ -279,30 +260,15 @@ fn ensure_ok_raw_response(
     response: serde_json::Value,
     context: &'static str,
 ) -> Result<serde_json::Value, CliError> {
-    let status = response
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-
-    if status.eq_ignore_ascii_case("ok") {
-        return Ok(response
-            .get("response")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null));
-    }
-
-    let message = response
-        .get("response")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| response.to_string());
+    let message = match Reply::decode(&response) {
+        Reply::Ok(payload) => return Ok(payload.clone()),
+        Reply::Err(text) => text,
+        Reply::Unrecognized(body) => exchange_reply::failure_text(body),
+    };
     Err(errors::from_exchange_rejection(&message, context))
 }
 
-pub(crate) fn ensure_default_response(
-    response: Response,
-    context: &'static str,
-) -> Result<(), CliError> {
+fn ensure_default_response(response: Response, context: &'static str) -> Result<(), CliError> {
     match response {
         Response::Ok(hypersdk::hypercore::types::OkResponse::Default) => Ok(()),
         Response::Err(err) => Err(errors::from_exchange_rejection(&err, context)),
@@ -454,5 +420,35 @@ mod tests {
         };
         let err = name_unknown_outcome(CliError::AuthRequired, sent, Chain::Mainnet);
         assert!(matches!(err, CliError::AuthRequired));
+    }
+
+    #[test]
+    fn a_raw_reply_is_its_ok_payload_or_a_rejection_quoting_the_exchange() {
+        let payload = serde_json::json!({"type": "default"});
+        for status in ["ok", "OK"] {
+            let reply = serde_json::json!({"status": status, "response": payload});
+            assert_eq!(ensure_ok_raw_response(reply, "ctx").unwrap(), payload);
+        }
+        assert_eq!(
+            ensure_ok_raw_response(serde_json::json!({"status": "ok"}), "ctx").unwrap(),
+            serde_json::Value::Null
+        );
+
+        // Any other status is a rejection: the exchange's text when it sent a
+        // string, the whole body otherwise, whatever the status is called.
+        for status in ["err", "failure", "mystery"] {
+            let text = ensure_ok_raw_response(
+                serde_json::json!({"status": status, "response": "Insufficient margin"}),
+                "order failed",
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(text.contains("Insufficient margin"), "{status}: {text}");
+        }
+        let body = serde_json::json!({"status": "err", "response": {"detail": 1}});
+        let text = ensure_ok_raw_response(body.clone(), "order failed")
+            .unwrap_err()
+            .to_string();
+        assert!(text.contains(&body.to_string()), "{text}");
     }
 }

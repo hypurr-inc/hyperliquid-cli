@@ -507,7 +507,7 @@ async fn funding_history(inv: &Invocation, args: &FundingHistoryArgs) -> Result<
         "loading funding history",
     )
     .await?;
-    paging::announce_truncation(inv, paging::FUNDING_HISTORY, &window, args.all);
+    paging::announce_truncation(inv, &window);
     let rows = window
         .rows
         .into_iter()

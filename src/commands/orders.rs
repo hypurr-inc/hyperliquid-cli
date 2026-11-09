@@ -273,11 +273,10 @@ async fn cancel(
 ) -> Result<(), anyhow::Error> {
     let plan =
         prepare_cancel_order_plan(context.api.sdk(), resolver, context.account(), args).await?;
-    let response = actions::send_l1_action_raw(
+    let response = actions::send_l1_action(
         context.api,
         context.signer,
         plan.action,
-        actions::nonce_now(),
         context.vault_address,
         "cancel failed",
     )
@@ -319,11 +318,10 @@ async fn cancel_all(
         confirm_cancel_all(args.coin.as_deref(), order_ids.len(), target)
     })?;
 
-    let response = actions::send_l1_action_raw(
+    let response = actions::send_l1_action(
         context.api,
         context.signer,
         action,
-        actions::nonce_now(),
         context.vault_address,
         "cancel-all failed",
     )
@@ -362,11 +360,10 @@ async fn modify(
     )
     .await?;
     let action = batch_modify_action(vec![plan.modify], args.always_place);
-    let response = actions::send_l1_action_raw(
+    let response = actions::send_l1_action(
         context.api,
         context.signer,
         action,
-        actions::nonce_now(),
         context.vault_address,
         "modify failed",
     )
@@ -431,11 +428,10 @@ async fn batch_modify(
         plans.iter().map(|plan| plan.modify.clone()).collect(),
         always_place,
     );
-    let response = actions::send_l1_action_raw(
+    let response = actions::send_l1_action(
         context.api,
         context.signer,
         action,
-        actions::nonce_now(),
         context.vault_address,
         "batch modify failed",
     )
@@ -466,8 +462,7 @@ async fn twap_create(
         context.api,
         context.signer,
         &plan.action,
-        actions::RawL1ActionMetadata::new(actions::nonce_now())
-            .with_vault_address(context.vault_address),
+        context.vault_address,
         "twap-create rejected",
     )
     .await?;
@@ -493,8 +488,7 @@ async fn twap_cancel(
         context.api,
         context.signer,
         &plan.action,
-        actions::RawL1ActionMetadata::new(actions::nonce_now())
-            .with_vault_address(context.vault_address),
+        context.vault_address,
         "twap-cancel rejected",
     )
     .await?;
@@ -517,15 +511,13 @@ async fn schedule_cancel(
     })?;
     // The trigger time counts from the moment of sending, not from the prompt.
     let scheduled = plan.scheduled(Utc::now());
-    let nonce = actions::nonce_now();
     if let Some(scheduled) = &scheduled {
-        actions::send_l1_action_raw(
+        actions::send_l1_action(
             context.api,
             context.signer,
             Action::ScheduleCancel(ScheduleCancel {
                 time: Some(scheduled.at_ms()),
             }),
-            nonce,
             context.vault_address,
             "schedule-cancel rejected",
         )
@@ -538,7 +530,7 @@ async fn schedule_cancel(
                 action_type: "scheduleCancel",
                 time: None,
             },
-            actions::RawL1ActionMetadata::new(nonce).with_vault_address(context.vault_address),
+            context.vault_address,
             "schedule-cancel clear rejected",
         )
         .await?;

@@ -11,7 +11,8 @@ use serde::Serialize;
 use crate::commands::actions;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
-use crate::signing::SelectedSigner;
+use crate::invocation::Invocation;
+use crate::signing::{SelectedSigner, Signs, nonce};
 
 /// A user-signed action: an EIP-712 struct whose JSON is the action body.
 pub(crate) trait UserSigned: SolStruct + Serialize {
@@ -28,12 +29,12 @@ pub(crate) struct AgentForm {
 }
 
 impl AgentForm {
-    /// The form `signer` signs in: `Some` for a stored API wallet, `None` for
-    /// any other signer, which signs the user-signed form.
-    pub(crate) fn of(signer: &SelectedSigner) -> Option<Self> {
-        signer.is_stored_agent().then(|| Self {
-            master: signer.query_address(),
-        })
+    /// The form the run's signer signs in: `Some` for a stored API wallet,
+    /// `None` for any other signer, which signs the user-signed form. The one
+    /// answer for the live action, the dry-run marker and the rule on what
+    /// the agent form may target, which each command states for itself.
+    pub(crate) fn of(inv: &Invocation) -> Option<Self> {
+        inv.agent_master().map(|master| Self { master })
     }
 }
 
@@ -47,7 +48,7 @@ pub(crate) async fn submit<T: UserSigned>(
     build: impl FnOnce(String, u64) -> T,
 ) -> Result<(), CliError> {
     let chain = api.chain();
-    let nonce = actions::nonce_now();
+    let nonce = nonce::next();
     let message = build(chain.to_string(), nonce);
     let signature = actions::sign_user_action::<T>(signer, chain, &message)?;
     let mut action =
@@ -59,5 +60,6 @@ pub(crate) async fn submit<T: UserSigned>(
             chain.arbitrum_id().to_string().into(),
         );
     }
-    actions::send_user_signed_json_action(api, action, nonce, signature).await
+    actions::send_user_signed_json_action(api, action, nonce, signature, Signs::UserSigned(T::NAME))
+        .await
 }

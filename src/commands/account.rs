@@ -194,7 +194,7 @@ async fn print_window(
         context,
     )
     .await?;
-    paging::announce_truncation(inv, endpoint, &window, args.all);
+    paging::announce_truncation(inv, &window);
     inv.print(&JsonValueOutput::new(
         serde_json::Value::Array(window.rows),
         empty_message,
@@ -788,9 +788,8 @@ impl CliCommand for AccountFills {
         let user = args.user.resolve(inv).await?;
         let api = inv.remote()?.api();
         validate_optional_time_range(args.start, args.end)?;
-        let (endpoint, window) = match args.start {
-            Some(start) => (
-                paging::USER_FILLS_BY_TIME,
+        let window = match args.start {
+            Some(start) => {
                 paging::read_window(
                     api,
                     paging::USER_FILLS_BY_TIME,
@@ -806,20 +805,19 @@ impl CliCommand for AccountFills {
                     },
                     "loading user fills by time",
                 )
-                .await?,
-            ),
-            None => (
-                paging::USER_FILLS_RECENT,
+                .await?
+            }
+            None => {
                 paging::read_recent(
                     api,
                     paging::USER_FILLS_RECENT,
                     &InfoRequest::user("userFills", user),
                     "loading user fills",
                 )
-                .await?,
-            ),
+                .await?
+            }
         };
-        paging::announce_truncation(inv, endpoint, &window, args.all);
+        paging::announce_truncation(inv, &window);
         inv.print(&FillsOutput::new(fill_rows(inv, window.rows).await?));
         Ok(())
     }

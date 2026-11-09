@@ -10,7 +10,7 @@ use super::prepared::PreparedOrder;
 use crate::commands::abstraction::fetch_abstraction;
 use crate::commands::transfers::{self, AssetMove, AssetVenue};
 use crate::http_api::ApiClient;
-use crate::invocation::Remote;
+use crate::invocation::Invocation;
 use crate::signing::SelectedSigner;
 
 /// The leverage an order is assumed to run at when sizing its margin.
@@ -124,14 +124,14 @@ fn required_margin(notional: Decimal) -> Decimal {
 }
 
 pub(super) async fn execute_hip3_margin_transfers(
-    remote: &Remote,
+    inv: &Invocation,
     signer: &SelectedSigner,
     user: Address,
     plans: &[Hip3MarginPlan],
 ) -> Result<(), anyhow::Error> {
     for plan in plans {
         transfers::send_asset(
-            remote,
+            inv,
             signer,
             AssetMove {
                 to: user,

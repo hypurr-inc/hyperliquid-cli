@@ -4,7 +4,7 @@ use hypersdk::Address;
 use hypersdk::hypercore::Chain;
 use serde::Serialize;
 
-use crate::builder_fee::{MaxFeeRate, percent_from_tenths_bps};
+use crate::builder_fee::{MaxFeeRate, max_builder_fee, percent_from_tenths_bps};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::builder_approval::{self, ApproveBuilderFee};
 use crate::commands::confirm;
@@ -13,7 +13,6 @@ use crate::commands::support::print_dry_run;
 use crate::commands::user_signed::UserSigned;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
-use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::signing::{SelectedSigner, Signs};
 use crate::wire::{AddressRole, InfoRequest, address};
@@ -146,7 +145,7 @@ impl Row for BuilderApproveRow {
 }
 
 async fn max_fee(inv: &Invocation, user: Address, builder: Address) -> Result<(), anyhow::Error> {
-    let max_fee_tenths_bps = load_max_fee(inv.remote()?.api(), user, builder).await?;
+    let max_fee_tenths_bps = max_builder_fee(inv.remote()?.api(), user, builder).await?;
     inv.print(&One::new(BuilderFeeRow::new(
         user,
         builder,
@@ -165,7 +164,7 @@ async fn approved(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> 
         .await?;
 
     let rows = try_join_all(builders.into_iter().map(|builder| async move {
-        let max_fee_tenths_bps = load_max_fee(api, user, builder).await?;
+        let max_fee_tenths_bps = max_builder_fee(api, user, builder).await?;
         Ok::<_, CliError>(BuilderFeeRow::new(user, builder, max_fee_tenths_bps))
     }))
     .await?;
@@ -196,14 +195,6 @@ fn approve_dry_run_value(
             "maxFeeRate": max_fee_rate,
         }
     })
-}
-
-async fn load_max_fee(api: &ApiClient, user: Address, builder: Address) -> Result<u64, CliError> {
-    api.info::<u64>(
-        &InfoRequest::user("maxBuilderFee", user).address("builder", builder),
-        "loading max builder fee",
-    )
-    .await
 }
 
 async fn approve(

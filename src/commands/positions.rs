@@ -24,7 +24,7 @@ use crate::hints::update_leverage_command;
 use crate::invocation::Invocation;
 use crate::margin::{MarginModeArg, isolated_only_market};
 use crate::output;
-use crate::quantity::{self, Scale};
+use crate::quantity;
 use crate::stream::SnapshotWatchArgs;
 
 /// Arguments for `positions update-leverage`.
@@ -304,8 +304,7 @@ fn margin_micro_units(amount: Decimal) -> Result<i64, CliError> {
                 .to_string(),
         ));
     }
-    let magnitude: i64 = quantity::positive(amount.abs(), Scale::USDC)
-        .map_err(|err| err.config("amount", Scale::USDC))?;
+    let magnitude: i64 = quantity::usdc_units(amount.abs())?;
     Ok(if amount.is_sign_negative() {
         -magnitude
     } else {
@@ -489,7 +488,7 @@ impl CliCommand for PositionsUpdateLeverage {
             );
         }
         let resolved = inv.resolve_signer()?;
-        actions::send_l1_action_raw(
+        actions::send_l1_action(
             inv.remote()?.api(),
             &resolved,
             Action::UpdateLeverage(UpdateLeverage {
@@ -497,9 +496,8 @@ impl CliCommand for PositionsUpdateLeverage {
                 is_cross: mode.is_cross(),
                 leverage: args.leverage,
             }),
-            actions::nonce_now(),
             vault_address,
-            "exchange action",
+            actions::EXCHANGE_ACTION,
         )
         .await?;
 
@@ -572,7 +570,7 @@ impl CliCommand for PositionsUpdateMargin {
         let resolved = inv.resolve_signer()?;
         let account = vault_address.unwrap_or_else(|| resolved.query_address());
         ensure_isolated_position(inv, account, &perp, args.on_behalf_of.as_deref()).await?;
-        actions::send_l1_action_raw(
+        actions::send_l1_action(
             inv.remote()?.api(),
             &resolved,
             Action::UpdateIsolatedMargin(UpdateIsolatedMargin {
@@ -580,9 +578,8 @@ impl CliCommand for PositionsUpdateMargin {
                 is_buy: true,
                 ntli,
             }),
-            actions::nonce_now(),
             vault_address,
-            "exchange action",
+            actions::EXCHANGE_ACTION,
         )
         .await?;
 
@@ -651,16 +648,15 @@ impl CliCommand for PositionsTopUpMargin {
         let asset_id = u32::try_from(asset).map_err(|_| {
             CliError::Internal(anyhow::anyhow!("asset id {asset} exceeds the wire range"))
         })?;
-        actions::send_l1_action_raw(
+        actions::send_l1_action(
             inv.remote()?.api(),
             &resolved,
             Action::TopUpIsolatedOnlyMargin(TopUpIsolatedOnlyMargin {
                 asset: asset_id,
                 leverage,
             }),
-            actions::nonce_now(),
             vault_address,
-            "exchange action",
+            actions::EXCHANGE_ACTION,
         )
         .await?;
 

@@ -14,6 +14,7 @@ use serde::{Serialize, Serializer};
 
 use super::status::Status;
 use crate::errors::{CliError, Rejection, classify_rejection};
+use crate::exchange_reply;
 use crate::response_sanitization::labelled_untrusted_text;
 
 /// The exchange's own words for refusing an order or a cancel. Remote text, so
@@ -191,17 +192,16 @@ pub(super) fn decode_statuses(
     what: &str,
 ) -> Result<Vec<OrderResponseStatus>, CliError> {
     let body = || labelled_untrusted_text(&response.to_string());
-    if !matches!(
-        response.get("type").and_then(serde_json::Value::as_str),
-        Some("order" | "cancel")
-    ) {
+    let Some(typed) =
+        exchange_reply::typed(&response).filter(|typed| matches!(typed.kind, "order" | "cancel"))
+    else {
         return Err(CliError::Internal(anyhow::anyhow!(
             "{what} response had unexpected type: {}",
             body()
         )));
-    }
-    let statuses = response
-        .get("data")
+    };
+    let statuses = typed
+        .data
         .and_then(|data| data.get("statuses"))
         .cloned()
         .ok_or_else(|| {

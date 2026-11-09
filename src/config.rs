@@ -14,6 +14,7 @@ use hypersdk::Address;
 use crate::errors::CliError;
 use crate::network::Network;
 use crate::private_fs::{self, FileLock, LockError};
+use crate::resolvers::parse_hex_address;
 
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
@@ -107,7 +108,7 @@ impl BankrLogin {
         let Some(text) = nonblank(self.address.as_deref()) else {
             return Ok(None);
         };
-        text.parse::<Address>().map(Some).map_err(|_| {
+        parse_hex_address(text, false).map(Some).map_err(|_| {
             CliError::Configuration(format!(
                 "invalid bankr_address in the config file: '{text}' is not an EVM address. Run `hyperliquid wallet login` again."
             ))

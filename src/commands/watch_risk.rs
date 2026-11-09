@@ -13,7 +13,7 @@ use hypersdk::{Address, Decimal};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::clock;
+use crate::clock::{self, DurationError};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, StreamBound, arg};
 use crate::commands::abstraction::{
     AccountMode, DexCollateral, UnifiedRisk, fetch_abstraction, load_dex_collateral,
@@ -100,7 +100,7 @@ pub struct WatchRiskArgs {
     pub disable: Vec<RiskRule>,
     #[arg(long = "only", value_enum)]
     pub only: Vec<RiskRule>,
-    #[arg(long, default_value = "15s", value_parser = parse_secs)]
+    #[arg(long, default_value = "15s", value_parser = parse_poll_interval)]
     pub interval: Duration,
     #[command(flatten)]
     pub stream: StreamBoundArgs,
@@ -744,23 +744,11 @@ fn enabled_rules(args: &WatchRiskArgs) -> Vec<RiskRule> {
         .collect()
 }
 
-fn parse_secs(raw: &str) -> Result<Duration, String> {
-    let trimmed = raw.trim();
-    let interval = if let Some(ms) = trimmed.strip_suffix("ms") {
-        let value: u64 = ms.parse().map_err(|_| format!("invalid duration {raw}"))?;
-        Duration::from_millis(value)
-    } else {
-        let seconds = trimmed
-            .strip_suffix('s')
-            .unwrap_or(trimmed)
-            .parse::<u64>()
-            .map_err(|_| format!("invalid duration {raw}"))?;
-        Duration::from_secs(seconds)
-    };
-    if interval.is_zero() {
-        return Err(format!("duration must be greater than zero: {raw}"));
-    }
-    Ok(interval)
+fn parse_poll_interval(raw: &str) -> Result<Duration, String> {
+    clock::parse_duration(raw, &clock::POLL_INTERVAL).map_err(|fault| match fault {
+        DurationError::Zero => format!("duration must be greater than zero: {raw}"),
+        _ => format!("invalid duration {raw}"),
+    })
 }
 
 impl Row for RiskAlert {
@@ -865,10 +853,13 @@ mod tests {
 
     #[test]
     fn poll_interval_must_be_positive() {
-        assert!(parse_secs("0").is_err());
-        assert!(parse_secs("0ms").is_err());
-        assert_eq!(parse_secs("500ms").unwrap(), Duration::from_millis(500));
-        assert_eq!(parse_secs("15s").unwrap(), Duration::from_secs(15));
+        assert!(parse_poll_interval("0").is_err());
+        assert!(parse_poll_interval("0ms").is_err());
+        assert_eq!(
+            parse_poll_interval("500ms").unwrap(),
+            Duration::from_millis(500)
+        );
+        assert_eq!(parse_poll_interval("15s").unwrap(), Duration::from_secs(15));
     }
 
     #[test]
