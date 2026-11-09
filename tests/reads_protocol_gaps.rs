@@ -919,6 +919,40 @@ async fn vault_get_with_a_user_sends_it_and_shows_their_stake() {
 }
 
 #[tokio::test]
+async fn vault_get_resolves_a_stored_account_alias_for_its_user() {
+    let env = IsolatedHome::new();
+    let address = support::expected_address(support::VALID_PRIVATE_KEY);
+    for db in env.accounts_db_candidates() {
+        let key_file = db.parent().unwrap().join("accounts.key");
+        support::legacy_accounts_fixture::create_accounts_db_with_key_file(
+            &db,
+            &key_file,
+            &[support::legacy_accounts_fixture::Row::new(
+                "trader",
+                &address,
+                support::VALID_PRIVATE_KEY,
+            )],
+        );
+    }
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_info(
+            json!({"type": "vaultDetails", "vaultAddress": VAULT, "user": address.to_lowercase()}),
+            vault_details(followers(1), Value::Null),
+        )
+        .await;
+
+    let mut command = env.account_command_without_passphrase();
+    command.env(support::API_OVERRIDE_ENV, server.uri()).args([
+        "--format", "json", "vault", "get", VAULT, "--user", "trader",
+    ]);
+    let vault = support::json_stdout(&command.assert().success());
+
+    assert_eq!(vault["follower_state"], Value::Null);
+    assert!(vault.get("follower_state").is_some());
+}
+
+#[tokio::test]
 async fn vault_get_with_a_user_who_holds_nothing_shows_a_null_stake() {
     let server = ExchangeFixture::start().await;
     server

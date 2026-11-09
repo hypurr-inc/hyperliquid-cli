@@ -636,6 +636,10 @@ pub async fn stream_subscription(
 
     run_stream(async move {
         let mut stdout = io::stdout();
+        if bounds.max_items == Some(0) {
+            emit_subscribed_line(&mut stdout, &target.label(), projection)?;
+            return Ok(StreamEnd::Finished);
+        }
         stream_target(
             &target,
             ws::websocket_for_chain(chain),
@@ -680,6 +684,26 @@ where
     .await
 }
 
+/// The `subscribed` line that opens every stream. A zero event bound prints it
+/// and stops before any connection is made.
+fn emit_subscribed_line<W>(
+    output: &mut W,
+    subscription_label: &str,
+    projection: &JsonRenderOptions,
+) -> Result<(), anyhow::Error>
+where
+    W: Write + ?Sized,
+{
+    emit_json_line(
+        output,
+        &serde_json::json!({
+            "type": "subscribed",
+            "subscription": subscription_label,
+        }),
+        projection,
+    )
+}
+
 /// Stream pre-built WebSocket events to a writer as subscription NDJSON.
 ///
 /// This is the deterministic core behind [`stream_subscription`]. Production
@@ -704,14 +728,7 @@ where
     F: Fn(&Incoming) -> bool,
     W: Write + ?Sized,
 {
-    emit_json_line(
-        output,
-        &serde_json::json!({
-            "type": "subscribed",
-            "subscription": subscription_label,
-        }),
-        projection,
-    )?;
+    emit_subscribed_line(output, subscription_label, projection)?;
 
     if bounds.max_items == Some(0) {
         return Ok(());

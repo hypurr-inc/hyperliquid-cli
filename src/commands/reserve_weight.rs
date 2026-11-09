@@ -115,7 +115,7 @@ impl CliCommand for AccountReserveWeight {
         }
         let signer = inv.resolve_signer()?;
         let remote = inv.remote()?;
-        let credited = destination.unwrap_or_else(|| signer.address());
+        let credited = destination.unwrap_or_else(|| signer.query_address());
         confirm::unless_yes(
             args.yes,
             inv.mode(),

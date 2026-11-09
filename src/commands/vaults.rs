@@ -363,7 +363,10 @@ impl Row for VaultTransferConfirmation {
 
 async fn get(inv: &Invocation, args: &VaultGetArgs) -> Result<(), anyhow::Error> {
     let vault = parse_address(&args.address)?;
-    let user = parse_optional_user(args.user.as_deref())?;
+    let user = match args.user.as_deref() {
+        Some(selector) => Some(inv.resolve_user(Some(selector)).await?),
+        None => None,
+    };
     let row = raw_vault_details_row(inv.remote()?.api(), vault, user).await?;
     inv.print(&One::new(row));
     Ok(())
