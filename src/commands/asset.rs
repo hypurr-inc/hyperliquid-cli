@@ -1,9 +1,3 @@
-//! Protocol asset ID lookup commands.
-//!
-//! Commands:
-//! - `hyperliquid asset decode <ASSET_ID>` — explain the protocol asset IDs surfaced in exchange errors.
-//! - `hyperliquid asset search <QUERY>` — find assets by symbol, title, slug, notation, or ID.
-
 use std::collections::BTreeSet;
 
 use clap::{Args, ValueEnum};

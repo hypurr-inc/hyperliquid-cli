@@ -1,5 +1,3 @@
-//! Authenticated subaccount workflows.
-
 use clap::{Args, ValueEnum};
 use hypersdk::hypercore::Chain;
 use hypersdk::{Address, Decimal};
@@ -280,7 +278,6 @@ fn usdc_to_wire_units(amount: Decimal) -> Result<u64, CliError> {
     })
 }
 
-/// Create a new subaccount signed by the configured master account.
 async fn create(
     inv: &Invocation,
     signer: &SelectedSigner,
@@ -327,7 +324,6 @@ async fn create(
     Ok(())
 }
 
-/// Transfer USDC between the configured master account and a subaccount.
 async fn transfer(
     inv: &Invocation,
     signer: &SelectedSigner,
@@ -386,7 +382,6 @@ async fn transfer(
     Ok(())
 }
 
-/// Transfer a spot token between the configured master account and a subaccount.
 async fn spot_transfer(
     inv: &Invocation,
     signer: &SelectedSigner,

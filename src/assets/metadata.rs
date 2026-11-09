@@ -1,6 +1,3 @@
-//! Exchange metadata snapshots: the two loaders (hypersdk, raw `/info`), the
-//! raw spot-meta fallback, the HIP-3 live lookup and the 60 s cache.
-
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -17,10 +14,8 @@ use super::asset_id;
 use super::market::{PerpAsset, SpotAsset};
 use super::query::eq_asset_name;
 
-/// Metadata cache lifetime for exchange metadata.
 pub const METADATA_TTL: Duration = Duration::from_secs(60);
 
-/// Exchange metadata used by the resolver.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AssetMetadata {
     pub(super) perps: Vec<PerpAsset>,
@@ -33,8 +28,6 @@ impl AssetMetadata {
         Self { perps, spots }
     }
 
-    /// Load default-dex perps and all spot markets through `hypersdk`.
-    ///
     /// HIP-3 markets are not loaded here; they are looked up live on demand.
     pub async fn load(api: &ApiClient) -> Result<Self, CliError> {
         let default_perps = api.sdk().perps().await.map_err(from_sdk)?;
@@ -51,9 +44,6 @@ impl AssetMetadata {
         Ok(Self { perps, spots })
     }
 
-    /// Load default-dex perps, every HIP-3 DEX and all spot markets from the raw
-    /// `/info` endpoints.
-    ///
     /// Used when the `hypersdk` loader cannot decode a network's metadata and by
     /// `asset search`/`asset decode`, which need every HIP-3 market.
     ///
@@ -360,7 +350,6 @@ pub(crate) async fn load_hip3_market(
     Ok(market.map(|market| (canonical_dex_name, market)))
 }
 
-/// A metadata snapshot with the time it was fetched.
 #[derive(Debug, Clone)]
 pub struct CachedMetadata {
     metadata: AssetMetadata,
@@ -376,14 +365,12 @@ impl CachedMetadata {
         }
     }
 
-    /// Return true while the entry is inside the 60-second freshness window.
     #[must_use]
     pub fn is_fresh_at(&self, now: Instant) -> bool {
         now.duration_since(self.fetched_at) <= METADATA_TTL
     }
 }
 
-/// Thread-safe 60-second metadata cache keyed by Hyperliquid network.
 #[derive(Debug, Default)]
 pub struct MetadataCache {
     cached: Mutex<Vec<(Chain, CachedMetadata)>>,
@@ -395,7 +382,6 @@ impl MetadataCache {
         Self::default()
     }
 
-    /// Get fresh metadata from cache, or load it through `hypersdk`.
     pub async fn get_or_load(&self, api: &ApiClient) -> Result<AssetMetadata, CliError> {
         let chain = api.chain();
         if let Some(metadata) = self.fresh_metadata_for_chain_at(chain, Instant::now()) {

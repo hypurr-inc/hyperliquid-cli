@@ -1,6 +1,3 @@
-//! Resolve asset names to markets over a metadata snapshot, with a live
-//! HIP-3 lookup for DEX markets the snapshot does not list.
-
 use hypersdk::hypercore::HttpClient;
 use strsim::levenshtein;
 
@@ -50,7 +47,6 @@ impl From<AssetError> for CliError {
     }
 }
 
-/// Asset resolver over a metadata snapshot.
 #[derive(Debug, Clone)]
 pub struct AssetResolver {
     metadata: AssetMetadata,
@@ -62,14 +58,10 @@ impl AssetResolver {
         Self { metadata }
     }
 
-    /// Resolver over metadata loaded from the raw `/info` endpoints.
-    /// See [`AssetMetadata::load_raw`].
     pub async fn load_raw(api: &ApiClient) -> Result<Self, CliError> {
         AssetMetadata::load_raw(api).await.map(Self::new)
     }
 
-    /// Resolve according to the user's asset format.
-    ///
     /// Outcome notation resolves to [`Market::Outcome`] without being decoded;
     /// commands that cannot trade outcomes reject it themselves.
     pub fn resolve(&self, input: &str) -> Result<Market, AssetError> {
@@ -82,7 +74,6 @@ impl AssetResolver {
         }
     }
 
-    /// Resolve a perpetual market symbol or HIP-3 `dex:TOKEN` input.
     pub fn resolve_perp(&self, input: &str) -> Result<PerpAsset, AssetError> {
         match parse_asset_query(input) {
             AssetQuery::Hip3 { dex, token } => self.resolve_hip3(input, &dex, &token),
@@ -92,7 +83,6 @@ impl AssetResolver {
         }
     }
 
-    /// Resolve a spot pair input.
     pub fn resolve_spot(&self, input: &str) -> Result<SpotAsset, AssetError> {
         let pair = match parse_asset_query(input) {
             AssetQuery::Spot(pair) => pair,
@@ -177,7 +167,6 @@ impl AssetResolver {
         self.metadata.spots()
     }
 
-    /// Suggestions across all known asset names.
     #[must_use]
     pub fn suggestions(&self, input: &str) -> Vec<String> {
         suggestions(input, self.metadata.all_candidate_names())

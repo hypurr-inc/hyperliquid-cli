@@ -1,5 +1,3 @@
-//! Raw exchange metadata command.
-
 use hypersdk::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

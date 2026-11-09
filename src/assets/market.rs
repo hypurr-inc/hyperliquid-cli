@@ -1,5 +1,3 @@
-//! A resolved market: what an asset name or protocol id refers to.
-
 use crate::errors::CliError;
 
 use super::asset_id::{self, OutcomeNotation};
@@ -25,7 +23,6 @@ impl PerpAsset {
     }
 }
 
-/// Spot market pair.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotAsset {
     pub symbol: String,
@@ -86,7 +83,6 @@ impl OutcomeAsset {
     }
 }
 
-/// What an asset name resolved to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Market {
     Perp(PerpAsset),

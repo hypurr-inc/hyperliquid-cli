@@ -1,12 +1,3 @@
-//! Order book and market data commands.
-//!
-//! Commands:
-//! - `hyperliquid book <COIN>` — show L2 bids and asks
-//! - `hyperliquid candles <COIN>` — show OHLCV candle history
-//! - `hyperliquid spread <COIN>` — show best bid, ask, and spread
-//! - `hyperliquid funding <COIN>` — show current and predicted funding
-//! - `hyperliquid mids` — show all mid prices
-
 use clap::Args;
 use std::time::Duration;
 
@@ -33,14 +24,12 @@ const VALID_INTERVALS: &str = "1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d
 /// How far back `funding` looks for the latest paid funding rate.
 const FUNDING_LOOKBACK: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Parse and validate a candle interval for clap.
 pub fn parse_candle_interval(input: &str) -> Result<CandleInterval, String> {
     input
         .parse::<CandleInterval>()
         .map_err(|_| format!("invalid interval '{input}'. Valid intervals: {VALID_INTERVALS}"))
 }
 
-/// Parse and validate the candle limit for clap.
 pub fn parse_candle_limit(input: &str) -> Result<usize, String> {
     let limit = input
         .parse::<usize>()
@@ -377,8 +366,6 @@ impl TableData for MidsOutput {
     }
 }
 
-/// Resolve and render the L2 order book for a perpetual or spot market.
-///
 /// A HIP-3 `dex:TOKEN` input is looked up on its dex, so `xyz:XYZ100` works
 /// without first loading every dex into the metadata snapshot.
 async fn book(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {

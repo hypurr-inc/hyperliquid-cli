@@ -1,6 +1,3 @@
-//! Assets: the names users type, the markets they resolve to, exchange
-//! metadata, and the protocol asset-id layout.
-
 pub mod asset_id;
 mod market;
 mod metadata;

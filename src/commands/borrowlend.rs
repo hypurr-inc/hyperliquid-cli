@@ -1,5 +1,3 @@
-//! Borrow/lend public market data commands.
-
 use clap::Args;
 use hypersdk::hypercore::{HttpClient, SpotToken};
 use hypersdk::{Address, Decimal};
@@ -263,7 +261,6 @@ impl TableData for BorrowLendActionOutput {
     }
 }
 
-/// Show reserve states for all borrow/lend tokens.
 async fn rates(inv: &Invocation) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let rows = reserve_rows(remote.api()).await?;
@@ -271,7 +268,6 @@ async fn rates(inv: &Invocation) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Show reserve state for a single token.
 async fn get(inv: &Invocation, token: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let token = resolve_spot_token(remote.api().sdk(), token).await?;
@@ -285,7 +281,6 @@ async fn get(inv: &Invocation, token: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Show public borrow/lend state for a user.
 async fn user(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     let positions = user_spot_balances_raw(inv.remote()?.api(), user)
         .await?

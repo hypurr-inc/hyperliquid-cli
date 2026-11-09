@@ -1,5 +1,3 @@
-//! Staking public queries and authenticated staking actions.
-
 use alloy::sol;
 use clap::Args;
 use hypersdk::hypercore::Chain;
@@ -482,7 +480,6 @@ impl TableData for LinkStakingOutput {
     }
 }
 
-/// Show staking balance, delegations, and reward summary for an address.
 async fn summary(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
     let summary = staking_info(api, "delegatorSummary", user, "loading staking summary").await?;
@@ -500,7 +497,6 @@ async fn summary(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// List validator summaries.
 async fn validators(inv: &Invocation) -> Result<(), anyhow::Error> {
     let rows = inv
         .remote()?
@@ -514,7 +510,6 @@ async fn validators(inv: &Invocation) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Show staking reward rows for an address.
 async fn rewards(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     let rows = staking_info(
         inv.remote()?.api(),
@@ -527,7 +522,6 @@ async fn rewards(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Show staking delegation and withdrawal history for an address.
 async fn history(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     let value: serde_json::Value = staking_info(
         inv.remote()?.api(),
@@ -549,7 +543,6 @@ async fn staking_info<T: DeserializeOwned>(
     api.info(&InfoRequest::user(kind, user), context).await
 }
 
-/// Delegate HYPE to a validator, or undelegate it.
 async fn delegate(
     inv: &Invocation,
     signer: &SelectedSigner,
@@ -648,7 +641,6 @@ async fn withdraw(
     Ok(())
 }
 
-/// Claim available staking rewards.
 async fn claim_rewards(inv: &Invocation, signer: &SelectedSigner) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     actions::send_raw_l1_json_action(
@@ -676,7 +668,6 @@ async fn claim_rewards(inv: &Invocation, signer: &SelectedSigner) -> Result<(), 
     Ok(())
 }
 
-/// Build a stable dry-run preview for staking-link actions.
 fn link_dry_run_value(chain: Chain, user: Address, is_finalize: bool) -> serde_json::Value {
     serde_json::json!({
         "phase": link_phase(is_finalize),

@@ -1,8 +1,3 @@
-/// Perpetual market commands.
-///
-/// Commands:
-/// - `hyperliquid perps list` — list all perpetual markets
-/// - `hyperliquid perps get <COIN>` — get details for a specific perpetual market
 use clap::Args;
 use hypersdk::Decimal;
 use hypersdk::hypercore::PerpMarket;
@@ -35,7 +30,6 @@ pub struct PerpsGetArgs {
     pub dex: Option<String>,
 }
 
-/// Renderable perpetual market row.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PerpMarketRow {
     pub name: String,
@@ -64,7 +58,6 @@ impl From<PerpMarket> for PerpMarketRow {
     }
 }
 
-/// Output wrapper for perpetual markets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PerpMarketsOutput {
     markets: Vec<PerpMarketRow>,
@@ -120,7 +113,6 @@ impl TableData for PerpMarketsOutput {
     }
 }
 
-/// Output wrapper for a single perpetual market.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PerpMarketDetailsOutput {
     market: PerpMarketRow,
@@ -160,7 +152,6 @@ async fn list(inv: &Invocation, args: &PerpsListArgs) -> Result<(), anyhow::Erro
     Ok(())
 }
 
-/// Resolve, fetch, and render one perpetual market.
 async fn get(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Error> {
     let client = inv.remote()?.api().sdk();
     let query = qualify_dex_asset(args.dex.as_deref(), &args.coin);

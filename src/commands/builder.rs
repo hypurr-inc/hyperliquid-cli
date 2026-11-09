@@ -1,10 +1,3 @@
-//! Builder fee approval and status commands.
-//!
-//! Commands:
-//! - `hyperliquid builder max-fee --user <ADDRESS> --builder <ADDRESS>`
-//! - `hyperliquid builder approved --user <ADDRESS>`
-//! - `hyperliquid builder approve --builder <ADDRESS> --max-fee-rate <PERCENT>`
-
 use alloy::sol;
 use clap::Args;
 use futures::future::try_join_all;

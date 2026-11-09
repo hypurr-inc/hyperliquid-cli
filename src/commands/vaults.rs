@@ -1,5 +1,3 @@
-//! Vault public queries and authenticated vault transfers.
-
 use clap::{Args, ValueEnum};
 use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::api::VaultTransfer;
@@ -354,7 +352,6 @@ impl TableData for VaultTransferOutput {
     }
 }
 
-/// Get vault details.
 async fn get(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
     let vault = parse_address(address)?;
     let row = raw_vault_details_row(inv.remote()?.api(), vault).await?;
@@ -362,7 +359,6 @@ async fn get(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// List vault summaries.
 async fn list(inv: &Invocation, args: &VaultListArgs) -> Result<(), anyhow::Error> {
     let user = validate_list_args(args)?;
     let mut rows = vault_summary_rows(inv.remote()?.api(), user).await?;
@@ -373,7 +369,6 @@ async fn list(inv: &Invocation, args: &VaultListArgs) -> Result<(), anyhow::Erro
     Ok(())
 }
 
-/// Search vault summaries by name, leader, or address.
 async fn search(inv: &Invocation, args: &VaultSearchArgs) -> Result<(), anyhow::Error> {
     let user = validate_search_args(args)?;
     let query = args.query.to_ascii_lowercase();
@@ -392,7 +387,6 @@ async fn search(inv: &Invocation, args: &VaultSearchArgs) -> Result<(), anyhow::
     Ok(())
 }
 
-/// List a vault's open positions.
 async fn positions(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
     let vault = parse_address(address)?;
     let positions = inv
