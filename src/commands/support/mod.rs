@@ -1,7 +1,6 @@
 use hypersdk::Address;
 
 use crate::dry_run::{DryRunEnvelope, DryRunSigning};
-use crate::errors::CliError;
 use crate::invocation::Invocation;
 
 /// Print the `--dry-run` preview of a command: its name from the invocation,
