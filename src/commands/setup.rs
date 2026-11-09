@@ -11,7 +11,6 @@ use crate::command_spec::{
 };
 use crate::env;
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::exchange::builder_approval;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
@@ -168,7 +167,7 @@ fn print_replay_command(
 
 async fn verify_connection(api: &ApiClient) -> Result<String, anyhow::Error> {
     let client = api.sdk();
-    let mids = client.all_mids(None).await.map_err(from_sdk)?;
+    let mids = client.all_mids(None).await?;
     Ok(format!(
         "Test query succeeded ({} mid prices returned)",
         mids.len()

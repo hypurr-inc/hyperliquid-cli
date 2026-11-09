@@ -22,7 +22,6 @@ use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::borrow_lend_state::fetch_user_state;
 use crate::commands::common::position::mark_price;
 use crate::commands::common::rows::{One, Row};
-use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::Session;
@@ -238,7 +237,7 @@ impl<'a> RiskWatcher<'a> {
         user: Address,
         args: &WatchRiskArgs,
     ) -> Result<Self, anyhow::Error> {
-        let fills = api.sdk().user_fills(user).await.map_err(from_sdk)?;
+        let fills = api.sdk().user_fills(user).await?;
         Ok(Self {
             api,
             user,
@@ -271,8 +270,7 @@ impl<'a> RiskWatcher<'a> {
                             .api
                             .sdk()
                             .clearinghouse_state(self.user, Some(name.clone()))
-                            .await
-                            .map_err(from_sdk)?;
+                            .await?;
                         others.push((dex.token, other));
                     }
                 }
@@ -312,15 +310,9 @@ impl Ticker for RiskWatcher<'_> {
         let mode = fetch_abstraction(self.api, self.user)
             .await?
             .normalized_mode;
-        let state = client
-            .clearinghouse_state(self.user, None)
-            .await
-            .map_err(from_sdk)?;
-        let open_orders = client
-            .open_orders(self.user, None)
-            .await
-            .map_err(from_sdk)?;
-        let mids = client.all_mids(None).await.map_err(from_sdk)?;
+        let state = client.clearinghouse_state(self.user, None).await?;
+        let open_orders = client.open_orders(self.user, None).await?;
+        let mids = client.all_mids(None).await?;
         let margin = self.margin_basis(mode, &state).await?;
 
         let snapshot = RiskSnapshot {

@@ -4,7 +4,6 @@ use hypersdk::{Address, Decimal};
 
 use crate::account_mode::fetch_abstraction;
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::spot_balances::user_spot_balances_raw;
 
@@ -45,8 +44,7 @@ async fn available_usdc(
     let withdrawable = api
         .sdk()
         .clearinghouse_state(user, None)
-        .await
-        .map_err(from_sdk)?
+        .await?
         .withdrawable;
     Ok((withdrawable, "perp withdrawable"))
 }

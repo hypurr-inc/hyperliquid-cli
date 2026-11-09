@@ -16,9 +16,10 @@ use thiserror::Error;
 
 use crate::response_sanitization::Untrusted;
 
+pub(crate) use classify::from_sdk;
 pub use classify::{
     Decisive, Rejection, address_rate_limit_in_body, classify_rejection, from_anyhow,
-    from_exchange_rejection, from_sdk, http_response_indicates_rate_limit, http_status_in_text,
+    from_exchange_rejection, http_response_indicates_rate_limit, http_status_in_text,
     is_server_status,
 };
 pub use envelope::{ErrorEnvelope, UsageParts, partial_results_fields};

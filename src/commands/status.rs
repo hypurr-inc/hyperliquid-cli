@@ -4,7 +4,6 @@ use serde::Serialize;
 
 use crate::assets::DexMeta;
 use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
-use crate::errors::from_sdk;
 use crate::invocation::Invocation;
 use crate::output::format::{duration, plural};
 use crate::output::{TableData, serialize_row};
@@ -56,7 +55,7 @@ pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
     let api = remote.api();
     let probe_start = Instant::now();
     let perps = DexMeta::load(api, None).await?.markets;
-    let mids = api.sdk().all_mids(None).await.map_err(from_sdk)?;
+    let mids = api.sdk().all_mids(None).await?;
     let latency = probe_start.elapsed();
 
     inv.print(&StatusOutput {

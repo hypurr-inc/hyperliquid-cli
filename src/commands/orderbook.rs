@@ -16,7 +16,6 @@ use crate::commands::common::market_input::{
 };
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
@@ -374,8 +373,7 @@ async fn candles_snapshot_for(
     let mut candles = client
         .sdk()
         .candle_snapshot(coin, interval, start_time, end_time)
-        .await
-        .map_err(from_sdk)?;
+        .await?;
 
     candles.sort_by_key(|candle| candle.open_time);
     let skip = candles.len().saturating_sub(limit);
@@ -408,8 +406,7 @@ async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
         .api()
         .sdk()
         .funding_history(coin.clone(), start_time, Some(end_time))
-        .await
-        .map_err(from_sdk)?
+        .await?
         .into_iter()
         .max_by_key(|rate| rate.time);
 
@@ -440,8 +437,7 @@ async fn mids_snapshot(
     let mut mids = client
         .sdk()
         .all_mids(dex.map(str::to_string))
-        .await
-        .map_err(from_sdk)?
+        .await?
         .into_iter()
         .map(|(name, mid)| MidRow { name, mid })
         .collect::<Vec<_>>();

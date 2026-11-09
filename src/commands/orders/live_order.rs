@@ -12,7 +12,7 @@ use hypersdk::hypercore::types::{
 use hypersdk::{Address, Decimal};
 
 use super::context::OrderSubmissionContext;
-use crate::errors::{CliError, from_sdk};
+use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::http_api::ApiClient;
 
@@ -100,11 +100,7 @@ impl LiveOrder {
         user: Address,
         dex: Option<String>,
     ) -> Result<Decimal, CliError> {
-        let open = client
-            .sdk()
-            .open_orders(user, dex)
-            .await
-            .map_err(from_sdk)?;
+        let open = client.sdk().open_orders(user, dex).await?;
         Ok(self.settle(self.open_size_in(&open)))
     }
 
