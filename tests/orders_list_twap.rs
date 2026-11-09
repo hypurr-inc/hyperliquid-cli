@@ -636,6 +636,32 @@ async fn orders_twap_create_rejects_non_minute_duration() {
         .stderr(predicate::str::contains("--duration 600"));
 }
 
+#[tokio::test]
+async fn orders_twap_create_rejects_duration_longer_than_seven_days() {
+    let env = IsolatedHome::new();
+    let server = mock_twap_server_without_exchange().await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "orders",
+            "twap-create",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--size",
+            "1.0",
+            "--duration",
+            "604860",
+            "--testnet",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot exceed 7 days"));
+}
+
 #[test]
 fn orders_twap_create_help_documents_whole_minute_duration() {
     let env = IsolatedHome::new();

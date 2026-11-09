@@ -13,6 +13,17 @@ async fn mock_order_server(oid: u64) -> MockServer {
 }
 
 async fn mock_order_server_with_leverage_type(oid: u64, leverage_type: &str) -> MockServer {
+    mock_order_server_with_statuses(
+        leverage_type,
+        serde_json::json!([{ "resting": { "oid": oid, "cloid": null } }]),
+    )
+    .await
+}
+
+async fn mock_order_server_with_statuses(
+    leverage_type: &str,
+    statuses: serde_json::Value,
+) -> MockServer {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
@@ -155,14 +166,7 @@ async fn mock_order_server_with_leverage_type(oid: u64, leverage_type: &str) -> 
             "response": {
                 "type": "order",
                 "data": {
-                    "statuses": [
-                        {
-                            "resting": {
-                                "oid": oid,
-                                "cloid": null
-                            }
-                        }
-                    ]
+                    "statuses": statuses
                 }
             }
         })))
@@ -1218,6 +1222,149 @@ async fn orders_trigger_limit_live_request_keeps_limit_and_trigger_prices_distin
     assert_eq!(order["t"]["trigger"]["isMarket"], false);
     assert_eq!(order["t"]["trigger"]["triggerPx"], "90000");
     assert_eq!(order["t"]["trigger"]["tpsl"], "sl");
+}
+
+#[tokio::test]
+async fn orders_create_truncates_price_and_size_to_protocol_precision() {
+    let env = IsolatedHome::new();
+    let server = mock_order_server(12370).await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "orders",
+            "create",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--price",
+            "1234.5678",
+            "--size",
+            "0.000123",
+            "--testnet",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.received_requests().await.unwrap();
+    let exchange_request = requests
+        .iter()
+        .find(|request| request.url.path() == "/exchange")
+        .expect("expected order exchange request");
+    let body: Value = serde_json::from_slice(&exchange_request.body).unwrap();
+    let order = &body["action"]["orders"][0];
+    // BTC has szDecimals 5: prices allow one decimal and five significant
+    // figures, sizes allow five decimals.
+    assert_eq!(order["p"], "1234.5");
+    assert_eq!(order["s"], "0.00012");
+}
+
+#[tokio::test]
+async fn orders_create_truncates_a_stop_limit_trigger_price_to_the_tick() {
+    let env = IsolatedHome::new();
+    let server = mock_order_server(12371).await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "orders",
+            "create",
+            "--coin",
+            "BTC",
+            "--side",
+            "sell",
+            "--type",
+            "stop-limit",
+            "--price",
+            "8950.555",
+            "--trigger-price",
+            "9000.98765",
+            "--size",
+            "0.001",
+            "--testnet",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.received_requests().await.unwrap();
+    let exchange_request = requests
+        .iter()
+        .find(|request| request.url.path() == "/exchange")
+        .expect("expected order exchange request");
+    let body: Value = serde_json::from_slice(&exchange_request.body).unwrap();
+    let order = &body["action"]["orders"][0];
+    assert_eq!(order["p"], "8950.5");
+    assert_eq!(order["t"]["trigger"]["triggerPx"], "9000.9");
+}
+
+#[tokio::test]
+async fn orders_create_rejects_a_price_that_truncates_to_zero() {
+    let env = IsolatedHome::new();
+    env.command()
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "orders",
+            "create",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--price",
+            "0.05",
+            "--size",
+            "0.001",
+            "--testnet",
+        ])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("truncates to zero"));
+}
+
+#[tokio::test]
+async fn orders_tpsl_truncates_trigger_prices_to_the_tick() {
+    let env = IsolatedHome::new();
+    let server = mock_order_server_with_statuses(
+        "cross",
+        serde_json::json!([
+            {"resting": {"oid": 12372, "cloid": null}},
+            {"resting": {"oid": 12373, "cloid": null}}
+        ]),
+    )
+    .await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "orders",
+            "tpsl",
+            "--coin",
+            "BTC",
+            "--side",
+            "sell",
+            "--size",
+            "0.1",
+            "--take-profit",
+            "6100.98765",
+            "--stop-loss",
+            "4900.123456",
+            "--testnet",
+        ])
+        .assert()
+        .success();
+
+    let requests = server.received_requests().await.unwrap();
+    let exchange_request = requests
+        .iter()
+        .find(|request| request.url.path() == "/exchange")
+        .expect("expected tpsl exchange request");
+    let body: Value = serde_json::from_slice(&exchange_request.body).unwrap();
+    let orders = &body["action"]["orders"];
+    assert_eq!(orders[0]["t"]["trigger"]["triggerPx"], "6100.9");
+    assert_eq!(orders[1]["t"]["trigger"]["triggerPx"], "4900.1");
 }
 
 #[tokio::test]

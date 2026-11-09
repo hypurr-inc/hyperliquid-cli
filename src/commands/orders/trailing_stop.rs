@@ -183,12 +183,18 @@ pub(crate) fn prepare_trailing_stop_plan(
     let query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
     let perp = resolver.resolve_perp(&query)?;
     let coin = perp.display_name();
-    let size = args.size.round_dp(perp.sz_decimals);
-    if size <= Decimal::ZERO {
-        return Err(CliError::Configuration(format!(
-            "size is too small for {coin}; rounds to zero"
-        )));
-    }
+    let size = super::validation::protocol_size(args.size, perp.sz_decimals, &coin)?;
+    let activation_px = args
+        .activation_price
+        .map(|price| {
+            super::validation::protocol_price(
+                price,
+                TradableAssetKind::Perp,
+                perp.sz_decimals,
+                &coin,
+            )
+        })
+        .transpose()?;
     Ok(TrailingStopPlan {
         action: TrailingStop {
             asset: perp.index,
@@ -196,13 +202,13 @@ pub(crate) fn prepare_trailing_stop_plan(
             sz: size,
             reduce_only: args.reduce_only,
             retracement,
-            activation_px: args.activation_price,
+            activation_px,
         },
         coin,
         side: args.side,
         size,
         retracement,
-        activation_px: args.activation_price,
+        activation_px,
     })
 }
 
@@ -526,23 +532,23 @@ mod tests {
                 "sz": "0.01",
                 "reduceOnly": false,
                 "retracement": { "px": "150" },
-                "activationPx": "60000.5",
+                "activationPx": "60000",
             })
         );
     }
 
     #[test]
-    fn size_rounds_to_the_market_precision_and_rejects_zero() {
+    fn size_truncates_to_the_market_lot_and_rejects_zero() {
         let mut args = parse(&["--retracement-pct", "5"]).unwrap();
         args.size = Decimal::new(1_234_567, 6);
         let plan = prepare_trailing_stop_plan(&resolver(), &args).unwrap();
-        assert_eq!(plan.size, Decimal::new(123_457, 5));
+        assert_eq!(plan.size, Decimal::new(123_456, 5));
 
         args.size = Decimal::new(1, 8);
         let err = prepare_trailing_stop_plan(&resolver(), &args)
             .err()
-            .expect("size below the lot rounds to zero");
-        assert!(err.to_string().contains("rounds to zero"), "{err}");
+            .expect("size below the lot truncates to zero");
+        assert!(err.to_string().contains("truncates to zero"), "{err}");
     }
 
     #[test]

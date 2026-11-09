@@ -32,6 +32,25 @@ fn basic_order_with_type(
     })
 }
 
+fn trigger_order(coin: &str, oid: u64, order_type: &str, trigger_px: &str) -> serde_json::Value {
+    serde_json::json!({
+        "timestamp": 1700000000000_u64,
+        "coin": coin,
+        "side": "A",
+        "limitPx": "50000",
+        "sz": "0.1",
+        "oid": oid,
+        "origSz": "0.1",
+        "cloid": null,
+        "orderType": order_type,
+        "tif": null,
+        "reduceOnly": true,
+        "isTrigger": true,
+        "triggerPx": trigger_px,
+        "triggerCondition": "Price below 48000.0"
+    })
+}
+
 fn spot_meta_with_hype_pair() -> serde_json::Value {
     serde_json::json!({
         "universe": [
@@ -913,6 +932,7 @@ async fn orders_modify_trigger_limit_sends_distinct_limit_and_trigger_prices() {
             "49000",
             "--size",
             "0.05",
+            "--always-place",
             "--testnet",
         ])
         .assert()
@@ -931,6 +951,60 @@ async fn orders_modify_trigger_limit_sends_distinct_limit_and_trigger_prices() {
     assert_eq!(order["t"]["trigger"]["isMarket"], false);
     assert_eq!(order["t"]["trigger"]["triggerPx"], "49000");
     assert_eq!(order["t"]["trigger"]["tpsl"], "sl");
+}
+
+#[tokio::test]
+async fn orders_modify_trigger_requires_always_place() {
+    let env = IsolatedHome::new();
+    let server = mock_order_management_server(
+        Some(trigger_order("BTC", 12345, "Stop Market", "48000")),
+        vec![],
+        vec![],
+        "order",
+    )
+    .await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args(["orders", "modify", "12345", "--size", "0.2", "--testnet"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("--always-place"));
+}
+
+#[tokio::test]
+async fn orders_modify_preserves_the_existing_trigger_price() {
+    let env = IsolatedHome::new();
+    let server = mock_order_management_server(
+        Some(trigger_order("BTC", 12345, "Stop Market", "48000")),
+        vec![],
+        vec![serde_json::json!({"resting": {"oid": 12345, "cloid": null}})],
+        "order",
+    )
+    .await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "orders",
+            "modify",
+            "12345",
+            "--size",
+            "0.2",
+            "--always-place",
+            "--testnet",
+        ])
+        .assert()
+        .success();
+
+    let action = modify_exchange_action(&server).await;
+    let order = &action["modifies"][0]["order"];
+    // The trigger comes from the order's triggerPx, not its limitPx.
+    assert_eq!(order["t"]["trigger"]["triggerPx"], "48000");
+    assert_eq!(order["p"], "50000");
+    assert_eq!(order["s"], "0.2");
 }
 
 #[test]

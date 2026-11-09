@@ -5,6 +5,9 @@
 - HIP-3 reads: `book`, `candles`, `spread`, `funding`, and `subscribe trades|orderbook|candles` accept a DEX-qualified market (`xyz:XYZ100`) by looking the market up on its dex, so a HIP-3 book, tape and funding rate no longer fail with `asset not found`.
 - `mids`, `positions list`, `orders open`, and `account portfolio` take `--dex <NAME>` to scope the read to a builder-deployed perp DEX. `account portfolio --dex` reports that dex's perp account only; spot balances and vault equities stay on the default-dex view.
 - A `--dex` name is validated against `perpDexs` before the read: an unknown DEX exits `13` with `Unknown DEX` instead of returning an empty account or empty mid map, and the canonical spelling is used in every request. A blank `--dex` behaves like no flag.
+- Order prices and sizes are truncated to the exchange tick and lot rules for the asset (5 significant figures and `6 - szDecimals` perp or `8 - szDecimals` spot/outcome decimals for prices, `szDecimals` for sizes) on `orders create`, `batch-create`, `scale`, `tpsl`, `bracket`, `chase`, and `trailing-stop`, so an over-precise value is placed at the representable value instead of being rejected on submission. A value that truncates to zero exits `2` naming the asset.
+- `orders modify` keeps a trigger order's existing trigger price when `--trigger-price` is omitted instead of overwriting it with the order's limit price, and aborts before submitting when the replacement requires `--always-place` (a trigger replacement or an IOC TIF), matching the exchange's `a: false` pre-validation.
+- `orders twap-create` rejects durations above the exchange's 7-day maximum.
 
 ## 0.17.0 - 2026-11-09
 

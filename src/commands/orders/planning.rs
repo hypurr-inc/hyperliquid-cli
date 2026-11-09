@@ -1,6 +1,6 @@
 use super::validation::{
-    reject_spot_buy_builder_fee, reject_spot_reduce_only, reject_spot_tpsl_grouping,
-    reject_spot_trigger_order, require_decimal,
+    protocol_price, protocol_size, reject_spot_buy_builder_fee, reject_spot_reduce_only,
+    reject_spot_tpsl_grouping, reject_spot_trigger_order, require_decimal,
 };
 use super::*;
 use crate::assets::PerpAsset;
@@ -233,8 +233,17 @@ pub(crate) async fn prepare_order(
 
     let (price, trigger_price, size, amount, warning, order_type, tif) = match args.order_type {
         CreateOrderType::Limit => {
-            let price = require_decimal(args.price, "--price", "limit orders")?;
-            let size = require_decimal(args.size, "--size", "limit orders")?;
+            let price = protocol_price(
+                require_decimal(args.price, "--price", "limit orders")?,
+                asset_kind,
+                sz_decimals,
+                &coin,
+            )?;
+            let size = protocol_size(
+                require_decimal(args.size, "--size", "limit orders")?,
+                sz_decimals,
+                &coin,
+            )?;
             (
                 price,
                 None,
@@ -248,8 +257,13 @@ pub(crate) async fn prepare_order(
             )
         }
         CreateOrderType::StopLoss | CreateOrderType::TakeProfit => {
-            let trigger_price = market_trigger_price(args)?;
-            let size = require_decimal(args.size, "--size", "market trigger orders")?;
+            let trigger_price =
+                protocol_price(market_trigger_price(args)?, asset_kind, sz_decimals, &coin)?;
+            let size = protocol_size(
+                require_decimal(args.size, "--size", "market trigger orders")?,
+                sz_decimals,
+                &coin,
+            )?;
             let tpsl = args
                 .order_type
                 .tpsl()
@@ -269,13 +283,27 @@ pub(crate) async fn prepare_order(
             )
         }
         CreateOrderType::StopLimit | CreateOrderType::TakeLimit => {
-            let price = require_decimal(args.price, "--price", "limit trigger orders")?;
-            let trigger_price = require_decimal(
-                args.trigger_price,
-                "--trigger-price",
-                "limit trigger orders",
+            let price = protocol_price(
+                require_decimal(args.price, "--price", "limit trigger orders")?,
+                asset_kind,
+                sz_decimals,
+                &coin,
             )?;
-            let size = require_decimal(args.size, "--size", "limit trigger orders")?;
+            let trigger_price = protocol_price(
+                require_decimal(
+                    args.trigger_price,
+                    "--trigger-price",
+                    "limit trigger orders",
+                )?,
+                asset_kind,
+                sz_decimals,
+                &coin,
+            )?;
+            let size = protocol_size(
+                require_decimal(args.size, "--size", "limit trigger orders")?,
+                sz_decimals,
+                &coin,
+            )?;
             let tpsl = args
                 .order_type
                 .tpsl()
@@ -302,17 +330,12 @@ pub(crate) async fn prepare_order(
                 args.max_slippage_bps, mid
             ));
             let (size, amount) = match (args.size, args.amount) {
-                (Some(size), None) => {
-                    let size = size.round_dp(sz_decimals);
-                    if size <= Decimal::ZERO {
-                        return Err(CliError::Configuration(format!(
-                            "size is too small for {coin}; rounds to zero"
-                        )));
-                    }
-                    (size, None)
-                }
+                (Some(size), None) => (protocol_size(size, sz_decimals, &coin)?, None),
                 (None, Some(amount)) => {
-                    let size = (amount / mid).round_dp(sz_decimals);
+                    let size = (amount / mid).round_dp_with_strategy(
+                        sz_decimals,
+                        rust_decimal::RoundingStrategy::ToZero,
+                    );
                     if size <= Decimal::ZERO {
                         return Err(CliError::Configuration(format!(
                             "amount is too small for {coin}; derived size rounds to zero"
@@ -358,6 +381,7 @@ pub(crate) async fn prepare_order(
                 .unwrap_or_default(),
         },
         asset_kind,
+        sz_decimals,
         coin,
         side: args.side,
         order_type: args.order_type,
@@ -498,12 +522,15 @@ pub(crate) fn prepare_normal_tpsl_batch(
     }
     let grouping = TpslGroupingArg::NormalTpsl;
     let child_side = parent.side.opposite();
-    validate_tpsl_price_ordering(
-        child_side,
-        args.take_profit,
-        args.stop_loss,
-        "orders create",
-    )?;
+    let take_profit = args
+        .take_profit
+        .map(|price| protocol_price(price, parent.asset_kind, parent.sz_decimals, &parent.coin))
+        .transpose()?;
+    let stop_loss = args
+        .stop_loss
+        .map(|price| protocol_price(price, parent.asset_kind, parent.sz_decimals, &parent.coin))
+        .transpose()?;
+    validate_tpsl_price_ordering(child_side, take_profit, stop_loss, "orders create")?;
     let mut legs = vec![PreparedTpslLeg {
         request: parent.request.clone(),
         leg: TpslLegKind::Parent,
@@ -522,7 +549,7 @@ pub(crate) fn prepare_normal_tpsl_batch(
         TpslLegKind::TakeProfit,
         &parent,
         child_side,
-        args.take_profit,
+        take_profit,
         &mut None,
     );
     push_tpsl_child_leg(
@@ -530,7 +557,7 @@ pub(crate) fn prepare_normal_tpsl_batch(
         TpslLegKind::StopLoss,
         &parent,
         child_side,
-        args.stop_loss,
+        stop_loss,
         &mut None,
     );
 
@@ -583,6 +610,13 @@ pub(crate) async fn prepare_position_tpsl_batch(
         entry,
         side.opposite(),
     )?;
+    let coin = resolved.display_name();
+    let take_profit = take_profit
+        .map(|price| protocol_price(price, TradableAssetKind::Perp, resolved.sz_decimals, &coin))
+        .transpose()?;
+    let stop_loss = stop_loss
+        .map(|price| protocol_price(price, TradableAssetKind::Perp, resolved.sz_decimals, &coin))
+        .transpose()?;
     validate_tpsl_price_ordering(side, take_profit, stop_loss, "orders tpsl")?;
 
     let parsed_cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
@@ -674,6 +708,7 @@ pub(crate) fn build_position_tpsl_batch(
             cloid: resolved_cloid,
         },
         asset_kind: TradableAssetKind::Perp,
+        sz_decimals: 0,
         coin,
         side,
         order_type: CreateOrderType::Limit,
@@ -1106,6 +1141,23 @@ pub(crate) async fn prepare_modify_order_plan(
     let price = args.price.unwrap_or(order.limit_px);
     let size = args.size.unwrap_or(order.sz);
     let order_type = order_type_placement(&order, args.trigger_price, args.price)?;
+    // The exchange rejects an action hashed with `a: false` unless the
+    // replacement is a non-trigger ALO or a non-executable GTC order, so fail
+    // here rather than after the cancel succeeds.
+    if !args.always_place {
+        let needs_always_place = match &order_type {
+            OrderTypePlacement::Trigger { .. } => true,
+            OrderTypePlacement::Limit { tif } => {
+                matches!(tif, TimeInForce::Ioc | TimeInForce::FrontendMarket)
+            }
+        };
+        if needs_always_place {
+            return Err(CliError::Configuration(
+                "orders modify without --always-place can only place an ALO or non-executable GTC replacement; add --always-place to modify trigger orders or place an IOC replacement"
+                    .to_string(),
+            ));
+        }
+    }
     let replacement = OrderRequest {
         asset,
         is_buy: matches!(order.side, Side::Bid),
@@ -1375,8 +1427,14 @@ pub fn tpsl_dry_run_preview(
 ) -> Result<serde_json::Value, CliError> {
     validate_tpsl_args(args)?;
     let resolved = resolve_dex_perp(resolver, args.dex.as_deref(), &args.coin)?;
+    let coin = resolved.display_name();
+    let normalize_price = |price: Decimal| {
+        protocol_price(price, TradableAssetKind::Perp, resolved.sz_decimals, &coin)
+    };
     let (absolute_tp, absolute_sl) =
         absolute_trigger_prices(args.take_profit.as_ref(), args.stop_loss.as_ref());
+    let absolute_tp = absolute_tp.map(normalize_price).transpose()?;
+    let absolute_sl = absolute_sl.map(normalize_price).transpose()?;
     let inferred_side = args
         .side
         .or_else(|| infer_close_side_from_tpsl_prices(absolute_tp, absolute_sl));
@@ -1413,6 +1471,8 @@ pub fn tpsl_dry_run_preview(
             None,
             side.opposite(),
         ) {
+            let take_profit = take_profit.map(normalize_price).transpose()?;
+            let stop_loss = stop_loss.map(normalize_price).transpose()?;
             validate_tpsl_price_ordering(side, take_profit, stop_loss, "orders tpsl")?;
             let parsed_cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
             let prepared = build_position_tpsl_batch(

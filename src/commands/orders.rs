@@ -104,6 +104,7 @@ pub use validation::{
 struct PreparedOrder {
     request: OrderRequest,
     asset_kind: TradableAssetKind,
+    sz_decimals: u32,
     coin: String,
     side: OrderSide,
     order_type: CreateOrderType,
@@ -1449,7 +1450,12 @@ fn order_type_placement(
     match order.order_type {
         OrderType::StopMarket => Ok(OrderTypePlacement::Trigger {
             is_market: true,
-            trigger_px: trigger_price.or(legacy_price).unwrap_or(order.limit_px),
+            // Preserve the order's own trigger price; its limit price is not
+            // the trigger and would silently move it on a size-only modify.
+            trigger_px: trigger_price
+                .or(legacy_price)
+                .or(order.trigger_px)
+                .unwrap_or(order.limit_px),
             tpsl: TpSl::Sl,
         }),
         OrderType::StopLimit => Ok(OrderTypePlacement::Trigger {
@@ -1459,7 +1465,12 @@ fn order_type_placement(
         }),
         OrderType::TakeProfitMarket => Ok(OrderTypePlacement::Trigger {
             is_market: true,
-            trigger_px: trigger_price.or(legacy_price).unwrap_or(order.limit_px),
+            // Preserve the order's own trigger price; its limit price is not
+            // the trigger and would silently move it on a size-only modify.
+            trigger_px: trigger_price
+                .or(legacy_price)
+                .or(order.trigger_px)
+                .unwrap_or(order.limit_px),
             tpsl: TpSl::Tp,
         }),
         OrderType::TakeProfitLimit => Ok(OrderTypePlacement::Trigger {
@@ -1469,7 +1480,12 @@ fn order_type_placement(
         }),
         OrderType::Trigger => Ok(OrderTypePlacement::Trigger {
             is_market: true,
-            trigger_px: trigger_price.or(legacy_price).unwrap_or(order.limit_px),
+            // Preserve the order's own trigger price; its limit price is not
+            // the trigger and would silently move it on a size-only modify.
+            trigger_px: trigger_price
+                .or(legacy_price)
+                .or(order.trigger_px)
+                .unwrap_or(order.limit_px),
             tpsl: TpSl::Sl,
         }),
         OrderType::TrailingStopMarket => Err(CliError::Unsupported(

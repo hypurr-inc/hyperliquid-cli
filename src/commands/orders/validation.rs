@@ -1,5 +1,67 @@
+use rust_decimal::MathematicalOps;
+use rust_decimal::RoundingStrategy;
+use rust_decimal::prelude::ToPrimitive;
+
 use super::planning::create_has_tpsl_legs;
 use super::*;
+
+/// Truncate a price to the protocol's tick rule for the asset.
+///
+/// The exchange accepts at most 5 significant figures and at most
+/// `MAX_DECIMALS - szDecimals` decimals (6 for perps, 8 for spot and outcomes);
+/// integer prices are exempt from the significant-figure cap. Every price the
+/// CLI sends must be representable, so an over-precise price is truncated toward
+/// zero (never rounded up) instead of being rejected after submission.
+pub(super) fn protocol_price(
+    price: Decimal,
+    asset_kind: TradableAssetKind,
+    sz_decimals: u32,
+    coin: &str,
+) -> Result<Decimal, CliError> {
+    let max_decimals = match asset_kind {
+        TradableAssetKind::Perp => 6_i64 - i64::from(sz_decimals),
+        TradableAssetKind::Spot | TradableAssetKind::Outcome => 8_i64 - i64::from(sz_decimals),
+    }
+    .clamp(0, 28);
+    let mut truncated = price.round_dp_with_strategy(
+        u32::try_from(max_decimals).unwrap_or(28),
+        RoundingStrategy::ToZero,
+    );
+    if !truncated.fract().is_zero() {
+        // Five significant figures: decimals allowed below the first integer digit.
+        let significant_places = Decimal::from(4) - truncated.log10().floor();
+        let places = significant_places
+            .clamp(Decimal::ZERO, Decimal::from(28u32))
+            .to_u32()
+            .unwrap_or(28);
+        truncated = truncated.round_dp_with_strategy(places, RoundingStrategy::ToZero);
+    }
+    if truncated <= Decimal::ZERO {
+        return Err(CliError::Configuration(format!(
+            "price for {coin} is below the smallest valid tick; it truncates to zero"
+        )));
+    }
+    Ok(truncated)
+}
+
+/// Truncate a size to the asset's lot size (`szDecimals`).
+///
+/// Sizes are truncated toward zero so the wire size never exceeds the requested
+/// size; a value that truncates to zero is rejected because the exchange cannot
+/// represent it.
+pub(super) fn protocol_size(
+    size: Decimal,
+    sz_decimals: u32,
+    coin: &str,
+) -> Result<Decimal, CliError> {
+    let truncated = size.round_dp_with_strategy(sz_decimals.min(28), RoundingStrategy::ToZero);
+    if truncated <= Decimal::ZERO {
+        return Err(CliError::Configuration(format!(
+            "size is too small for {coin}; it truncates to zero at {sz_decimals} decimal places"
+        )));
+    }
+    Ok(truncated)
+}
 
 pub fn validate_create_args(args: &CreateArgs) -> Result<(), CliError> {
     if let Some(cloid) = args.cloid.as_deref() {
@@ -170,6 +232,11 @@ pub fn validate_twap_create_args(args: &TwapCreateArgs) -> Result<(), CliError> 
         return Err(CliError::Configuration(
             "TWAP duration must be a whole-minute value in seconds; use values like --duration 300, --duration 600, or --duration 3600"
                 .to_string(),
+        ));
+    }
+    if args.duration > 7 * 24 * 60 * 60 {
+        return Err(CliError::Configuration(
+            "TWAP duration cannot exceed 7 days (604800 seconds)".to_string(),
         ));
     }
     Ok(())
