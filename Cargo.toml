@@ -1,6 +1,6 @@
 [package]
 name = "hyperliquid-cli"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2024"
 description = "Production-grade CLI for Hyperliquid DEX"
 license = "MIT"

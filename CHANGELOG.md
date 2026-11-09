@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.19.0 - 2026-11-09
+
+Highlights:
+
+- Margin modes: markets report their margin rule (`margin_mode` on `perps list|get`), `positions update-leverage` refuses cross on isolated-only markets, `positions update-margin` takes a signed amount and `--on-behalf-of`, and `--margin-mode` on orders is checked against the account's current mode with no open position needed.
+- Account modes: unified and portfolio-margin accounts are recognized. `account portfolio` reports `account_mode`, transfers check the spot balance for pooled accounts, `watch risk` uses the unified account ratio or portfolio-margin health, and `borrowlend user` reads `borrowLendUserState`.
+- Protocol gaps closed: monotonic nonces and `--expires-after`, `account invalidate-nonce` and `account reserve-weight`, address rate limits (exit 11) and ten documented order refusals, `orders batch-modify`, `--priority-rate`, `--sub-builder`, HIP-4 outcome reads and `outcomes split|merge|merge-question|negate`, new reads (`account role|asset-data|multisig-signers`, `perps dexs|dex-limits|at-oi-cap|funding-predicted|funding-history`, `spot token`), new `subscribe` kinds, and truncation notices with `--all` paging for history reads.
+
+Command-line behavior:
+
 - `perps list` and `perps get` add `margin_mode` next to `isolated_margin` (unchanged): `cross_or_isolated`, `no_cross` (isolated only, margin removable), `strict_isolated` (isolated only, margin not removable) or `isolated_only` (only the deprecated `onlyIsolated` flag is set). The table view gains a `Margin Mode` column.
 - `positions update-leverage` refuses cross margin (the default without `--isolated`) on an isolated-only market with exit `13`, naming the market and the exact `positions update-leverage ... --isolated` command, in `--dry-run` as live.
 - `positions update-leverage` and `positions update-margin` take `--on-behalf-of` (`vaultAddress`) like the orders commands; `--dry-run` reports `acting_as`/`vault_address` and an `on_behalf_of` arg (`null` when absent).
