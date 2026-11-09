@@ -362,7 +362,7 @@ fn every_suggested_command_names_a_command_that_exists() {
         &hints::cancel_order_command("7", None),
         &hints::protect_position_command("ETH", "+10%", "-5%", None),
         &hints::builder_approve_command("0x2222222222222222222222222222222222222222", "0.05%"),
-        &hints::invalidate_nonce_command(true, 7),
+        &hints::invalidate_nonce_command(false, 7),
         &hints::outcome_get_command("#1"),
         &wallet::wallet_export("main"),
         &wallet::wallet_delete("main"),
