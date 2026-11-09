@@ -74,6 +74,8 @@ fn base_args() -> CreateArgs {
         margin_mode: None,
         builder: None,
         builder_fee_rate: None,
+        sub_builder: Vec::new(),
+        priority_rate: None,
         cloid: None,
         yes: false,
     }
@@ -394,6 +396,7 @@ fn scale_args(total_size: Decimal, start: Decimal, end: Decimal, count: usize) -
         reduce_only: false,
         on_behalf_of: None,
         margin_mode: None,
+        priority_rate: None,
         yes: false,
     }
 }

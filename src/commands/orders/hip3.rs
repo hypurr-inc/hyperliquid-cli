@@ -178,6 +178,7 @@ mod tests {
             warning: None,
             builder: None,
             margin_mode: None,
+            priority_rate: None,
         }
     }
 

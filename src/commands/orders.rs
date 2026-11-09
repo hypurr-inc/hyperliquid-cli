@@ -5,9 +5,7 @@
 use std::io::{self, Write};
 
 use chrono::Utc;
-use hypersdk::hypercore::types::{
-    Action, BatchOrder, OrderGrouping, OrderResponseStatus, ScheduleCancel,
-};
+use hypersdk::hypercore::types::{Action, BatchOrder, OrderResponseStatus, ScheduleCancel};
 
 use crate::assets::{AssetResolver, PerpAsset};
 use crate::commands::actions;
@@ -18,6 +16,7 @@ use crate::prompt;
 
 mod args;
 mod bracket;
+mod builder_check;
 mod chase;
 pub mod cli;
 mod cloid;
@@ -36,9 +35,9 @@ mod validation;
 
 use args::{CancelAllArgs, CancelArgs, MarginModeArg, ModifyArgs};
 use consent::{
-    ConsentKind, ConsentTarget, confirm_cancel_all, confirm_mainnet_order,
-    confirm_mainnet_order_batch, confirm_mainnet_schedule_cancel, confirm_mainnet_tpsl_batch,
-    confirm_mainnet_twap,
+    ConsentKind, ConsentTarget, confirm_cancel_all, confirm_mainnet_batch_modify,
+    confirm_mainnet_order, confirm_mainnet_order_batch, confirm_mainnet_schedule_cancel,
+    confirm_mainnet_tpsl_batch, confirm_mainnet_twap,
 };
 use context::OrderSubmissionContext;
 use exchange::{
@@ -47,23 +46,24 @@ use exchange::{
     rejected_all,
 };
 use existing::{
-    OrderIdentifier, prepare_cancel_all_orders_plan, prepare_cancel_order_plan,
-    prepare_modify_order_plan,
+    BatchModifyOrder, ModifyOrderPlan, OrderIdentifier, batch_modify_action,
+    prepare_cancel_all_orders_plan, prepare_cancel_order_plan, prepare_modify_order_plan,
 };
 use hip3::{Hip3MarginPlan, execute_hip3_margin_transfers, plan_hip3_margin_transfers};
 use planning::{
     ScheduleCancelPlan, ScheduledCancel, TwapCancelPlan, TwapCreatePlan, fetch_current_margin_mode,
-    prepare_position_tpsl_batch,
+    prepare_position_tpsl_batch, priority_grouping,
 };
 use prepared::{CreateOrderSubmission, PreparedOrder, PreparedOrderBatch, PreparedTpslBatch};
+pub use queries::open_orders_output;
 pub use rendering::OrderListOutput;
 use rendering::{
     BatchVerb, CancelAllSummary, CancelAllSummaryOutput, CancelConfirmation,
-    CancelConfirmationOutput, CancelLeg, CancelLegsOutput, ModifyConfirmationOutput,
-    OrderConfirmation, OrderConfirmationOutput, PartialBatchOutput, ScheduleCancelConfirmation,
-    ScheduleCancelOutput, TpslOrderConfirmation, TpslOrderConfirmationOutput,
-    TwapCancelConfirmation, TwapCancelOutput, TwapCreateConfirmation, TwapCreateOutput,
-    pair_statuses, single_status, update_leverage_command,
+    CancelConfirmationOutput, CancelLeg, CancelLegsOutput, ModifyConfirmationOutput, ModifyLeg,
+    ModifyLegsOutput, OrderConfirmation, OrderConfirmationOutput, PartialBatchOutput,
+    ScheduleCancelConfirmation, ScheduleCancelOutput, TpslOrderConfirmation,
+    TpslOrderConfirmationOutput, TwapCancelConfirmation, TwapCancelOutput, TwapCreateConfirmation,
+    TwapCreateOutput, pair_statuses, single_status, update_leverage_command,
 };
 use validation::{TpslSpec, validate_margin_mode_for_market};
 
@@ -125,6 +125,17 @@ async fn clear_to_send(
 ) -> Result<(), anyhow::Error> {
     if let Some((perp, margin_mode)) = gate.margin {
         verify_margin_mode(context, perp, margin_mode).await?;
+    }
+    // Acting for a vault or subaccount, which account must have approved the
+    // builder is not documented, so only the signer's own orders are checked.
+    if let (Some(builder), None) = (gate.builder, context.vault_address) {
+        builder_check::ensure_approved(
+            context.api,
+            context.inv.mode(),
+            context.signer.query_address(),
+            builder,
+        )
+        .await?;
     }
     let user = context.account();
     let helpers = plan_hip3_margin_transfers(context.api, user, &gate.funded).await?;
@@ -206,7 +217,7 @@ async fn place_prepared_single(
 
     let batch = BatchOrder {
         orders: vec![prepared.request.clone()],
-        grouping: OrderGrouping::Na,
+        grouping: priority_grouping(prepared.priority_rate),
         builder: None,
     };
     let statuses = place_orders(
@@ -508,12 +519,14 @@ async fn modify(
         context.account(),
         identifier,
         args,
+        "orders modify",
     )
     .await?;
+    let action = batch_modify_action(vec![plan.modify], args.always_place);
     let response = actions::send_l1_action_raw(
         context.api,
         context.signer,
-        plan.action,
+        action,
         actions::nonce_now(),
         context.vault_address,
         "modify failed",
@@ -528,6 +541,83 @@ async fn modify(
         rows: vec![confirmation],
     });
     Ok(())
+}
+
+/// The error for modification `index` of a batch, led by which one it was:
+/// the planner's wording names an order, not its place in the orders file.
+fn for_modification(index: usize, error: CliError) -> CliError {
+    match error {
+        CliError::Configuration(message) => {
+            CliError::Configuration(format!("orders[{index}]: {message}"))
+        }
+        CliError::Unsupported(message) => {
+            CliError::Unsupported(format!("orders[{index}]: {message}"))
+        }
+        other => other,
+    }
+}
+
+async fn batch_modify(
+    context: OrderSubmissionContext<'_>,
+    resolver: &AssetResolver,
+    orders: &[BatchModifyOrder],
+    always_place: bool,
+) -> Result<(), anyhow::Error> {
+    let mut plans: Vec<ModifyOrderPlan> = Vec::with_capacity(orders.len());
+    for (index, order) in orders.iter().enumerate() {
+        let plan = prepare_modify_order_plan(
+            context.api.sdk(),
+            resolver,
+            context.account(),
+            &order.identifier,
+            &order.modify_args(always_place),
+            "orders batch-modify",
+        )
+        .await
+        .map_err(|error| for_modification(index, error))?;
+        // Two names for one order (an order id and its cloid) are only
+        // visible once both are looked up.
+        if let Some(earlier) = plans
+            .iter()
+            .position(|earlier| earlier.confirmation.order_id == plan.confirmation.order_id)
+        {
+            return Err(CliError::Configuration(format!(
+                "orders[{index}] modifies the same order as orders[{earlier}]"
+            ))
+            .into());
+        }
+        plans.push(plan);
+    }
+
+    context.consent(ConsentKind::ModifyOrders, None, |target| {
+        confirm_mainnet_batch_modify(plans.len(), target)
+    })?;
+
+    let action = batch_modify_action(
+        plans.iter().map(|plan| plan.modify.clone()).collect(),
+        always_place,
+    );
+    let response = actions::send_l1_action_raw(
+        context.api,
+        context.signer,
+        action,
+        actions::nonce_now(),
+        context.vault_address,
+        "batch modify failed",
+    )
+    .await?;
+    let statuses = decode_statuses(response, "batch modify")?;
+    let rows = pair_statuses(&plans, statuses)?
+        .into_iter()
+        .map(|(plan, status)| ModifyLeg::from_status(plan.confirmation.clone(), status))
+        .collect();
+    let legs = ModifyLegsOutput { rows };
+    let failures = legs.rejection_errors();
+    if failures.is_empty() {
+        context.inv.print(&legs);
+        return Ok(());
+    }
+    finish_with_failures(legs, BatchVerb::ModifyOrders, failures, context.inv)
 }
 
 async fn twap_create(

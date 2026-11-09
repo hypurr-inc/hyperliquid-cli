@@ -210,18 +210,35 @@ pub(crate) fn modification_result_oid(statuses: &[OrderResponseStatus]) -> Optio
     statuses.iter().find_map(OrderResponseStatus::oid)
 }
 
-/// What Hyperliquid wants in a builder fee `{ b, f }`: the builder's address
-/// and the fee in tenths of a basis point (0.001%). This is the one place the
-/// unit is named; the percent form comes from [`OrderBuilderFee::percent`].
+/// What Hyperliquid wants in a builder fee `{ b, f, s }`: the builder's address,
+/// the fee in tenths of a basis point (0.001%), and the optional sub-builders
+/// that split the fee. This is the one place the unit is named; the percent
+/// form comes from [`OrderBuilderFee::percent`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct OrderBuilderFee {
     pub(super) b: String,
     pub(super) f: u64,
+    /// Left off the wire when empty, so a plain builder fee keeps its `{ b, f }` shape.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(super) s: Vec<SubBuilder>,
+}
+
+/// A sub-builder `{ b, s }`: an existing user that receives `s` of the
+/// builder's fee, in units of 0.001% (100,000 is all of it). The builder keeps
+/// the remainder.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct SubBuilder {
+    pub(super) b: String,
+    pub(super) s: u64,
 }
 
 impl OrderBuilderFee {
     /// The most a perpetual order may pay a builder: 0.1%.
     pub(super) const PERP_MAX_TENTHS_BPS: u64 = 100;
+    /// At most this many sub-builders share one builder fee.
+    pub(super) const MAX_SUB_BUILDERS: usize = 5;
+    /// The sub-builder shares sum to at most this: 100%.
+    pub(super) const MAX_SUB_BUILDER_SHARES: u64 = 100_000;
 
     /// The fee as a percent, such as `0.01`.
     pub(super) fn percent(&self) -> Decimal {
@@ -239,8 +256,10 @@ struct BuilderOrderAction {
 }
 
 /// Send `batch` and return one status per order. A builder fee goes in the
-/// raw action `{ type: "order", orders, grouping, builder: { b, f } }`, which
-/// the SDK's `Action::Order` cannot carry; without one the SDK action is sent.
+/// raw action `{ type: "order", orders, grouping, builder: { b, f, s } }`. The
+/// SDK's `BatchOrder.builder` carries only `{ b, f }`, which cannot express
+/// sub-builders, so every builder order is sent this one way; without a
+/// builder the SDK action is sent.
 pub(super) async fn place_orders(
     api: &ApiClient,
     signer: &SelectedSigner,
@@ -481,6 +500,7 @@ mod tests {
         let fee = |f| OrderBuilderFee {
             b: "0xabc".to_string(),
             f,
+            s: Vec::new(),
         };
         assert_eq!(fee(10).percent(), Decimal::new(1, 2));
         assert_eq!(

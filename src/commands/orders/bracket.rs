@@ -164,6 +164,8 @@ fn entry_preview_args(args: &BracketArgs) -> CreateArgs {
         margin_mode: None,
         builder: None,
         builder_fee_rate: None,
+        sub_builder: Vec::new(),
+        priority_rate: None,
         cloid: None,
         yes: false,
     }

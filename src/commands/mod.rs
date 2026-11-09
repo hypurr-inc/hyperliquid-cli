@@ -71,6 +71,7 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<orders::cli::OrdersCancel>(),
             Entry::of::<orders::cli::OrdersCancelAll>(),
             Entry::of::<orders::cli::OrdersModify>(),
+            Entry::of::<orders::cli::OrdersBatchModify>(),
             Entry::of::<orders::cli::OrdersTwapCreate>(),
             Entry::of::<orders::cli::OrdersTwapCancel>(),
             Entry::of::<orders::cli::OrdersScheduleCancel>(),

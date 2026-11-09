@@ -498,6 +498,7 @@ pub(super) enum BatchVerb {
     PlaceOrders,
     PlaceTpsl,
     CancelAll,
+    ModifyOrders,
 }
 
 impl BatchVerb {
@@ -506,6 +507,7 @@ impl BatchVerb {
         match self {
             Self::PlaceOrders | Self::PlaceTpsl => "Placed",
             Self::CancelAll => "Cancelled",
+            Self::ModifyOrders => "Modified",
         }
     }
 
@@ -515,6 +517,7 @@ impl BatchVerb {
             Self::PlaceOrders => "place orders",
             Self::PlaceTpsl => "place TP/SL orders",
             Self::CancelAll => "cancel all orders",
+            Self::ModifyOrders => "modify orders",
         }
     }
 }
@@ -649,10 +652,95 @@ impl TableData for ModifyConfirmationOutput {
     }
 }
 
+/// One modification of a batch: the planned replacement and what the
+/// exchange said of it.
+#[derive(Debug, Clone, Serialize)]
+pub(super) struct ModifyLeg {
+    #[serde(flatten)]
+    confirmation: ModifyConfirmation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) error: Option<Rejected>,
+}
+
+impl ModifyLeg {
+    /// The leg for one modification. The exchange answers each with an order
+    /// status, carrying the replacement's order id, or an error.
+    pub(super) fn from_status(
+        mut confirmation: ModifyConfirmation,
+        status: OrderResponseStatus,
+    ) -> Self {
+        match status {
+            OrderResponseStatus::Error(err) => {
+                confirmation.status = "failed".to_string();
+                Self {
+                    confirmation,
+                    error: Some(Rejected::new(err)),
+                }
+            }
+            other => {
+                confirmation.order_id = other.oid().or(confirmation.order_id);
+                Self {
+                    confirmation,
+                    error: None,
+                }
+            }
+        }
+    }
+}
+
+pub(super) struct ModifyLegsOutput {
+    pub(super) rows: Vec<ModifyLeg>,
+}
+
+impl ModifyLegsOutput {
+    pub(super) fn rejection_errors(&self) -> Vec<Rejected> {
+        self.rows
+            .iter()
+            .filter_map(|row| row.error.clone())
+            .collect()
+    }
+}
+
+impl TableData for ModifyLegsOutput {
+    fn headers(&self) -> Vec<&str> {
+        vec![
+            "Coin", "Status", "Order ID", "CLOID", "Price", "Size", "Error",
+        ]
+    }
+
+    fn rows(&self) -> Vec<Vec<String>> {
+        self.rows
+            .iter()
+            .map(|row| {
+                let leg = &row.confirmation;
+                vec![
+                    leg.coin.clone(),
+                    leg.status.clone(),
+                    leg.order_id.map(|oid| oid.to_string()).unwrap_or_default(),
+                    leg.cloid.clone().unwrap_or_default(),
+                    leg.price.clone(),
+                    leg.size.clone(),
+                    row.error
+                        .as_ref()
+                        .map(Rejected::to_string)
+                        .unwrap_or_default(),
+                ]
+            })
+            .collect()
+    }
+
+    fn to_json_value(&self) -> serde_json::Value {
+        output::serialize_row(&self.rows)
+    }
+}
+
 /// One open or historical order, as `orders open`, `orders history` and
 /// `account orders` list it.
+///
+/// The exchange reports `triggerPx: "0.0"` and `triggerCondition: "N/A"` on an
+/// order that is not a trigger; those placeholders read as no trigger here.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct OrderListRow {
+pub(super) struct OrderListRow {
     coin: String,
     side: String,
     #[serde(with = "rust_decimal::serde::str")]
@@ -667,10 +755,25 @@ struct OrderListRow {
     reduce_only: bool,
     timestamp: u64,
     cloid: Option<String>,
+    is_trigger: Option<bool>,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    trigger_price: Option<Decimal>,
+    trigger_condition: Option<String>,
+    is_position_tpsl: Option<bool>,
+    /// The exchange's lifecycle status, from `historicalOrders` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status_timestamp: Option<u64>,
+    /// The TP/SL orders attached to this one, from `frontendOpenOrders`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    children: Vec<OrderListRow>,
 }
 
 impl From<BasicOrder> for OrderListRow {
     fn from(order: BasicOrder) -> Self {
+        let is_trigger = order.is_trigger;
+        let trigger = is_trigger != Some(false);
         Self {
             coin: order.coin,
             side: order.side.to_string(),
@@ -683,7 +786,38 @@ impl From<BasicOrder> for OrderListRow {
             reduce_only: order.reduce_only,
             timestamp: order.timestamp,
             cloid: order.cloid.map(|cloid| cloid.to_string()),
+            is_trigger,
+            trigger_price: order.trigger_px.filter(|_| trigger),
+            trigger_condition: order.trigger_condition.filter(|_| trigger),
+            is_position_tpsl: order.is_position_tpsl,
+            status: None,
+            status_timestamp: None,
+            children: Vec::new(),
         }
+    }
+}
+
+impl OrderListRow {
+    /// Show `coin` instead of the exchange's spelling, for this order and its children.
+    pub(super) fn with_display_coin(mut self, display: &impl Fn(&str) -> String) -> Self {
+        self.coin = display(&self.coin);
+        self.children = self
+            .children
+            .into_iter()
+            .map(|child| child.with_display_coin(display))
+            .collect();
+        self
+    }
+
+    pub(super) fn with_children(mut self, children: Vec<OrderListRow>) -> Self {
+        self.children = children;
+        self
+    }
+
+    pub(super) fn with_status(mut self, status: String, status_timestamp: u64) -> Self {
+        self.status = Some(status);
+        self.status_timestamp = Some(status_timestamp);
+        self
     }
 }
 
@@ -727,16 +861,28 @@ pub struct OrderListOutput {
 impl OrderListOutput {
     #[must_use]
     pub fn new(orders: impl IntoIterator<Item = BasicOrder>, empty_message: &'static str) -> Self {
+        Self::from_rows(
+            orders.into_iter().map(OrderListRow::from).collect(),
+            empty_message,
+        )
+    }
+
+    pub(super) fn from_rows(rows: Vec<OrderListRow>, empty_message: &'static str) -> Self {
         Self {
-            rows: orders.into_iter().map(OrderListRow::from).collect(),
+            rows,
             empty_message,
         }
+    }
+
+    /// Only `orders history` rows carry a status, so only its table has the columns.
+    fn has_status(&self) -> bool {
+        self.rows.iter().any(|order| order.status.is_some())
     }
 }
 
 impl TableData for OrderListOutput {
     fn headers(&self) -> Vec<&str> {
-        vec![
+        let mut headers = vec![
             "Coin",
             "Side",
             "Limit Price",
@@ -747,14 +893,23 @@ impl TableData for OrderListOutput {
             "TIF",
             "Reduce Only",
             "Timestamp",
-        ]
+            "Trigger Price",
+            "Trigger Condition",
+            "Position TP/SL",
+            "Children",
+        ];
+        if self.has_status() {
+            headers.extend(["Status", "Status Time"]);
+        }
+        headers
     }
 
     fn rows(&self) -> Vec<Vec<String>> {
+        let has_status = self.has_status();
         self.rows
             .iter()
             .map(|order| {
-                vec![
+                let mut row = vec![
                     order.coin.clone(),
                     order.side.clone(),
                     order.limit_price.to_string(),
@@ -765,7 +920,32 @@ impl TableData for OrderListOutput {
                     order.tif.clone().unwrap_or_else(|| NO_TIF.to_string()),
                     order.reduce_only.to_string(),
                     order.timestamp.to_string(),
-                ]
+                    order
+                        .trigger_price
+                        .map(|price| price.to_string())
+                        .unwrap_or_default(),
+                    order.trigger_condition.clone().unwrap_or_default(),
+                    order
+                        .is_position_tpsl
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    order
+                        .children
+                        .iter()
+                        .map(|child| child.oid.to_string())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ];
+                if has_status {
+                    row.push(order.status.clone().unwrap_or_default());
+                    row.push(
+                        order
+                            .status_timestamp
+                            .map(|time| time.to_string())
+                            .unwrap_or_default(),
+                    );
+                }
+                row
             })
             .collect()
     }
@@ -981,6 +1161,48 @@ mod tests {
         let list = OrderListOutput::new([order(OrderType::Limit, None)], "No orders.");
         assert_eq!(list.rows()[0][7], NO_TIF);
         assert_eq!(list.to_json_value()[0]["tif"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn an_order_row_lists_trigger_fields_children_and_status_and_a_plain_order_lists_none() {
+        let mut stop = order(OrderType::StopMarket, None);
+        stop.is_trigger = Some(true);
+        stop.trigger_px = Some(Decimal::from(95));
+        stop.trigger_condition = Some("Price below 95".to_string());
+        stop.is_position_tpsl = Some(false);
+        let child = OrderListRow::from(stop.clone());
+        let parent = OrderListRow::from(stop)
+            .with_children(vec![child])
+            .with_status("triggered".to_string(), 7);
+        let json = serde_json::to_value(&parent).unwrap();
+        assert_eq!(json["trigger_price"], "95");
+        assert_eq!(json["trigger_condition"], "Price below 95");
+        assert_eq!(json["is_trigger"], true);
+        assert_eq!(json["children"][0]["oid"], 5);
+        assert_eq!(json["status"], "triggered");
+        assert_eq!(json["status_timestamp"], 7);
+
+        let mut plain = order(OrderType::Limit, Some(TimeInForce::Gtc));
+        plain.is_trigger = Some(false);
+        plain.trigger_px = Some(Decimal::ZERO);
+        plain.trigger_condition = Some("N/A".to_string());
+        let json = serde_json::to_value(OrderListRow::from(plain)).unwrap();
+        assert_eq!(json["trigger_price"], serde_json::Value::Null);
+        assert_eq!(json["trigger_condition"], serde_json::Value::Null);
+        assert!(json.get("children").is_none());
+        assert!(json.get("status").is_none());
+    }
+
+    #[test]
+    fn only_a_list_with_a_status_has_the_status_columns() {
+        let plain = OrderListOutput::new([order(OrderType::Limit, None)], "No orders.");
+        assert!(!plain.headers().contains(&"Status"));
+        let with_status = OrderListOutput::from_rows(
+            vec![OrderListRow::from(order(OrderType::Limit, None)).with_status("filled".into(), 3)],
+            "No orders.",
+        );
+        assert_eq!(with_status.headers().len(), with_status.rows()[0].len());
+        assert_eq!(with_status.rows()[0].last().unwrap(), "3");
     }
 
     #[test]
