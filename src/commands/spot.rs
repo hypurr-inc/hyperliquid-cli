@@ -3,12 +3,12 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::PriceTick;
 use serde::Serialize;
 
-use crate::assets::{SpotListing, load_spot_markets};
+use crate::assets::{AssetQuery, SpotListing, eq_asset_name, load_spot_markets, parse_asset_query};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
+use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::output::TableData;
 
 #[derive(Args, Debug)]
 pub struct SpotGetArgs {
@@ -43,85 +43,34 @@ impl From<SpotListing> for SpotMarketRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpotMarketsOutput {
-    markets: Vec<SpotMarketRow>,
-}
+pub type SpotMarketsOutput = Rows<SpotMarketRow>;
 
-impl SpotMarketsOutput {
-    #[must_use]
-    pub fn new(markets: Vec<SpotMarketRow>) -> Self {
-        Self { markets }
+impl Row for SpotMarketRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Symbol",
+        "Index",
+        "Base",
+        "Quote",
+        "Base Sz Decimals",
+        "Quote Sz Decimals",
+        "Tick Size @ Price 1",
+    ];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.symbol.clone(),
+            self.index.to_string(),
+            self.base.clone(),
+            self.quote.clone(),
+            self.base_sz_decimals.to_string(),
+            self.quote_sz_decimals.to_string(),
+            or_missing(self.tick_size_at_price_1.as_deref()),
+        ]
     }
 }
 
-const SPOT_MARKET_HEADERS: &[&str] = &[
-    "Symbol",
-    "Index",
-    "Base",
-    "Quote",
-    "Base Sz Decimals",
-    "Quote Sz Decimals",
-    "Tick Size @ Price 1",
-];
-
-fn spot_market_cells(market: &SpotMarketRow) -> Vec<String> {
-    vec![
-        market.symbol.clone(),
-        market.index.to_string(),
-        market.base.clone(),
-        market.quote.clone(),
-        market.base_sz_decimals.to_string(),
-        market.quote_sz_decimals.to_string(),
-        market
-            .tick_size_at_price_1
-            .clone()
-            .unwrap_or_else(|| "n/a".to_string()),
-    ]
-}
-
-impl TableData for SpotMarketsOutput {
-    fn headers(&self) -> Vec<&str> {
-        SPOT_MARKET_HEADERS.to_vec()
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.markets.iter().map(spot_market_cells).collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.markets).unwrap_or_else(|_| serde_json::json!([]))
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No spot markets.")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpotMarketDetailsOutput {
-    market: SpotMarketRow,
-}
-
-impl SpotMarketDetailsOutput {
-    #[must_use]
-    pub fn new(market: SpotMarketRow) -> Self {
-        Self { market }
-    }
-}
-
-impl TableData for SpotMarketDetailsOutput {
-    fn headers(&self) -> Vec<&str> {
-        SPOT_MARKET_HEADERS.to_vec()
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![spot_market_cells(&self.market)]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.market).unwrap_or_else(|_| serde_json::json!({}))
-    }
+impl ListRow for SpotMarketRow {
+    const EMPTY: &'static str = "No spot markets.";
 }
 
 pub async fn list(inv: &Invocation) -> Result<(), anyhow::Error> {
@@ -131,22 +80,29 @@ pub async fn list(inv: &Invocation) -> Result<(), anyhow::Error> {
 }
 
 pub async fn get(inv: &Invocation, pair: &str) -> Result<(), anyhow::Error> {
-    let api = inv.remote()?.api();
-    let resolver = inv.asset_resolver().await?;
-    let resolved = resolver.resolve_spot(pair).map_err(CliError::from)?;
-    let (resolved_symbol, resolved_index) = (resolved.symbol, resolved.index);
+    // The list already holds the market, so a hit needs no resolver. A miss
+    // asks the resolver why, for its suggestion or its outcome-notation error.
+    let listed = match parse_asset_query(pair) {
+        AssetQuery::Spot(symbol) => load_spot_market_rows(inv.remote()?.api())
+            .await?
+            .into_iter()
+            .find(|market| eq_asset_name(&market.symbol, &symbol)),
+        _ => None,
+    };
+    let market = match listed {
+        Some(market) => market,
+        None => {
+            return Err(match inv.asset_resolver().await?.resolve_spot(pair) {
+                Err(err) => CliError::from(err),
+                Ok(_) => CliError::AssetNotFoundNoSuggestion {
+                    asset: pair.to_string(),
+                },
+            }
+            .into());
+        }
+    };
 
-    let market = load_spot_market_rows(api)
-        .await?
-        .into_iter()
-        .find(|market| {
-            market.index == resolved_index || market.symbol.eq_ignore_ascii_case(&resolved_symbol)
-        })
-        .ok_or_else(|| CliError::AssetNotFoundNoSuggestion {
-            asset: pair.to_string(),
-        })?;
-
-    inv.print(&SpotMarketDetailsOutput::new(market));
+    inv.print(&One::new(market));
     Ok(())
 }
 

@@ -14,9 +14,10 @@ use super::{
     TpslArgs, TriggerPriceSpec, TwapCreateArgs, parse_cloid,
 };
 use crate::assets::Market;
-use crate::commands::builder;
+use crate::builder_fee::MaxFeeRate;
 use crate::errors::CliError;
 use crate::input_hardening::{FilePolicy, read_json_file};
+use crate::wire::{self, AddressRole};
 
 /// How the exchange constrains prices and sizes on one market.
 ///
@@ -207,8 +208,8 @@ impl BuilderRequest {
     ) -> Result<Self, CliError> {
         match (builder, fee_rate) {
             (Some(raw_builder), Some(raw_fee)) => Ok(Self::Explicit {
-                address: builder::parse_builder_address(raw_builder)?,
-                fee: builder::validate_max_fee_rate(raw_fee)?,
+                address: wire::address(raw_builder, AddressRole::Builder)?,
+                fee: MaxFeeRate::parse(raw_fee)?.tenths_bps(),
             }),
             (Some(_), None) => Err(CliError::Configuration(
                 "orders create --builder requires --builder-fee-rate".to_string(),

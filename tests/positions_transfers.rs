@@ -413,6 +413,154 @@ async fn positions_update_margin_outputs_confirmation() {
     assert!(body["signature"].is_object());
 }
 
+async fn mount_info(server: &MockServer, request: Value, response: Value) {
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(request))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .mount(server)
+        .await;
+}
+
+/// A server where `xyz:XYZ100` is the second market of the HIP-3 dex `xyz`
+/// (dex slot 1). The default dex lists only BTC, so only a live HIP-3 lookup
+/// can find it.
+async fn hip3_positions_server() -> MockServer {
+    let server = MockServer::start().await;
+    mount_info(
+        &server,
+        serde_json::json!({"type": "allMids"}),
+        serde_json::json!({"BTC": "1"}),
+    )
+    .await;
+    mount_info(
+        &server,
+        serde_json::json!({"type": "perpDexs"}),
+        serde_json::json!([null, {"name": "xyz", "deployerFeeScale": "1"}]),
+    )
+    .await;
+    mount_info(
+        &server,
+        serde_json::json!({"type": "spotMeta"}),
+        serde_json::json!({
+            "universe": [],
+            "tokens": [{
+                "name": "USDC", "index": 0,
+                "tokenId": "0x00000000000000000000000000000000",
+                "szDecimals": 6, "weiDecimals": 6, "evmContract": null
+            }]
+        }),
+    )
+    .await;
+    let market = |name: &str| {
+        serde_json::json!({
+            "name": name, "szDecimals": 2, "maxLeverage": 10,
+            "onlyIsolated": false, "marginMode": null, "growthMode": "disabled"
+        })
+    };
+    mount_info(
+        &server,
+        serde_json::json!({"type": "meta", "dex": "xyz"}),
+        serde_json::json!({
+            "universe": [market("xyz:XYZ50"), market("xyz:XYZ100")],
+            "collateralToken": 0
+        }),
+    )
+    .await;
+    mount_info(
+        &server,
+        serde_json::json!({"type": "meta"}),
+        serde_json::json!({"universe": [market("BTC")], "collateralToken": 0}),
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/exchange"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "ok",
+            "response": {"type": "default"}
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn positions_update_leverage_targets_a_hip3_market_by_its_protocol_asset_id() {
+    let env = IsolatedHome::new();
+    let server = hip3_positions_server().await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "--format",
+            "json",
+            "positions",
+            "update-leverage",
+            "--coin",
+            "xyz:XYZ100",
+            "--leverage",
+            "3",
+            "--isolated",
+            "--testnet",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("xyz:XYZ100"));
+
+    let body = exchange_body(&server).await;
+    assert_eq!(body["action"]["type"], "updateLeverage");
+    assert_eq!(body["action"]["asset"], 110_001);
+    assert_eq!(body["action"]["isCross"], false);
+}
+
+#[tokio::test]
+async fn positions_update_margin_targets_a_hip3_market_by_its_protocol_asset_id() {
+    let env = IsolatedHome::new();
+    let server = hip3_positions_server().await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "positions",
+            "update-margin",
+            "--coin",
+            "xyz:XYZ100",
+            "--amount",
+            "5",
+            "--testnet",
+        ])
+        .assert()
+        .success();
+
+    let body = exchange_body(&server).await;
+    assert_eq!(body["action"]["type"], "updateIsolatedMargin");
+    assert_eq!(body["action"]["asset"], 110_001);
+}
+
+#[tokio::test]
+async fn positions_update_leverage_reports_an_unknown_hip3_market_as_not_found() {
+    let env = IsolatedHome::new();
+    let server = hip3_positions_server().await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "positions",
+            "update-leverage",
+            "--coin",
+            "xyz:NOPE",
+            "--leverage",
+            "3",
+            "--testnet",
+        ])
+        .assert()
+        .code(13)
+        .stderr(predicate::str::contains("xyz:NOPE"));
+}
+
 #[tokio::test]
 async fn transfer_spot_to_perp_prompts_and_confirms() {
     let env = IsolatedHome::new();

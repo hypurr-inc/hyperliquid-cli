@@ -17,7 +17,6 @@ use crate::command_spec::{
     Risk, arg,
 };
 use crate::commands::support::print_dry_run;
-use crate::commands::{builder, referral};
 use crate::config::{BankrLogin, Config};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
@@ -28,6 +27,7 @@ use crate::prompt;
 use crate::settings::{Settings, env};
 use crate::signing::SelectedSigner;
 use crate::wallet_store::{ConfigEdit, NewWallet, StoredWallet, WalletName, WalletStore};
+use crate::{builder_fee, referral_code};
 use output::{
     BankrReceipt, Receipt, print_bankr_receipt, print_declined, print_receipt, print_status,
     print_wallet_address, shell_arg,
@@ -57,14 +57,14 @@ fn no_stored_accounts_error() -> CliError {
 /// Resolution failures are ignored: a bad default must not block wallet creation.
 fn apply_setup_defaults(config: &mut Config, settings: &Settings) {
     if !config.has_builder_default()
-        && let Ok(Some((address, fee))) = builder::suggested_default_builder(settings)
+        && let Ok(Some((address, fee))) = builder_fee::suggested_default_builder(settings)
     {
         config.default_builder_address = Some(address);
         config.default_builder_fee_rate = Some(fee);
     }
     if !config.has_referral_default()
         && let Ok(Some(code)) =
-            referral::suggested_default_referral_code(settings, config.network.is_testnet())
+            referral_code::suggested_default_referral_code(settings, config.network.is_testnet())
     {
         config.default_referral_code = Some(code);
     }

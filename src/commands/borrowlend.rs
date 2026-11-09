@@ -3,10 +3,11 @@ use hypersdk::hypercore::{HttpClient, SpotToken};
 use hypersdk::{Address, Decimal};
 use serde::{Deserialize, Serialize};
 
-use crate::assets::find_spot_token;
+use crate::assets::require_spot_token;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
-use crate::commands::account::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::actions;
+use crate::commands::rows::{ListRow, One, Row, Rows, style_column};
+use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
 use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
@@ -92,11 +93,6 @@ struct RawReserveState {
     total_borrowed: Decimal,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReserveOutput {
-    rows: Vec<ReserveRow>,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct UserBorrowLendPosition {
     token: String,
@@ -129,9 +125,36 @@ struct BorrowLendActionRow {
     signer: String,
     reversibility: String,
 }
+impl Row for ReserveRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Token",
+        "Supply Rate",
+        "Borrow Rate",
+        "Total Supply",
+        "Total Borrow",
+        "Note",
+    ];
 
-struct BorrowLendActionOutput {
-    row: BorrowLendActionRow,
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.token.clone(),
+            self.supply_rate.to_string(),
+            self.borrow_rate.to_string(),
+            self.total_supply.to_string(),
+            self.total_borrow.to_string(),
+            self.note.clone(),
+        ]
+    }
+
+    fn pretty_cells(&self) -> Vec<String> {
+        let mut cells = self.cells();
+        style_column::<Self>(&mut cells, "Note", output::colors::gray);
+        cells
+    }
+}
+
+impl ListRow for ReserveRow {
+    const EMPTY: &'static str = "No reserve states.";
 }
 
 #[derive(Debug, Serialize)]
@@ -144,50 +167,35 @@ struct BorrowLendExchangeAction {
     amount: Option<String>,
 }
 
-impl TableData for ReserveOutput {
-    fn headers(&self) -> Vec<&str> {
+impl Row for BorrowLendActionRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Status",
+        "Action",
+        "Operation",
+        "Acting As",
+        "Token",
+        "Token Index",
+        "Amount",
+        "Max",
+        "Network",
+        "Signer",
+        "Reversibility",
+    ];
+
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Token",
-            "Supply Rate",
-            "Borrow Rate",
-            "Total Supply",
-            "Total Borrow",
-            "Note",
+            self.status.clone(),
+            self.action.clone(),
+            self.operation.clone(),
+            self.acting_as.clone(),
+            self.token.clone(),
+            self.token_index.to_string(),
+            self.amount.clone().unwrap_or_default(),
+            self.max.to_string(),
+            self.network.clone(),
+            self.signer.clone(),
+            self.reversibility.clone(),
         ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.token.clone(),
-                    row.supply_rate.to_string(),
-                    row.borrow_rate.to_string(),
-                    row.total_supply.to_string(),
-                    row.total_borrow.to_string(),
-                    row.note.clone(),
-                ]
-            })
-            .collect()
-    }
-
-    fn pretty_rows(&self) -> Vec<Vec<String>> {
-        self.rows()
-            .into_iter()
-            .map(|mut row| {
-                row[5] = output::colors::gray(&row[5]);
-                row
-            })
-            .collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No reserve states.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
     }
 }
 
@@ -223,61 +231,23 @@ impl TableData for UserBorrowLendOutput {
     }
 }
 
-impl TableData for BorrowLendActionOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec![
-            "Status",
-            "Action",
-            "Operation",
-            "Acting As",
-            "Token",
-            "Token Index",
-            "Amount",
-            "Max",
-            "Network",
-            "Signer",
-            "Reversibility",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.row.status.clone(),
-            self.row.action.clone(),
-            self.row.operation.clone(),
-            self.row.acting_as.clone(),
-            self.row.token.clone(),
-            self.row.token_index.to_string(),
-            self.row.amount.clone().unwrap_or_default(),
-            self.row.max.to_string(),
-            self.row.network.clone(),
-            self.row.signer.clone(),
-            self.row.reversibility.clone(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
-    }
-}
-
 async fn rates(inv: &Invocation) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let rows = reserve_rows(remote.api()).await?;
-    inv.print(&ReserveOutput { rows });
+    inv.print(&Rows::new(rows));
     Ok(())
 }
 
 async fn get(inv: &Invocation, token: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let token = resolve_spot_token(remote.api().sdk(), token).await?;
+    let token = require_spot_token(remote.api().sdk(), token).await?;
     let row = match live_reserve_row(remote.api(), token.index, token.name.clone()).await {
         Ok(row) => row,
         Err(BorrowLendInfoError::EndpointUnavailable) => unavailable_reserve_row(token),
         Err(BorrowLendInfoError::Cli(err)) => return Err(err.into()),
     };
 
-    inv.print(&ReserveOutput { rows: vec![row] });
+    inv.print(&Rows::new(vec![row]));
     Ok(())
 }
 
@@ -361,21 +331,19 @@ async fn action(
     )
     .await?;
 
-    inv.print(&BorrowLendActionOutput {
-        row: BorrowLendActionRow {
-            status: "submitted".to_string(),
-            action: "borrowlend".to_string(),
-            operation: operation.as_str().to_string(),
-            acting_as: signer.query_address().to_string(),
-            token: token.name,
-            token_index: token.index,
-            amount,
-            max: args.max,
-            network: remote.chain().to_string(),
-            signer: signer.address().to_string(),
-            reversibility: REVERSIBILITY.as_str().to_string(),
-        },
-    });
+    inv.print(&One::new(BorrowLendActionRow {
+        status: "submitted".to_string(),
+        action: "borrowlend".to_string(),
+        operation: operation.as_str().to_string(),
+        acting_as: signer.query_address().to_string(),
+        token: token.name,
+        token_index: token.index,
+        amount,
+        max: args.max,
+        network: remote.chain().to_string(),
+        signer: signer.address().to_string(),
+        reversibility: REVERSIBILITY.as_str().to_string(),
+    }));
     Ok(())
 }
 
@@ -390,13 +358,6 @@ fn validate_action_args(operation: BorrowLendOperation, args: &ActionArgs) -> Re
         return Err(CliError::Unsupported(
             "borrow/lend supply requires --amount; --max is only supported for withdraw"
                 .to_string(),
-        ));
-    }
-    if let Some(amount) = args.amount
-        && amount <= Decimal::ZERO
-    {
-        return Err(CliError::Unsupported(
-            "borrow/lend amount must be greater than zero".to_string(),
         ));
     }
     Ok(())
@@ -502,12 +463,6 @@ async fn token_names_by_index(
         .into_iter()
         .map(|token| (token.index, token.name))
         .collect())
-}
-
-async fn resolve_spot_token(client: &HttpClient, token: &str) -> Result<SpotToken, CliError> {
-    find_spot_token(client, token)
-        .await?
-        .ok_or_else(|| CliError::Unsupported(format!("Borrow/lend token not found: {token}")))
 }
 
 fn borrowlend_wei(args: &ActionArgs, decimals: i64) -> Result<u64, CliError> {
@@ -755,7 +710,7 @@ async fn borrowlend_action(
 ) -> Result<(), anyhow::Error> {
     validate_action_args(operation, args)?;
     let remote = inv.remote()?;
-    let token = resolve_spot_token(remote.api().sdk(), &args.token).await?;
+    let token = require_spot_token(remote.api().sdk(), &args.token).await?;
     let wei = borrowlend_wei(args, token.wei_decimals)?;
     if inv.dry_run() {
         return print_dry_run(

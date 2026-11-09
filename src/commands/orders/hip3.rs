@@ -1,7 +1,7 @@
 use hypersdk::{Address, Decimal};
 use serde_json::json;
 
-use crate::commands::account::fetch_abstraction;
+use crate::commands::abstraction::fetch_abstraction;
 use crate::commands::transfers::{self, SendAssetArgs};
 use crate::http_api::ApiClient;
 use crate::invocation::Remote;

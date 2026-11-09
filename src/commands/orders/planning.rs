@@ -33,7 +33,7 @@ use crate::assets::{
     AssetQuery, AssetResolver, Market, OutcomeAsset, PerpAsset, parse_asset_query,
     qualify_dex_asset,
 };
-use crate::commands::builder;
+use crate::builder_fee;
 use crate::errors::{CliError, from_sdk};
 use crate::settings::Settings;
 
@@ -318,7 +318,7 @@ fn order_builder_fee(
             if spot_buy {
                 return Ok(None);
             }
-            match builder::resolve_default_builder_fee(settings)? {
+            match builder_fee::resolve_default_builder_fee(settings)? {
                 Some(default) => default,
                 None => return Ok(None),
             }
