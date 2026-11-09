@@ -1,17 +1,16 @@
 # Hyperliquid CLI Pack
 
-Read-only Hyperliquid monitoring for Aeon, built on the
-[`hyperliquid` CLI](https://github.com/hypurr-inc/hyperliquid-cli) — one binary
-that speaks the whole Hyperliquid surface (perps, spot, HIP-3 dex markets,
-outcomes, orders, positions, transfers, staking, vaults, borrow/lend).
+Read-only Hyperliquid monitoring for Aeon, from the team behind the
+[`hyperliquid` CLI](https://github.com/hypurr-inc/hyperliquid-cli).
 
-This pack is deliberately **read-only**. Aeon runs unattended on a schedule, and
-a scheduled skill that could sign a trade is a foot-gun: a threshold, a stale
-watchlist, or a bad `${var}` becomes a position nobody asked for. These skills
-report facts and stop. Execution stays interactive, through the same CLI, with a
+The skills are plain `node` helpers that read the public `api.hyperliquid.xyz/info`
+endpoint with `fetch`: no binary to install, no key, no `bash`, nothing a read-only
+Aeon run is not allowed to do. The CLI itself stays the tool for execution, with a
 `--dry-run` preview and an explicit approval.
 
-Install the pack:
+This pack is deliberately **read-only**. Aeon runs unattended on a schedule, and a
+scheduled skill that could sign a trade is a foot-gun: a threshold, a stale
+watchlist, or a bad `${var}` becomes a position nobody asked for.
 
 ```bash
 bin/install-skill-pack hypurr-inc/hyperliquid-cli --path aeon
@@ -19,34 +18,36 @@ bin/install-skill-pack hypurr-inc/hyperliquid-cli --path aeon
 
 ## Skills
 
-| Skill | Schedule | What it does |
-| --- | --- | --- |
-| `hyperliquid-account-brief` | `0 13 * * *` (disabled) | One account: equity, withdrawable, margin use, every open position with uPnL and liquidation price, open orders, 24h realized PnL and fees |
-| `hyperliquid-market-monitor` | `0 * * * *` (disabled) | Watched perps: 24h move, hourly funding and open interest, notifying only when a threshold is crossed |
+| Skill | Schedule | `var` | What it does |
+| --- | --- | --- | --- |
+| `hyperliquid-account-brief` | `0 13 * * *` (disabled) | `0x…` account (required) | Default-dex equity, withdrawable and margin use, open positions across dexes with uPnL and liquidation price, open orders, 24h realized PnL and fees by token. For unified and portfolio-margin accounts it reports the spot USDC balance and margin used instead of equity and withdrawable |
+| `hyperliquid-market-monitor` | `0 */4 * * *` (disabled) | `BTC,ETH move=5 funding=0.01` | Watched perps by 24h move and hourly funding. Notifies only for crossings the previous run did not already report |
 
-Both are stateless and use no secrets. The account brief reads an address from
-`${var}` or the configured signer; the monitor reads `${var}` as a comma-separated
-watchlist and takes thresholds from `HL_MOVE_PCT` (default `5`) and
-`HL_FUNDING_PCT` (default `0.01`).
+```yaml
+# aeon.yml
+hyperliquid-account-brief: { enabled: true, schedule: "0 13 * * *", var: "0xYourAddress" } # replace the placeholder with a real account: 0x followed by 40 hex characters; the skill notifies once and stops otherwise
+hyperliquid-market-monitor: { enabled: true, schedule: "0 */4 * * *", var: "BTC,ETH,SOL,HYPE move=5 funding=0.01" }
+```
 
-## Requirements
+Both are stateless apart from the monitor reading its own previous log line, and use
+no secrets.
 
-- The `hyperliquid` binary on `PATH`. Each skill installs it if it is missing:
-  ```bash
-  curl -fsSLO https://raw.githubusercontent.com/hypurr-inc/hyperliquid-cli/main/install.sh
-  sh install.sh
-  ```
-- `jq` (present on GitHub Actions runners).
-- No API key, no wallet, no secret. Public reads only.
+## Behavior to know
+
+- **Quiet is normal.** The monitor prints `HL_WATCH_QUIET` or `HL_WATCH_REPEAT` and does
+  not notify when nothing new crossed a threshold. A move that persists is reported once;
+  it alerts again after it clears and returns.
+- **Failures are loud once.** A missing or malformed account address, or a bad `var` for
+  the monitor, sends one notification and stops. An unreachable API stays silent and the
+  next run retries.
+- **Unknown coins are reported**, so a typo in the watchlist cannot hide.
 
 ## What it will not do
 
-- Sign, submit, cancel, transfer or stake. Any skill that writes is out of scope
-  for this pack by design.
-- Print or request a private key. If a signer is configured for other runs, these
-  skills never read it.
-- Recommend a trade. Alerts carry the number, the threshold it crossed, and the
-  market context (open interest, volume).
+- Sign, submit, cancel, transfer or stake.
+- Print or request a private key.
+- Recommend a trade. Alerts carry the number, the threshold it crossed, and the market
+  context (open interest, volume).
 
 ## Files
 
@@ -57,12 +58,8 @@ aeon/
 └── skills/
     ├── hyperliquid-account-brief/
     │   ├── SKILL.md
-    │   └── brief.sh
+    │   └── x.mjs
     └── hyperliquid-market-monitor/
         ├── SKILL.md
-        └── monitor.sh
+        └── x.mjs
 ```
-
-`SKILL.md` is the agent-facing contract (frontmatter, steps, exit codes, output
-reading). The `.sh` helpers do the reads and the formatting so a run costs three
-commands and no model arithmetic.
