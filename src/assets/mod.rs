@@ -12,17 +12,18 @@ mod outcomes;
 mod query;
 mod resolver;
 
-pub(crate) use dexes::{CoinDecimal, DexMeta, PerpDexList};
+pub(crate) use dexes::{CoinDecimal, DexMeta, PerpDexList, PerpListing};
 pub use dexes::{DeployerFeeScales, MarketFeeScale, canonical_dex, canonical_dexs};
 #[cfg(test)]
 pub(crate) use market::test_support;
 pub use market::{
     MarginRule, Market, OutcomeAsset, PerpAsset, SpotAsset, perp_price_tick, spot_price_tick,
 };
-pub(crate) use metadata::load_hip3_market;
 pub use metadata::{
-    AssetMetadata, MetadataCache, SpotListing, load_spot_markets, require_spot_token,
+    AssetMetadata, MetadataCache, SpotListing, SpotTokenListing, load_spot_markets,
+    load_spot_tokens, require_spot_token,
 };
+pub(crate) use metadata::{load_hip3_market, load_perp_listings};
 pub use outcome_description::OutcomeDescription;
 pub use outcome_templates::{OutcomeTemplate, TemplateList, TemplateRole, load_outcome_templates};
 #[cfg(test)]

@@ -1,13 +1,12 @@
-use hypersdk::hypercore::HttpClient;
 use strsim::levenshtein;
 
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 
 use super::asset_id;
-use super::dexes::PerpDexList;
+use super::dexes::{PerpDexList, PerpListing};
 use super::market::{Market, OutcomeAsset, PerpAsset, SpotAsset};
-use super::metadata::{AssetMetadata, load_hip3_market, perp_asset_from_market};
+use super::metadata::{AssetMetadata, load_hip3_market};
 use super::query::{AssetQuery, eq_asset_name, normalize_asset_name, parse_asset_query};
 
 /// Why an asset name did not resolve.
@@ -59,8 +58,8 @@ impl AssetResolver {
         Self { metadata }
     }
 
-    pub async fn load_raw(api: &ApiClient) -> Result<Self, CliError> {
-        AssetMetadata::load_raw(api).await.map(Self::new)
+    pub async fn load_with_hip3(api: &ApiClient) -> Result<Self, CliError> {
+        AssetMetadata::load_with_hip3(api).await.map(Self::new)
     }
 
     /// Outcome notation resolves to [`Market::Outcome`] without being decoded;
@@ -102,24 +101,24 @@ impl AssetResolver {
     /// [`Self::resolve_perp`], looking a missing HIP-3 market up live.
     pub async fn resolve_perp_or_fetch(
         &self,
-        client: &HttpClient,
+        api: &ApiClient,
         input: &str,
     ) -> Result<PerpAsset, AssetError> {
         match self.resolve_perp(input) {
             Ok(perp) => Ok(perp),
-            Err(err) => fetch_hip3_perp(client, input, err).await,
+            Err(err) => fetch_hip3_perp(api, input, err).await,
         }
     }
 
     /// [`Self::resolve`], looking a missing HIP-3 market up live.
     pub async fn resolve_or_fetch(
         &self,
-        client: &HttpClient,
+        api: &ApiClient,
         input: &str,
     ) -> Result<Market, AssetError> {
         match parse_asset_query(input) {
             AssetQuery::Hip3 { .. } => self
-                .resolve_perp_or_fetch(client, input)
+                .resolve_perp_or_fetch(api, input)
                 .await
                 .map(Market::Perp),
             _ => self.resolve(input),
@@ -245,7 +244,7 @@ fn unsupported_outcome(input: &str) -> AssetError {
 /// After `missed` (a failed snapshot lookup of `input`), look a HIP-3 market up
 /// live. A DEX without that market reports the original miss.
 async fn fetch_hip3_perp(
-    client: &HttpClient,
+    api: &ApiClient,
     input: &str,
     missed: AssetError,
 ) -> Result<PerpAsset, AssetError> {
@@ -253,12 +252,13 @@ async fn fetch_hip3_perp(
         return Err(missed);
     };
     let loaded = async {
-        let dexes = PerpDexList::load_sdk(client).await?;
+        let dexes = PerpDexList::load(api).await?;
         let dex = dexes.canonical(&dex)?;
-        match load_hip3_market(client, dex, &token).await? {
-            Some(market) => perp_asset_from_market(&market, Some(dex.name.clone())).map(Some),
-            None => Ok(None),
-        }
+        Ok::<_, CliError>(
+            load_hip3_market(api, dex, &token)
+                .await?
+                .map(PerpListing::into_asset),
+        )
     }
     .await;
     match loaded {

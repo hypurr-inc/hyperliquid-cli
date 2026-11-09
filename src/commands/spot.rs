@@ -94,7 +94,7 @@ pub async fn get(inv: &Invocation, pair: &str) -> Result<(), anyhow::Error> {
     let listings = load_spot_markets(api).await?;
     // The resolver is built from the list the row is read from, so a miss gets
     // its suggestion or outcome-notation error without a second read.
-    let resolver = AssetResolver::new(AssetMetadata::from_listings(&[], listings.clone())?);
+    let resolver = AssetResolver::new(AssetMetadata::from_listings(Vec::new(), listings.clone())?);
     let spot = resolver.resolve_spot(pair).map_err(CliError::from)?;
     let listing = listings
         .into_iter()
@@ -216,7 +216,7 @@ async fn token_id(inv: &Invocation, token: &str) -> Result<String, CliError> {
             ))
         };
     }
-    let found = require_spot_token(inv.remote()?.api().sdk(), token).await?;
+    let found = require_spot_token(inv.remote()?.api(), token).await?;
     Ok(format!("{:#x}", found.token_id))
 }
 

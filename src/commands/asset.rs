@@ -574,10 +574,10 @@ fn fuzzy_search_threshold(query: &str) -> usize {
     if query.len() <= 3 { 1 } else { 2 }
 }
 
-/// The raw-metadata resolver, which lists every HIP-3 market. A dex that failed
+/// The resolver over every HIP-3 market. A dex that failed
 /// to load is named on stderr: its markets are missing from the answer.
 async fn load_resolver(api: &ApiClient) -> Option<AssetResolver> {
-    let resolver = or_warn("asset metadata", AssetResolver::load_raw(api).await)?;
+    let resolver = or_warn("asset metadata", AssetResolver::load_with_hip3(api).await)?;
     for dex in resolver.unavailable_dexes() {
         warn(&format!(
             "HIP-3 dex {dex} metadata unavailable, results are limited"

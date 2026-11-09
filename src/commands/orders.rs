@@ -161,8 +161,7 @@ async fn place_position_tpsl(
     spec: &TpslSpec,
 ) -> Result<Legs<TpslOrderConfirmation>, anyhow::Error> {
     let margin = MarginPlan::for_market(perp, spec.margin_mode)?;
-    let prepared =
-        prepare_position_tpsl_batch(context.api.sdk(), perp, context.account(), spec).await?;
+    let prepared = prepare_position_tpsl_batch(context.api, perp, context.account(), spec).await?;
     let cleared = clear_to_send(
         context,
         Gate::for_position(ConsentKind::Tpsl, perp, margin),
@@ -271,8 +270,7 @@ async fn cancel(
     resolver: &AssetResolver,
     args: &CancelArgs,
 ) -> Result<(), anyhow::Error> {
-    let plan =
-        prepare_cancel_order_plan(context.api.sdk(), resolver, context.account(), args).await?;
+    let plan = prepare_cancel_order_plan(context.api, resolver, context.account(), args).await?;
     let response = actions::send_l1_action(
         context.api,
         context.signer,
@@ -303,8 +301,8 @@ async fn cancel_all(
     resolver: &AssetResolver,
     args: &CancelAllArgs,
 ) -> Result<(), anyhow::Error> {
-    let plan = prepare_cancel_all_orders_plan(context.api.sdk(), resolver, context.account(), args)
-        .await?;
+    let plan =
+        prepare_cancel_all_orders_plan(context.api, resolver, context.account(), args).await?;
     let order_ids = plan.order_ids();
 
     let Some(action) = plan.action() else {
@@ -351,7 +349,7 @@ async fn modify(
     args: &ModifyArgs,
 ) -> Result<(), anyhow::Error> {
     let plan = prepare_modify_order_plan(
-        context.api.sdk(),
+        context.api,
         resolver,
         context.account(),
         identifier,
@@ -400,7 +398,7 @@ async fn batch_modify(
     let mut plans: Vec<ModifyOrderPlan> = Vec::with_capacity(orders.len());
     for (index, order) in orders.iter().enumerate() {
         let plan = prepare_modify_order_plan(
-            context.api.sdk(),
+            context.api,
             resolver,
             context.account(),
             &order.identifier,

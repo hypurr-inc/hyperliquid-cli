@@ -1,9 +1,8 @@
 use clap::Args;
-use hypersdk::hypercore::{HttpClient, SpotToken};
 use hypersdk::{Address, Decimal};
 use serde::{Deserialize, Serialize};
 
-use crate::assets::require_spot_token;
+use crate::assets::{SpotTokenListing, load_spot_tokens, require_spot_token};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
 use crate::commands::abstraction::{AccountMode, fetch_abstraction};
 use crate::commands::actions;
@@ -12,7 +11,6 @@ use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::exchange_reply;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
@@ -334,7 +332,7 @@ fn action_preview(
     chain: hypersdk::hypercore::Chain,
     operation: BorrowLendOperation,
     args: &ActionArgs,
-    token: &SpotToken,
+    token: &SpotTokenListing,
     wei: u64,
     exchange_action: &BorrowLendAction,
 ) -> serde_json::Value {
@@ -382,7 +380,7 @@ async fn action(
     signer: &SelectedSigner,
     operation: BorrowLendOperation,
     args: &ActionArgs,
-    token: SpotToken,
+    token: SpotTokenListing,
     exchange_action: BorrowLendAction,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
@@ -430,9 +428,7 @@ fn validate_action_args(operation: BorrowLendOperation, args: &ActionArgs) -> Re
 async fn reserve_rows(api: &ApiClient) -> Result<Vec<ReserveRow>, CliError> {
     let mut rows = match live_reserve_rows(api).await {
         Ok(rows) => rows,
-        Err(BorrowLendInfoError::EndpointUnavailable) => {
-            unavailable_reserve_rows(api.sdk()).await?
-        }
+        Err(BorrowLendInfoError::EndpointUnavailable) => unavailable_reserve_rows(api).await?,
         Err(BorrowLendInfoError::Cli(err)) => return Err(err),
     };
 
@@ -451,7 +447,7 @@ async fn live_reserve_rows(api: &ApiClient) -> Result<Vec<ReserveRow>, BorrowLen
         &InfoRequest::new("allBorrowLendReserveStates"),
     )
     .await?;
-    let token_names = token_names_by_index(api.sdk()).await?;
+    let token_names = token_names_by_index(api).await?;
 
     Ok(reserve_states
         .into_iter()
@@ -480,17 +476,15 @@ async fn live_reserve_row(
     Ok(reserve_state.to_row(token_name, token_index))
 }
 
-async fn unavailable_reserve_rows(client: &HttpClient) -> Result<Vec<ReserveRow>, CliError> {
-    Ok(client
-        .spot_tokens()
-        .await
-        .map_err(from_sdk)?
+async fn unavailable_reserve_rows(api: &ApiClient) -> Result<Vec<ReserveRow>, CliError> {
+    Ok(load_spot_tokens(api)
+        .await?
         .into_iter()
         .map(unavailable_reserve_row)
         .collect::<Vec<_>>())
 }
 
-fn unavailable_reserve_row(token: hypersdk::hypercore::SpotToken) -> ReserveRow {
+fn unavailable_reserve_row(token: SpotTokenListing) -> ReserveRow {
     ReserveRow {
         token: token.name,
         token_index: token.index,
@@ -517,12 +511,10 @@ impl RawReserveState {
 }
 
 async fn token_names_by_index(
-    client: &HttpClient,
+    api: &ApiClient,
 ) -> Result<std::collections::HashMap<u32, String>, BorrowLendInfoError> {
-    Ok(client
-        .spot_tokens()
+    Ok(load_spot_tokens(api)
         .await
-        .map_err(from_sdk)
         .map_err(BorrowLendInfoError::Cli)?
         .into_iter()
         .map(|token| (token.index, token.name))
@@ -668,7 +660,7 @@ impl CliCommand for BorrowlendGet {
 
     async fn run(inv: &Invocation, args: &BorrowlendGetArgs) -> Result<(), anyhow::Error> {
         let remote = inv.remote()?;
-        let token = require_spot_token(remote.api().sdk(), &args.token).await?;
+        let token = require_spot_token(remote.api(), &args.token).await?;
         let row = match live_reserve_row(remote.api(), token.index, token.name.clone()).await {
             Ok(row) => row,
             Err(BorrowLendInfoError::EndpointUnavailable) => unavailable_reserve_row(token),
@@ -700,7 +692,7 @@ impl CliCommand for BorrowlendUser {
         let token_names = if state.token_to_state.is_empty() {
             Default::default()
         } else {
-            match token_names_by_index(api.sdk()).await {
+            match token_names_by_index(api).await {
                 Ok(names) => names,
                 Err(BorrowLendInfoError::Cli(err)) => return Err(err.into()),
                 Err(BorrowLendInfoError::EndpointUnavailable) => Default::default(),
@@ -824,7 +816,7 @@ async fn borrowlend_action(
 ) -> Result<(), anyhow::Error> {
     validate_action_args(operation, args)?;
     let remote = inv.remote()?;
-    let token = require_spot_token(remote.api().sdk(), &args.token).await?;
+    let token = require_spot_token(remote.api(), &args.token).await?;
     let wei = borrowlend_wei(args, token.wei_decimals)?;
     let exchange_action = BorrowLendAction::new(operation, token.index, args);
     if inv.dry_run() {

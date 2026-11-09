@@ -1,7 +1,6 @@
 //! Orders that already exist: finding them, and planning their cancel or
 //! replacement.
 
-use hypersdk::hypercore::HttpClient;
 use hypersdk::hypercore::types::{
     Action, BasicOrder, BatchCancel, BatchCancelCloid, BatchModify, Cancel, CancelByCloid, Modify,
     OrderRequest, OrderType, OrderTypePlacement, Side, TimeInForce, TpSl,
@@ -26,13 +25,15 @@ use crate::errors::{CliError, from_sdk};
 use crate::hints::{
     CANCEL_ORDER_COMMAND, CANCEL_TWAP_COMMAND, CREATE_TWAP_COMMAND, TRAILING_STOP_COMMAND,
 };
+use crate::http_api::ApiClient;
 
 async fn lookup_order(
-    client: &HttpClient,
+    client: &ApiClient,
     user: Address,
     identifier: &OrderIdentifier,
 ) -> Result<BasicOrder, CliError> {
     let order = client
+        .sdk()
         .order_status(user, identifier.to_status_identifier())
         .await
         .map_err(from_sdk)?
@@ -60,7 +61,7 @@ impl OrderAsset {
 }
 
 async fn order_asset(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     order: &BasicOrder,
 ) -> Result<OrderAsset, CliError> {
@@ -94,7 +95,7 @@ pub(super) struct CancelOrderPlan {
 }
 
 pub(super) async fn prepare_cancel_order_plan(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     user: Address,
     args: &CancelArgs,
@@ -154,7 +155,7 @@ impl CoinFilter {
 /// market must exist: an unknown coin or dex fails here instead of listing an
 /// empty set of orders to cancel.
 pub(super) async fn resolve_cancel_all_coin_filter(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     args: &CancelAllArgs,
 ) -> Result<Option<CoinFilter>, CliError> {
@@ -225,13 +226,14 @@ impl CancelAllOrdersPlan {
 }
 
 pub(super) async fn prepare_cancel_all_orders_plan(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     user: Address,
     args: &CancelAllArgs,
 ) -> Result<CancelAllOrdersPlan, CliError> {
     let coin_filter = resolve_cancel_all_coin_filter(client, resolver, args).await?;
     let open_orders = client
+        .sdk()
         .open_orders(
             user,
             coin_filter.as_ref().and_then(|filter| filter.dex.clone()),
@@ -258,7 +260,7 @@ pub(super) async fn prepare_cancel_all_orders_plan(
 }
 
 pub(super) async fn cancel_all_dry_run_plan(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     args: &CancelAllArgs,
 ) -> Result<OrderDryRunPlan, CliError> {
@@ -294,7 +296,7 @@ pub(super) fn validate_modify_args(args: &ModifyArgs) -> Result<OrderIdentifier,
 }
 
 pub(super) async fn prepare_modify_order_plan(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     user: Address,
     identifier: &OrderIdentifier,

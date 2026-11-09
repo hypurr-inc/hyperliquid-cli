@@ -5,15 +5,16 @@
 
 use std::time::Instant;
 
+use hypersdk::hypercore::Cloid;
 use hypersdk::hypercore::types::{
     Action, BasicOrder, BatchCancel, BatchCancelCloid, Cancel, CancelByCloid,
 };
-use hypersdk::hypercore::{Cloid, HttpClient};
 use hypersdk::{Address, Decimal};
 
 use super::context::OrderSubmissionContext;
 use crate::commands::actions;
 use crate::errors::{CliError, from_sdk};
+use crate::http_api::ApiClient;
 
 /// A protocol asset index as a cancel-by-cloid request carries it: 32 bits,
 /// where an order request carries it as a `usize`. Built before an order is
@@ -96,11 +97,15 @@ impl LiveOrder {
     /// Returns the size that left the book since the last read.
     pub(super) async fn refresh(
         &mut self,
-        client: &HttpClient,
+        client: &ApiClient,
         user: Address,
         dex: Option<String>,
     ) -> Result<Decimal, CliError> {
-        let open = client.open_orders(user, dex).await.map_err(from_sdk)?;
+        let open = client
+            .sdk()
+            .open_orders(user, dex)
+            .await
+            .map_err(from_sdk)?;
         Ok(self.settle(self.open_size_in(&open)))
     }
 

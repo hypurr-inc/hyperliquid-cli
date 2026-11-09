@@ -1,19 +1,17 @@
 use clap::Args;
 use hypersdk::Decimal;
-use hypersdk::hypercore::PerpMarket;
 use serde::{Deserialize, Serialize};
 
 use crate::assets::{
-    AssetMetadata, AssetQuery, AssetResolver, CoinDecimal, DeployerFeeScales, MarginRule,
-    PerpDexList, canonical_dex, eq_asset_name, load_hip3_market, normalize_dex, parse_asset_query,
-    perp_price_tick, qualify_dex_asset,
+    AssetMetadata, AssetQuery, AssetResolver, CoinDecimal, DeployerFeeScales, PerpDexList,
+    PerpListing, canonical_dex, eq_asset_name, load_hip3_market, load_perp_listings, normalize_dex,
+    parse_asset_query, perp_price_tick, qualify_dex_asset,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::account::parse_time_millis;
 use crate::commands::paging;
 use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::invocation::Invocation;
 use crate::wire::InfoRequest;
 
@@ -54,23 +52,37 @@ pub struct PerpMarketRow {
     pub deployer_fee_scale: Option<Decimal>,
 }
 
-impl From<PerpMarket> for PerpMarketRow {
-    fn from(market: PerpMarket) -> Self {
-        let tick_size_at_price_1 = perp_price_tick(market.sz_decimals)
+impl TryFrom<PerpListing> for PerpMarketRow {
+    type Error = CliError;
+
+    fn try_from(listing: PerpListing) -> Result<Self, CliError> {
+        let PerpListing {
+            market,
+            index,
+            collateral,
+            ..
+        } = listing;
+        let max_leverage = market.max_leverage.ok_or_else(|| {
+            CliError::Internal(anyhow::anyhow!(
+                "exchange metadata for {} has no maxLeverage",
+                market.name
+            ))
+        })?;
+        let tick_size_at_price_1 = perp_price_tick(i64::from(market.sz_decimals))
             .tick_for(Decimal::from(1))
             .map(|tick| tick.to_string());
-        Self {
-            margin_mode: MarginRule::of_market(&market).as_str(),
+        Ok(Self {
+            margin_mode: market.margin_rule.as_str(),
             name: market.name,
-            index: market.index,
-            max_leverage: market.max_leverage,
-            sz_decimals: market.sz_decimals,
-            collateral: market.collateral.name,
-            isolated_margin: market.isolated_margin,
+            index,
+            max_leverage,
+            sz_decimals: i64::from(market.sz_decimals),
+            collateral,
+            isolated_margin: market.only_isolated,
             tick_size_at_price_1,
             delisted: market.delisted,
             deployer_fee_scale: market.deployer_fee_scale,
-        }
+        })
     }
 }
 
@@ -110,17 +122,16 @@ impl ListRow for PerpMarketRow {
 
 async fn list(inv: &Invocation, args: &PerpsListArgs) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
-    let client = api.sdk();
-    let markets = if let Some(dex_name) = normalize_dex(args.dex.as_deref()) {
+    let listings = if let Some(dex_name) = normalize_dex(args.dex.as_deref()) {
         let dexes = PerpDexList::load(api).await?;
-        client
-            .perps_from(dexes.canonical(dex_name)?.sdk())
-            .await
-            .map_err(from_sdk)?
+        load_perp_listings(api, Some(dexes.canonical(dex_name)?)).await?
     } else {
-        client.perps().await.map_err(from_sdk)?
+        load_perp_listings(api, None).await?
     };
-    let markets = markets.into_iter().map(PerpMarketRow::from).collect();
+    let markets = listings
+        .into_iter()
+        .map(PerpMarketRow::try_from)
+        .collect::<Result<_, _>>()?;
     inv.print(&PerpMarketsOutput::new(markets));
     Ok(())
 }
@@ -131,28 +142,29 @@ async fn get(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Error>
     let not_found = || CliError::AssetNotFoundNoSuggestion {
         asset: query.clone(),
     };
-    let market = if let AssetQuery::Hip3 {
+    let listing = if let AssetQuery::Hip3 {
         dex: dex_name,
         token,
     } = parse_asset_query(&query)
     {
         let dexes = PerpDexList::load(api).await?;
-        load_hip3_market(api.sdk(), dexes.canonical(&dex_name)?, &token)
+        load_hip3_market(api, dexes.canonical(&dex_name)?, &token)
             .await?
             .ok_or_else(not_found)?
     } else {
         // The resolver is built from the list the row is read from, so a miss
         // gets its suggestion or outcome-notation error without a second read.
-        let markets = api.sdk().perps().await.map_err(from_sdk)?;
-        let resolver = AssetResolver::new(AssetMetadata::from_listings(&markets, Vec::new())?);
+        let listings = load_perp_listings(api, None).await?;
+        let assets = listings.iter().cloned().map(PerpListing::into_asset);
+        let resolver = AssetResolver::new(AssetMetadata::from_assets(assets.collect(), Vec::new()));
         let perp = resolver.resolve_perp(&query).map_err(CliError::from)?;
-        markets
+        listings
             .into_iter()
-            .find(|market| market.index == perp.index)
+            .find(|listing| listing.index == perp.index)
             .ok_or_else(not_found)?
     };
 
-    inv.print(&One::new(PerpMarketRow::from(market)));
+    inv.print(&One::new(PerpMarketRow::try_from(listing)?));
     Ok(())
 }
 
@@ -490,7 +502,7 @@ async fn funding_history(inv: &Invocation, args: &FundingHistoryArgs) -> Result<
     let perp = inv
         .asset_resolver()
         .await?
-        .resolve_perp_or_fetch(api.sdk(), &args.coin)
+        .resolve_perp_or_fetch(api, &args.coin)
         .await
         .map_err(CliError::from)?;
     let coin = perp.display_name();
@@ -525,7 +537,7 @@ async fn funding_history(inv: &Invocation, args: &FundingHistoryArgs) -> Result<
 
 async fn at_oi_cap(inv: &Invocation, args: &AtOiCapArgs) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
-    let dex = canonical_dex(api.sdk(), args.dex.as_deref()).await?;
+    let dex = canonical_dex(api, args.dex.as_deref()).await?;
     let coins: Vec<String> = api
         .info(
             &InfoRequest::new("perpsAtOpenInterestCap").field_if("dex", dex),
@@ -570,7 +582,7 @@ async fn dexs(inv: &Invocation) -> Result<(), anyhow::Error> {
 
 async fn dex_limits(inv: &Invocation, args: &DexLimitsArgs) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
-    let Some(dex) = canonical_dex(api.sdk(), Some(&args.dex)).await? else {
+    let Some(dex) = canonical_dex(api, Some(&args.dex)).await? else {
         return Err(CliError::Configuration("dex must not be empty".to_string()).into());
     };
     let limits: Option<RawDexLimits> = api

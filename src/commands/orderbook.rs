@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use hypersdk::Decimal;
 use hypersdk::hypercore::{
-    AssetContext, BookLevel, Candle, CandleInterval, Chain, FundingRate, HttpClient, Incoming,
-    L2Book, Subscription,
+    AssetContext, BookLevel, Candle, CandleInterval, Chain, FundingRate, Incoming, L2Book,
+    Subscription,
 };
 use serde::Serialize;
 
@@ -14,6 +14,7 @@ use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
 use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
+use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
 use crate::output::format::epoch_ms_to_iso;
@@ -336,7 +337,7 @@ async fn book(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
-    let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
+    let coin = resolve_market_coin(remote.api(), &resolver, coin).await?;
     inv.print(&book_snapshot_for(remote.chain(), &coin, aggregation).await?);
     Ok(())
 }
@@ -358,7 +359,7 @@ async fn candles(
     interval: CandleInterval,
     limit: usize,
 ) -> Result<(), anyhow::Error> {
-    let client = inv.remote()?.api().sdk();
+    let client = inv.remote()?.api();
     let resolver = inv.asset_resolver().await?;
     let coin = resolve_market_coin(client, &resolver, coin).await?;
     inv.print(&candles_snapshot_for(client, &coin, interval, limit).await?);
@@ -367,7 +368,7 @@ async fn candles(
 
 /// Candle history for an already-resolved info coin.
 async fn candles_snapshot_for(
-    client: &HttpClient,
+    client: &ApiClient,
     coin: &str,
     interval: CandleInterval,
     limit: usize,
@@ -379,6 +380,7 @@ async fn candles_snapshot_for(
     let start_time = end_time.saturating_sub(lookback);
 
     let mut candles = client
+        .sdk()
         .candle_snapshot(coin, interval, start_time, end_time)
         .await
         .map_err(from_sdk)?;
@@ -398,7 +400,7 @@ async fn candles_snapshot_for(
 async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
-    let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
+    let coin = resolve_market_coin(remote.api(), &resolver, coin).await?;
     let book = fetch_l2_book(remote.chain(), &coin, BookAggregationArgs::default()).await?;
     inv.print(&One::new(spread_row_from_book(&coin, &book)?));
     Ok(())
@@ -408,7 +410,7 @@ async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
 async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
-    let coin = resolve_perp_coin_or_fetch(remote.api().sdk(), &resolver, coin).await?;
+    let coin = resolve_perp_coin_or_fetch(remote.api(), &resolver, coin).await?;
     let end_time = clock::now_ms();
     let start_time = end_time.saturating_sub(FUNDING_LOOKBACK.as_millis() as u64);
 
@@ -432,7 +434,7 @@ async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
 
 async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Error> {
     let selected = inv.session().json_options().selected_fields();
-    let client = inv.remote()?.api().sdk();
+    let client = inv.remote()?.api();
     let dex = canonical_dex(client, dex).await?;
     inv.print(&mids_snapshot(client, dex.as_deref(), selected).await?);
     Ok(())
@@ -441,11 +443,12 @@ async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Error> 
 /// Fetch all mid prices without printing them. `selected` is `--select`: it
 /// switches the JSON from a name-to-mid map to rows of the named fields.
 async fn mids_snapshot(
-    client: &HttpClient,
+    client: &ApiClient,
     dex: Option<&str>,
     selected: Option<&[String]>,
 ) -> Result<MidsOutput, anyhow::Error> {
     let mut mids = client
+        .sdk()
         .all_mids(dex.map(str::to_string))
         .await
         .map_err(from_sdk)?
@@ -508,7 +511,7 @@ fn market_info_coin(market: Market, input: &str) -> Result<String, CliError> {
 
 /// Resolve a perpetual, fetching the market when it belongs to another dex.
 pub(crate) async fn resolve_perp_coin_or_fetch(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     coin: &str,
 ) -> Result<String, CliError> {
@@ -521,7 +524,7 @@ pub(crate) async fn resolve_perp_coin_or_fetch(
 
 /// Resolve any market for a data command, fetching a HIP-3 market when needed.
 pub(crate) async fn resolve_market_coin(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     coin: &str,
 ) -> Result<String, CliError> {
@@ -783,7 +786,7 @@ async fn watch_book(
     let remote = inv.remote()?;
     let chain = remote.chain();
     let resolver = inv.asset_resolver().await?;
-    let subscription_coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
+    let subscription_coin = resolve_market_coin(remote.api(), &resolver, coin).await?;
 
     crate::watch::run_snapshot_watch(
         inv,
@@ -805,7 +808,7 @@ async fn watch_mids(
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let client = remote.api().sdk();
+    let client = remote.api();
     let selected = inv.session().json_options().selected_fields();
     let dex = canonical_dex(client, dex).await?;
 
@@ -831,7 +834,7 @@ async fn watch_candles(
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let client = remote.api().sdk();
+    let client = remote.api();
     let resolver = inv.asset_resolver().await?;
     let subscription_coin = resolve_market_coin(client, &resolver, coin).await?;
 

@@ -1,12 +1,13 @@
 use std::time::{Duration, Instant};
 
 use hypersdk::Decimal;
-use hypersdk::hypercore::{Cloid, HttpClient};
+use hypersdk::hypercore::Cloid;
 use serde_json::json;
 
 use crate::assets::{AssetResolver, Market, PerpAsset};
 use crate::errors::{CliError, NextCommand, partial_results_fields};
 use crate::hints::{CHECK_LIVE_COMMAND, cancel_order_command, protect_position_command};
+use crate::http_api::ApiClient;
 use crate::margin::MarginPlan;
 use crate::output::TableData;
 use crate::settings::Settings;
@@ -107,7 +108,7 @@ pub(super) fn validate_bracket_args(args: &BracketArgs) -> Result<(), CliError> 
 }
 
 pub(super) async fn bracket_dry_run_plan(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     settings: &Settings,
     args: &BracketArgs,
@@ -231,7 +232,7 @@ pub(super) async fn bracket(
     )?;
 
     let started = Instant::now();
-    let client = context.api.sdk();
+    let client = context.api;
     let cloid = generated_cloid(1);
     let spec = entry.spec(args, Some(cloid))?;
     let perp = resolve_perp_market(

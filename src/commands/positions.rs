@@ -3,7 +3,6 @@ use std::fmt;
 use clap::Args;
 use hypersdk::Address;
 use hypersdk::Decimal;
-use hypersdk::hypercore::HttpClient;
 use hypersdk::hypercore::Subscription;
 use hypersdk::hypercore::api::UpdateLeverage;
 use hypersdk::hypercore::types::api::{TopUpIsolatedOnlyMargin, UpdateIsolatedMargin};
@@ -21,6 +20,7 @@ use crate::commands::support::{print_dry_run_acting_for, resolve_optional_acting
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::hints::update_leverage_command;
+use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::margin::{MarginModeArg, isolated_only_market};
 use crate::output;
@@ -273,11 +273,12 @@ impl ListRow for PositionActionConfirmation {
 
 /// Fetch authenticated user's open positions without printing them.
 async fn list_snapshot(
-    client: &HttpClient,
+    client: &ApiClient,
     user: Address,
     dex: Option<&str>,
 ) -> Result<Rows<PositionRow>, anyhow::Error> {
     let positions = client
+        .sdk()
         .clearinghouse_state(user, dex.map(str::to_string))
         .await
         .map_err(from_sdk)?
@@ -290,7 +291,7 @@ async fn list_snapshot(
 /// when the metadata snapshot lacks it, as orders do.
 async fn resolve_perp_asset(
     resolver: &AssetResolver,
-    client: &HttpClient,
+    client: &ApiClient,
     coin: &str,
 ) -> Result<PerpAsset, CliError> {
     Ok(resolver.resolve_perp_or_fetch(client, coin).await?)
@@ -320,12 +321,13 @@ fn margin_direction(ntli: i64) -> &'static str {
 
 /// The open `coin` position of `account`, if any. A closed one is not open.
 async fn open_position(
-    client: &HttpClient,
+    client: &ApiClient,
     account: Address,
     perp: &PerpAsset,
 ) -> Result<Option<AssetPosition>, CliError> {
     let coin = perp.display_name();
     Ok(client
+        .sdk()
         .clearinghouse_state(account, perp.dex.clone())
         .await
         .map_err(from_sdk)?
@@ -345,7 +347,7 @@ async fn ensure_isolated_position(
     on_behalf_of: Option<&str>,
 ) -> Result<(), CliError> {
     let coin = perp.display_name();
-    match open_position(inv.remote()?.api().sdk(), account, perp).await? {
+    match open_position(inv.remote()?.api(), account, perp).await? {
         None => Err(CliError::Unsupported(format!(
             "{account} has no open {coin} position, and isolated margin belongs to an open isolated position; open one first (set isolated mode with `{}`)",
             update_leverage_command(&coin, "<N>", true, on_behalf_of)
@@ -412,7 +414,7 @@ impl CliCommand for PositionsList {
     async fn run(inv: &Invocation, args: &PositionsListArgs) -> Result<(), anyhow::Error> {
         // Validate once, before either path: a watch must not start on a dex that
         // cannot be read, and both paths send the canonical spelling.
-        let client = inv.remote()?.api().sdk();
+        let client = inv.remote()?.api();
         let dex = canonical_dex(client, args.dex.as_deref()).await?;
         if args.watch.watch {
             watch_positions(inv, dex.as_deref(), args.watch.max_ticks).await
@@ -448,8 +450,8 @@ impl CliCommand for PositionsUpdateLeverage {
     ]);
 
     async fn run(inv: &Invocation, args: &UpdateLeverageArgs) -> Result<(), anyhow::Error> {
-        let resolver = inv.trading_resolver().await?;
-        let perp = resolve_perp_asset(&resolver, inv.remote()?.api().sdk(), &args.coin).await?;
+        let resolver = inv.asset_resolver().await?;
+        let perp = resolve_perp_asset(&resolver, inv.remote()?.api(), &args.coin).await?;
         let (coin, asset) = (perp.display_name(), perp.index);
         let mode = if args.isolated {
             MarginModeArg::Isolated
@@ -534,8 +536,8 @@ impl CliCommand for PositionsUpdateMargin {
 
     async fn run(inv: &Invocation, args: &UpdateMarginArgs) -> Result<(), anyhow::Error> {
         let ntli = margin_micro_units(args.amount)?;
-        let resolver = inv.trading_resolver().await?;
-        let perp = resolve_perp_asset(&resolver, inv.remote()?.api().sdk(), &args.coin).await?;
+        let resolver = inv.asset_resolver().await?;
+        let perp = resolve_perp_asset(&resolver, inv.remote()?.api(), &args.coin).await?;
         let (coin, asset) = (perp.display_name(), perp.index);
         if ntli < 0 && perp.margin_rule.refuses_margin_removal() {
             return Err(CliError::Unsupported(format!(
@@ -617,8 +619,8 @@ impl CliCommand for PositionsTopUpMargin {
     async fn run(inv: &Invocation, args: &TopUpMarginArgs) -> Result<(), anyhow::Error> {
         quantity::require_positive(args.leverage, "leverage")?;
         let leverage = args.leverage.normalize();
-        let resolver = inv.trading_resolver().await?;
-        let perp = resolve_perp_asset(&resolver, inv.remote()?.api().sdk(), &args.coin).await?;
+        let resolver = inv.asset_resolver().await?;
+        let perp = resolve_perp_asset(&resolver, inv.remote()?.api(), &args.coin).await?;
         let (coin, asset) = (perp.display_name(), perp.index);
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
@@ -675,7 +677,7 @@ async fn watch_positions(
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let client = remote.api().sdk();
+    let client = remote.api();
     let user = inv.resolve_signer_account().await?;
     let dex = dex.map(str::to_string);
 
