@@ -289,6 +289,13 @@ impl Invocation {
         }
     }
 
+    /// The signer a dry run previews with: `None` when none resolves, an error
+    /// when one resolves that the live run would refuse. The one way a command's
+    /// preview asks, so no preview swallows a refusal the live run would give.
+    pub(crate) fn dry_run_signer(&self) -> Result<Option<&SelectedSigner>, CliError> {
+        Ok(self.preview_signer()?.ok())
+    }
+
     /// The signer a live run signs with, checked before any prompt or network
     /// lookup: it must fit the command ([`Self::ensure_signer_fits`]) and, for a
     /// command that signs, hold a key. A dry run signs nothing, so it needs only
