@@ -7,19 +7,23 @@ use hypersdk::{Address, Decimal};
 use rust_decimal::RoundingStrategy;
 
 use super::args::{
-    BPS_DENOMINATOR, BatchCreateArgs, BatchCreateOrder, BatchModifyArgs, BracketArgs, CreateArgs,
-    CreateOrderType, CreateTpslGroupingArg, MAX_MARKET_ORDER_SLIPPAGE_BPS,
-    MIN_MARKET_ORDER_SLIPPAGE_BPS, OrderSide, ScaleArgs, TifArg, TpslArgs, TriggerPriceSpec,
-    TwapCreateArgs,
+    BatchCreateArgs, BatchCreateOrder, BatchModifyArgs, BracketArgs, CreateArgs,
+    CreateTpslGroupingArg, ScaleArgs, TpslArgs, TriggerPriceSpec, TwapCreateArgs,
 };
 use super::cloid::parse_cloid;
 use super::identifier::{BatchModifyOrder, OrderIdentifier, ensure_distinct};
+use super::limits::{TWAP_MAX_SECONDS, TWAP_MIN_SECONDS, TWAP_STEP_SECONDS};
+use super::vocab::{
+    BPS_DENOMINATOR, CreateOrderType, MAX_MARKET_ORDER_SLIPPAGE_BPS, MIN_MARKET_ORDER_SLIPPAGE_BPS,
+    OrderSide, TifArg,
+};
 use crate::assets::{Market, PerpAsset, perp_price_tick, spot_price_tick};
 use crate::builder_fee::{MaxFeeRate, SubBuilder, parse_sub_builders};
 use crate::errors::CliError;
+use crate::hints::{BUY_DRY_RUN, TPSL_DRY_RUN};
 use crate::input_hardening::{FilePolicy, read_json_file};
 use crate::margin::{MarginModeArg, MarginPlan};
-use crate::quantity::{not_positive, require_positive};
+use crate::quantity::{not_positive, require_positive, require_positive_if_set};
 use crate::wire::{self, AddressRole};
 
 pub(super) const MAX_BATCH_ORDER_COUNT: usize = 500;
@@ -244,8 +248,8 @@ impl OrderSpec {
         validate_create_order_type_flags(args)?;
         positive_price(args.price, "price")?;
         positive_price(args.trigger_price, "trigger-price")?;
-        positive_quantity(args.size, "size")?;
-        positive_quantity(args.amount, "amount")?;
+        require_positive_if_set(args.size, "size")?;
+        require_positive_if_set(args.amount, "amount")?;
         positive_price(args.take_profit, "take-profit")?;
         positive_price(args.stop_loss, "stop-loss")?;
         validate_market_slippage(args.max_slippage_bps)?;
@@ -278,7 +282,7 @@ impl OrderSpec {
         tif: TifArg,
     ) -> Result<Self, CliError> {
         positive_price(Some(price), "price")?;
-        positive_quantity(Some(size), "size")?;
+        require_positive(size, "size")?;
         Ok(Self {
             coin: coin.to_string(),
             dex: dex.map(str::to_string),
@@ -326,8 +330,8 @@ impl OrderSpec {
         max_slippage_bps: u16,
     ) -> Result<Self, CliError> {
         match sizing {
-            MarketSizing::Size(size) => positive_quantity(Some(size), "size")?,
-            MarketSizing::Amount(amount) => positive_quantity(Some(amount), "amount")?,
+            MarketSizing::Size(size) => require_positive(size, "size")?,
+            MarketSizing::Amount(amount) => require_positive(amount, "amount")?,
         }
         validate_market_slippage(max_slippage_bps)?;
         Ok(Self {
@@ -408,11 +412,10 @@ fn order_kind(args: &CreateArgs) -> Result<OrderKind, CliError> {
                     ));
                 }
                 (None, None) => {
-                    return Err(CliError::Configuration(
+                    return Err(CliError::Configuration(format!(
                         "orders create requires --amount or --size for market orders.\n  \
-                         hyperliquid --format json --dry-run buy --coin BTC --size 0.001"
-                            .to_string(),
-                    ));
+                         {BUY_DRY_RUN}"
+                    )));
                 }
             };
             Ok(OrderKind::Market {
@@ -534,7 +537,7 @@ impl ScaleLadder {
     pub(super) fn from_args(args: &ScaleArgs) -> Result<Self, CliError> {
         positive_price(Some(args.start_price), "start-price")?;
         positive_price(Some(args.end_price), "end-price")?;
-        positive_quantity(Some(args.total_size), "total-size")?;
+        require_positive(args.total_size, "total-size")?;
         let Some(order_count) = NonZeroUsize::new(args.order_count) else {
             return Err(CliError::Configuration(
                 "orders scale requires --orders greater than zero".to_string(),
@@ -733,13 +736,12 @@ fn validate_tpsl_triggers(
     stop_loss: Option<&TriggerPriceSpec>,
     size: Option<Decimal>,
 ) -> Result<(), CliError> {
-    positive_quantity(size, "size")?;
+    require_positive_if_set(size, "size")?;
     if take_profit.is_none() && stop_loss.is_none() {
-        return Err(CliError::Configuration(
+        return Err(CliError::Configuration(format!(
             "orders tpsl requires --take-profit or --stop-loss.\n  \
-             hyperliquid --format json --dry-run orders tpsl --coin ETH --take-profit +10% --stop-loss -5%"
-                .to_string(),
-        ));
+             {TPSL_DRY_RUN}"
+        )));
     }
     if let (Some(take_profit), Some(stop_loss)) = (take_profit, stop_loss)
         && take_profit == stop_loss
@@ -753,26 +755,27 @@ fn validate_tpsl_triggers(
 
 /// Validate `orders twap-create` and return its duration in whole minutes.
 pub(super) fn validate_twap_create_args(args: &TwapCreateArgs) -> Result<u32, CliError> {
-    positive_quantity(Some(args.size), "size")?;
-    if args.duration < 300 {
-        return Err(CliError::Configuration(
-            "TWAP duration must be at least 300 seconds and a whole-minute value in seconds (for example, --duration 300, --duration 600, or --duration 3600)"
-                .to_string(),
-        ));
+    require_positive(args.size, "size")?;
+    if args.duration < TWAP_MIN_SECONDS {
+        return Err(CliError::Configuration(format!(
+            "TWAP duration must be at least {TWAP_MIN_SECONDS} seconds and a whole-minute value in seconds (for example, --duration 300, --duration 600, or --duration 3600)"
+        )));
     }
-    if !args.duration.is_multiple_of(60) {
+    if !args.duration.is_multiple_of(TWAP_STEP_SECONDS) {
         return Err(CliError::Configuration(
             "TWAP duration must be a whole-minute value in seconds; use values like --duration 300, --duration 600, or --duration 3600"
                 .to_string(),
         ));
     }
     let too_long = || {
-        CliError::Configuration("TWAP duration cannot exceed 7 days (604800 seconds)".to_string())
+        CliError::Configuration(format!(
+            "TWAP duration cannot exceed 7 days ({TWAP_MAX_SECONDS} seconds)"
+        ))
     };
-    if args.duration > crate::clock::WEEK.of(1).as_secs() {
+    if args.duration > TWAP_MAX_SECONDS {
         return Err(too_long());
     }
-    u32::try_from(args.duration / 60).map_err(|_| too_long())
+    u32::try_from(args.duration / TWAP_STEP_SECONDS).map_err(|_| too_long())
 }
 
 fn validate_create_order_type_flags(args: &CreateArgs) -> Result<(), CliError> {
@@ -842,10 +845,6 @@ pub(super) fn positive_price(value: Option<Decimal>, name: &str) -> Result<(), C
         }
         _ => Ok(()),
     }
-}
-
-pub(super) fn positive_quantity(value: Option<Decimal>, name: &str) -> Result<(), CliError> {
-    value.map_or(Ok(()), |value| require_positive(value, name))
 }
 
 fn validate_market_slippage(max_slippage_bps: u16) -> Result<(), CliError> {

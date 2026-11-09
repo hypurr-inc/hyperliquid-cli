@@ -169,7 +169,7 @@ async fn bid(
         bid_hype: HYPE_WEI.amount(bid).to_string(),
         status,
     };
-    inv.print(&Rows::one(row));
+    inv.print(&Rows::list_of_one(row));
     Ok(())
 }
 

@@ -37,33 +37,18 @@ pub(super) struct OrderRun<'a> {
     /// The vault or subaccount the command acts for; `None` acts for the signer.
     vault: Option<Address>,
     on_behalf_of: Option<String>,
-    yes: bool,
 }
 
 impl<'a> OrderRun<'a> {
-    /// A command with a `--yes` flag: it asks for approval where its spec
-    /// prompts, unless `yes` was given.
     pub(super) fn new(
         inv: &'a Invocation,
         on_behalf_of: Option<&str>,
-        yes: bool,
     ) -> Result<Self, anyhow::Error> {
         Ok(Self {
             inv,
             vault: resolve_optional_acting_account_target(inv, on_behalf_of)?,
             on_behalf_of: on_behalf_of.map(str::to_string),
-            yes,
         })
-    }
-
-    /// A command that never asks (`cancel`, `modify`, `twap-cancel`): it has no
-    /// `--yes` to read. That none of them prompts is pinned over the source by
-    /// `cli::tests::commands_run_unprompted_only_when_their_spec_never_prompts`.
-    pub(super) fn unprompted(
-        inv: &'a Invocation,
-        on_behalf_of: Option<&str>,
-    ) -> Result<Self, anyhow::Error> {
-        Self::new(inv, on_behalf_of, false)
     }
 
     pub(super) fn on_behalf_of(&self) -> Option<&str> {
@@ -81,8 +66,9 @@ impl<'a> OrderRun<'a> {
         )
     }
 
-    /// It fails before any side effect when the connection is not there. `yes` waives the
-    /// approval prompt, which only commands whose spec prompts on this network ask for.
+    /// It fails before any side effect when the connection is not there. `--yes`
+    /// waives the approval prompt, which only commands whose spec prompts on this
+    /// network ask for.
     pub(super) fn context<'s>(
         &'s self,
         signer: &'s SelectedSigner,
@@ -93,7 +79,7 @@ impl<'a> OrderRun<'a> {
             api: remote.api(),
             signer,
             vault_address: self.vault,
-            requires_approval: self.inv.requires_approval(self.yes)?,
+            requires_approval: self.inv.requires_approval(self.inv.confirmed())?,
         })
     }
 

@@ -129,6 +129,11 @@ pub(crate) fn require_positive(amount: Decimal, name: &str) -> Result<(), CliErr
     Ok(())
 }
 
+/// [`require_positive`] for an amount a command may leave out.
+pub(crate) fn require_positive_if_set(amount: Option<Decimal>, name: &str) -> Result<(), CliError> {
+    amount.map_or(Ok(()), |amount| require_positive(amount, name))
+}
+
 /// A count of at least 1, as the clap value parser of an option that takes one.
 pub fn parse_positive_usize(raw: &str) -> Result<usize, String> {
     let value = raw

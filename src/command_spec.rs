@@ -30,6 +30,16 @@ pub const YES_FOR_AUTOMATION: ArgSpec =
 pub const YES_FOR_LIVE_EXECUTION: ArgSpec =
     YES.describe("Skip confirmation prompt for live execution.");
 
+/// `--on-behalf-of`, hardened: the acting-account selector of a command that
+/// sends for a vault or subaccount.
+pub const ON_BEHALF_OF: ArgSpec = arg("on_behalf_of")
+    .kind(InputKind::ActingAccountSelector)
+    .resource_id("on-behalf-of selector");
+/// [`ON_BEHALF_OF`] with the description the schema gives it.
+pub const ON_BEHALF_OF_DESCRIBED: ArgSpec = ON_BEHALF_OF.describe(
+    "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
+);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Lifecycle {

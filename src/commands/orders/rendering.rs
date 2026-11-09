@@ -2,10 +2,10 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::types::OrderResponseStatus;
 use serde::Serialize;
 
-use super::args::TpslGroupingArg;
 use super::exchange::{Placement, Rejected, status_error};
 use super::prepared::{PreparedOrder, PreparedTpslLeg};
 use super::status::Status;
+use super::vocab::TpslGroupingArg;
 use crate::commands::common::rows::{ListRow, Row, paint_column};
 use crate::errors::{CliError, NextCommand, partial_results_fields};
 use crate::hints::CHECK_LIVE_COMMAND;

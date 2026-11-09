@@ -1,16 +1,19 @@
 use std::time::Duration;
 
-use hypersdk::hypercore::types::TimeInForce;
+use hypersdk::hypercore::types::{OrderGrouping, TimeInForce};
 
 use super::*;
 use crate::assets::test_support::{hip3_perp, perp, spot as spot_asset};
 use crate::assets::{AssetMetadata, SpotAsset};
 use crate::commands::orders::args::{
-    CreateTpslGroupingArg, DEFAULT_MARKET_ORDER_SLIPPAGE_BPS, PositionTpslGroupingArg, TpslArgs,
+    CreateArgs, CreateTpslGroupingArg, PositionTpslGroupingArg, TpslArgs,
 };
+use crate::commands::orders::preview::tpsl_dry_run_plan;
 use crate::commands::orders::validation::{MAX_BATCH_ORDER_COUNT, validate_order_for_market};
+use crate::commands::orders::vocab::DEFAULT_MARKET_ORDER_SLIPPAGE_BPS;
 use crate::env::EnvSource;
 use crate::http_api::ApiClient;
+use crate::margin::MarginModeArg;
 use crate::network::Network;
 
 fn resolver() -> AssetResolver {

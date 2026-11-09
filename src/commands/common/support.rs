@@ -4,6 +4,7 @@ use hypersdk::hypercore::types::Action;
 use crate::dry_run::{DryRunEnvelope, DryRunSigning};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
+use crate::signing::SelectedSigner;
 
 /// A signing command's preview also names the signer, once resolved here and
 /// without prompting. A signer that cannot be resolved prints as `null` with a
@@ -64,6 +65,11 @@ pub(crate) fn resolve_optional_acting_account_target(
     selector
         .map(|selector| inv.resolve_account(selector))
         .transpose()
+}
+
+/// The account an action sent for `vault` is on: the vault, else the signer's own.
+pub(crate) fn acting_account(vault: Option<Address>, signer: &SelectedSigner) -> Address {
+    vault.unwrap_or_else(|| signer.query_address())
 }
 
 /// The document an L1 `action` is sent as, for a preview that must show it

@@ -397,7 +397,7 @@ async fn convert(inv: &Invocation, conversion: Conversion, yes: bool) -> Result<
     )
     .await?;
 
-    inv.print(&Rows::one(OutcomeActionConfirmation {
+    inv.print(&Rows::list_of_one(OutcomeActionConfirmation {
         action: conversion.name().to_string(),
         status: "confirmed".to_string(),
         outcome: conversion.outcome(),
