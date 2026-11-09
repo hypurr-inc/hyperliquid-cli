@@ -6,15 +6,13 @@ mod support;
 
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, order_reply};
-use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, json_stdout, wire};
+use support::orders::{answer_info, write_orders_file};
+use support::signing::test_signer;
+use support::{IsolatedHome, json_stdout, wire};
 
 const BUILDER: &str = "0x00000000000000000000000000000000000000bb";
 const SUB_A: &str = "0x00000000000000000000000000000000000000cc";
 const SUB_B: &str = "0x00000000000000000000000000000000000000dd";
-
-fn master() -> String {
-    expected_address(VALID_PRIVATE_KEY).to_lowercase()
-}
 
 /// A stop order as `frontendOpenOrders` lists it on mainnet.
 fn stop_order(oid: u64, children: Vec<Value>) -> Value {
@@ -37,8 +35,6 @@ fn limit_order(oid: u64) -> Value {
         "orderType": "Limit", "origSz": "2500.0", "tif": "Gtc", "cloid": null
     })
 }
-
-// ---- order listings ----
 
 #[tokio::test]
 async fn open_orders_carry_their_trigger_fields_and_children() {
@@ -162,7 +158,7 @@ async fn order_history_rows_carry_status_and_status_time() {
 }
 
 #[tokio::test]
-async fn order_history_raw_fallback_has_no_status_to_report() {
+async fn order_history_falls_back_to_the_raw_list_on_a_shape_mismatch() {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server
@@ -179,8 +175,38 @@ async fn order_history_raw_fallback_has_no_status_to_report() {
         .success();
     let row = &json_stdout(&assert)[0];
 
+    // A bare order list is not the wrapped shape the SDK decodes: only that
+    // mismatch sends the CLI to the raw read, which has no status to report.
     assert_eq!(row["oid"], 5);
     assert!(row.get("status").is_none(), "{row}");
+    assert_eq!(
+        server.info_requests("historicalOrders").await.len(),
+        2,
+        "the SDK read, then the raw read"
+    );
+}
+
+#[tokio::test]
+async fn order_history_does_not_retry_a_malformed_body_as_a_raw_list() {
+    // Cut off mid-document (an EOF error) and not JSON at all (a syntax error).
+    for body in [r#"[{"order": {"coin": "BTC""#, "<html>bad gateway</html>"] {
+        let env = IsolatedHome::new();
+        let server = ExchangeFixture::start().await;
+        answer_info(&server, json!({"type": "historicalOrders"}), 200, body).await;
+
+        let assert = env
+            .live_json(&server)
+            .args(["orders", "history"])
+            .assert()
+            .failure();
+
+        assert!(!assert.get_output().stdout.is_empty());
+        assert_eq!(
+            server.info_requests("historicalOrders").await.len(),
+            1,
+            "{body}: a body that is not JSON is an API failure, not a shape to retry"
+        );
+    }
 }
 
 #[tokio::test]
@@ -205,8 +231,6 @@ async fn order_history_status_comes_from_the_raw_list_when_the_sdk_shape_fails()
     assert_eq!(row["status"], "someNewStatus");
     assert_eq!(row["status_timestamp"], 7);
 }
-
-// ---- cloid ----
 
 #[tokio::test]
 async fn a_zero_cloid_is_refused_before_anything_is_sent() {
@@ -243,8 +267,6 @@ async fn a_zero_cloid_is_refused_before_anything_is_sent() {
     assert!(server.exchange_actions().await.is_empty());
 }
 
-// ---- builder approval ----
-
 fn create_with_builder<'a>(extra: &[&'a str]) -> Vec<&'a str> {
     let mut args = vec![
         "orders",
@@ -269,7 +291,7 @@ fn create_with_builder<'a>(extra: &[&'a str]) -> Vec<&'a str> {
 async fn approved_max_fee(server: &ExchangeFixture, tenths_bps: u64) {
     server
         .mount_info(
-            json!({"type": "maxBuilderFee", "user": master(), "builder": BUILDER}),
+            json!({"type": "maxBuilderFee", "user": test_signer(), "builder": BUILDER}),
             json!(tenths_bps),
         )
         .await;
@@ -319,7 +341,7 @@ async fn a_builder_fee_within_the_approved_maximum_is_sent() {
     assert_eq!(actions[0]["builder"], json!({"b": BUILDER, "f": 10}));
     assert_eq!(
         server.info_requests("maxBuilderFee").await,
-        [json!({"type": "maxBuilderFee", "user": master(), "builder": BUILDER})]
+        [json!({"type": "maxBuilderFee", "user": test_signer(), "builder": BUILDER})]
     );
 }
 
@@ -407,8 +429,6 @@ async fn the_dry_run_reports_the_approval_and_survives_an_unreadable_one() {
         "unknown"
     );
 }
-
-// ---- sub-builders ----
 
 #[tokio::test]
 async fn sub_builders_ride_in_the_builder_object() {
@@ -509,8 +529,6 @@ async fn a_sub_builder_needs_a_builder() {
         .assert()
         .code(2);
 }
-
-// ---- order write priority ----
 
 fn ioc_order<'a>(extra: &[&'a str]) -> Vec<&'a str> {
     let mut args = vec![
@@ -808,21 +826,15 @@ async fn the_dry_run_names_the_priority_grouping() {
     assert_eq!(args["grouping_wire"], json!({"p": 80000}));
 }
 
-// ---- orders batch-modify ----
-
 async fn mount_open_order(server: &ExchangeFixture, oid: u64, cloid: Option<&str>) {
     let order = support::wire::basic_order_with_cloid("BTC", oid, cloid);
     let oid_or_cloid = cloid.map_or(json!(oid), |cloid| json!(cloid));
     server
         .mount_info(
-            json!({"type": "orderStatus", "user": master(), "oid": oid_or_cloid}),
+            json!({"type": "orderStatus", "user": test_signer(), "oid": oid_or_cloid}),
             wire::order_status_reply(order),
         )
         .await;
-}
-
-fn write_orders(env: &IsolatedHome, name: &str, orders: Value) {
-    std::fs::write(env.tmp_path().join(name), orders.to_string()).unwrap();
 }
 
 #[tokio::test]
@@ -838,10 +850,10 @@ async fn batch_modify_sends_every_modification_in_one_batch_modify_action() {
             wire::resting_status(112),
         ]))
         .await;
-    write_orders(
+    write_orders_file(
         &env,
         "mods.json",
-        json!({"orders": [
+        &json!({"orders": [
             {"order_id": 11, "price": "49000.123456"},
             {"cloid": cloid, "size": "0.25"}
         ]}),
@@ -890,14 +902,18 @@ async fn batch_modify_keeps_a_trigger_orders_trigger_price_on_a_size_only_change
     });
     server
         .mount_info(
-            json!({"type": "orderStatus", "user": master(), "oid": 15}),
+            json!({"type": "orderStatus", "user": test_signer(), "oid": 15}),
             wire::order_status_reply(stop),
         )
         .await;
     server
         .mount_exchange(order_reply(vec![json!("waitingForTrigger")]))
         .await;
-    write_orders(&env, "mods.json", json!([{"order_id": 15, "size": "0.05"}]));
+    write_orders_file(
+        &env,
+        "mods.json",
+        &json!([{"order_id": 15, "size": "0.05"}]),
+    );
 
     env.live_json(&server)
         .args([
@@ -932,10 +948,10 @@ async fn batch_modify_reports_a_partial_failure_per_modification() {
             json!({"error": "Order has invalid size."}),
         ]))
         .await;
-    write_orders(
+    write_orders_file(
         &env,
         "mods.json",
-        json!([{"order_id": 11, "price": "49000"}, {"order_id": 12, "price": "48000"}]),
+        &json!([{"order_id": 11, "price": "49000"}, {"order_id": 12, "price": "48000"}]),
     );
 
     let assert = env
@@ -970,7 +986,7 @@ async fn batch_modify_validates_the_file_before_reading_the_exchange() {
         ]))
         .await;
     let run = |name: &str, orders: Value| {
-        write_orders(&env, name, orders);
+        write_orders_file(&env, name, &orders);
         env.live_json(&server)
             .args(["orders", "batch-modify", "--orders-file", name])
             .current_dir(env.tmp_path())
@@ -1030,17 +1046,17 @@ async fn batch_modify_names_the_modification_a_planning_error_belongs_to() {
     mount_open_order(&server, 11, None).await;
     server
         .mount_info(
-            json!({"type": "orderStatus", "user": master(), "oid": 15}),
+            json!({"type": "orderStatus", "user": test_signer(), "oid": 15}),
             wire::order_status_reply(stop),
         )
         .await;
     server
         .mount_exchange(order_reply(vec![wire::resting_status(1)]))
         .await;
-    write_orders(
+    write_orders_file(
         &env,
         "mods.json",
-        json!([{"order_id": 11, "price": "49000"}, {"order_id": 15, "size": "0.05"}]),
+        &json!([{"order_id": 11, "price": "49000"}, {"order_id": 15, "size": "0.05"}]),
     );
 
     let assert = env
@@ -1066,10 +1082,10 @@ async fn batch_modify_names_the_modification_a_planning_error_belongs_to() {
 async fn batch_modify_dry_run_previews_without_reading_orders() {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
-    write_orders(
+    write_orders_file(
         &env,
         "mods.json",
-        json!([{"order_id": 11, "price": "49000"}, {"cloid": "0x00000000000000000000000000000abc", "size": "2"}]),
+        &json!([{"order_id": 11, "price": "49000"}, {"cloid": "0x00000000000000000000000000000abc", "size": "2"}]),
     );
 
     let assert = env
@@ -1107,10 +1123,10 @@ async fn batch_modify_on_mainnet_needs_approval_unless_yes() {
     server
         .mount_exchange(order_reply(vec![wire::resting_status(111)]))
         .await;
-    write_orders(
+    write_orders_file(
         &env,
         "mods.json",
-        json!([{"order_id": 11, "price": "49000"}]),
+        &json!([{"order_id": 11, "price": "49000"}]),
     );
 
     let mut command = env.live_command(&server);
