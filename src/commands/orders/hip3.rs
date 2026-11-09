@@ -40,7 +40,8 @@ impl Hip3MarginPlan {
 }
 
 /// The transfers that top up each HIP-3 dex `orders` trade on, one per dex
-/// that needs one. Orders on the default dex or on a unified account need none.
+/// that needs one. Orders on the default dex, or on an account whose exchange moves
+/// dex collateral itself, need none.
 pub async fn plan_hip3_margin_transfers(
     api: &ApiClient,
     user: Address,
@@ -52,10 +53,7 @@ pub async fn plan_hip3_margin_transfers(
     }
 
     let abstraction = fetch_abstraction(api, user).await?;
-    if matches!(
-        abstraction.normalized_mode.as_str(),
-        "unified-account" | "portfolio-margin"
-    ) {
+    if abstraction.normalized_mode.moves_dex_collateral_itself() {
         return Ok(Vec::new());
     }
 

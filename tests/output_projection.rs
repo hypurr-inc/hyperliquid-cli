@@ -1,4 +1,4 @@
-use hyperliquid_cli::commands::abstraction::AbstractionRow;
+use hyperliquid_cli::commands::abstraction::{AbstractionRow, AccountMode};
 use hyperliquid_cli::commands::account::{FillRow, FillsOutput};
 use hyperliquid_cli::commands::meta::{AssetContextRow, DexRow, MetaOutput, MetaSpotRow};
 use hyperliquid_cli::commands::orderbook::{
@@ -112,7 +112,7 @@ fn account_abstraction_projection_selects_requested_fields() {
     let output = One::new(AbstractionRow {
         user: "0x0000000000000000000000000000000000000001".to_string(),
         raw_mode: "unifiedAccount".to_string(),
-        normalized_mode: "unified-account".to_string(),
+        normalized_mode: AccountMode::Unified,
     });
     let rendered = json_session(Some("user,normalized_mode")).render(&output);
     let json: serde_json::Value = serde_json::from_str(&rendered).unwrap();

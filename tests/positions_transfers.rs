@@ -167,6 +167,15 @@ async fn mock_positions_transfer_server(withdrawable: &str, spot_usdc_total: &st
         .await;
 
     Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
+            serde_json::json!({"type": "userAbstraction"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("disabled")))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
         .and(path("/exchange"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "status": "ok",

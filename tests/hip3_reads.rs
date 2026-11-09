@@ -15,6 +15,15 @@ fn json_stdout(output: Vec<u8>) -> Value {
 }
 
 /// The minimum `/info` reads `orders open` needs to build an asset resolver.
+async fn mount_standard_account_mode(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(json!({ "type": "userAbstraction" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!("disabled")))
+        .mount(server)
+        .await;
+}
+
 async fn mount_resolver_metadata(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/info"))
@@ -206,6 +215,7 @@ async fn portfolio_dex_view_skips_account_wide_reads() {
     // The loopback API override probes the endpoint with an unqualified allMids.
     mount_override_healthcheck(&server).await;
     mount_resolver_metadata(&server).await;
+    mount_standard_account_mode(&server).await;
     Mock::given(method("POST"))
         .and(path("/info"))
         .and(body_partial_json(
@@ -306,6 +316,7 @@ async fn blank_dex_keeps_account_wide_portfolio_rows() {
     let env = IsolatedHome::new();
     let server = MockServer::start().await;
     mount_override_healthcheck(&server).await;
+    mount_standard_account_mode(&server).await;
     Mock::given(method("POST"))
         .and(path("/info"))
         .and(body_json(

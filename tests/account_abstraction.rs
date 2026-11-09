@@ -203,3 +203,137 @@ fn master_only_actions_refuse_a_stored_api_wallet_even_under_dry_run() {
         }
     }
 }
+
+#[test]
+fn account_abstraction_set_help_and_schema_carry_the_protocol_cautions() {
+    let env = IsolatedHome::new();
+    let text = |args: &[&str]| {
+        let output = env
+            .command()
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(output).unwrap()
+    };
+    let help = text(&["account", "abstraction", "set", "--help"]);
+    let schema = text(&[
+        "--format",
+        "json",
+        "schema",
+        "account",
+        "abstraction",
+        "set",
+    ]);
+
+    for caution in [
+        "`disabled` is Standard",
+        "builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode",
+        "limited to 50k actions per day",
+    ] {
+        assert!(help.contains(caution), "{caution}: {help}");
+        assert!(schema.contains(caution), "{caution}: {schema}");
+    }
+}
+
+fn perp_state() -> Value {
+    let summary = serde_json::json!({
+        "accountValue": "626469", "totalNtlPos": "0",
+        "totalRawUsd": "626469", "totalMarginUsed": "0"
+    });
+    serde_json::json!({
+        "marginSummary": summary,
+        "crossMarginSummary": summary,
+        "crossMaintenanceMarginUsed": "0",
+        "withdrawable": "479227",
+        "assetPositions": [],
+        "time": 1_700_000_000_000_u64
+    })
+}
+
+async fn portfolio_server(raw_mode: &str) -> MockServer {
+    let server = mock_info_server().await;
+    for (request, response) in [
+        (
+            serde_json::json!({"type": "userAbstraction"}),
+            serde_json::json!(raw_mode),
+        ),
+        (
+            serde_json::json!({"type": "clearinghouseState"}),
+            perp_state(),
+        ),
+        (
+            serde_json::json!({"type": "spotClearinghouseState"}),
+            serde_json::json!({"balances": [{
+                "coin": "USDC", "token": 0, "hold": "147242",
+                "total": "1186505", "entryNtl": "0"
+            }]}),
+        ),
+        (
+            serde_json::json!({"type": "userVaultEquities"}),
+            serde_json::json!([]),
+        ),
+    ] {
+        Mock::given(method("POST"))
+            .and(path("/info"))
+            .and(body_partial_json(request))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&server)
+            .await;
+    }
+    server
+}
+
+fn portfolio_stdout(env: &IsolatedHome, server: &MockServer, format: &str) -> String {
+    let output = env
+        .command_with_server(server)
+        .args(["--format", format, "account", "portfolio", USER])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    String::from_utf8(output).unwrap()
+}
+
+#[tokio::test]
+async fn account_portfolio_names_the_account_mode_and_flags_a_partial_perp_state() {
+    for (raw_mode, normalized_mode, pooled) in [
+        ("unifiedAccount", "unified-account", true),
+        ("portfolioMargin", "portfolio-margin", true),
+        ("disabled", "disabled", false),
+        ("default", "default", false),
+        ("dexAbstraction", "dex-abstraction", false),
+    ] {
+        let env = IsolatedHome::new();
+        let server = portfolio_server(raw_mode).await;
+
+        let json: Value = serde_json::from_str(&portfolio_stdout(&env, &server, "json")).unwrap();
+        let summary = &json["summary"];
+
+        assert_eq!(summary["account_mode"], normalized_mode, "{raw_mode}");
+        if pooled {
+            assert_eq!(summary["perp_state_is_partial"], true, "{raw_mode}");
+        } else {
+            assert!(summary.get("perp_state_is_partial").is_none(), "{raw_mode}");
+        }
+        // The perp figures are reported as the API gave them in every mode.
+        assert_eq!(summary["account_value"], "626469");
+        assert_eq!(summary["withdrawable"], "479227");
+
+        let note = "Balances live in the spot balance under this mode";
+        let pretty = portfolio_stdout(&env, &server, "pretty");
+        assert_eq!(
+            pretty.matches(note).count(),
+            usize::from(pooled),
+            "{raw_mode}: {pretty}"
+        );
+        assert!(!portfolio_stdout(&env, &server, "table").contains(note));
+        assert!(
+            pretty.contains("1186505"),
+            "spot balances stay listed: {pretty}"
+        );
+    }
+}
