@@ -4,8 +4,6 @@
 //! plan, its flags and its consent text live with the other order plans; this
 //! sends it and reports the result.
 
-use std::io::{self, Write};
-
 use hypersdk::Decimal;
 use hypersdk::hypercore::types::Action;
 use serde::Serialize;
@@ -17,6 +15,7 @@ use super::planning::TrailingStopPlan;
 use super::status::Status;
 use crate::commands::common::rows::{ListRow, Row, Rows};
 use crate::hints;
+use crate::output::sink;
 use crate::terminal::OutputFormat;
 
 pub(super) async fn trailing_stop(
@@ -51,13 +50,10 @@ pub(super) async fn trailing_stop(
 }
 
 fn print_cancel_hint(oid: u64, on_behalf_of: Option<&str>) {
-    let mut stderr = io::stderr();
-    // A closed stderr must not turn a placed order into a failure.
-    let _ = writeln!(
-        stderr,
+    sink::err_line(&format!(
         "\nCancel it:\n    {}",
         hints::cancel_order_command(&oid.to_string(), on_behalf_of)
-    );
+    ));
 }
 
 #[derive(Debug, Clone, Serialize)]

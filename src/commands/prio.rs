@@ -8,7 +8,6 @@ use crate::command_spec::{CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
 use crate::commands::common::rows::{ListRow, MISSING, Row, Rows};
 use crate::commands::common::support::print_dry_run;
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::exchange::actions::send_l1_action;
 use crate::exchange_reply;
 use crate::invocation::Invocation;
@@ -125,10 +124,7 @@ async fn bid(
     let max = args.max;
     let ip = args.ip.as_str();
 
-    let status = client
-        .gossip_priority_auction_status()
-        .await
-        .map_err(from_sdk)?;
+    let status = client.gossip_priority_auction_status().await?;
     let slot = status
         .slots
         .get(args.slot as usize)
@@ -197,8 +193,7 @@ impl CliCommand for PrioStatus {
             .api()
             .sdk()
             .gossip_priority_auction_status()
-            .await
-            .map_err(from_sdk)?;
+            .await?;
 
         let rows: Vec<PrioritySlotRow> = status
             .slots

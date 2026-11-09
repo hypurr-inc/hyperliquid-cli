@@ -33,6 +33,7 @@ pub use session::Session;
 pub mod colors;
 pub mod format;
 pub mod notice;
+pub mod sink;
 
 /// `--select`, `--results-only` and `--max-results`, applied to JSON output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

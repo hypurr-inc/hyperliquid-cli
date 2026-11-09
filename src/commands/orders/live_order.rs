@@ -11,7 +11,7 @@ use hypersdk::hypercore::types::{
 };
 use hypersdk::{Address, Decimal};
 
-use crate::errors::{CliError, from_sdk};
+use crate::errors::CliError;
 use crate::http_api::ApiClient;
 
 /// A protocol asset index as a cancel-by-cloid request carries it: 32 bits,
@@ -83,11 +83,7 @@ impl LiveOrder {
         user: Address,
         dex: Option<String>,
     ) -> Result<Decimal, CliError> {
-        let open = client
-            .sdk()
-            .open_orders(user, dex)
-            .await
-            .map_err(from_sdk)?;
+        let open = client.sdk().open_orders(user, dex).await?;
         Ok(self.settle(self.open_size_in(&open)))
     }
 

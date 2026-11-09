@@ -139,7 +139,7 @@ thread_local! {
 }
 
 /// Unit tests never inherit the developer's terminal or environment: until a
-/// test opts in with [`with_streams_for_test`], nothing is styled.
+/// test opts in with `with_streams_for_test`, nothing is styled.
 fn streams() -> (bool, bool) {
     #[cfg(test)]
     if let Some(streams) = TEST_STREAMS.with(std::cell::Cell::get) {

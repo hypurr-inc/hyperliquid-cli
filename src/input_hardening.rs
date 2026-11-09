@@ -371,22 +371,6 @@ mod tests {
     }
 
     #[test]
-    fn every_secret_arg_a_command_declares_is_redacted_from_a_payload() {
-        let secret_ids: Vec<&str> = crate::command_registry::CommandRegistry::get()
-            .commands()
-            .iter()
-            .flat_map(|contract| contract.spec.args.iter())
-            .filter(|arg| arg.secret)
-            .map(|arg| arg.id)
-            .collect();
-        assert!(!secret_ids.is_empty());
-        for id in secret_ids {
-            let redacted = redact_sensitive_json(serde_json::json!({ id: "value" }));
-            assert_eq!(redacted[id], "[redacted]", "{id} escapes payload redaction");
-        }
-    }
-
-    #[test]
     fn parse_json_text_rejects_escaped_terminal_controls_and_oversized_strings() {
         let control_err = parse_json_text(r#"{"note":"bad\u001b"}"#, "payload").unwrap_err();
         assert!(

@@ -90,16 +90,18 @@ impl Vault {
             |path| path.join("wallets").display().to_string(),
         );
         let passphrase_env = env::OWS_PASSPHRASE;
-        Notice::Advice(vec![
-            format!(
-                "! {passphrase_env} isn't set, so this wallet is encrypted with an empty passphrase."
+        Notice::Advice {
+            headline: format!(
+                "{passphrase_env} isn't set, so this wallet is encrypted with an empty passphrase."
             ),
-            format!(
-                "  Anyone who can read {vault} can recover the key. To use a passphrase, delete the wallet and recreate it with:"
-            ),
-            format!("    {passphrase_env}=<passphrase> {WALLET_CREATE}"),
-        ])
-        .eprint(false);
+            lines: vec![
+                format!(
+                    "  Anyone who can read {vault} can recover the key. To use a passphrase, delete the wallet and recreate it with:"
+                ),
+                format!("    {passphrase_env}=<passphrase> {WALLET_CREATE}"),
+            ],
+        }
+        .eprint();
     }
 
     /// Whether the vault's wallet directory exists. Reads must not create it.

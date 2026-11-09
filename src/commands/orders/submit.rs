@@ -2,8 +2,6 @@
 //! and only [`clear_to_send`] and an [`Ungated`] declaration make one, so no
 //! command can place orders by skipping a step.
 
-use std::io::{self, Write};
-
 use hypersdk::hypercore::types::{
     Action, BatchOrder, OrderGrouping, OrderRequest, OrderResponseStatus,
 };
@@ -21,7 +19,7 @@ use crate::builder_fee::BuilderFee;
 use crate::errors::CliError;
 use crate::hints;
 use crate::margin::{self, MarginPlan};
-use crate::prompt;
+use crate::output::Notice;
 
 /// What a placement must clear before anything is sent, in the one order that
 /// is safe: the margin mode holds, the builder is approved, the HIP-3 dexes are
@@ -148,7 +146,7 @@ pub(super) async fn clear_to_send<'a>(
     let user = context.account();
     let helpers = plan_hip3_margin_transfers(context.api, user, &gate.funded).await?;
     if context.requires_approval {
-        warn_hip3_margin_helpers(&helpers)?;
+        warn_hip3_margin_helpers(&helpers);
     }
     context.consent(&gate.consent, gate.builder)?;
     execute_hip3_margin_transfers(context.inv, context.signer, user, &helpers).await?;
@@ -157,20 +155,14 @@ pub(super) async fn clear_to_send<'a>(
     })
 }
 
-fn warn_hip3_margin_helpers(helpers: &[Hip3MarginPlan]) -> Result<(), CliError> {
-    let mut stderr = io::stderr();
+fn warn_hip3_margin_helpers(helpers: &[Hip3MarginPlan]) {
     for plan in helpers {
-        writeln!(
-            stderr,
-            "{}",
-            prompt::warning(&format!(
-                "This order requires a helper transfer of {} {} from perp to dex:{} before placement.",
-                plan.amount, plan.token, plan.dest_dex
-            ))
-        )
-        .map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
+        Notice::Caution(format!(
+            "This order requires a helper transfer of {} {} from perp to dex:{} before placement.",
+            plan.amount, plan.token, plan.dest_dex
+        ))
+        .eprint();
     }
-    Ok(())
 }
 
 /// Fail before placing an order when `--margin-mode` does not match the margin
