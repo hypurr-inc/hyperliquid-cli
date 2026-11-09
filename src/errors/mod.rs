@@ -298,6 +298,15 @@ impl CliError {
         Self::Unsupported(format!("{prefix}{remote}"))
     }
 
+    /// Outcome asset notation given to a command that only trades or reads perp
+    /// and spot markets.
+    #[must_use]
+    pub fn unsupported_outcome_notation(raw: &str) -> Self {
+        Self::Unsupported(format!(
+            "outcome asset notation '{raw}' requires an outcome-aware command path; use `hyperliquid outcomes get {raw}` to inspect the encoded HIP-4 asset id. Live limit orders support outcome notation."
+        ))
+    }
+
     /// Secondary detail line shown under the headline in human output.
     #[must_use]
     pub fn detail(&self) -> Option<String> {

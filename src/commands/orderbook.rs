@@ -20,7 +20,6 @@ use serde::Serialize;
 use crate::assets::{AssetResolver, Market};
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, StreamBound, arg};
 use crate::commands::actions;
-use crate::commands::outcomes;
 use crate::commands::support::canonical_dex;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -547,7 +546,7 @@ fn market_info_coin(market: Market, input: &str) -> Result<String, CliError> {
     match market {
         Market::Perp(perp) => Ok(perp.display_name()),
         Market::Spot(spot) => Ok(spot.info_coin()),
-        Market::Outcome(_) => Err(outcomes::unsupported_outcome_trading_error(input)),
+        Market::Outcome(_) => Err(CliError::unsupported_outcome_notation(input)),
     }
 }
 
