@@ -20,6 +20,10 @@
 - `HYPERLIQUID_API_BASE_URL` (and its network variants) accept an IPv6 loopback host such as `http://[::1]:8080`, like the Bankr endpoint does.
 - `wallet show --account <vault wallet>` describes the wallet by name like the default wallet does. `account ls` no longer prints the always-empty Master, Agent Name and Expires At columns (JSON is unchanged).
 - `Config keys written` in wallet and setup receipts lists the keys the command changed, read from the config diff, and the root help lists every environment variable the CLI reads.
+- Every signing command's `--dry-run` preview carries `signer`, `acting_as` and `vault_address`; `transfer spot-to-perp|perp-to-spot|send|withdraw` and `prio bid` previews gained `acting_as` and `vault_address`, and `account abstraction set` reports `acting_as` as the signer's account instead of `null`. A `null` signer always comes with `signer_warning`.
+- `account abstraction set --dry-run` with no resolvable signer previews `user` as `null` instead of the placeholder address `0x…0001`.
+- `--dry-run` of `account abstraction set`, `builder approve` and `api-wallet create|approve|revoke` refuses a stored API wallet with exit `13`, as the live run does.
+- The dry-run `command` of `buy`, `sell`, `outcome-buy` and `outcome-sell` names the command typed instead of `orders create`.
 
 ## 0.17.0 - 2026-11-09
 

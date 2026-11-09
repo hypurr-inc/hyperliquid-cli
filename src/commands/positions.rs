@@ -17,9 +17,7 @@ use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, StreamBound, arg,
 };
 use crate::commands::actions;
-use crate::commands::support::{
-    canonical_dex, dry_run_signed_details, dry_run_signing_addresses, print_dry_run,
-};
+use crate::commands::support::{canonical_dex, print_dry_run};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
@@ -336,7 +334,7 @@ impl CliCommand for PositionsList {
     )
     .risk(Risk::AccountState)
     .ows(OwsSupport::ExperimentalFeatureGated)
-    .auth(true)
+    .auth()
     .stream(StreamBound::SnapshotWatch)
     .args(&[
         arg("watch")
@@ -390,26 +388,18 @@ impl CliCommand for PositionsUpdateLeverage {
         let is_cross = !args.isolated;
         let margin_mode = if is_cross { "cross" } else { "isolated" };
         if inv.dry_run() {
-            let (signer, acting_as) = dry_run_signing_addresses(inv);
             return print_dry_run(
                 inv,
-                "positions update-leverage",
-                dry_run_signed_details(
-                    inv,
-                    "update_position_leverage",
-                    serde_json::json!({
-                        "coin": args.coin,
-                        "resolved_coin": coin,
-                        "asset": asset,
-                        "network": inv.remote()?.network().to_string(),
-                        "leverage": args.leverage,
-                        "margin_mode": margin_mode,
-                        "is_cross": is_cross,
-                    }),
-                    signer,
-                    acting_as,
-                    None,
-                ),
+                "update_position_leverage",
+                serde_json::json!({
+                    "coin": args.coin,
+                    "resolved_coin": coin,
+                    "asset": asset,
+                    "network": inv.remote()?.network().to_string(),
+                    "leverage": args.leverage,
+                    "margin_mode": margin_mode,
+                    "is_cross": is_cross,
+                }),
             );
         }
         let resolved = inv.resolve_signer()?;
@@ -465,26 +455,18 @@ impl CliCommand for PositionsUpdateMargin {
         let resolver = inv.trading_resolver().await?;
         let (coin, asset) = resolve_perp_asset(&resolver, &args.coin)?;
         if inv.dry_run() {
-            let (signer, acting_as) = dry_run_signing_addresses(inv);
             return print_dry_run(
                 inv,
-                "positions update-margin",
-                dry_run_signed_details(
-                    inv,
-                    "update_isolated_margin",
-                    serde_json::json!({
-                        "coin": args.coin,
-                        "resolved_coin": coin,
-                        "asset": asset,
-                        "network": inv.remote()?.network().to_string(),
-                        "amount": args.amount.to_string(),
-                        "ntli": ntli,
-                        "margin_mode": "isolated",
-                    }),
-                    signer,
-                    acting_as,
-                    None,
-                ),
+                "update_isolated_margin",
+                serde_json::json!({
+                    "coin": args.coin,
+                    "resolved_coin": coin,
+                    "asset": asset,
+                    "network": inv.remote()?.network().to_string(),
+                    "amount": args.amount.to_string(),
+                    "ntli": ntli,
+                    "margin_mode": "isolated",
+                }),
             );
         }
         let resolved = inv.resolve_signer()?;

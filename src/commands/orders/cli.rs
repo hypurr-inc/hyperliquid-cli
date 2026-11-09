@@ -66,7 +66,7 @@ impl CliCommand for OrdersOpen {
     )
     .risk(Risk::AccountState)
     .ows(OwsSupport::ExperimentalFeatureGated)
-    .auth(true)
+    .auth()
     .stream(StreamBound::SnapshotWatch)
     .args(&[
         arg("watch")
@@ -136,7 +136,7 @@ impl CliCommand for OrdersHistory {
     )
     .risk(Risk::AccountState)
     .ows(OwsSupport::ExperimentalFeatureGated)
-    .auth(true);
+    .auth();
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         let resolver = inv.asset_resolver().await?;
@@ -196,10 +196,7 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
         let submission = prepare_create_order(client, &resolver, &spec).await?;
         if inv.dry_run() {
             let plan = create_dry_run_plan(&submission, args)?;
-            let command = plan.command();
             let would_execute = plan.would_execute();
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
             let mut details = plan.into_args();
             if let Ok(resolved) = inv.resolve_signer()
                 && let Some(object) = details.as_object_mut()
@@ -220,18 +217,7 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
                     );
                 }
             }
-            return print_dry_run(
-                inv,
-                command,
-                dry_run_signed_details(
-                    inv,
-                    would_execute,
-                    details,
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
-            );
+            return print_dry_run_acting_for(inv, would_execute, details, vault_address_string);
         }
         let resolved_signer = inv.resolve_signer()?;
         let signer = resolved_signer.selected_signer();
@@ -282,19 +268,11 @@ impl CliCommand for OrdersScale {
         let prepared = prepare_scale_batch(client, &resolver, args).await?;
         if inv.dry_run() {
             let plan = scale_dry_run_plan(&prepared, args);
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
+            return print_dry_run_acting_for(
                 inv,
-                plan.command(),
-                dry_run_signed_details(
-                    inv,
-                    plan.would_execute(),
-                    plan.into_args(),
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
+                plan.would_execute(),
+                plan.into_args(),
+                vault_address_string,
             );
         }
         let resolved_signer = inv.resolve_signer()?;
@@ -349,19 +327,11 @@ impl CliCommand for OrdersBatchCreate {
         let prepared = prepare_batch_create_orders(client, &resolver, orders).await?;
         if inv.dry_run() {
             let plan = batch_create_dry_run_plan(&prepared, args);
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
+            return print_dry_run_acting_for(
                 inv,
-                plan.command(),
-                dry_run_signed_details(
-                    inv,
-                    plan.would_execute(),
-                    plan.into_args(),
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
+                plan.would_execute(),
+                plan.into_args(),
+                vault_address_string,
             );
         }
         let resolved_signer = inv.resolve_signer()?;
@@ -422,19 +392,11 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
             let plan = tpsl_dry_run_plan(&perp, args)?;
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
+            return print_dry_run_acting_for(
                 inv,
-                plan.command(),
-                dry_run_signed_details(
-                    inv,
-                    plan.would_execute(),
-                    plan.into_args(),
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
+                plan.would_execute(),
+                plan.into_args(),
+                vault_address_string,
             );
         }
         let resolved_signer = inv.resolve_signer()?;
@@ -496,19 +458,11 @@ hyperliquid --format json orders trailing-stop --coin ETH --side sell --size 0.5
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
             let dry_run_plan = plan.dry_run_plan(args);
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
+            return print_dry_run_acting_for(
                 inv,
-                dry_run_plan.command(),
-                dry_run_signed_details(
-                    inv,
-                    dry_run_plan.would_execute(),
-                    dry_run_plan.into_args(),
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
+                dry_run_plan.would_execute(),
+                dry_run_plan.into_args(),
+                vault_address_string,
             );
         }
         let resolved = inv.resolve_signer()?;
@@ -554,19 +508,11 @@ impl CliCommand for OrdersCancel {
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
             let plan = cancel_dry_run_plan(args)?;
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
+            return print_dry_run_acting_for(
                 inv,
-                plan.command(),
-                dry_run_signed_details(
-                    inv,
-                    plan.would_execute(),
-                    plan.into_args(),
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
+                plan.would_execute(),
+                plan.into_args(),
+                vault_address_string,
             );
         }
         let resolver = inv.trading_resolver().await?;
@@ -619,19 +565,11 @@ impl CliCommand for OrdersCancelAll {
         if inv.dry_run() {
             let resolver = inv.trading_resolver().await?;
             let plan = cancel_all_dry_run_plan(&resolver, args)?;
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
+            return print_dry_run_acting_for(
                 inv,
-                plan.command(),
-                dry_run_signed_details(
-                    inv,
-                    plan.would_execute(),
-                    plan.into_args(),
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
+                plan.would_execute(),
+                plan.into_args(),
+                vault_address_string,
             );
         }
         let resolver = inv.trading_resolver().await?;
@@ -690,19 +628,11 @@ impl CliCommand for OrdersModify {
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
             let plan = modify_dry_run_plan(args);
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
+            return print_dry_run_acting_for(
                 inv,
-                plan.command(),
-                dry_run_signed_details(
-                    inv,
-                    plan.would_execute(),
-                    plan.into_args(),
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
+                plan.would_execute(),
+                plan.into_args(),
+                vault_address_string,
             );
         }
         let resolver = inv.trading_resolver().await?;
@@ -754,19 +684,11 @@ impl CliCommand for OrdersTwapCreate {
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
             let dry_run_plan = twap_create_dry_run_plan(&plan, args);
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
+            return print_dry_run_acting_for(
                 inv,
-                dry_run_plan.command(),
-                dry_run_signed_details(
-                    inv,
-                    dry_run_plan.would_execute(),
-                    dry_run_plan.into_args(),
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
+                dry_run_plan.would_execute(),
+                dry_run_plan.into_args(),
+                vault_address_string,
             );
         }
         let resolved = inv.resolve_signer()?;
@@ -818,19 +740,11 @@ impl CliCommand for OrdersTwapCancel {
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
             let dry_run_plan = twap_cancel_dry_run_plan(&plan, args);
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
+            return print_dry_run_acting_for(
                 inv,
-                dry_run_plan.command(),
-                dry_run_signed_details(
-                    inv,
-                    dry_run_plan.would_execute(),
-                    dry_run_plan.into_args(),
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
+                dry_run_plan.would_execute(),
+                dry_run_plan.into_args(),
+                vault_address_string,
             );
         }
         let resolved = inv.resolve_signer()?;
@@ -871,19 +785,11 @@ impl CliCommand for OrdersScheduleCancel {
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
             let dry_run_plan = schedule_cancel_dry_run_plan(&plan, args, Utc::now());
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
+            return print_dry_run_acting_for(
                 inv,
-                dry_run_plan.command(),
-                dry_run_signed_details(
-                    inv,
-                    dry_run_plan.would_execute(),
-                    dry_run_plan.into_args(),
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
+                dry_run_plan.would_execute(),
+                dry_run_plan.into_args(),
+                vault_address_string,
             );
         }
         let resolved = inv.resolve_signer()?;
@@ -946,13 +852,7 @@ hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeou
                 .ok()
                 .and_then(|mids| mids.get(&coin_key).copied());
             let plan = chase_dry_run_plan(args, mid, chase::requires_explicit_timeout(inv))?;
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
-                inv,
-                "orders chase",
-                dry_run_signed_details(inv, "chase", plan, signer, acting_as, vault_address_string),
-            );
+            return print_dry_run_acting_for(inv, "chase", plan, vault_address_string);
         }
         let resolved_signer = inv.resolve_signer()?;
         let signer = resolved_signer.selected_signer();
@@ -1011,20 +911,7 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
             let plan = bracket_dry_run_plan(client, &resolver, args).await?;
-            let (signer, acting_as, vault_address_string) =
-                dry_run_vault_signing_addresses(inv, vault_address_string);
-            return print_dry_run(
-                inv,
-                "orders bracket",
-                dry_run_signed_details(
-                    inv,
-                    "bracket",
-                    plan,
-                    signer,
-                    acting_as,
-                    vault_address_string,
-                ),
-            );
+            return print_dry_run_acting_for(inv, "bracket", plan, vault_address_string);
         }
         let resolved_signer = inv.resolve_signer()?;
         let signer = resolved_signer.selected_signer();

@@ -537,14 +537,13 @@ impl CliCommand for Setup {
         "Run the guided setup wizard. This is interactive and may not complete in an automation request unless the CLI exits on EOF.",
     )
     .long_about("Set up a wallet, network, and defaults.\n\
-\n\
-The wizard can create a new wallet or import an existing private key through a hidden prompt, choose the default network, save local config, store the wallet in the OWS vault as the default signing account, and verify the selected Hyperliquid API connection.\n\
-\n\
-Generated or imported private keys are never printed.")
+    \n\
+    The wizard can create a new wallet or import an existing private key through a hidden prompt, choose the default network, save local config, store the wallet in the OWS vault as the default signing account, and verify the selected Hyperliquid API connection.\n\
+    \n\
+    Generated or imported private keys are never printed.")
     .lifecycle(Lifecycle::InteractiveLocal)
     .risk(Risk::LocalSecret)
-    .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .ows(OwsSupport::NotApplicable).dangerous()
     .prompt()
     .args(&[
         arg("yes").kind(InputKind::Boolean),

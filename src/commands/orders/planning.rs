@@ -37,19 +37,13 @@ use crate::commands::builder;
 use crate::errors::{CliError, from_sdk};
 
 pub(super) struct OrderDryRunPlan {
-    command: &'static str,
     would_execute: &'static str,
     args: serde_json::Value,
 }
 
 impl OrderDryRunPlan {
-    pub(super) fn new(
-        command: &'static str,
-        would_execute: &'static str,
-        args: serde_json::Value,
-    ) -> Self {
+    pub(super) fn new(would_execute: &'static str, args: serde_json::Value) -> Self {
         Self {
-            command,
             would_execute,
             args,
         }
@@ -61,11 +55,6 @@ impl OrderDryRunPlan {
             object.insert("on_behalf_of".to_string(), serde_json::json!(on_behalf_of));
         }
         self
-    }
-
-    #[must_use]
-    pub(super) fn command(&self) -> &'static str {
-        self.command
     }
 
     #[must_use]
@@ -1229,12 +1218,10 @@ pub(super) fn create_dry_run_plan(
     submission: &CreateOrderSubmission,
     args: &CreateArgs,
 ) -> Result<OrderDryRunPlan, CliError> {
-    Ok(OrderDryRunPlan::new(
-        "orders create",
-        "submit_order",
-        create_dry_run_preview(submission, args)?,
+    Ok(
+        OrderDryRunPlan::new("submit_order", create_dry_run_preview(submission, args)?)
+            .acting_for(&args.on_behalf_of),
     )
-    .acting_for(&args.on_behalf_of))
 }
 
 pub(super) fn scale_dry_run_plan(
@@ -1243,8 +1230,7 @@ pub(super) fn scale_dry_run_plan(
 ) -> OrderDryRunPlan {
     let mut preview = order_batch_dry_run_args(prepared);
     insert_margin_mode(&mut preview, args.margin_mode);
-    OrderDryRunPlan::new("orders scale", "submit_order_batch", preview)
-        .acting_for(&args.on_behalf_of)
+    OrderDryRunPlan::new("submit_order_batch", preview).acting_for(&args.on_behalf_of)
 }
 
 pub(super) fn batch_create_dry_run_plan(
@@ -1258,8 +1244,7 @@ pub(super) fn batch_create_dry_run_plan(
             serde_json::json!(args.orders_file),
         );
     }
-    OrderDryRunPlan::new("orders batch-create", "submit_order_batch", preview)
-        .acting_for(&args.on_behalf_of)
+    OrderDryRunPlan::new("submit_order_batch", preview).acting_for(&args.on_behalf_of)
 }
 
 pub(super) fn twap_create_dry_run_plan(
@@ -1278,8 +1263,7 @@ pub(super) fn twap_create_dry_run_plan(
         "resolved_asset": plan.coin,
     });
     insert_margin_mode(&mut preview, plan.margin_mode);
-    OrderDryRunPlan::new("orders twap-create", "create_twap_order", preview)
-        .acting_for(&args.on_behalf_of)
+    OrderDryRunPlan::new("create_twap_order", preview).acting_for(&args.on_behalf_of)
 }
 
 pub(super) fn twap_cancel_dry_run_plan(
@@ -1287,7 +1271,6 @@ pub(super) fn twap_cancel_dry_run_plan(
     args: &TwapCancelArgs,
 ) -> OrderDryRunPlan {
     OrderDryRunPlan::new(
-        "orders twap-cancel",
         "cancel_twap_order",
         serde_json::json!({
             "twap_id": plan.twap_id,
@@ -1313,17 +1296,11 @@ pub(super) fn schedule_cancel_dry_run_plan(
         }),
         None => serde_json::json!({ "mode": "clear" }),
     };
-    OrderDryRunPlan::new(
-        "orders schedule-cancel",
-        "schedule_dead_mans_switch",
-        preview,
-    )
-    .acting_for(&args.on_behalf_of)
+    OrderDryRunPlan::new("schedule_dead_mans_switch", preview).acting_for(&args.on_behalf_of)
 }
 
 pub(super) fn modify_dry_run_plan(args: &ModifyArgs) -> OrderDryRunPlan {
     OrderDryRunPlan::new(
-        "orders modify",
         "modify_order",
         serde_json::json!({
             "order_id": args.order_id,
@@ -1340,7 +1317,6 @@ pub(super) fn modify_dry_run_plan(args: &ModifyArgs) -> OrderDryRunPlan {
 pub(super) fn cancel_dry_run_plan(args: &CancelArgs) -> Result<OrderDryRunPlan, CliError> {
     let identifier = cancel_identifier(args)?;
     Ok(OrderDryRunPlan::new(
-        "orders cancel",
         "cancel_order",
         serde_json::json!({
             "order_id": args.order_id,
@@ -1358,7 +1334,6 @@ pub(super) fn cancel_all_dry_run_plan(
     let coin_filter =
         resolve_cancel_all_coin_filter(resolver, args.coin.as_deref(), args.dex.as_deref())?;
     Ok(OrderDryRunPlan::new(
-        "orders cancel-all",
         "cancel_open_orders",
         serde_json::json!({
             "coin": args.coin,
@@ -1548,11 +1523,7 @@ pub(super) fn tpsl_dry_run_plan(
         }
     }
 
-    Ok(OrderDryRunPlan::new(
-        "orders tpsl",
-        "submit_position_tpsl",
-        preview,
-    ))
+    Ok(OrderDryRunPlan::new("submit_position_tpsl", preview))
 }
 
 fn append_tpsl_preview(

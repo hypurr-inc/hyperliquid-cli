@@ -294,7 +294,9 @@ fn transfer_action_plans_preserve_public_dry_run_envelopes() {
             "command": "transfer spot-to-perp",
             "would_execute": "transfer_spot_to_perp",
             "args": {"amount": "1.23"},
-            "signer": null
+            "signer": null,
+            "acting_as": null,
+            "vault_address": null
         })
     );
 
@@ -313,7 +315,9 @@ fn transfer_action_plans_preserve_public_dry_run_envelopes() {
             "command": "transfer perp-to-spot",
             "would_execute": "transfer_perp_to_spot",
             "args": {"amount": "1.23"},
-            "signer": null
+            "signer": null,
+            "acting_as": null,
+            "vault_address": null
         })
     );
 
@@ -337,7 +341,9 @@ fn transfer_action_plans_preserve_public_dry_run_envelopes() {
                 "to": "0x0000000000000000000000000000000000000001",
                 "amount": "1.23"
             },
-            "signer": null
+            "signer": null,
+            "acting_as": null,
+            "vault_address": null
         })
     );
 
@@ -361,7 +367,9 @@ fn transfer_action_plans_preserve_public_dry_run_envelopes() {
                 "to": "0x0000000000000000000000000000000000000001",
                 "amount": "1.23"
             },
-            "signer": null
+            "signer": null,
+            "acting_as": null,
+            "vault_address": null
         })
     );
 }
@@ -603,6 +611,89 @@ async fn staking_vault_and_borrowlend_action_plans_preserve_public_dry_run_envel
             "vault_address": null
         })
     );
+}
+
+/// Every signing command's preview names the signer, the account it acts as and
+/// the vault, and a signer that can't be resolved is `null` with a warning,
+/// wherever else the command's own `args` mention the signer.
+#[test]
+fn signed_previews_name_the_acting_account_and_warn_about_a_missing_signer() {
+    let env = IsolatedHome::new();
+    let signer = expected_address(VALID_PRIVATE_KEY);
+    let to = "0x0000000000000000000000000000000000000001";
+    let builder = "0x00000000000000000000000000000000000000bb";
+    let commands: [&[&str]; 5] = [
+        &["transfer", "spot-to-perp", "--amount", "1"],
+        &["transfer", "send", "--to", to, "--amount", "1"],
+        &["prio", "bid", "--max", "1", "--ip", "1.2.3.4"],
+        &["account", "abstraction", "set", "--mode", "disabled"],
+        &[
+            "builder",
+            "approve",
+            "--builder",
+            builder,
+            "--max-fee-rate",
+            "0.001%",
+        ],
+    ];
+
+    for command in commands {
+        let run = |key: Option<&str>| {
+            let mut cmd = env.command();
+            if let Some(key) = key {
+                cmd.env(PRIVATE_KEY_ENV, key);
+            }
+            let output = cmd
+                .args(["--format", "json", "--dry-run", "--testnet"])
+                .args(command)
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            serde_json::from_slice::<Value>(&output).unwrap()
+        };
+
+        let signed = run(Some(VALID_PRIVATE_KEY));
+        assert_eq!(signed["signer"], signer, "{command:?}");
+        assert_eq!(signed["acting_as"], signer, "{command:?}");
+        assert!(signed["vault_address"].is_null(), "{command:?}");
+        assert!(signed.get("signer_warning").is_none(), "{command:?}");
+
+        let unsigned = run(None);
+        assert!(unsigned["signer"].is_null(), "{command:?}");
+        assert!(unsigned["acting_as"].is_null(), "{command:?}");
+        assert!(unsigned["vault_address"].is_null(), "{command:?}");
+        assert!(
+            unsigned["signer_warning"].as_str().is_some(),
+            "a null signer carries its warning: {command:?}"
+        );
+    }
+}
+
+/// `--dry-run` previews the command that ran, not the command a shortcut expands to.
+#[tokio::test]
+async fn shortcut_orders_preview_under_their_own_command_name() {
+    let server = mock_market_server().await;
+    let env = IsolatedHome::new();
+
+    for (command, side) in [("buy", "buy"), ("sell", "sell")] {
+        let output = run_json(env.command().env(API_OVERRIDE_ENV, server.uri()).args([
+            "--format",
+            "json",
+            "--dry-run",
+            command,
+            "--coin",
+            "BTC",
+            "--price",
+            "50000",
+            "--size",
+            "0.001",
+        ]));
+        assert_eq!(output["command"], command);
+        assert_eq!(output["would_execute"], "submit_order");
+        assert_eq!(output["args"]["side"], side);
+    }
 }
 
 /// Run a dry-run command and return its envelope without the run context.
