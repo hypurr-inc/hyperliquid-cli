@@ -11,17 +11,27 @@ use crate::errors::CliError;
 use crate::mode::Mode;
 use crate::output::colors;
 
-/// Ask a yes/no question. Only `y` or `yes` (any case) confirm.
+/// Read a yes/no answer: `y` or `yes` is yes, `n` or `no` is no, any case,
+/// and an empty answer is `blank`. `None` is anything else, which a
+/// confirmation reads as no and a setup question rejects.
+#[must_use]
+pub fn parse_yes_no(answer: &str, blank: bool) -> Option<bool> {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" => Some(blank),
+        "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// Ask a yes/no question. Only `y` or `yes` (any case) confirm; an empty or
+/// unrecognized answer declines.
 ///
 /// `bypass` names the option that answers the question in non-interactive
 /// runs, such as `--yes`.
 pub fn confirm(mode: &Mode, question: &str, bypass: &str) -> Result<bool, CliError> {
     let answer = read_line(mode, &format!("{question} [y/N]: "), bypass)?;
-    Ok(is_yes(&answer))
-}
-
-pub fn confirm_warning(mode: &Mode, question: &str, bypass: &str) -> Result<bool, CliError> {
-    confirm(mode, &warning(question), bypass)
+    Ok(parse_yes_no(&answer, false) == Some(true))
 }
 
 /// Style `text` as a warning for a prompt or consent preview written to stderr.
@@ -48,29 +58,6 @@ pub fn read_line(mode: &Mode, label: &str, input: &str) -> Result<String, CliErr
     Ok(line)
 }
 
-/// Print `preview` when it is non-empty, then ask `question`.
-///
-/// A decline is `abort` as a configuration error. `bypass` is the flag named
-/// in the non-interactive error. Callers that already accepted `--yes` return
-/// before this runs.
-pub fn consent(
-    mode: &Mode,
-    bypass: &str,
-    preview: &str,
-    question: &str,
-    abort: &str,
-) -> Result<(), CliError> {
-    ensure_can_prompt(mode, bypass)?;
-    if !preview.is_empty() {
-        eprintln!("{preview}");
-    }
-    if confirm_warning(mode, question, bypass)? {
-        Ok(())
-    } else {
-        Err(CliError::Configuration(abort.to_string()))
-    }
-}
-
 pub fn ensure_can_prompt(mode: &Mode, input: &str) -> Result<(), CliError> {
     match mode.prompt_blocker() {
         None => Ok(()),
@@ -78,10 +65,6 @@ pub fn ensure_can_prompt(mode: &Mode, input: &str) -> Result<(), CliError> {
             "Can't prompt for {input} because of {reason}. Pass {input} instead."
         ))),
     }
-}
-
-fn is_yes(input: &str) -> bool {
-    matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 /// Ask the user to type `expected` exactly. Anything else, including an empty
@@ -164,16 +147,26 @@ fn stdin_ended(input: &str, given: &str) -> CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_yes, warning};
+    use super::{parse_yes_no, warning};
     use crate::output::colors;
 
     #[test]
-    fn only_explicit_yes_confirms() {
-        assert!(is_yes("y"));
-        assert!(is_yes(" YES \n"));
-        assert!(!is_yes(""));
-        assert!(!is_yes("yep"));
-        assert!(!is_yes("n"));
+    fn yes_and_no_read_in_any_case_with_surrounding_space() {
+        for yes in ["y", "Y", " YES \n", "yes"] {
+            assert_eq!(parse_yes_no(yes, false), Some(true), "{yes:?}");
+        }
+        for no in ["n", "N", " No\n", "no"] {
+            assert_eq!(parse_yes_no(no, true), Some(false), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_answer_is_the_prompts_default_and_anything_else_is_unrecognized() {
+        assert_eq!(parse_yes_no("", true), Some(true));
+        assert_eq!(parse_yes_no("  \n", false), Some(false));
+        for other in ["yep", "nope", "1", "maybe"] {
+            assert_eq!(parse_yes_no(other, true), None, "{other:?}");
+        }
     }
 
     #[test]

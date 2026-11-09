@@ -5,8 +5,8 @@
 use clap::ArgMatches;
 use clap::parser::MatchesError;
 use hyperliquid_cli::command_spec::{
-    CommandSpec, ConfirmationPolicy, DryRunPolicy, NetworkUse, RawPayloadPolicy, YES_ARG,
-    check_args, supplied_secrets,
+    CommandSpec, DryRunPolicy, NetworkUse, RawPayloadPolicy, YES_ARG, YES_FLAG, check_args,
+    supplied_secrets,
 };
 use hyperliquid_cli::errors::CliError;
 use hyperliquid_cli::input_hardening::{validate_input_path, validate_resource_id};
@@ -110,7 +110,7 @@ impl Confirmation {
             }),
             Err(MatchesError::UnknownArgument { .. }) => Ok(Self::default()),
             Err(err) => Err(CliError::Internal(anyhow::anyhow!(
-                "--{YES_ARG} is not a flag: {err}"
+                "{YES_FLAG} is not a flag: {err}"
             ))),
         }
     }
@@ -127,17 +127,13 @@ fn validate_prompt_policy(inv: &Invocation, selected: &Selected) -> Result<(), C
         ));
     }
     let confirmation = Confirmation::from_matches(matches)?;
-    if inv.dry_run()
-        || mode.can_prompt()
-        || spec.confirmation != ConfirmationPolicy::Prompt
-        || confirmation.given
-        || !confirmation_applies(spec, matches)?
-    {
-        return Ok(());
-    }
     // Whether a testnet run is exempt depends on the resolved network, not on
     // which flag or variable selected it, so it is asked last.
-    if spec.testnet_unprompted && !spec.prompts_on(inv.remote()?.network()) {
+    if inv.dry_run()
+        || mode.can_prompt()
+        || !confirmation_applies(spec, matches)?
+        || !inv.requires_approval(confirmation.given)?
+    {
         return Ok(());
     }
 
@@ -171,7 +167,7 @@ fn confirmation_required_error(selected: &Selected, confirmation: Confirmation) 
     });
     let approve = confirmation.supported.then(|| {
         let mut argv = args.clone();
-        argv.push(format!("--{YES_ARG}"));
+        argv.push(YES_FLAG.to_string());
         replay_command(&argv)
     });
     CliError::ConfirmationRequired {

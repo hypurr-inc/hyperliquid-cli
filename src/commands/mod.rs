@@ -7,7 +7,6 @@ pub mod asset;
 pub mod borrowlend;
 pub mod builder;
 pub(crate) mod builder_approval;
-pub(crate) mod confirm;
 pub mod feedback;
 pub(crate) mod funds;
 pub mod invalidate_nonce;

@@ -6,13 +6,13 @@ use hypersdk::hypercore::types::{
 use hypersdk::hypercore::{Chain, SpotToken};
 
 use crate::assets::require_spot_token;
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, YES_FOR_AUTOMATION, arg};
 use crate::commands::actions;
-use crate::commands::confirm;
 use crate::commands::funds::{self, Pool};
 use crate::commands::rows::{ListRow, Row, Rows};
 use crate::commands::support::print_dry_run;
 use crate::commands::user_signed::{self, AgentForm, UserSigned};
+use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::invocation::{Invocation, Remote};
@@ -251,28 +251,15 @@ struct TransferPreview {
 }
 
 impl TransferPreview {
-    fn render(&self) -> String {
-        format!(
-            "\
-Network: {network}
-Signer: {signer}
-Acting context: {acting_context}
-Recipient: {recipient}
-Destination class: {destination_class}
-Asset: {asset}
-Amount: {amount}
-Fee/cap: {fee_or_cap}
-Reversibility: {reversibility}",
-            network = self.network,
-            signer = self.signer,
-            acting_context = self.acting_context,
-            recipient = self.recipient,
-            destination_class = self.destination_class,
-            asset = self.asset,
-            amount = self.amount,
-            fee_or_cap = self.fee_or_cap,
-            reversibility = self.reversibility.as_str(),
-        )
+    fn block(&self) -> ConsentBlock {
+        ConsentBlock::signed(self.network, self.signer)
+            .field("Acting context", self.acting_context)
+            .field("Recipient", self.recipient)
+            .field("Destination class", self.destination_class)
+            .field("Asset", &self.asset)
+            .field("Amount", self.amount)
+            .field("Fee/cap", self.fee_or_cap)
+            .field("Reversibility", self.reversibility.as_str())
     }
 }
 
@@ -317,10 +304,10 @@ async fn send(
         fee_or_cap: EXCHANGE_DEFAULT_FEE,
         reversibility: TransferActionKind::Send.reversibility(),
     };
-    confirm::unless_yes(
+    consent::approve(
+        inv,
         args.yes,
-        inv.mode(),
-        &preview.render(),
+        &preview.block(),
         &format!("Send {} USDC to {}?", args.amount, args.to),
         "send transfer aborted",
     )?;
@@ -362,10 +349,10 @@ async fn spot_send(
         fee_or_cap: EXCHANGE_DEFAULT_FEE,
         reversibility: TransferActionKind::SpotSend.reversibility(),
     };
-    confirm::unless_yes(
+    consent::approve(
+        inv,
         args.yes,
-        inv.mode(),
-        &preview.render(),
+        &preview.block(),
         &format!(
             "Send {} {} spot token to {}?",
             args.amount, token.name, args.to
@@ -607,10 +594,10 @@ async fn withdraw(
         fee_or_cap: "not_estimated_bridge_or_exchange_fee",
         reversibility: TransferActionKind::Withdraw.reversibility(),
     };
-    confirm::unless_yes(
+    consent::approve(
+        inv,
         args.yes,
-        inv.mode(),
-        &preview.render(),
+        &preview.block(),
         &format!(
             "Withdraw {} USDC to Arbitrum address {}?",
             args.amount, args.to
@@ -666,7 +653,13 @@ async fn class_transfer(
         }
         None => format!("Transfer {amount} USDC {direction}?"),
     };
-    confirm::unless_yes(args.yes, inv.mode(), "", &question, "transfer aborted")?;
+    consent::approve(
+        inv,
+        args.yes,
+        &ConsentBlock::new(),
+        &question,
+        "transfer aborted",
+    )?;
 
     let wire_amount = class_transfer_amount(amount, subaccount);
     user_signed::submit(api, signer, |hyperliquid_chain, nonce| UsdClassTransfer {
@@ -754,9 +747,7 @@ impl CliCommand for TransferSpotToPerp {
             .kind(InputKind::ActingAccountSelector)
             .describe("Move the USDC of this subaccount instead of the signer's own account: subaccount address, wallet name, or wallet id.")
             .resource_id("subaccount selector"),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip confirmation prompt for deliberate automation."),
+        YES_FOR_AUTOMATION,
     ]);
 
     async fn run(inv: &Invocation, args: &ClassTransferArgs) -> Result<(), anyhow::Error> {
@@ -786,9 +777,7 @@ impl CliCommand for TransferPerpToSpot {
             .kind(InputKind::ActingAccountSelector)
             .describe("Move the USDC of this subaccount instead of the signer's own account: subaccount address, wallet name, or wallet id.")
             .resource_id("subaccount selector"),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip confirmation prompt for deliberate automation."),
+        YES_FOR_AUTOMATION,
     ]);
 
     async fn run(inv: &Invocation, args: &ClassTransferArgs) -> Result<(), anyhow::Error> {
@@ -818,9 +807,7 @@ impl CliCommand for TransferSend {
         arg("amount")
             .kind(InputKind::Amount)
             .describe("USDC amount."),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip confirmation prompt for deliberate automation."),
+        YES_FOR_AUTOMATION,
     ]);
 
     async fn run(inv: &Invocation, args: &SendArgs) -> Result<(), anyhow::Error> {
@@ -863,9 +850,7 @@ impl CliCommand for TransferSpotSend {
         arg("amount")
             .kind(InputKind::Amount)
             .describe("Token amount."),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip confirmation prompt for deliberate automation."),
+        YES_FOR_AUTOMATION,
     ]);
 
     async fn run(inv: &Invocation, args: &SpotSendArgs) -> Result<(), anyhow::Error> {
@@ -921,9 +906,7 @@ impl CliCommand for TransferSendAsset {
         arg("from_subaccount")
             .describe("Optional explicit source subaccount address.")
             .resource_id("from subaccount address"),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip confirmation prompt for deliberate automation."),
+        YES_FOR_AUTOMATION,
     ]);
 
     async fn run(inv: &Invocation, args: &SendAssetArgs) -> Result<(), anyhow::Error> {
@@ -970,10 +953,10 @@ impl CliCommand for TransferSendAsset {
             fee_or_cap: EXCHANGE_DEFAULT_FEE,
             reversibility: TransferActionKind::SendAsset.reversibility(),
         };
-        confirm::unless_yes(
+        consent::approve(
+            inv,
             args.yes,
-            inv.mode(),
-            &preview.render(),
+            &preview.block(),
             &format!(
                 "Send {amount} {} from {} to {} for {}?",
                 token.name, source.display, dest.display, args.to
@@ -1009,9 +992,7 @@ impl CliCommand for TransferWithdraw {
         arg("amount")
             .kind(InputKind::Amount)
             .describe("USDC amount."),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip confirmation prompt for deliberate automation."),
+        YES_FOR_AUTOMATION,
     ]);
 
     async fn run(inv: &Invocation, args: &WithdrawArgs) -> Result<(), anyhow::Error> {
@@ -1091,6 +1072,7 @@ mod tests {
             fee_or_cap: EXCHANGE_DEFAULT_FEE,
             reversibility: ActionReversibility::Irreversible,
         }
+        .block()
         .render();
 
         let labels: Vec<&str> = preview

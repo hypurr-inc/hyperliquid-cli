@@ -24,17 +24,14 @@ use super::prepared::PreparedOrder;
 use super::preview::OrderDryRunPlan;
 use crate::assets::PerpAsset;
 use crate::builder_fee::BuilderFee;
-use crate::command_spec::CommandSpec;
 use crate::commands::support::{print_dry_run_acting_for, resolve_optional_acting_account_target};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::margin::{self, MarginPlan};
-use crate::network::Network;
 use crate::signing::SelectedSigner;
 
 pub(super) struct OrderRun<'a> {
     inv: &'a Invocation,
-    spec: &'static CommandSpec,
     /// The vault or subaccount the command acts for; `None` acts for the signer.
     vault: Option<Address>,
     /// The `--on-behalf-of` selector as the user typed it.
@@ -47,13 +44,11 @@ impl<'a> OrderRun<'a> {
     /// prompts, unless `yes` was given.
     pub(super) fn new(
         inv: &'a Invocation,
-        spec: &'static CommandSpec,
         on_behalf_of: Option<&str>,
         yes: bool,
     ) -> Result<Self, anyhow::Error> {
         Ok(Self {
             inv,
-            spec,
             vault: resolve_optional_acting_account_target(inv, on_behalf_of)?,
             on_behalf_of: on_behalf_of.map(str::to_string),
             yes,
@@ -64,11 +59,10 @@ impl<'a> OrderRun<'a> {
     /// `--yes` to read.
     pub(super) fn unprompted(
         inv: &'a Invocation,
-        spec: &'static CommandSpec,
         on_behalf_of: Option<&str>,
     ) -> Result<Self, anyhow::Error> {
-        debug_assert!(!spec.prompts_on(Network::Mainnet));
-        Self::new(inv, spec, on_behalf_of, false)
+        debug_assert!(!inv.requires_approval(false)?);
+        Self::new(inv, on_behalf_of, false)
     }
 
     pub(super) fn on_behalf_of(&self) -> Option<&str> {
@@ -101,7 +95,7 @@ impl<'a> OrderRun<'a> {
             api: remote.api(),
             signer,
             vault_address: self.vault,
-            requires_approval: self.spec.prompts_on(remote.network()) && !self.yes,
+            requires_approval: self.inv.requires_approval(self.yes)?,
         })
     }
 

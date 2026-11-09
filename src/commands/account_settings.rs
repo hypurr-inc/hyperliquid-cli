@@ -8,13 +8,13 @@ use hypersdk::hypercore::types::Action;
 use hypersdk::hypercore::{AbstractionMode, Chain, UserRole};
 use serde::Serialize;
 
-use crate::command_spec::{CliCommand, CommandSpec, InputKind, Risk, arg};
+use crate::command_spec::{CliCommand, CommandSpec, InputKind, Risk, YES_FOR_LIVE_EXECUTION, arg};
 use crate::commands::abstraction::AccountMode;
 use crate::commands::actions;
-use crate::commands::confirm;
 use crate::commands::rows::{One, Row};
 use crate::commands::support::print_dry_run;
 use crate::commands::user_signed::{self, AgentForm, UserSigned};
+use crate::consent::{self, ConsentBlock};
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
@@ -209,10 +209,10 @@ async fn set_abstraction(
         "Set account abstraction for {user} to {}?",
         args.mode.cli_value()
     );
-    confirm::unless_yes(
+    consent::approve(
+        inv,
         args.yes,
-        inv.mode(),
-        "",
+        &ConsentBlock::new(),
         &question,
         "account abstraction update aborted",
     )?;
@@ -277,7 +277,7 @@ Use --dry-run to preview; confirm or pass -y for live submit.")
     .args(&[
         arg("mode").describe("Target abstraction mode."),
         arg("user").kind(InputKind::ActingAccountSelector).describe("Subaccount of the signer to set the mode for: subaccount address, wallet name, or wallet id. Defaults to the signer's own account.").resource_id("subaccount selector"),
-        arg("yes").kind(InputKind::Boolean).describe("Skip confirmation prompt for live execution."),
+        YES_FOR_LIVE_EXECUTION,
     ]);
 
     async fn run(inv: &Invocation, args: &SetAbstractionArgs) -> Result<(), anyhow::Error> {

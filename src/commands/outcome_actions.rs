@@ -17,14 +17,29 @@ use hypersdk::hypercore::types::api::UserOutcomeAction;
 use serde::Serialize;
 
 use crate::assets::{Names, OutcomeCatalog};
-use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
+use crate::command_spec::{ArgSpec, CliCommand, CommandSpec, InputKind, YES, arg};
 use crate::commands::actions;
-use crate::commands::confirm;
 use crate::commands::rows::{ListRow, Row, Rows, or_missing};
 use crate::commands::support::print_dry_run;
+use crate::consent::{self, ConsentBlock};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::quantity;
+
+const YES_MAINNET: ArgSpec = YES.describe(
+    "Skip the mainnet confirmation prompt for deliberate automation. Testnet runs never prompt.",
+);
+
+/// The sentence every outcome conversion's description ends with.
+macro_rules! prompts_unless_yes {
+    () => {
+        concat!(
+            "Mainnet runs prompt for confirmation unless ",
+            $crate::yes_flag!(),
+            " is passed; --testnet runs without a prompt."
+        )
+    };
+}
 
 /// Arguments for `outcomes split`.
 #[derive(Args, Debug, Clone)]
@@ -366,21 +381,18 @@ async fn convert(inv: &Invocation, conversion: Conversion, yes: bool) -> Result<
     }
 
     let signer = inv.resolve_signer()?;
-    if inv.command().prompts_on(remote.network()) {
-        let label = quote_token.as_deref().unwrap_or("quote tokens");
-        let description = conversion.describe(label);
-        confirm::unless_yes(
-            yes,
-            inv.mode(),
-            &format!(
-                "{description}\n  network: {}\n  signer: {}",
-                remote.network(),
-                signer.address()
-            ),
-            &format!("{description}?"),
-            "outcome conversion aborted",
-        )?;
-    }
+    let label = quote_token.as_deref().unwrap_or("quote tokens");
+    let description = conversion.describe(label);
+    consent::approve(
+        inv,
+        yes,
+        &ConsentBlock::new()
+            .text(&description)
+            .field("  network", remote.network())
+            .field("  signer", signer.address()),
+        &format!("{description}?"),
+        "outcome conversion aborted",
+    )?;
     actions::send_l1_action_raw(
         remote.api(),
         &signer,
@@ -411,7 +423,7 @@ impl CliCommand for OutcomesSplit {
         &["outcomes", "split"],
         "trade",
         "Split quote tokens into outcome shares",
-        "Split X quote tokens into X shares of each side of an outcome (HIP-4 userOutcome splitOutcome). Dry-run first. Mainnet runs prompt for confirmation unless --yes is passed; --testnet runs without a prompt.",
+        concat!("Split X quote tokens into X shares of each side of an outcome (HIP-4 userOutcome splitOutcome). Dry-run first. ", prompts_unless_yes!()),
     )
     .prompt()
     .testnet_unprompted()
@@ -422,9 +434,7 @@ impl CliCommand for OutcomesSplit {
         arg("amount")
             .kind(InputKind::Amount)
             .describe("Quote tokens to split (the outcome's quote token, see `outcomes get`)."),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet runs never prompt."),
+        YES_MAINNET,
     ]);
 
     fn validate(args: &OutcomeSplitArgs) -> Result<(), CliError> {
@@ -445,7 +455,7 @@ impl CliCommand for OutcomesMerge {
         &["outcomes", "merge"],
         "trade",
         "Merge both sides of an outcome into quote tokens",
-        "Merge X shares of each side of an outcome back into X quote tokens (HIP-4 userOutcome mergeOutcome); --max merges the maximum available. Dry-run first. Mainnet runs prompt for confirmation unless --yes is passed; --testnet runs without a prompt.",
+        concat!("Merge X shares of each side of an outcome back into X quote tokens (HIP-4 userOutcome mergeOutcome); --max merges the maximum available. Dry-run first. ", prompts_unless_yes!()),
     )
     .prompt()
     .testnet_unprompted()
@@ -460,9 +470,7 @@ impl CliCommand for OutcomesMerge {
         arg("max")
             .kind(InputKind::Boolean)
             .describe("Merge the maximum available instead of an amount."),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet runs never prompt."),
+        YES_MAINNET,
     ]);
 
     fn validate(args: &OutcomeMergeArgs) -> Result<(), CliError> {
@@ -483,7 +491,7 @@ impl CliCommand for OutcomesMergeQuestion {
         &["outcomes", "merge-question"],
         "trade",
         "Merge a question's Yes shares into quote tokens",
-        "Merge X Yes shares from each outcome of a question into X quote tokens (HIP-4 userOutcome mergeQuestion); --max merges the maximum available. Dry-run first. Mainnet runs prompt for confirmation unless --yes is passed; --testnet runs without a prompt.",
+        concat!("Merge X Yes shares from each outcome of a question into X quote tokens (HIP-4 userOutcome mergeQuestion); --max merges the maximum available. Dry-run first. ", prompts_unless_yes!()),
     )
     .prompt()
     .testnet_unprompted()
@@ -498,9 +506,7 @@ impl CliCommand for OutcomesMergeQuestion {
         arg("max")
             .kind(InputKind::Boolean)
             .describe("Merge the maximum available instead of an amount."),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet runs never prompt."),
+        YES_MAINNET,
     ]);
 
     fn validate(args: &OutcomeMergeQuestionArgs) -> Result<(), CliError> {
@@ -521,7 +527,7 @@ impl CliCommand for OutcomesNegate {
         &["outcomes", "negate"],
         "trade",
         "Convert No shares of a question outcome into Yes shares",
-        "Convert X No shares of an outcome of a question into X Yes shares of every other outcome of the question (HIP-4 userOutcome negateOutcome). Dry-run first. Mainnet runs prompt for confirmation unless --yes is passed; --testnet runs without a prompt.",
+        concat!("Convert X No shares of an outcome of a question into X Yes shares of every other outcome of the question (HIP-4 userOutcome negateOutcome). Dry-run first. ", prompts_unless_yes!()),
     )
     .prompt()
     .testnet_unprompted()
@@ -535,9 +541,7 @@ impl CliCommand for OutcomesNegate {
         arg("amount")
             .kind(InputKind::Amount)
             .describe("No shares to convert."),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip the mainnet confirmation prompt for deliberate automation. Testnet runs never prompt."),
+        YES_MAINNET,
     ]);
 
     fn validate(args: &OutcomeNegateArgs) -> Result<(), CliError> {

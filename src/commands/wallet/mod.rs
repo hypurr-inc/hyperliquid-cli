@@ -14,10 +14,11 @@ use ows_lib::types::WalletInfo;
 
 use crate::command_spec::{
     CliCommand, CommandSpec, DryRunPolicy, GroupSpec, InputKind, Lifecycle, NoArgs, OwsSupport,
-    Risk, arg,
+    Risk, YES, YES_ARG, YES_FLAG, YES_FOR_AUTOMATION, arg,
 };
 use crate::commands::support::print_dry_run;
 use crate::config::{BankrLogin, Config, nonblank};
+use crate::consent::{self, ConsentBlock, Tone};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::mode::Mode;
@@ -278,14 +279,14 @@ pub fn logout(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
         return Ok(());
     };
 
-    if !yes {
-        require_promptable("--yes", inv.format(), inv.mode())?;
-        eprintln!(
-            "This removes the stored Bankr API key from {}.",
-            file.path().display()
-        );
-        eprintln!("The wallet and its funds stay with Bankr.");
-        if !prompt::confirm(inv.mode(), "Log out of Bankr?", "--yes")? {
+    if inv.requires_approval(yes)? {
+        let block = ConsentBlock::new()
+            .text(format!(
+                "This removes the stored Bankr API key from {}.",
+                file.path().display()
+            ))
+            .text("The wallet and its funds stay with Bankr.");
+        if !consent::ask(inv.mode(), &block, "Log out of Bankr?", Tone::Plain)? {
             print_declined(inv, "Logout cancelled");
             return Ok(());
         }
@@ -337,17 +338,15 @@ pub fn reset(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
     };
     let path = file.path().display();
 
-    if !yes {
-        require_promptable("--yes", inv.format(), inv.mode())?;
-        eprintln!("This deletes the config file at {path}.");
-        eprintln!(
-            "It clears the default wallet, network, builder, and referral defaults. Wallets stay in the vault."
-        );
+    if inv.requires_approval(yes)? {
+        let mut block = ConsentBlock::new()
+            .text(format!("This deletes the config file at {path}."))
+            .text("It clears the default wallet, network, builder, and referral defaults. Wallets stay in the vault.");
         if file.read().is_err() {
-            eprintln!("The file isn't valid config, so its contents are discarded.");
+            block = block.text("The file isn't valid config, so its contents are discarded.");
         }
         let question = format!("Delete config file {path}?");
-        if !prompt::confirm(inv.mode(), &question, "--yes")? {
+        if !consent::ask(inv.mode(), &block, &question, Tone::Plain)? {
             print_declined(inv, "Reset cancelled");
             return Ok(());
         }
@@ -455,28 +454,32 @@ pub fn account_remove(
         .unwrap_or_else(|_| "no Hyperliquid account".to_string());
     let is_default = store.is_configured_default(&wallet)?;
 
-    if !yes {
-        require_promptable("--yes", inv.format(), inv.mode())?;
-        eprintln!("Wallet:  {}", wallet.name);
-        eprintln!("Address: {address}");
-        eprintln!("Default: {}", if is_default { "yes" } else { "no" });
-        eprintln!();
-        eprintln!("This deletes the encrypted key from the vault. This cannot be undone.");
-        eprintln!("Back up first:");
-        eprintln!("    {}", hints::wallet_export(&shell_arg(&wallet.name)));
-        eprintln!();
+    if inv.requires_approval(yes)? {
+        let block = ConsentBlock::new()
+            .text(format!("Wallet:  {}", wallet.name))
+            .text(format!("Address: {address}"))
+            .field("Default", if is_default { "yes" } else { "no" })
+            .text("")
+            .text("This deletes the encrypted key from the vault. This cannot be undone.")
+            .text("Back up first:")
+            .text(format!(
+                "    {}",
+                hints::wallet_export(&shell_arg(&wallet.name))
+            ))
+            .text("");
+        consent::show(inv.mode(), &block)?;
         let confirmed = if inv.mode().terminal.stdin {
             prompt::confirm_typed(
                 inv.mode(),
                 &format!("To confirm, type the wallet name \"{}\": ", wallet.name),
                 &wallet.name,
-                "--yes",
+                YES_FLAG,
             )?
         } else {
             prompt::confirm(
                 inv.mode(),
                 &format!("Delete wallet {}?", wallet.name),
-                "--yes",
+                YES_FLAG,
             )?
         };
         if !confirmed {
@@ -513,12 +516,11 @@ pub fn rename(inv: &Invocation, selector: &str, new_name: &str) -> Result<(), an
 /// explicit interactive confirmation prompt (or --yes flag) and a warning
 /// banner. The command's sole purpose is secret recovery/export.
 pub fn export(inv: &Invocation, selector: &str, yes: bool) -> Result<(), anyhow::Error> {
-    if !yes {
-        require_promptable("--yes", inv.format(), inv.mode())?;
+    if inv.requires_approval(yes)? {
         let question = format!(
             "Export secret for wallet '{selector}'? This will display the private key or mnemonic."
         );
-        if !prompt::confirm(inv.mode(), &question, "--yes")? {
+        if !consent::ask(inv.mode(), &ConsentBlock::new(), &question, Tone::Plain)? {
             print_declined(inv, "Export cancelled");
             return Ok(());
         }
@@ -777,9 +779,7 @@ impl CliCommand for AccountRemove {
             .describe("Wallet name, wallet id, or address.")
             .resource_id("account selector")
             .schema_required(),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip confirmation prompt for deliberate automation."),
+        YES_FOR_AUTOMATION,
     ]);
 
     async fn run(inv: &Invocation, args: &AccountRemoveArgs) -> Result<(), anyhow::Error> {
@@ -960,7 +960,7 @@ impl CliCommand for WalletLogout {
     .ows(OwsSupport::NotApplicable)
     .prompt()
     .local()
-    .args(&[arg("yes")]);
+    .args(&[arg(YES_ARG)]);
 
     async fn run(inv: &Invocation, args: &WalletLogoutArgs) -> Result<(), anyhow::Error> {
         if inv.dry_run() {
@@ -1079,7 +1079,7 @@ impl CliCommand for WalletDelete {
     .dangerous()
     .prompt()
     .local()
-    .args(&[arg("selector"), arg("yes").kind(InputKind::Boolean)]);
+    .args(&[arg("selector"), YES]);
 
     async fn run(inv: &Invocation, args: &WalletDeleteArgs) -> Result<(), anyhow::Error> {
         if inv.dry_run() {
@@ -1111,7 +1111,7 @@ impl CliCommand for WalletExport {
     .prompt()
     .local()
     .dry_run_refusal("--dry-run is not supported for wallet export")
-    .args(&[arg("selector"), arg("yes").kind(InputKind::Boolean)]);
+    .args(&[arg("selector"), YES]);
 
     async fn run(inv: &Invocation, args: &WalletExportArgs) -> Result<(), anyhow::Error> {
         export(inv, &args.selector, args.yes)
@@ -1136,7 +1136,7 @@ impl CliCommand for WalletReset {
     .prompt()
     .local()
     .args(&[
-        arg("yes").kind(InputKind::Boolean).describe("Skip confirmation prompt for deliberate automation."),
+        YES_FOR_AUTOMATION,
     ]);
 
     async fn run(inv: &Invocation, args: &WalletResetArgs) -> Result<(), anyhow::Error> {
