@@ -8,6 +8,11 @@
 - Order prices and sizes are truncated to the exchange tick and lot rules for the asset (5 significant figures and `6 - szDecimals` perp or `8 - szDecimals` spot/outcome decimals for prices, `szDecimals` for sizes) on `orders create`, `batch-create`, `scale`, `tpsl`, `bracket`, `chase`, and `trailing-stop`, so an over-precise value is placed at the representable value instead of being rejected on submission. A value that truncates to zero exits `2` naming the asset.
 - `orders modify` keeps a trigger order's existing trigger price when `--trigger-price` is omitted instead of overwriting it with the order's limit price, and aborts before submitting when the replacement requires `--always-place` (a trigger replacement or an IOC TIF), matching the exchange's `a: false` pre-validation.
 - `orders twap-create` rejects durations above the exchange's 7-day maximum.
+- A non-interactive run that stops at the confirmation check no longer repeats a secret argument in its suggested `--dry-run`/`--yes` commands or in the saved last-error report: `wallet import <PRIVATE_KEY>`, `wallet import-mnemonic <MNEMONIC>`, `account add` and `wallet login --api-key` values are dropped, as `--private-key` and `--keystore-password` already were.
+- `HYPERLIQUID_NETWORK=testnet` now skips the mainnet-only confirmation check in the run pipeline exactly like `--testnet`; before, a non-interactive run without `--yes` was rejected there although the command itself would not have prompted.
+- `watch risk` declares its stream bound like `subscribe`: in JSON or agent contexts it needs `--max-events` or `--idle-timeout-ms` (checked before the run, exit `2`), and `hyperliquid schema watch risk` reports `stream_bounds` and `bounded_ndjson_stream`. An explicit `--format pretty` on a pipe no longer forces the bound; an explicit `--format json` on a terminal now does.
+- `feedback`, `mcp` and `report-incident` no longer carry a `Notes:` block saying they change live exchange state; they change no state.
+- The watch view refreshes only on its timer, a socket message, or `r`; other keys no longer trigger a refresh.
 
 ## 0.17.0 - 2026-11-09
 

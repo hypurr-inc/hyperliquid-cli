@@ -1,11 +1,18 @@
-//! Whether this invocation may prompt, decided once in `main`.
+//! The interaction context of one run: who, if anyone, is at the other end.
 //!
-//! Commands ask the [`Mode`] they were handed. They never read
-//! `HYPERLIQUID_AGENT`, `CI`, or TTY state for interaction decisions
-//! themselves, so every command agrees.
+//! [`Mode`] is built once at startup from the flags, the output format and the
+//! probed [`OutputEnv`]. It is the only reader of agent, CI and terminal state
+//! for interaction decisions: each question the CLI asks about its surroundings
+//! has exactly one predicate here, so every command and every pipeline step
+//! agrees. Nothing else reads `HYPERLIQUID_AGENT`, `CI` or a TTY to decide
+//! whether to prompt, bound a stream, announce or redraw.
 
 use crate::errors::CliError;
 use crate::output::terminal::{EnvFlag, OutputEnv, env_flag};
+use crate::settings::env;
+
+/// `HYPERLIQUID_AGENT`; `output::terminal` reads the same name.
+const AGENT_ENV: &str = "HYPERLIQUID_AGENT";
 
 /// What decides whether this invocation may prompt, resolved once in `main`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -20,6 +27,8 @@ pub struct Mode {
     pub agent: bool,
     /// The process runs under CI.
     pub ci: bool,
+    pub stdout_tty: bool,
+    pub stderr_tty: bool,
 }
 
 impl Mode {
@@ -36,6 +45,8 @@ impl Mode {
             stdin_is_payload,
             agent: env.agent,
             ci: env.ci,
+            stdout_tty: env.stdout_tty,
+            stderr_tty: env.stderr_tty,
         }
     }
 
@@ -59,12 +70,42 @@ impl Mode {
         } else if self.machine_format {
             Some("JSON output")
         } else if self.agent {
-            Some("HYPERLIQUID_AGENT")
+            Some(AGENT_ENV)
         } else if self.ci {
             Some("CI")
         } else {
             None
         }
+    }
+
+    /// A program, not a person, consumes this run's output: JSON format or an
+    /// agent. Endless streams need an explicit bound and secrets may not arrive
+    /// on the command line. CI alone does not make a context machine-readable.
+    #[must_use]
+    pub fn machine_context(&self) -> bool {
+        self.machine_format || self.agent
+    }
+
+    /// Notices addressed to a person on stderr, such as retry announcements:
+    /// stderr is a terminal and the run could prompt that person.
+    #[must_use]
+    pub fn person_on_stderr(&self) -> bool {
+        self.stderr_tty && self.can_prompt()
+    }
+
+    /// An unprompted notice may interrupt the person at this terminal, for
+    /// example the passive update notice: human formats, no agent or CI, and
+    /// both output streams are terminals.
+    #[must_use]
+    pub fn person_at_terminal(&self) -> bool {
+        !self.machine_format && !self.agent && !self.ci && self.stdout_tty && self.stderr_tty
+    }
+
+    /// The run may redraw the terminal in place (a live view): stdout is a
+    /// terminal and neither an agent, CI nor `--non-interactive` is driving.
+    #[must_use]
+    pub fn live_display(&self) -> bool {
+        self.stdout_tty && !self.agent && !self.ci && !self.non_interactive_flag
     }
 }
 
@@ -90,8 +131,8 @@ fn flag_value(name: &str, flag: EnvFlag) -> Result<Option<bool>, CliError> {
 
 /// Validate every boolean `HYPERLIQUID_*` mode variable once at startup.
 pub fn validate_env() -> Result<(), CliError> {
-    env_bool("HYPERLIQUID_AGENT")?;
-    env_bool("HYPERLIQUID_NO_UPDATE_CHECK")?;
+    env_bool(AGENT_ENV)?;
+    env_bool(env::NO_UPDATE_CHECK)?;
     Ok(())
 }
 
@@ -156,5 +197,180 @@ mod tests {
         };
         assert!(!ci.can_prompt());
         assert_eq!(ci.prompt_blocker(), Some("CI"));
+    }
+
+    fn terminal() -> Mode {
+        Mode {
+            stdout_tty: true,
+            stderr_tty: true,
+            ..Mode::default()
+        }
+    }
+
+    #[test]
+    fn machine_context_is_json_or_agent_but_not_ci() {
+        assert!(!Mode::default().machine_context());
+        assert!(
+            Mode {
+                machine_format: true,
+                ..Mode::default()
+            }
+            .machine_context()
+        );
+        assert!(
+            Mode {
+                agent: true,
+                ..Mode::default()
+            }
+            .machine_context()
+        );
+        assert!(
+            !Mode {
+                ci: true,
+                non_interactive_flag: true,
+                ..Mode::default()
+            }
+            .machine_context()
+        );
+    }
+
+    #[test]
+    fn stderr_notices_are_for_a_person_at_a_terminal_who_may_be_prompted() {
+        assert!(terminal().person_on_stderr());
+        for (name, mode) in [
+            (
+                "stderr piped",
+                Mode {
+                    stderr_tty: false,
+                    ..terminal()
+                },
+            ),
+            (
+                "json",
+                Mode {
+                    machine_format: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "agent",
+                Mode {
+                    agent: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "ci",
+                Mode {
+                    ci: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "non-interactive",
+                Mode {
+                    non_interactive_flag: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "payload on stdin",
+                Mode {
+                    stdin_is_payload: true,
+                    ..terminal()
+                },
+            ),
+        ] {
+            assert!(!mode.person_on_stderr(), "{name}");
+        }
+    }
+
+    #[test]
+    fn unprompted_notices_need_both_streams_on_a_terminal() {
+        assert!(terminal().person_at_terminal());
+        assert!(
+            Mode {
+                non_interactive_flag: true,
+                ..terminal()
+            }
+            .person_at_terminal(),
+            "--non-interactive only forbids prompts"
+        );
+        for (name, mode) in [
+            (
+                "stdout piped",
+                Mode {
+                    stdout_tty: false,
+                    ..terminal()
+                },
+            ),
+            (
+                "stderr piped",
+                Mode {
+                    stderr_tty: false,
+                    ..terminal()
+                },
+            ),
+            (
+                "json",
+                Mode {
+                    machine_format: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "agent",
+                Mode {
+                    agent: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "ci",
+                Mode {
+                    ci: true,
+                    ..terminal()
+                },
+            ),
+        ] {
+            assert!(!mode.person_at_terminal(), "{name}");
+        }
+    }
+
+    #[test]
+    fn live_display_needs_a_terminal_stdout_and_no_driver() {
+        assert!(terminal().live_display());
+        for (name, mode) in [
+            (
+                "stdout piped",
+                Mode {
+                    stdout_tty: false,
+                    ..terminal()
+                },
+            ),
+            (
+                "agent",
+                Mode {
+                    agent: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "ci",
+                Mode {
+                    ci: true,
+                    ..terminal()
+                },
+            ),
+            (
+                "non-interactive",
+                Mode {
+                    non_interactive_flag: true,
+                    ..terminal()
+                },
+            ),
+        ] {
+            assert!(!mode.live_display(), "{name}");
+        }
     }
 }

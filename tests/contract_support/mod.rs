@@ -105,7 +105,7 @@ pub fn registry_fixtures() -> Vec<(&'static str, Value)> {
             json!({
                 "command": command.command,
                 "command_path": command.command_path,
-                "group": command.group,
+                "group": command.category,
                 "auth_required": command.auth_required,
                 "dangerous": command.dangerous,
                 "risk": command.risk,

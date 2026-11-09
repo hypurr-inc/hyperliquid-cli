@@ -28,17 +28,15 @@ use crate::ws::websocket_for_chain;
 const WATCH_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const KEY_POLL_INTERVAL: Duration = Duration::from_millis(150);
 
+/// What ends the wait between two snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchEvent {
-    Timer,
-    WebSocketMessage,
-    WebSocketClosed,
+    /// Time passed, the socket delivered data or `r` was pressed: take another snapshot.
+    Refresh,
     ConnectionLost,
     ConnectionRestored,
-    KeyRefresh,
-    KeyQuit,
-    KeyInterrupt,
-    Continue,
+    Quit,
+    Interrupt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,19 +111,41 @@ impl WatchOutput for StdoutWatchOutput {
         format: OutputFormat,
         connection_lost: bool,
     ) -> Result<(), anyhow::Error> {
-        render_tui(session, title, data, format, connection_lost).map_err(Into::into)
+        let body = session.render_as(data, format);
+
+        let mut stdout = io::stdout();
+        execute!(stdout, cursor::MoveTo(0, 0), Clear(ClearType::All))?;
+        let (_, height) = terminal_size().unwrap_or((120, 36));
+        let available_body_lines = usize::from(height.saturating_sub(4));
+        let body_lines = body
+            .lines()
+            .take(available_body_lines)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        writeln!(stdout, "{}", output::colors::cyan(title))?;
+        writeln!(
+            stdout,
+            "{}",
+            output::colors::gray(
+                "q/Ctrl-C/Ctrl-D/Esc quit • r refresh • live updates via Hyperliquid WebSocket",
+            )
+        )?;
+        if connection_lost {
+            writeln!(stdout, "{}", output::colors::yellow(CONNECTION_LOST_NOTICE))?;
+        } else {
+            writeln!(stdout)?;
+        }
+        writeln!(stdout, "{body_lines}")?;
+        stdout.flush().map_err(Into::into)
     }
 }
 
 struct RealWatchInput {
     ws: WebSocket,
+    /// The socket has ended; the refresh timer alone keeps the view current.
+    ws_closed: bool,
     read_keys: bool,
-}
-
-impl RealWatchInput {
-    fn new(ws: WebSocket, read_keys: bool) -> Self {
-        Self { ws, read_keys }
-    }
 }
 
 impl WatchInput for RealWatchInput {
@@ -135,22 +155,16 @@ impl WatchInput for RealWatchInput {
 
         loop {
             tokio::select! {
-                _ = &mut refresh_sleep => return Ok(WatchEvent::Timer),
-                event = self.ws.next() => {
-                    return match event {
-                        Some(WsEvent::Message(_)) => Ok(WatchEvent::WebSocketMessage),
-                        Some(WsEvent::Disconnected) => Ok(WatchEvent::ConnectionLost),
-                        Some(WsEvent::Connected) => Ok(WatchEvent::ConnectionRestored),
-                        None => {
-                            tokio::time::sleep(WATCH_REFRESH_INTERVAL).await;
-                            Ok(WatchEvent::WebSocketClosed)
-                        }
-                    };
-                }
+                _ = &mut refresh_sleep => return Ok(WatchEvent::Refresh),
+                event = self.ws.next(), if !self.ws_closed => match event {
+                    Some(WsEvent::Message(_)) => return Ok(WatchEvent::Refresh),
+                    Some(WsEvent::Disconnected) => return Ok(WatchEvent::ConnectionLost),
+                    Some(WsEvent::Connected) => return Ok(WatchEvent::ConnectionRestored),
+                    None => self.ws_closed = true,
+                },
                 _ = tokio::time::sleep(KEY_POLL_INTERVAL), if self.read_keys => {
-                    match try_read_key_event().await? {
-                        Some(key) => return Ok(watch_key_event_action(key)),
-                        None => continue,
+                    if let Some(event) = try_read_key_event().await?.and_then(watch_key_event_action) {
+                        return Ok(event);
                     }
                 }
             }
@@ -175,7 +189,7 @@ where
     let format = session.format();
     let bounds = StreamBounds::snapshot_watch(max_ticks);
     let stdin_is_tty = terminal::stdin_is_terminal();
-    let stdout_is_tty = terminal::stdout_is_terminal();
+    let stdout_is_tty = session.env().stdout_tty;
     let render_mode =
         snapshot_watch_render_mode(format, bounds.max_items, stdin_is_tty, stdout_is_tty)?;
 
@@ -198,8 +212,11 @@ where
             ws.subscribe(subscription);
         }
 
-        let mut input =
-            RealWatchInput::new(ws, matches!(render_mode, SnapshotWatchRenderMode::Tui(_)));
+        let mut input = RealWatchInput {
+            ws,
+            ws_closed: false,
+            read_keys: matches!(render_mode, SnapshotWatchRenderMode::Tui(_)),
+        };
         let mut output = StdoutWatchOutput;
 
         match render_mode {
@@ -268,15 +285,11 @@ where
         }
 
         match input.next_event().await? {
-            WatchEvent::KeyQuit => return Ok(StreamEnd::Finished),
-            WatchEvent::KeyInterrupt => return Ok(StreamEnd::Signal(EXIT_SIGINT)),
+            WatchEvent::Quit => return Ok(StreamEnd::Finished),
+            WatchEvent::Interrupt => return Ok(StreamEnd::Signal(EXIT_SIGINT)),
             WatchEvent::ConnectionLost => connection_lost = true,
             WatchEvent::ConnectionRestored => connection_lost = false,
-            WatchEvent::Timer
-            | WatchEvent::WebSocketMessage
-            | WatchEvent::WebSocketClosed
-            | WatchEvent::KeyRefresh
-            | WatchEvent::Continue => {}
+            WatchEvent::Refresh => {}
         }
     }
 }
@@ -291,85 +304,35 @@ fn snapshot_watch_render_mode(
         return Ok(SnapshotWatchRenderMode::Ndjson);
     }
 
-    if stdin_is_tty && stdout_is_tty {
-        return Ok(SnapshotWatchRenderMode::Tui(format));
+    match (stdin_is_tty, stdout_is_tty) {
+        (true, true) => Ok(SnapshotWatchRenderMode::Tui(format)),
+        _ if max_ticks.is_some() => Ok(SnapshotWatchRenderMode::Ndjson),
+        (false, false) => Err(non_tty_watch_error("stdin and stdout are not TTYs")),
+        (false, true) => Err(non_tty_watch_error("stdin is not a TTY")),
+        (true, false) => Err(non_tty_watch_error("stdout is not a TTY")),
     }
-
-    if max_ticks.is_some() {
-        return Ok(SnapshotWatchRenderMode::Ndjson);
-    }
-
-    Err(CliError::Unsupported(non_tty_watch_error_message(
-        stdin_is_tty,
-        stdout_is_tty,
-    )))
 }
 
-fn non_tty_watch_error_message(stdin_is_tty: bool, stdout_is_tty: bool) -> String {
-    let reason = match (stdin_is_tty, stdout_is_tty) {
-        (false, false) => "stdin and stdout are not TTYs",
-        (false, true) => "stdin is not a TTY",
-        (true, false) => "stdout is not a TTY",
-        (true, true) => unreachable!("called only for non-TTY watch contexts"),
-    };
-
-    format!(
+fn non_tty_watch_error(reason: &str) -> CliError {
+    CliError::Unsupported(format!(
         "Non-TTY watch output cannot enter the alternate-screen TUI safely ({reason}). \
          For scripts/agents, pass --format json and --max-ticks <N> \
          (or set HYPERLIQUID_WATCH_MAX_TICKS) to receive bounded NDJSON."
-    )
+    ))
 }
 
-fn render_tui(
-    session: &Session,
-    title: &str,
-    data: &dyn TableData,
-    format: OutputFormat,
-    connection_lost: bool,
-) -> Result<(), io::Error> {
-    let body = match format {
-        OutputFormat::Pretty | OutputFormat::Table => session.render_as(data, format),
-        OutputFormat::Json => unreachable!("JSON watch mode bypasses TUI rendering"),
-    };
-
-    let mut stdout = io::stdout();
-    execute!(stdout, cursor::MoveTo(0, 0), Clear(ClearType::All))?;
-    let (_, height) = terminal_size().unwrap_or((120, 36));
-    let available_body_lines = usize::from(height.saturating_sub(4));
-    let body_lines = body
-        .lines()
-        .take(available_body_lines)
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    writeln!(stdout, "{}", output::colors::cyan(title))?;
-    writeln!(
-        stdout,
-        "{}",
-        output::colors::gray(
-            "q/Ctrl-C/Ctrl-D/Esc quit • r refresh • live updates via Hyperliquid WebSocket",
-        )
-    )?;
-    if connection_lost {
-        writeln!(stdout, "{}", output::colors::yellow(CONNECTION_LOST_NOTICE))?;
-    } else {
-        writeln!(stdout)?;
-    }
-    writeln!(stdout, "{body_lines}")?;
-    stdout.flush()
-}
-
-fn watch_key_event_action(key: KeyEvent) -> WatchEvent {
+/// The action for a key press; `None` for keys the view does not use.
+fn watch_key_event_action(key: KeyEvent) -> Option<WatchEvent> {
     let has_control = key.modifiers.contains(KeyModifiers::CONTROL);
     let plain_or_shift = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
 
     match key.code {
-        KeyCode::Esc => WatchEvent::KeyQuit,
-        KeyCode::Char('c' | 'C') if has_control => WatchEvent::KeyInterrupt,
-        KeyCode::Char('d' | 'D') if has_control => WatchEvent::KeyQuit,
-        KeyCode::Char('q' | 'Q') if plain_or_shift => WatchEvent::KeyQuit,
-        KeyCode::Char('r' | 'R') if plain_or_shift => WatchEvent::KeyRefresh,
-        _ => WatchEvent::Continue,
+        KeyCode::Esc => Some(WatchEvent::Quit),
+        KeyCode::Char('c' | 'C') if has_control => Some(WatchEvent::Interrupt),
+        KeyCode::Char('d' | 'D') if has_control => Some(WatchEvent::Quit),
+        KeyCode::Char('q' | 'Q') if plain_or_shift => Some(WatchEvent::Quit),
+        KeyCode::Char('r' | 'R') if plain_or_shift => Some(WatchEvent::Refresh),
+        _ => None,
     }
 }
 
@@ -446,7 +409,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
         ] {
-            assert_eq!(watch_key_event_action(key), WatchEvent::KeyQuit);
+            assert_eq!(watch_key_event_action(key), Some(WatchEvent::Quit));
         }
     }
 
@@ -455,7 +418,7 @@ mod tests {
         for code in ['c', 'C'] {
             assert_eq!(
                 watch_key_event_action(KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL)),
-                WatchEvent::KeyInterrupt
+                Some(WatchEvent::Interrupt)
             );
         }
     }
@@ -466,7 +429,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
             KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
         ] {
-            assert_eq!(watch_key_event_action(key), WatchEvent::KeyQuit);
+            assert_eq!(watch_key_event_action(key), Some(WatchEvent::Quit));
         }
     }
 
@@ -474,20 +437,36 @@ mod tests {
     fn watch_key_preserves_modifiers_for_control_chords() {
         assert_eq!(
             watch_key_event_action(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
-            WatchEvent::Continue
+            None
         );
         assert_eq!(
             watch_key_event_action(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
-            WatchEvent::Continue
+            None
         );
         assert_eq!(
             watch_key_event_action(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
-            WatchEvent::Continue
+            None
         );
         assert_eq!(
             watch_key_event_action(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
-            WatchEvent::KeyRefresh
+            Some(WatchEvent::Refresh)
         );
+    }
+
+    #[test]
+    fn keys_the_view_does_not_use_do_not_refresh() {
+        for code in [
+            KeyCode::Char('x'),
+            KeyCode::Enter,
+            KeyCode::Up,
+            KeyCode::Tab,
+        ] {
+            assert_eq!(
+                watch_key_event_action(KeyEvent::new(code, KeyModifiers::NONE)),
+                None,
+                "{code:?}"
+            );
+        }
     }
 
     #[derive(Clone)]
@@ -523,7 +502,7 @@ mod tests {
 
     impl WatchInput for ScriptedInput {
         async fn next_event(&mut self) -> Result<WatchEvent, anyhow::Error> {
-            Ok(self.events.pop_front().unwrap_or(WatchEvent::Timer))
+            Ok(self.events.pop_front().unwrap_or(WatchEvent::Refresh))
         }
     }
 
@@ -574,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn watch_json_max_tick_output_emits_expected_snapshots_and_terminates() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::Timer]);
+        let mut input = ScriptedInput::new([WatchEvent::Refresh]);
         let mut output = CapturingOutput::default();
 
         run_snapshot_watch_core(
@@ -622,7 +601,7 @@ mod tests {
     #[tokio::test]
     async fn watch_q_quits_after_current_snapshot() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::KeyQuit]);
+        let mut input = ScriptedInput::new([WatchEvent::Quit]);
         let mut output = CapturingOutput::default();
 
         run_snapshot_watch_core(
@@ -644,7 +623,7 @@ mod tests {
     #[tokio::test]
     async fn watch_r_refreshes_before_q_quits() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::KeyRefresh, WatchEvent::KeyQuit]);
+        let mut input = ScriptedInput::new([WatchEvent::Refresh, WatchEvent::Quit]);
         let mut output = CapturingOutput::default();
 
         run_snapshot_watch_core(
@@ -665,53 +644,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_websocket_message_triggers_refresh() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::WebSocketMessage]);
-        let mut output = CapturingOutput::default();
-
-        run_snapshot_watch_core(
-            &Session::for_test(OutputFormat::Pretty),
-            "Live TUI",
-            OutputFormat::Pretty,
-            Some(2),
-            counting_refresh(Arc::clone(&counter)),
-            &mut input,
-            &mut output,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
-        assert_eq!(output.tui_renders.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn watch_websocket_close_continues_without_error() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::WebSocketClosed]);
-        let mut output = CapturingOutput::default();
-
-        run_snapshot_watch_core(
-            &Session::for_test(OutputFormat::Pretty),
-            "Live TUI",
-            OutputFormat::Pretty,
-            Some(2),
-            counting_refresh(Arc::clone(&counter)),
-            &mut input,
-            &mut output,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
-        assert_eq!(output.tui_renders.len(), 2);
-    }
-
-    #[tokio::test]
     async fn watch_refresh_error_propagates_clearly() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::KeyRefresh]);
+        let mut input = ScriptedInput::new([WatchEvent::Refresh]);
         let mut output = CapturingOutput::default();
 
         let result = run_snapshot_watch_core(
@@ -747,7 +682,7 @@ mod tests {
     #[tokio::test]
     async fn watch_ctrl_c_key_ends_with_sigint_status() {
         let counter = Arc::new(AtomicUsize::new(0));
-        let mut input = ScriptedInput::new([WatchEvent::KeyInterrupt]);
+        let mut input = ScriptedInput::new([WatchEvent::Interrupt]);
         let mut output = CapturingOutput::default();
 
         let end = run_snapshot_watch_core(

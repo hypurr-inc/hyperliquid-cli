@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::release::{InstallMethod, ReleaseClient, is_newer_version, normalize_version};
-use crate::output::{OutputFormat, terminal};
+use crate::mode::Mode;
+use crate::output::terminal;
 use crate::settings::env;
 
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(20 * 60 * 60);
@@ -42,43 +43,31 @@ impl UpdateCheck {
     }
 }
 
-/// Conditions under which the passive check and its notice stay silent.
+/// Conditions under which the passive check and its notice stay silent. Whether
+/// a person is at the terminal comes from the run's [`Mode`]; the rest are this
+/// feature's own switches.
 #[derive(Debug, Clone, Copy, Default)]
 struct Suppression {
     disabled: bool,
-    json: bool,
     no_update_check_env: bool,
-    agent: bool,
-    ci: bool,
     no_update_notifier: bool,
-    stdout_is_terminal: bool,
-    stderr_is_terminal: bool,
+    person_at_terminal: bool,
 }
 
 impl Suppression {
-    fn current(format: OutputFormat, disabled: bool) -> Self {
+    fn current(mode: &Mode, disabled: bool) -> Self {
         Self {
             disabled,
-            json: format == OutputFormat::Json,
             no_update_check_env: terminal::env_flag(env::NO_UPDATE_CHECK) == terminal::EnvFlag::On,
-            agent: terminal::agent_env(),
-            ci: terminal::ci_env(),
             no_update_notifier: std::env::var_os(env::NO_UPDATE_NOTIFIER)
                 .is_some_and(|value| !value.is_empty()),
-            stdout_is_terminal: terminal::stdout_is_terminal(),
-            stderr_is_terminal: terminal::stderr_is_terminal(),
+            person_at_terminal: mode.person_at_terminal(),
         }
     }
 
     fn allows_check(self) -> bool {
-        !(self.disabled
-            || self.json
-            || self.no_update_check_env
-            || self.agent
-            || self.ci
-            || self.no_update_notifier
-            || !self.stdout_is_terminal
-            || !self.stderr_is_terminal)
+        self.person_at_terminal
+            && !(self.disabled || self.no_update_check_env || self.no_update_notifier)
     }
 }
 
@@ -86,9 +75,9 @@ impl Suppression {
 /// `NO_UPDATE_NOTIFIER`, and non-terminal runs. When the cached release info
 /// is stale it spawns a detached background refresh. Nothing is printed here:
 /// pass the handle to [`flush_update_check`] after the command's result.
-pub fn maybe_start_update_check(format: OutputFormat, disabled: bool) -> UpdateCheck {
+pub fn maybe_start_update_check(mode: &Mode, disabled: bool) -> UpdateCheck {
     start_update_check(
-        Suppression::current(format, disabled),
+        Suppression::current(mode, disabled),
         crate::paths::version_cache_file(),
     )
 }
@@ -296,8 +285,7 @@ mod tests {
 
     fn allowing() -> Suppression {
         Suppression {
-            stdout_is_terminal: true,
-            stderr_is_terminal: true,
+            person_at_terminal: true,
             ..Suppression::default()
         }
     }
@@ -311,19 +299,7 @@ mod tests {
                 ..allowing()
             },
             Suppression {
-                json: true,
-                ..allowing()
-            },
-            Suppression {
                 no_update_check_env: true,
-                ..allowing()
-            },
-            Suppression {
-                agent: true,
-                ..allowing()
-            },
-            Suppression {
-                ci: true,
                 ..allowing()
             },
             Suppression {
@@ -331,15 +307,45 @@ mod tests {
                 ..allowing()
             },
             Suppression {
-                stdout_is_terminal: false,
-                ..allowing()
-            },
-            Suppression {
-                stderr_is_terminal: false,
+                person_at_terminal: false,
                 ..allowing()
             },
         ] {
             assert!(!suppressed.allows_check(), "{suppressed:?}");
+        }
+    }
+
+    #[test]
+    fn suppression_follows_the_mode_of_the_run() {
+        let terminal = Mode {
+            stdout_tty: true,
+            stderr_tty: true,
+            ..Mode::default()
+        };
+        assert!(Suppression::current(&terminal, false).person_at_terminal);
+        for mode in [
+            Mode {
+                machine_format: true,
+                ..terminal
+            },
+            Mode {
+                agent: true,
+                ..terminal
+            },
+            Mode {
+                ci: true,
+                ..terminal
+            },
+            Mode {
+                stdout_tty: false,
+                ..terminal
+            },
+            Mode {
+                stderr_tty: false,
+                ..terminal
+            },
+        ] {
+            assert!(!Suppression::current(&mode, false).person_at_terminal);
         }
     }
 
@@ -349,7 +355,7 @@ mod tests {
         let path = tmpdir.path().join("version.json");
         let check = start_update_check(
             Suppression {
-                ci: true,
+                person_at_terminal: false,
                 ..allowing()
             },
             Some(path.clone()),

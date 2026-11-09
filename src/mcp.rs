@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 
-use crate::command_registry::{CommandContract, CommandRegistry};
-use crate::command_spec::{Lifecycle, Risk};
+use crate::command_registry::{ArgType, CommandContract, CommandRegistry};
+use crate::command_spec::YES_ARG;
 use crate::commands::schema::schema_query;
 use crate::output::TableData;
 
@@ -250,14 +250,13 @@ pub fn run_stdio_server() -> Result<(), anyhow::Error> {
 
 // Keep discovery and invocation behind the same policy.
 fn exposed(cmd: &CommandContract, allow_unsafe: bool) -> bool {
-    cmd.command_path != ["mcp"]
-        && (allow_unsafe || (cmd.lifecycle == Lifecycle::ReadOnly && cmd.risk == Risk::None))
+    cmd.command_path != ["mcp"] && (allow_unsafe || cmd.spec.is_public_read())
 }
 
 fn command_args(cmd: &CommandContract, args: &Value) -> Result<Vec<String>, String> {
     let map = args.as_object().ok_or("arguments must be an object")?;
     for key in map.keys() {
-        if key == "yes" || cmd.confirmation_bypass_arg() == Some(key.as_str()) {
+        if key == YES_ARG {
             return Err("confirmation bypass arguments are not allowed".into());
         }
         if !cmd.inputs.iter().any(|input| input.id == *key) {
@@ -272,7 +271,7 @@ fn command_args(cmd: &CommandContract, args: &Value) -> Result<Vec<String>, Stri
         let Some(value) = map.get(&input.id).filter(|v| !v.is_null()) else {
             continue;
         };
-        if input.arg_type == "boolean" {
+        if input.arg_type == ArgType::Boolean {
             let enabled = value.as_bool().ok_or("flag must be boolean")?;
             if enabled {
                 result.push(format!(
@@ -413,15 +412,17 @@ mod tests {
     }
 
     #[test]
-    fn exposure_uses_lifecycle_and_risk() {
+    fn default_exposure_is_public_reads_only() {
         for cmd in CommandRegistry::get().commands() {
             assert_eq!(exposed(cmd, true), cmd.command_path != ["mcp"]);
             assert_eq!(
                 exposed(cmd, false),
-                cmd.command_path != ["mcp"]
-                    && cmd.lifecycle == Lifecycle::ReadOnly
-                    && cmd.risk == Risk::None
+                cmd.command_path != ["mcp"] && cmd.spec.is_public_read()
             );
+            if exposed(cmd, false) {
+                assert!(!cmd.spec.changes_state(), "{}", cmd.command_key());
+                assert!(!cmd.dangerous, "{}", cmd.command_key());
+            }
         }
     }
 

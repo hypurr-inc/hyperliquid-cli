@@ -12,14 +12,13 @@ use hypersdk::{Address, Decimal};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, StreamBound, arg};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
 use crate::output::{self, OutputFormat, Session};
 use crate::stream::{
-    self, StreamBoundArgs, StreamBounds, StreamEnd, Ticker, emit_json_line_to_stdout,
-    write_stdout_line,
+    self, StreamBoundArgs, StreamBounds, StreamEnd, Ticker, emit_json_line, write_stdout_line,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -217,14 +216,6 @@ pub async fn watch_risk(
     let client = inv.remote()?.api().sdk();
     let session = inv.session();
     let bounds = StreamBounds::watch_risk(&args.stream);
-    if stream::piped_or_agent() && !bounds.is_bounded() {
-        return Err(CliError::Configuration(
-            "watch risk requires --max-events or --idle-timeout-ms in agent mode.\n  \
-             hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20"
-                .to_string(),
-        )
-        .into());
-    }
 
     stream::run_stream(async {
         let mut watcher = RiskWatcher::new(client, user, args).await;
@@ -239,7 +230,11 @@ pub async fn watch_risk(
 
 fn emit_alert(alert: RiskAlert, session: &Session) -> Result<(), anyhow::Error> {
     match session.format() {
-        OutputFormat::Json => emit_json_line_to_stdout(&alert, session.json_options()),
+        OutputFormat::Json => emit_json_line(
+            &mut std::io::stdout().lock(),
+            &alert,
+            session.json_options(),
+        ),
         _ => write_stdout_line(&session.render(&AlertTable(alert))),
     }
 }
@@ -699,6 +694,7 @@ Retry: safe. Agent/non-TTY mode requires --max-events or --idle-timeout-ms.\n\
 Examples:\n  \
 hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20\n  \
 hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --idle-timeout-ms 8000")
+    .stream(StreamBound::Polled)
     .args(&[
         arg("user").kind(InputKind::Identifier).resource_id("user"),
         arg("min_severity").describe("Minimum alert severity to emit."),

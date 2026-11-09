@@ -173,9 +173,12 @@ pub fn entries() -> &'static [Entry] {
     &ENTRIES
 }
 
-/// The clap tree of every command, without the global options.
-pub fn command_tree() -> clap::Command {
-    crate::command_spec::command_tree(entries(), groups())
+/// The clap tree of every command, without the global options. Built once;
+/// consumers clone it to decorate or `build()` their copy.
+pub fn command_tree() -> &'static clap::Command {
+    static TREE: LazyLock<clap::Command> =
+        LazyLock::new(|| crate::command_spec::command_tree(entries(), groups()));
+    &TREE
 }
 
 /// The command groups: names with children and no behavior of their own.
