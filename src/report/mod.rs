@@ -49,7 +49,12 @@ fn render_human_error(err: &CliError, rich: bool) -> String {
 /// single JSON document carrying the envelope keys.
 fn print_json_error(err: &CliError) {
     match err.stdout_document() {
-        StdoutDocument::Envelope => sink::out_line(&ErrorEnvelope::from_cli_error(err).to_json()),
+        StdoutDocument::Envelope => {
+            let line = format!("{}\n", ErrorEnvelope::from_cli_error(err).to_json());
+            if let Err(failure) = sink::try_out(&line) {
+                sink::err_line(&format!("Failed to write to stdout: {failure}"));
+            }
+        }
         StdoutDocument::CommandResult => {}
     }
 }

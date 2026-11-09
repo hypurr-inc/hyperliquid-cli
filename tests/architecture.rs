@@ -266,7 +266,7 @@ fn module_of(file: &Path) -> Vec<String> {
 /// is the file's `tests` module, where `super` is the file itself.
 fn paths_in(file: &Path, source: &str) -> Vec<Vec<String>> {
     let here = module_of(file);
-    let (code, tests) = match source.find("#[cfg(test)]") {
+    let (code, tests) = match test_module_start(source) {
         Some(at) => source.split_at(at),
         None => (source, ""),
     };
@@ -554,8 +554,7 @@ fn only_the_clock_reads_the_wall_clock() {
             continue;
         }
         let source = fs::read_to_string(&file).unwrap();
-        let production = source.split("#[cfg(test)]").next().unwrap();
-        let code = code_only(production);
+        let code = production_code(&source);
         if code.contains("Utc::now(") || code.contains("SystemTime::now(") {
             offenders.push(file.display().to_string());
         }
@@ -567,21 +566,30 @@ fn only_the_clock_reads_the_wall_clock() {
     );
 }
 
-/// `source` as production code: comments and literals blanked, and the unit
-/// tests (the first `#[cfg(test)] mod`) cut off.
-fn production_code(source: &str) -> String {
-    let code = code_only(source);
+/// Where the unit tests start: the first `#[cfg(test)]` that gates a module.
+/// One that gates a single item is production code.
+fn test_module_start(source: &str) -> Option<usize> {
     let marker = "#[cfg(test)]";
     let mut from = 0;
-    while let Some(found) = code[from..].find(marker) {
+    while let Some(found) = source[from..].find(marker) {
         let start = from + found;
-        let after = code[start + marker.len()..].trim_start();
+        let after = source[start + marker.len()..].trim_start();
         if after.starts_with("mod ") || after.starts_with("pub mod ") {
-            return code[..start].to_string();
+            return Some(start);
         }
         from = start + marker.len();
     }
-    code
+    None
+}
+
+/// `source` as production code: comments and literals blanked, and the unit
+/// tests cut off.
+fn production_code(source: &str) -> String {
+    let code = code_only(source);
+    match test_module_start(&code) {
+        Some(at) => code[..at].to_string(),
+        None => code,
+    }
 }
 
 /// The print macros panic on a closed pipe, and each used to be a policy of its

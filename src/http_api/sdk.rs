@@ -139,12 +139,12 @@ impl<'a> Sdk<'a> {
         {
             Ok(updates) => Ok(Some(updates)),
             Err(err) if is_shape_mismatch(&err) => Ok(None),
-            Err(err) => Err(from_sdk(err)),
+            Err(err) => Err(read_error(err)),
         }
     }
 
     async fn read<T>(&self, call: impl AsyncFnMut() -> anyhow::Result<T>) -> Result<T, CliError> {
-        self.read_raw(call).await.map_err(from_sdk)
+        self.read_raw(call).await.map_err(read_error)
     }
 
     async fn read_raw<T>(
@@ -158,6 +158,17 @@ impl<'a> Sdk<'a> {
                 (result, transient)
             })
             .await
+    }
+}
+
+/// An SDK read is always safe to resend, so its rate limit says so.
+fn read_error(err: anyhow::Error) -> CliError {
+    match from_sdk(err) {
+        CliError::RateLimited { retry_after, .. } => CliError::RateLimited {
+            retry_after,
+            retryable: true,
+        },
+        other => other,
     }
 }
 
@@ -252,6 +263,9 @@ mod tests {
                 ),
                 "{err:?}"
             );
+            if matches!(err, CliError::RateLimited { .. }) {
+                assert_eq!(err.retryable(), Some(true), "{err:?}");
+            }
             assert!(!err.to_string().contains("Couldn't reach"), "{err}");
             assert_eq!(requests(&server).await, 3, "one attempt and two retries");
         }
