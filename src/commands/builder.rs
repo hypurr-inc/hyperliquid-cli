@@ -2,24 +2,21 @@ use alloy::sol;
 use clap::Args;
 use futures::future::try_join_all;
 use hypersdk::Address;
-use hypersdk::Decimal;
 use hypersdk::hypercore::Chain;
 use serde::Serialize;
 
+use crate::builder_fee::{MaxFeeRate, percent_from_tenths_bps};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::confirm;
+use crate::commands::rows::{ListRow, One, Row, Rows};
 use crate::commands::support::{print_dry_run, require_master_signer};
 use crate::commands::user_signed::{self, UserSigned};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::mode::Mode;
-use crate::output::TableData;
-use crate::quantity::{self, Scale, ScaleError};
-use crate::resolvers::{HexAddressError, parse_hex_address};
-use crate::settings::{BuilderDefaultSetting, Settings};
 use crate::signing::{SelectedSigner, Signs};
-use crate::wire::InfoRequest;
+use crate::wire::{AddressRole, InfoRequest, address};
 
 const APPROVE_REVERSIBILITY: ActionReversibility = ActionReversibility::Reversible;
 
@@ -70,6 +67,21 @@ pub struct ApproveArgs {
     pub yes: bool,
 }
 
+/// `builder approve`'s arguments, validated.
+struct ApproveRequest {
+    builder: Address,
+    max_fee_rate: MaxFeeRate,
+}
+
+impl ApproveRequest {
+    fn parse(args: &ApproveArgs) -> Result<Self, CliError> {
+        Ok(Self {
+            builder: address(&args.builder, AddressRole::Builder)?,
+            max_fee_rate: MaxFeeRate::parse(&args.max_fee_rate)?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct BuilderFeeRow {
     user: String,
@@ -78,14 +90,32 @@ struct BuilderFeeRow {
     max_fee_rate: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderMaxFeeOutput {
-    row: BuilderFeeRow,
+impl BuilderFeeRow {
+    fn new(user: Address, builder: Address, max_fee_tenths_bps: u64) -> Self {
+        Self {
+            user: user.to_string(),
+            builder: builder.to_string(),
+            max_fee_tenths_bps,
+            max_fee_rate: percent_from_tenths_bps(max_fee_tenths_bps),
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderApprovedOutput {
-    rows: Vec<BuilderFeeRow>,
+impl Row for BuilderFeeRow {
+    const HEADERS: &'static [&'static str] = &["User", "Builder", "Max Fee", "Tenths Bps"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.user.clone(),
+            self.builder.clone(),
+            self.max_fee_rate.clone(),
+            self.max_fee_tenths_bps.to_string(),
+        ]
+    }
+}
+
+impl ListRow for BuilderFeeRow {
+    const EMPTY: &'static str = "No approved builders.";
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -101,97 +131,41 @@ struct BuilderApproveRow {
     reversibility: String,
 }
 
-struct BuilderApproveOutput {
-    row: BuilderApproveRow,
-}
+impl Row for BuilderApproveRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Status",
+        "Action",
+        "Signer",
+        "Query Address",
+        "Builder",
+        "Max Fee",
+        "Tenths Bps",
+        "Network",
+        "Reversibility",
+    ];
 
-const BUILDER_FEE_HEADERS: &[&str] = &["User", "Builder", "Max Fee", "Tenths Bps"];
-
-fn builder_fee_cells(row: &BuilderFeeRow) -> Vec<String> {
-    vec![
-        row.user.clone(),
-        row.builder.clone(),
-        row.max_fee_rate.clone(),
-        row.max_fee_tenths_bps.to_string(),
-    ]
-}
-
-impl TableData for BuilderMaxFeeOutput {
-    fn headers(&self) -> Vec<&str> {
-        BUILDER_FEE_HEADERS.to_vec()
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![builder_fee_cells(&self.row)]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
-    }
-}
-
-impl TableData for BuilderApprovedOutput {
-    fn headers(&self) -> Vec<&str> {
-        BUILDER_FEE_HEADERS.to_vec()
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows.iter().map(builder_fee_cells).collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No approved builders.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
-    }
-}
-
-impl TableData for BuilderApproveOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Status",
-            "Action",
-            "Signer",
-            "Query Address",
-            "Builder",
-            "Max Fee",
-            "Tenths Bps",
-            "Network",
-            "Reversibility",
+            self.status.clone(),
+            self.action.clone(),
+            self.signer.clone(),
+            self.query_address.clone(),
+            self.builder.clone(),
+            self.max_fee_rate.clone(),
+            self.max_fee_tenths_bps.to_string(),
+            self.network.clone(),
+            self.reversibility.clone(),
         ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.row.status.clone(),
-            self.row.action.clone(),
-            self.row.signer.clone(),
-            self.row.query_address.clone(),
-            self.row.builder.clone(),
-            self.row.max_fee_rate.clone(),
-            self.row.max_fee_tenths_bps.to_string(),
-            self.row.network.clone(),
-            self.row.reversibility.clone(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
     }
 }
 
 async fn max_fee(inv: &Invocation, user: Address, builder: Address) -> Result<(), anyhow::Error> {
     let max_fee_tenths_bps = load_max_fee(inv.remote()?.api(), user, builder).await?;
-    inv.print(&BuilderMaxFeeOutput {
-        row: BuilderFeeRow {
-            user: user.to_string(),
-            builder: builder.to_string(),
-            max_fee_tenths_bps,
-            max_fee_rate: percent_from_tenths_bps(max_fee_tenths_bps),
-        },
-    });
+    inv.print(&One::new(BuilderFeeRow::new(
+        user,
+        builder,
+        max_fee_tenths_bps,
+    )));
     Ok(())
 }
 
@@ -206,16 +180,11 @@ async fn approved(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> 
 
     let rows = try_join_all(builders.into_iter().map(|builder| async move {
         let max_fee_tenths_bps = load_max_fee(api, user, builder).await?;
-        Ok::<_, CliError>(BuilderFeeRow {
-            user: user.to_string(),
-            builder: builder.to_string(),
-            max_fee_tenths_bps,
-            max_fee_rate: percent_from_tenths_bps(max_fee_tenths_bps),
-        })
+        Ok::<_, CliError>(BuilderFeeRow::new(user, builder, max_fee_tenths_bps))
     }))
     .await?;
 
-    inv.print(&BuilderApprovedOutput { rows });
+    inv.print(&Rows::new(rows));
     Ok(())
 }
 
@@ -223,26 +192,25 @@ fn approve_dry_run_value(
     chain: Chain,
     signer: Option<Address>,
     query_address: Option<Address>,
-    builder: Address,
-    args: &ApproveArgs,
-) -> Result<serde_json::Value, CliError> {
-    let max_fee_tenths_bps = validate_max_fee_rate(&args.max_fee_rate)?;
-    Ok(serde_json::json!({
+    request: &ApproveRequest,
+) -> serde_json::Value {
+    let max_fee_rate = request.max_fee_rate.percent();
+    serde_json::json!({
         "network": chain.to_string(),
         "signer": signer.map(|address| address.to_string()),
         "query_address": query_address.map(|address| address.to_string()),
-        "builder": builder.to_string(),
-        "max_fee_rate": args.max_fee_rate,
-        "max_fee_tenths_bps": max_fee_tenths_bps,
+        "builder": request.builder.to_string(),
+        "max_fee_rate": max_fee_rate,
+        "max_fee_tenths_bps": request.max_fee_rate.tenths_bps(),
         "reversibility": APPROVE_REVERSIBILITY,
         "action": {
             "type": ApproveBuilderFee::ACTION_TYPE,
             "hyperliquidChain": chain.to_string(),
             "signatureChainId": chain.arbitrum_id().to_string(),
-            "builder": builder.to_string(),
-            "maxFeeRate": args.max_fee_rate,
+            "builder": request.builder.to_string(),
+            "maxFeeRate": max_fee_rate,
         }
-    }))
+    })
 }
 
 async fn load_max_fee(api: &ApiClient, user: Address, builder: Address) -> Result<u64, CliError> {
@@ -256,26 +224,37 @@ async fn load_max_fee(api: &ApiClient, user: Address, builder: Address) -> Resul
 async fn approve(
     inv: &Invocation,
     signer: &SelectedSigner,
-    builder: Address,
-    args: &ApproveArgs,
+    request: &ApproveRequest,
+    yes: bool,
 ) -> Result<(), anyhow::Error> {
-    let max_fee_tenths_bps = validate_max_fee_rate(&args.max_fee_rate)?;
-    if !args.yes {
-        confirm_builder_approval(inv.mode(), builder, &args.max_fee_rate, max_fee_tenths_bps)?;
-    }
+    let question = format!(
+        "Approve builder {} for max fee {} ({} tenths bps)?",
+        request.builder,
+        request.max_fee_rate.percent(),
+        request.max_fee_rate.tenths_bps()
+    );
+    confirm::unless_yes(
+        yes,
+        inv.mode(),
+        "",
+        &question,
+        "builder fee approval aborted",
+    )?;
 
     let remote = inv.remote()?;
-    submit_approval(remote.api(), signer, builder, &args.max_fee_rate).await?;
+    submit_approval(remote.api(), signer, request.builder, &request.max_fee_rate).await?;
 
-    inv.print(&BuilderApproveOutput {
-        row: approve_output_row(
-            remote.chain(),
-            signer,
-            builder,
-            &args.max_fee_rate,
-            max_fee_tenths_bps,
-        ),
-    });
+    inv.print(&One::new(BuilderApproveRow {
+        status: "submitted".to_string(),
+        action: "approve-builder-fee".to_string(),
+        signer: signer.address().to_string(),
+        query_address: signer.query_address().to_string(),
+        builder: request.builder.to_string(),
+        max_fee_rate: request.max_fee_rate.percent().to_string(),
+        max_fee_tenths_bps: request.max_fee_rate.tenths_bps(),
+        network: remote.chain().to_string(),
+        reversibility: APPROVE_REVERSIBILITY.as_str().to_string(),
+    }));
     Ok(())
 }
 
@@ -283,150 +262,16 @@ pub async fn submit_approval(
     api: &ApiClient,
     signer: &SelectedSigner,
     builder: Address,
-    max_fee_rate: &str,
-) -> Result<u64, anyhow::Error> {
-    let max_fee_tenths_bps = validate_max_fee_rate(max_fee_rate)?;
+    max_fee_rate: &MaxFeeRate,
+) -> Result<(), anyhow::Error> {
     user_signed::submit(api, signer, |hyperliquid_chain, nonce| ApproveBuilderFee {
         hyperliquidChain: hyperliquid_chain,
-        maxFeeRate: max_fee_rate.to_string(),
+        maxFeeRate: max_fee_rate.percent().to_string(),
         builder,
         nonce,
     })
     .await?;
-    Ok(max_fee_tenths_bps)
-}
-
-fn approve_output_row(
-    chain: Chain,
-    signer: &SelectedSigner,
-    builder: Address,
-    max_fee_rate: &str,
-    max_fee_tenths_bps: u64,
-) -> BuilderApproveRow {
-    BuilderApproveRow {
-        status: "submitted".to_string(),
-        action: "approve-builder-fee".to_string(),
-        signer: signer.address().to_string(),
-        query_address: signer.query_address().to_string(),
-        builder: builder.to_string(),
-        max_fee_rate: max_fee_rate.to_string(),
-        max_fee_tenths_bps,
-        network: chain.to_string(),
-        reversibility: APPROVE_REVERSIBILITY.as_str().to_string(),
-    }
-}
-
-pub fn parse_builder_address(raw: &str) -> Result<Address, CliError> {
-    parse_hex_address(raw, true).map_err(|err| match err {
-        HexAddressError::Format => CliError::Unsupported(format!("Invalid builder address: {raw}")),
-        HexAddressError::Zero => {
-            CliError::Unsupported("builder address cannot be the zero address".to_string())
-        }
-    })
-}
-
-/// Resolve the default builder address and fee rate.
-///
-/// Priority: `HYPERLIQUID_DEFAULT_BUILDER_ADDRESS` /
-/// `HYPERLIQUID_DEFAULT_BUILDER_FEE_RATE` env vars, then the config file
-/// `default_builder_address` / `default_builder_fee_rate`, then the build-time
-/// default. Returns `Ok(None)` when nothing is configured and `Err` when a layer
-/// sets only one side or holds invalid values.
-pub fn resolve_default_builder_fee(
-    settings: &Settings,
-) -> Result<Option<(Address, u64)>, CliError> {
-    settings
-        .default_builder()?
-        .map(parse_default_builder_pair)
-        .transpose()
-}
-
-/// The builder default setup and wallet creation offer, as the address and
-/// fee-rate text they would write to the config. Skips the config file.
-pub fn suggested_default_builder(
-    settings: &Settings,
-) -> Result<Option<(String, String)>, CliError> {
-    Ok(settings
-        .suggested_default_builder()
-        .map(parse_default_builder_pair)
-        .transpose()?
-        .map(|(address, fee)| (address.to_string(), percent_from_tenths_bps(fee))))
-}
-
-fn parse_default_builder_pair(setting: BuilderDefaultSetting) -> Result<(Address, u64), CliError> {
-    let BuilderDefaultSetting {
-        address,
-        fee_rate,
-        address_label,
-        fee_label,
-    } = setting;
-    match (address, fee_rate) {
-        (Some(_), None) => Err(CliError::Configuration(format!(
-            "{address_label} is set but {fee_label} is not; both must be configured"
-        ))),
-        (None, Some(_)) | (None, None) => Err(CliError::Configuration(format!(
-            "{fee_label} is set but {address_label} is not; both must be configured"
-        ))),
-        (Some(address), Some(fee)) => {
-            let address = parse_builder_address(&address).map_err(|err| {
-                CliError::Configuration(format!("invalid {address_label}: {err}"))
-            })?;
-            let fee_tenths_bps = validate_max_fee_rate(&fee)
-                .map_err(|err| CliError::Configuration(format!("invalid {fee_label}: {err}")))?;
-            Ok((address, fee_tenths_bps))
-        }
-    }
-}
-
-pub fn validate_max_fee_rate(raw: &str) -> Result<u64, CliError> {
-    let Some(percent) = raw.strip_suffix('%') else {
-        return Err(CliError::Unsupported(
-            "builder max fee rate must be a percent string such as 0.001%".to_string(),
-        ));
-    };
-    if percent.trim() != percent || percent.is_empty() {
-        return Err(CliError::Unsupported(
-            "builder max fee rate must not contain whitespace".to_string(),
-        ));
-    }
-    let value = percent.parse::<Decimal>().map_err(|_| {
-        CliError::Unsupported("builder max fee rate must be a decimal percent".to_string())
-    })?;
-    if value < Decimal::ZERO {
-        return Err(CliError::Unsupported(
-            "builder max fee rate cannot be negative".to_string(),
-        ));
-    }
-    if value > Decimal::ONE {
-        return Err(CliError::Unsupported(
-            "builder max fee rate cannot exceed 1%".to_string(),
-        ));
-    }
-    quantity::non_negative(value, Scale::TENTHS_BPS_PER_PERCENT).map_err(|err| match err {
-        ScaleError::TooPrecise => {
-            CliError::Unsupported("builder max fee rate must be a multiple of 0.001%".to_string())
-        }
-        ScaleError::Negative | ScaleError::NotPositive | ScaleError::TooLarge => {
-            CliError::Unsupported("builder max fee rate is outside supported bounds".to_string())
-        }
-    })
-}
-
-pub(crate) fn percent_from_tenths_bps(value: u64) -> String {
-    let percent = Decimal::from(value) / Decimal::from(1000);
-    format!("{percent}%")
-}
-
-fn confirm_builder_approval(
-    mode: &Mode,
-    builder: Address,
-    max_fee_rate: &str,
-    max_fee_tenths_bps: u64,
-) -> Result<(), CliError> {
-    let question = format!(
-        "Approve builder {builder} for max fee {max_fee_rate} ({max_fee_tenths_bps} tenths bps)?"
-    );
-    crate::prompt::consent(mode, "--yes", "", &question, "builder fee approval aborted")
+    Ok(())
 }
 
 pub const GROUP: GroupSpec =
@@ -449,13 +294,13 @@ impl CliCommand for BuilderMaxFee {
     ]);
 
     fn validate(args: &MaxFeeArgs) -> Result<(), CliError> {
-        parse_builder_address(&args.builder)?;
+        address(&args.builder, AddressRole::Builder)?;
         Ok(())
     }
 
     async fn run(inv: &Invocation, args: &MaxFeeArgs) -> Result<(), anyhow::Error> {
         let user = inv.resolve_account(&args.user)?;
-        let builder_address = parse_builder_address(&args.builder)?;
+        let builder_address = address(&args.builder, AddressRole::Builder)?;
         max_fee(inv, user, builder_address).await
     }
 }
@@ -502,14 +347,11 @@ impl CliCommand for BuilderApprove {
     ]);
 
     fn validate(args: &ApproveArgs) -> Result<(), CliError> {
-        parse_builder_address(&args.builder)?;
-        validate_max_fee_rate(&args.max_fee_rate)?;
-        Ok(())
+        ApproveRequest::parse(args).map(drop)
     }
 
     async fn run(inv: &Invocation, args: &ApproveArgs) -> Result<(), anyhow::Error> {
-        let builder = parse_builder_address(&args.builder)?;
-        validate_max_fee_rate(&args.max_fee_rate)?;
+        let request = ApproveRequest::parse(args)?;
         let resolved = inv.resolve_signer();
         if let Ok(signer) = &resolved {
             require_master_signer(signer, "approveBuilderFee")?;
@@ -520,110 +362,10 @@ impl CliCommand for BuilderApprove {
                 inv.remote()?.chain(),
                 signer.as_ref().map(|resolved| resolved.address()),
                 signer.as_ref().map(|resolved| resolved.query_address()),
-                builder,
-                args,
-            )?;
+                &request,
+            );
             return print_dry_run(inv, "approve_builder_fee", preview_args);
         }
-        approve(inv, &resolved?, builder, args).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::Config;
-    use crate::settings::{EnvSource, env};
-
-    #[test]
-    fn max_fee_rate_percent_converts_to_tenths_bps() {
-        assert_eq!(validate_max_fee_rate("0%").unwrap(), 0);
-        assert_eq!(validate_max_fee_rate("0.001%").unwrap(), 1);
-        assert_eq!(validate_max_fee_rate("0.01%").unwrap(), 10);
-        assert_eq!(validate_max_fee_rate("0.1%").unwrap(), 100);
-        assert_eq!(validate_max_fee_rate("1%").unwrap(), 1000);
-    }
-
-    #[test]
-    fn max_fee_rate_rejects_ambiguous_or_over_limit_values() {
-        assert!(validate_max_fee_rate("0.0001%").is_err());
-        assert!(validate_max_fee_rate("1.001%").is_err());
-        assert!(validate_max_fee_rate("1").is_err());
-        assert!(validate_max_fee_rate("-0.001%").is_err());
-    }
-
-    fn settings(env: &[(&str, &str)]) -> Settings {
-        Settings::detached(EnvSource::fixed(env.iter().copied()), None)
-    }
-
-    const ADDRESS: &str = "0x0000000000000000000000000000000000000001";
-
-    #[test]
-    fn default_builder_errs_when_only_address_set() {
-        let result =
-            resolve_default_builder_fee(&settings(&[(env::DEFAULT_BUILDER_ADDRESS, ADDRESS)]));
-        assert!(result.unwrap_err().to_string().contains("FEE_RATE"));
-    }
-
-    #[test]
-    fn default_builder_errs_when_only_fee_set() {
-        let result =
-            resolve_default_builder_fee(&settings(&[(env::DEFAULT_BUILDER_FEE_RATE, "0.001%")]));
-        assert!(result.unwrap_err().to_string().contains("BUILDER_ADDRESS"));
-    }
-
-    #[test]
-    fn default_builder_errs_on_invalid_address_or_fee() {
-        let bad_address = settings(&[
-            (env::DEFAULT_BUILDER_ADDRESS, "not-an-address"),
-            (env::DEFAULT_BUILDER_FEE_RATE, "0.001%"),
-        ]);
-        let err = resolve_default_builder_fee(&bad_address).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("invalid HYPERLIQUID_DEFAULT_BUILDER_ADDRESS")
-        );
-
-        let bad_fee = settings(&[
-            (env::DEFAULT_BUILDER_ADDRESS, ADDRESS),
-            (env::DEFAULT_BUILDER_FEE_RATE, "not-a-percent"),
-        ]);
-        assert!(resolve_default_builder_fee(&bad_fee).is_err());
-    }
-
-    #[test]
-    fn default_builder_reads_valid_env_vars() {
-        let (address, fee) = resolve_default_builder_fee(&settings(&[
-            (env::DEFAULT_BUILDER_ADDRESS, ADDRESS),
-            (env::DEFAULT_BUILDER_FEE_RATE, "0.001%"),
-        ]))
-        .unwrap()
-        .unwrap();
-        assert_eq!(address.to_string(), ADDRESS);
-        assert_eq!(fee, 1); // 0.001% = 1 tenth bps
-    }
-
-    #[test]
-    fn default_builder_falls_back_to_config_and_names_its_fields() {
-        let config = Config {
-            default_builder_address: Some(ADDRESS.to_string()),
-            ..Config::default()
-        };
-        let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), Some(config));
-        let err = resolve_default_builder_fee(&settings).unwrap_err();
-        assert!(err.to_string().contains("default_builder_fee_rate"));
-    }
-
-    #[test]
-    fn suggestion_normalizes_address_and_fee_text() {
-        let suggestion = suggested_default_builder(&settings(&[
-            (env::DEFAULT_BUILDER_ADDRESS, ADDRESS),
-            (env::DEFAULT_BUILDER_FEE_RATE, "0.0010%"),
-        ]))
-        .unwrap();
-        assert_eq!(
-            suggestion,
-            Some((ADDRESS.to_string(), "0.001%".to_string()))
-        );
+        approve(inv, &resolved?, &request, args.yes).await
     }
 }

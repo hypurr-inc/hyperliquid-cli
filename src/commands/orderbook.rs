@@ -8,10 +8,10 @@ use hypersdk::hypercore::{
 };
 use serde::Serialize;
 
+use crate::assets::canonical_dex;
 use crate::assets::{AssetResolver, Market};
 use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, StreamBound, arg};
-use crate::commands::support::canonical_dex;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
@@ -122,7 +122,7 @@ impl TableData for BookSnapshot {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        crate::output::serialize_row(self)
     }
 }
 
@@ -213,7 +213,7 @@ impl TableData for CandlesOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.candles).unwrap_or_else(|_| serde_json::json!([]))
+        crate::output::serialize_row(&self.candles)
     }
 }
 
@@ -246,7 +246,7 @@ impl TableData for SpreadRow {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        crate::output::serialize_row(self)
     }
 }
 
@@ -294,7 +294,7 @@ impl TableData for FundingRow {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        crate::output::serialize_row(self)
     }
 }
 

@@ -4,14 +4,14 @@ use hypersdk::hypercore::PerpMarket;
 use serde::Serialize;
 
 use crate::assets::{
-    AssetQuery, find_perp_dex, load_hip3_market, normalize_dex, parse_asset_query,
+    AssetQuery, eq_asset_name, find_perp_dex, load_hip3_market, normalize_dex, parse_asset_query,
     qualify_dex_asset,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
-use crate::output::TableData;
 
 #[derive(Args, Debug)]
 pub struct PerpsListArgs {
@@ -58,85 +58,34 @@ impl From<PerpMarket> for PerpMarketRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PerpMarketsOutput {
-    markets: Vec<PerpMarketRow>,
-}
+pub type PerpMarketsOutput = Rows<PerpMarketRow>;
 
-impl PerpMarketsOutput {
-    #[must_use]
-    pub fn new(markets: Vec<PerpMarketRow>) -> Self {
-        Self { markets }
+impl Row for PerpMarketRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Name",
+        "Index",
+        "Max Leverage",
+        "Sz Decimals",
+        "Collateral",
+        "Isolated",
+        "Tick Size @ Price 1",
+    ];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            self.index.to_string(),
+            format!("{}x", self.max_leverage),
+            self.sz_decimals.to_string(),
+            self.collateral.clone(),
+            self.isolated_margin.to_string(),
+            or_missing(self.tick_size_at_price_1.as_deref()),
+        ]
     }
 }
 
-const PERP_MARKET_HEADERS: &[&str] = &[
-    "Name",
-    "Index",
-    "Max Leverage",
-    "Sz Decimals",
-    "Collateral",
-    "Isolated",
-    "Tick Size @ Price 1",
-];
-
-fn perp_market_cells(market: &PerpMarketRow) -> Vec<String> {
-    vec![
-        market.name.clone(),
-        market.index.to_string(),
-        format!("{}x", market.max_leverage),
-        market.sz_decimals.to_string(),
-        market.collateral.clone(),
-        market.isolated_margin.to_string(),
-        market
-            .tick_size_at_price_1
-            .clone()
-            .unwrap_or_else(|| "n/a".to_string()),
-    ]
-}
-
-impl TableData for PerpMarketsOutput {
-    fn headers(&self) -> Vec<&str> {
-        PERP_MARKET_HEADERS.to_vec()
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.markets.iter().map(perp_market_cells).collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.markets).unwrap_or_else(|_| serde_json::json!([]))
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No perpetual markets.")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PerpMarketDetailsOutput {
-    market: PerpMarketRow,
-}
-
-impl PerpMarketDetailsOutput {
-    #[must_use]
-    pub fn new(market: PerpMarketRow) -> Self {
-        Self { market }
-    }
-}
-
-impl TableData for PerpMarketDetailsOutput {
-    fn headers(&self) -> Vec<&str> {
-        PERP_MARKET_HEADERS.to_vec()
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![perp_market_cells(&self.market)]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.market).unwrap_or_else(|_| serde_json::json!({}))
-    }
+impl ListRow for PerpMarketRow {
+    const EMPTY: &'static str = "No perpetual markets.";
 }
 
 async fn list(inv: &Invocation, args: &PerpsListArgs) -> Result<(), anyhow::Error> {
@@ -162,28 +111,34 @@ async fn get(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Error>
     {
         load_hip3_market(client, &dex_name, &token)
             .await?
-            .map(|(_, market)| PerpMarketRow::from(market))
+            .map(|(_, market)| market)
             .ok_or_else(|| CliError::AssetNotFoundNoSuggestion {
                 asset: query.clone(),
             })?
     } else {
-        let resolver = inv.asset_resolver().await?;
-        let resolved = resolver.resolve_perp(&query).map_err(CliError::from)?;
-        client
+        // The list already holds the market, so a hit needs no resolver. A
+        // miss asks the resolver why, for its suggestion or its outcome-notation
+        // error.
+        let symbol = query.trim();
+        let listed = client
             .perps()
             .await
             .map_err(from_sdk)?
             .into_iter()
-            .find(|market| {
-                market.index == resolved.index || market.name.eq_ignore_ascii_case(&resolved.name)
-            })
-            .map(PerpMarketRow::from)
-            .ok_or_else(|| CliError::AssetNotFoundNoSuggestion {
-                asset: query.clone(),
-            })?
+            .find(|market| eq_asset_name(&market.name, symbol));
+        match listed {
+            Some(market) => market,
+            None => {
+                return Err(match inv.asset_resolver().await?.resolve_perp(&query) {
+                    Err(err) => CliError::from(err),
+                    Ok(_) => CliError::AssetNotFoundNoSuggestion { asset: query },
+                }
+                .into());
+            }
+        }
     };
 
-    inv.print(&PerpMarketDetailsOutput::new(market));
+    inv.print(&One::new(PerpMarketRow::from(market)));
     Ok(())
 }
 

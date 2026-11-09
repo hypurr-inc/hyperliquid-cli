@@ -6,20 +6,20 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
-use crate::commands::account::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::actions;
+use crate::commands::confirm;
+use crate::commands::rows::{ListRow, One, Row, Rows, or_missing, style_column};
+use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::support::print_dry_run;
 use crate::commands::user_signed::{self, UserSigned};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::mode::Mode;
-use crate::output::{self, JsonValueOutput, TableData};
+use crate::output::{self, JsonValueOutput};
 use crate::quantity::{self, Scale};
-use crate::resolvers::{HexAddressError, parse_hex_address};
 use crate::signing::{SelectedSigner, Signs};
-use crate::wire::InfoRequest;
+use crate::wire::{AddressRole, InfoRequest, address};
 
 const ASSET: &str = "HYPE";
 const WITHDRAWAL_NOTE: &str = "7-day withdrawal queue before funds become available in spot";
@@ -140,10 +140,27 @@ impl StakingActionKind {
             Self::LinkInitiate | Self::LinkFinalize => "link_staking_user",
         }
     }
+
+    /// The action name receipts report.
+    fn receipt_action(self) -> &'static str {
+        match self {
+            Self::Delegate => "delegate",
+            Self::Undelegate => "undelegate",
+            Self::Deposit => "deposit",
+            Self::Withdraw => "withdraw",
+            Self::ClaimRewards => "claim-rewards",
+            Self::LinkInitiate | Self::LinkFinalize => "staking-link",
+        }
+    }
+
+    fn note(self) -> Option<&'static str> {
+        (self == Self::Withdraw).then_some(WITHDRAWAL_NOTE)
+    }
 }
 
+/// Responses are camelCase; the CLI's own JSON is snake_case.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
 pub struct DelegatorSummary {
     #[serde(with = "rust_decimal::serde::str")]
     pub delegated: Decimal,
@@ -155,7 +172,7 @@ pub struct DelegatorSummary {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
 pub struct DelegationRow {
     pub validator: String,
     #[serde(with = "rust_decimal::serde::str")]
@@ -164,7 +181,7 @@ pub struct DelegationRow {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
 pub struct RewardRow {
     pub time: u64,
     pub source: String,
@@ -172,7 +189,23 @@ pub struct RewardRow {
     pub total_amount: Decimal,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+impl Row for RewardRow {
+    const HEADERS: &'static [&'static str] = &["Time", "Source", "Total Amount"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.time.to_string(),
+            self.source.clone(),
+            self.total_amount.to_string(),
+        ]
+    }
+}
+
+impl ListRow for RewardRow {
+    const EMPTY: &'static str = "No results.";
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidatorSummary {
     pub validator: String,
@@ -190,7 +223,7 @@ pub struct ValidatorSummary {
     pub stats: Vec<(String, ValidatorStats)>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidatorStats {
     #[serde(with = "rust_decimal::serde::str")]
@@ -200,33 +233,141 @@ pub struct ValidatorStats {
     pub n_samples: u64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct StakingSummaryOutput {
+/// A validator as `staking validators` reports it: the exchange's fields plus
+/// the stake in HYPE, with the per-period stats as objects.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ValidatorRow {
+    validator: String,
+    signer: Option<String>,
+    name: String,
+    description: Option<String>,
+    n_recent_blocks: Option<u64>,
+    stake: u64,
+    #[serde(with = "rust_decimal::serde::str")]
+    stake_hype: Decimal,
+    is_jailed: bool,
+    unjailable_after: Option<u64>,
+    is_active: bool,
+    #[serde(with = "rust_decimal::serde::str")]
+    commission: Decimal,
+    stats: Vec<ValidatorPeriodStats>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct ValidatorPeriodStats {
+    period: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    uptime_fraction: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    predicted_apr: Decimal,
+    n_samples: u64,
+}
+
+impl From<ValidatorSummary> for ValidatorRow {
+    fn from(summary: ValidatorSummary) -> Self {
+        Self {
+            stake_hype: Scale::HYPE_CORE.amount(summary.stake),
+            validator: summary.validator,
+            signer: summary.signer,
+            name: summary.name,
+            description: summary.description,
+            n_recent_blocks: summary.n_recent_blocks,
+            stake: summary.stake,
+            is_jailed: summary.is_jailed,
+            unjailable_after: summary.unjailable_after,
+            is_active: summary.is_active,
+            commission: summary.commission,
+            stats: summary
+                .stats
+                .into_iter()
+                .map(|(period, stats)| ValidatorPeriodStats {
+                    period,
+                    uptime_fraction: stats.uptime_fraction,
+                    predicted_apr: stats.predicted_apr,
+                    n_samples: stats.n_samples,
+                })
+                .collect(),
+        }
+    }
+}
+
+impl ValidatorRow {
+    /// The APR the table shows: the day period's, else the first reported.
+    fn apr(&self) -> Option<Decimal> {
+        self.stats
+            .iter()
+            .find(|stats| stats.period == "day")
+            .or_else(|| self.stats.first())
+            .map(|stats| stats.predicted_apr)
+    }
+}
+
+impl Row for ValidatorRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Name",
+        "Validator",
+        "Stake",
+        "Commission",
+        "APR",
+        "Active",
+        "Jailed",
+    ];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.name.clone(),
+            self.validator.clone(),
+            self.stake_hype.to_string(),
+            self.commission.to_string(),
+            or_missing(self.apr()),
+            self.is_active.to_string(),
+            self.is_jailed.to_string(),
+        ]
+    }
+}
+
+impl ListRow for ValidatorRow {
+    const EMPTY: &'static str = "No results.";
+}
+
+/// `staking summary`: the delegator summary with its delegations and rewards.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+struct StakingSummaryRow {
     address: String,
+    #[serde(flatten)]
     summary: DelegatorSummary,
+    #[serde(with = "rust_decimal::serde::str")]
     pending_rewards: Decimal,
     delegations: Vec<DelegationRow>,
     rewards: Vec<RewardRow>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RewardsOutput {
-    rows: Vec<RewardRow>,
-}
+impl Row for StakingSummaryRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Address",
+        "Delegated",
+        "Undelegated",
+        "Pending Withdrawal",
+        "Pending Withdrawals",
+        "Pending Rewards",
+        "Delegations",
+    ];
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ValidatorsOutput {
-    rows: Vec<ValidatorSummary>,
-}
-
-struct ActionConfirmationContext<'a> {
-    chain: Chain,
-    signer: &'a SelectedSigner,
-    action_kind: StakingActionKind,
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.address.clone(),
+            self.summary.delegated.to_string(),
+            self.summary.undelegated.to_string(),
+            self.summary.total_pending_withdrawal.to_string(),
+            self.summary.n_pending_withdrawals.to_string(),
+            self.pending_rewards.to_string(),
+            self.delegations.len().to_string(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct ActionConfirmation {
+struct ActionRow {
     action: String,
     status: String,
     network: String,
@@ -240,12 +381,38 @@ struct ActionConfirmation {
     note: Option<String>,
 }
 
-struct ActionOutput {
-    row: ActionConfirmation,
+impl Row for ActionRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Action",
+        "Status",
+        "Network",
+        "Signer",
+        "Acting As",
+        "Reversibility",
+        "Amount",
+        "Asset",
+        "Validator",
+        "Note",
+    ];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.action.clone(),
+            self.status.clone(),
+            self.network.clone(),
+            self.signer.clone(),
+            self.acting_as.clone(),
+            self.reversibility.clone(),
+            self.amount.to_string(),
+            self.asset.clone(),
+            self.validator.clone().unwrap_or_default(),
+            self.note.clone().unwrap_or_default(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct LinkStakingConfirmation {
+struct LinkStakingRow {
     status: String,
     action: String,
     phase: String,
@@ -258,8 +425,40 @@ struct LinkStakingConfirmation {
     warning: String,
 }
 
-struct LinkStakingOutput {
-    row: LinkStakingConfirmation,
+impl Row for LinkStakingRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Status",
+        "Action",
+        "Phase",
+        "Acting As",
+        "Signer",
+        "User",
+        "Is Finalize",
+        "Network",
+        "Reversibility",
+        "Warning",
+    ];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.status.clone(),
+            self.action.clone(),
+            self.phase.clone(),
+            self.acting_as.clone(),
+            self.signer.clone(),
+            self.user.clone(),
+            self.is_finalize.to_string(),
+            self.network.clone(),
+            self.reversibility.clone(),
+            self.warning.clone(),
+        ]
+    }
+
+    fn pretty_cells(&self) -> Vec<String> {
+        let mut cells = self.cells();
+        style_column::<Self>(&mut cells, "Warning", output::colors::yellow);
+        cells
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -269,217 +468,6 @@ struct ClaimRewardsAction {
     action_type: &'static str,
 }
 
-impl TableData for StakingSummaryOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec![
-            "Address",
-            "Delegated",
-            "Undelegated",
-            "Pending Withdrawal",
-            "Pending Withdrawals",
-            "Pending Rewards",
-            "Delegations",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.address.clone(),
-            self.summary.delegated.to_string(),
-            self.summary.undelegated.to_string(),
-            self.summary.total_pending_withdrawal.to_string(),
-            self.summary.n_pending_withdrawals.to_string(),
-            self.pending_rewards.to_string(),
-            self.delegations.len().to_string(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::json!({
-            "address": self.address,
-            "delegated": self.summary.delegated,
-            "undelegated": self.summary.undelegated,
-            "total_pending_withdrawal": self.summary.total_pending_withdrawal,
-            "n_pending_withdrawals": self.summary.n_pending_withdrawals,
-            "pending_rewards": self.pending_rewards,
-            "delegations": self.delegations.iter().map(delegation_json).collect::<Vec<_>>(),
-            "rewards": self.rewards.iter().map(reward_json).collect::<Vec<_>>(),
-        })
-    }
-}
-
-impl TableData for RewardsOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec!["Time", "Source", "Total Amount"]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.time.to_string(),
-                    row.source.clone(),
-                    row.total_amount.to_string(),
-                ]
-            })
-            .collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::Value::Array(self.rows.iter().map(reward_json).collect())
-    }
-}
-
-impl TableData for ValidatorsOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec![
-            "Name",
-            "Validator",
-            "Stake",
-            "Commission",
-            "APR",
-            "Active",
-            "Jailed",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.name.clone(),
-                    row.validator.clone(),
-                    format_hype_wei(row.stake),
-                    row.commission.to_string(),
-                    row.stats
-                        .iter()
-                        .find(|(period, _)| period == "day")
-                        .or_else(|| row.stats.first())
-                        .map(|(_, stats)| stats.predicted_apr.to_string())
-                        .unwrap_or_default(),
-                    row.is_active.to_string(),
-                    row.is_jailed.to_string(),
-                ]
-            })
-            .collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::Value::Array(
-            self.rows
-                .iter()
-                .map(|row| {
-                    serde_json::json!({
-                        "validator": row.validator,
-                        "signer": row.signer,
-                        "name": row.name,
-                        "description": row.description,
-                        "n_recent_blocks": row.n_recent_blocks,
-                        "stake": row.stake,
-                        "stake_hype": format_hype_wei(row.stake),
-                        "is_jailed": row.is_jailed,
-                        "unjailable_after": row.unjailable_after,
-                        "is_active": row.is_active,
-                        "commission": row.commission,
-                        "stats": row.stats.iter().map(|(period, stats)| serde_json::json!({
-                            "period": period,
-                            "uptime_fraction": stats.uptime_fraction,
-                            "predicted_apr": stats.predicted_apr,
-                            "n_samples": stats.n_samples,
-                        })).collect::<Vec<_>>(),
-                    })
-                })
-                .collect(),
-        )
-    }
-}
-
-impl TableData for ActionOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec![
-            "Action",
-            "Status",
-            "Network",
-            "Signer",
-            "Acting As",
-            "Reversibility",
-            "Amount",
-            "Asset",
-            "Validator",
-            "Note",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.row.action.clone(),
-            self.row.status.clone(),
-            self.row.network.clone(),
-            self.row.signer.clone(),
-            self.row.acting_as.clone(),
-            self.row.reversibility.clone(),
-            self.row.amount.to_string(),
-            self.row.asset.clone(),
-            self.row.validator.clone().unwrap_or_default(),
-            self.row.note.clone().unwrap_or_default(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
-    }
-}
-
-impl TableData for LinkStakingOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec![
-            "Status",
-            "Action",
-            "Phase",
-            "Acting As",
-            "Signer",
-            "User",
-            "Is Finalize",
-            "Network",
-            "Reversibility",
-            "Warning",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
-            self.row.status.clone(),
-            self.row.action.clone(),
-            self.row.phase.clone(),
-            self.row.acting_as.clone(),
-            self.row.signer.clone(),
-            self.row.user.clone(),
-            self.row.is_finalize.to_string(),
-            self.row.network.clone(),
-            self.row.reversibility.clone(),
-            self.row.warning.clone(),
-        ]]
-    }
-
-    fn pretty_rows(&self) -> Vec<Vec<String>> {
-        self.rows()
-            .into_iter()
-            .map(|mut row| {
-                if row.len() > 7 {
-                    row[7] = output::colors::yellow(&row[7]);
-                }
-                row
-            })
-            .collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
-    }
-}
-
 async fn summary(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
     let summary = staking_info(api, "delegatorSummary", user, "loading staking summary").await?;
@@ -487,38 +475,41 @@ async fn summary(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     let rewards: Vec<RewardRow> =
         staking_info(api, "delegatorRewards", user, "loading staking rewards").await?;
     let pending_rewards = rewards.iter().map(|row| row.total_amount).sum();
-    inv.print(&StakingSummaryOutput {
+    inv.print(&One::new(StakingSummaryRow {
         address: user.to_string(),
         summary,
         pending_rewards,
         delegations,
         rewards,
-    });
+    }));
     Ok(())
 }
 
 async fn validators(inv: &Invocation) -> Result<(), anyhow::Error> {
-    let rows = inv
+    let rows: Vec<ValidatorRow> = inv
         .remote()?
         .api()
         .info::<Vec<ValidatorSummary>>(
             &InfoRequest::new("validatorSummaries"),
             "loading validator summaries",
         )
-        .await?;
-    inv.print(&ValidatorsOutput { rows });
+        .await?
+        .into_iter()
+        .map(ValidatorRow::from)
+        .collect();
+    inv.print(&Rows::new(rows));
     Ok(())
 }
 
 async fn rewards(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    let rows = staking_info(
+    let rows: Vec<RewardRow> = staking_info(
         inv.remote()?.api(),
         "delegatorRewards",
         user,
         "loading staking rewards",
     )
     .await?;
-    inv.print(&RewardsOutput { rows });
+    inv.print(&Rows::new(rows));
     Ok(())
 }
 
@@ -543,104 +534,6 @@ async fn staking_info<T: DeserializeOwned>(
     api.info(&InfoRequest::user(kind, user), context).await
 }
 
-async fn delegate(
-    inv: &Invocation,
-    signer: &SelectedSigner,
-    validator: Address,
-    args: &DelegateArgs,
-    is_undelegate: bool,
-) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    let wei = validate_amount_to_wei(args.amount)?;
-    user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| {
-        TokenDelegate {
-            hyperliquidChain: hyperliquid_chain,
-            validator,
-            wei,
-            isUndelegate: is_undelegate,
-            nonce,
-        }
-    })
-    .await?;
-
-    let (action_kind, action_name) = if is_undelegate {
-        (StakingActionKind::Undelegate, "undelegate")
-    } else {
-        (StakingActionKind::Delegate, "delegate")
-    };
-    print_action_confirmation(
-        inv,
-        ActionConfirmationContext {
-            chain: remote.chain(),
-            signer,
-            action_kind,
-        },
-        action_name,
-        args.amount,
-        Some(args.validator.clone()),
-        None,
-    );
-    Ok(())
-}
-
-/// Move HYPE from spot to staking balance.
-async fn deposit(
-    inv: &Invocation,
-    signer: &SelectedSigner,
-    args: &AmountArgs,
-) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    let wei = validate_amount_to_wei(args.amount)?;
-    user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| CDeposit {
-        hyperliquidChain: hyperliquid_chain,
-        wei,
-        nonce,
-    })
-    .await?;
-    print_action_confirmation(
-        inv,
-        ActionConfirmationContext {
-            chain: remote.chain(),
-            signer,
-            action_kind: StakingActionKind::Deposit,
-        },
-        "deposit",
-        args.amount,
-        None,
-        None,
-    );
-    Ok(())
-}
-
-/// Queue HYPE withdrawal from staking to spot balance.
-async fn withdraw(
-    inv: &Invocation,
-    signer: &SelectedSigner,
-    args: &AmountArgs,
-) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    let wei = validate_amount_to_wei(args.amount)?;
-    user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| CWithdraw {
-        hyperliquidChain: hyperliquid_chain,
-        wei,
-        nonce,
-    })
-    .await?;
-    print_action_confirmation(
-        inv,
-        ActionConfirmationContext {
-            chain: remote.chain(),
-            signer,
-            action_kind: StakingActionKind::Withdraw,
-        },
-        "withdraw",
-        args.amount,
-        None,
-        Some(WITHDRAWAL_NOTE.to_string()),
-    );
-    Ok(())
-}
-
 async fn claim_rewards(inv: &Invocation, signer: &SelectedSigner) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     actions::send_raw_l1_json_action(
@@ -655,14 +548,10 @@ async fn claim_rewards(inv: &Invocation, signer: &SelectedSigner) -> Result<(), 
     .await?;
     print_action_confirmation(
         inv,
-        ActionConfirmationContext {
-            chain: remote.chain(),
-            signer,
-            action_kind: StakingActionKind::ClaimRewards,
-        },
-        "claim-rewards",
+        signer,
+        remote.chain(),
+        StakingActionKind::ClaimRewards,
         Decimal::ZERO,
-        None,
         None,
     );
     Ok(())
@@ -717,10 +606,8 @@ fn amount_dry_run_value(
         "network": chain.to_string(),
         "reversibility": action_kind.reversibility(),
     });
-    if action_kind == StakingActionKind::Withdraw
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert("note".to_string(), serde_json::json!(WITHDRAWAL_NOTE));
+    if let Some(note) = action_kind.note() {
+        value["note"] = serde_json::json!(note);
     }
     value
 }
@@ -741,9 +628,17 @@ async fn link_staking_user(
     args: &LinkArgs,
     is_finalize: bool,
 ) -> Result<(), anyhow::Error> {
-    if !args.yes {
-        confirm_staking_link(inv.mode(), user, is_finalize)?;
-    }
+    let question = format!(
+        "Submit staking link {} for user {user}?",
+        link_phase(is_finalize)
+    );
+    confirm::unless_yes(
+        args.yes,
+        inv.mode(),
+        STAKING_LINK_WARNING,
+        &question,
+        "staking-link confirmation required; action cancelled. Rerun with --yes for deliberate automation.",
+    )?;
     let remote = inv.remote()?;
     user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| {
         LinkStakingUser {
@@ -755,59 +650,28 @@ async fn link_staking_user(
     })
     .await?;
 
-    inv.print(&LinkStakingOutput {
-        row: LinkStakingConfirmation {
-            status: "submitted".to_string(),
-            action: "staking-link".to_string(),
-            phase: link_phase(is_finalize).to_string(),
-            acting_as: signer.query_address().to_string(),
-            signer: signer.address().to_string(),
-            user: user.to_string(),
-            is_finalize,
-            network: remote.chain().to_string(),
-            reversibility: action_kind_for_link(is_finalize)
-                .reversibility()
-                .as_str()
-                .to_string(),
-            warning: STAKING_LINK_WARNING.to_string(),
-        },
-    });
+    inv.print(&One::new(LinkStakingRow {
+        status: "submitted".to_string(),
+        action: "staking-link".to_string(),
+        phase: link_phase(is_finalize).to_string(),
+        acting_as: signer.query_address().to_string(),
+        signer: signer.address().to_string(),
+        user: user.to_string(),
+        is_finalize,
+        network: remote.chain().to_string(),
+        reversibility: action_kind_for_link(is_finalize)
+            .reversibility()
+            .as_str()
+            .to_string(),
+        warning: STAKING_LINK_WARNING.to_string(),
+    }));
     Ok(())
 }
 
-/// A validator or linked-user address argument, never the zero address. `subject` names the address in the zero-address error.
-fn protocol_address(raw: &str, subject: &str) -> Result<Address, CliError> {
-    parse_hex_address(raw, true).map_err(|err| match err {
-        HexAddressError::Format => CliError::Unsupported(format!("Invalid address: {raw}")),
-        HexAddressError::Zero => {
-            CliError::Configuration(format!("{subject} address must not be the zero address"))
-        }
-    })
-}
-
+/// An amount of HYPE in HyperCore wei.
 fn validate_amount_to_wei(amount: Decimal) -> Result<u64, CliError> {
     quantity::positive(amount, Scale::HYPE_CORE)
         .map_err(|err| err.config("amount", Scale::HYPE_CORE))
-}
-
-fn format_hype_wei(wei: u64) -> String {
-    Scale::HYPE_CORE.amount(wei).to_string()
-}
-
-fn delegation_json(row: &DelegationRow) -> serde_json::Value {
-    serde_json::json!({
-        "validator": row.validator,
-        "amount": row.amount,
-        "locked_until_timestamp": row.locked_until_timestamp,
-    })
-}
-
-fn reward_json(row: &RewardRow) -> serde_json::Value {
-    serde_json::json!({
-        "time": row.time,
-        "source": row.source,
-        "total_amount": row.total_amount,
-    })
 }
 
 fn link_phase(is_finalize: bool) -> &'static str {
@@ -822,40 +686,26 @@ fn action_kind_for_link(is_finalize: bool) -> StakingActionKind {
     }
 }
 
-fn confirm_staking_link(mode: &Mode, user: Address, is_finalize: bool) -> Result<(), CliError> {
-    let phase = link_phase(is_finalize);
-    let question = format!("Submit staking link {phase} for user {user}?");
-    crate::prompt::consent(
-        mode,
-        "--yes",
-        STAKING_LINK_WARNING,
-        &question,
-        "staking-link confirmation required; action cancelled. Rerun with --yes for deliberate automation.",
-    )
-}
-
 fn print_action_confirmation(
     inv: &Invocation,
-    context: ActionConfirmationContext<'_>,
-    action: &str,
+    signer: &SelectedSigner,
+    chain: Chain,
+    kind: StakingActionKind,
     amount: Decimal,
     validator: Option<String>,
-    note: Option<String>,
 ) {
-    inv.print(&ActionOutput {
-        row: ActionConfirmation {
-            action: action.to_string(),
-            status: "submitted".to_string(),
-            network: context.chain.to_string(),
-            signer: context.signer.address().to_string(),
-            acting_as: context.signer.query_address().to_string(),
-            reversibility: (context.action_kind.reversibility()).as_str().to_string(),
-            amount,
-            asset: "HYPE".to_string(),
-            validator,
-            note,
-        },
-    });
+    inv.print(&One::new(ActionRow {
+        action: kind.receipt_action().to_string(),
+        status: "submitted".to_string(),
+        network: chain.to_string(),
+        signer: signer.address().to_string(),
+        acting_as: signer.query_address().to_string(),
+        reversibility: kind.reversibility().as_str().to_string(),
+        amount,
+        asset: ASSET.to_string(),
+        validator,
+        note: kind.note().map(str::to_string),
+    }));
 }
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["staking"], "Manage staking");
@@ -940,47 +790,64 @@ impl CliCommand for StakingHistory {
 async fn run_delegation(
     inv: &Invocation,
     args: &DelegateArgs,
-    action_kind: StakingActionKind,
+    kind: StakingActionKind,
 ) -> Result<(), anyhow::Error> {
-    let validator = protocol_address(&args.validator, "validator")?;
-    validate_amount_to_wei(args.amount)?;
+    let validator = address(&args.validator, AddressRole::Protocol("validator"))?;
+    let wei = validate_amount_to_wei(args.amount)?;
     if inv.dry_run() {
         return print_dry_run(
             inv,
-            action_kind.would_execute(),
-            delegate_dry_run_value(inv.remote()?.chain(), args, action_kind),
+            kind.would_execute(),
+            delegate_dry_run_value(inv.remote()?.chain(), args, kind),
         );
     }
     let signer = inv.resolve_signer()?;
-    delegate(
+    let remote = inv.remote()?;
+    user_signed::submit(remote.api(), &signer, |hyperliquid_chain, nonce| {
+        TokenDelegate {
+            hyperliquidChain: hyperliquid_chain,
+            validator,
+            wei,
+            isUndelegate: kind == StakingActionKind::Undelegate,
+            nonce,
+        }
+    })
+    .await?;
+    print_action_confirmation(
         inv,
         &signer,
-        validator,
-        args,
-        action_kind == StakingActionKind::Undelegate,
-    )
-    .await
+        remote.chain(),
+        kind,
+        args.amount,
+        Some(args.validator.clone()),
+    );
+    Ok(())
 }
 
-/// `staking deposit` and `staking withdraw`.
-async fn run_amount(
+/// `staking deposit` and `staking withdraw`: `build` makes the action from the
+/// network name, the amount in wei and the nonce.
+async fn run_amount<T: UserSigned>(
     inv: &Invocation,
     args: &AmountArgs,
-    action_kind: StakingActionKind,
+    kind: StakingActionKind,
+    build: impl FnOnce(String, u64, u64) -> T,
 ) -> Result<(), anyhow::Error> {
-    validate_amount_to_wei(args.amount)?;
+    let wei = validate_amount_to_wei(args.amount)?;
     if inv.dry_run() {
         return print_dry_run(
             inv,
-            action_kind.would_execute(),
-            amount_dry_run_value(inv.remote()?.chain(), args, action_kind),
+            kind.would_execute(),
+            amount_dry_run_value(inv.remote()?.chain(), args, kind),
         );
     }
     let signer = inv.resolve_signer()?;
-    match action_kind {
-        StakingActionKind::Deposit => deposit(inv, &signer, args).await,
-        _ => withdraw(inv, &signer, args).await,
-    }
+    let remote = inv.remote()?;
+    user_signed::submit(remote.api(), &signer, |hyperliquid_chain, nonce| {
+        build(hyperliquid_chain, wei, nonce)
+    })
+    .await?;
+    print_action_confirmation(inv, &signer, remote.chain(), kind, args.amount, None);
+    Ok(())
 }
 
 pub struct StakingDelegate;
@@ -1054,7 +921,17 @@ impl CliCommand for StakingDeposit {
         .describe("HYPE amount.")]);
 
     async fn run(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::Error> {
-        run_amount(inv, args, StakingActionKind::Deposit).await
+        run_amount(
+            inv,
+            args,
+            StakingActionKind::Deposit,
+            |hyperliquid_chain, wei, nonce| CDeposit {
+                hyperliquidChain: hyperliquid_chain,
+                wei,
+                nonce,
+            },
+        )
+        .await
     }
 }
 
@@ -1075,7 +952,17 @@ impl CliCommand for StakingWithdraw {
         .describe("HYPE amount.")]);
 
     async fn run(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::Error> {
-        run_amount(inv, args, StakingActionKind::Withdraw).await
+        run_amount(
+            inv,
+            args,
+            StakingActionKind::Withdraw,
+            |hyperliquid_chain, wei, nonce| CWithdraw {
+                hyperliquidChain: hyperliquid_chain,
+                wei,
+                nonce,
+            },
+        )
+        .await
     }
 }
 
@@ -1156,7 +1043,7 @@ async fn staking_link(
     args: &LinkArgs,
     is_finalize: bool,
 ) -> Result<(), anyhow::Error> {
-    let user = protocol_address(&args.user, "staking-link user")?;
+    let user = address(&args.user, AddressRole::Protocol("staking-link user"))?;
     if inv.dry_run() {
         let action_kind = action_kind_for_link(is_finalize);
         return print_dry_run(
@@ -1184,11 +1071,90 @@ mod tests {
         assert!(validate_amount_to_wei("0.000000001".parse::<Decimal>().unwrap()).is_err());
     }
 
+    fn validator_summary() -> ValidatorSummary {
+        serde_json::from_value(serde_json::json!({
+            "validator": "0x0000000000000000000000000000000000000002",
+            "signer": null,
+            "name": "Validator One",
+            "description": "desc",
+            "nRecentBlocks": 7,
+            "stake": 1_234_500_000_u64,
+            "isJailed": false,
+            "unjailableAfter": null,
+            "isActive": true,
+            "commission": "0.04",
+            "stats": [
+                ["week", {"uptimeFraction": "0.9", "predictedApr": "0.02", "nSamples": 3}],
+                ["day", {"uptimeFraction": "1", "predictedApr": "0.05", "nSamples": 9}]
+            ]
+        }))
+        .unwrap()
+    }
+
     #[test]
-    fn protocol_address_accepts_a_bare_hex_address_and_names_a_malformed_one() {
-        assert!(protocol_address("0000000000000000000000000000000000000002", "validator").is_ok());
-        let err = protocol_address("0x02", "validator").unwrap_err();
-        assert_eq!(err.exit_code(), 13);
-        assert!(err.to_string().contains("Invalid address"));
+    fn validator_rows_keep_the_public_json_shape() {
+        let row = ValidatorRow::from(validator_summary());
+
+        assert_eq!(
+            crate::output::serialize_row(&row),
+            serde_json::json!({
+                "validator": "0x0000000000000000000000000000000000000002",
+                "signer": null,
+                "name": "Validator One",
+                "description": "desc",
+                "n_recent_blocks": 7,
+                "stake": 1_234_500_000_u64,
+                "stake_hype": "12.345",
+                "is_jailed": false,
+                "unjailable_after": null,
+                "is_active": true,
+                "commission": "0.04",
+                "stats": [
+                    {"period": "week", "uptime_fraction": "0.9", "predicted_apr": "0.02", "n_samples": 3},
+                    {"period": "day", "uptime_fraction": "1", "predicted_apr": "0.05", "n_samples": 9}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn validator_apr_prefers_the_day_period_and_shows_missing_without_stats() {
+        let apr_cell = |summary: ValidatorSummary| ValidatorRow::from(summary).cells()[4].clone();
+
+        assert_eq!(apr_cell(validator_summary()), "0.05");
+
+        let mut bare = validator_summary();
+        bare.stats.clear();
+        assert_eq!(apr_cell(bare), crate::commands::rows::MISSING);
+    }
+
+    #[test]
+    fn link_confirmation_colours_the_warning_not_the_network() {
+        let row = LinkStakingRow {
+            status: "submitted".to_string(),
+            action: "staking-link".to_string(),
+            phase: "initiate".to_string(),
+            acting_as: "0xa".to_string(),
+            signer: "0xb".to_string(),
+            user: "0xc".to_string(),
+            is_finalize: false,
+            network: "Testnet".to_string(),
+            reversibility: "irreversible".to_string(),
+            warning: "careful".to_string(),
+        };
+        let plain = row.cells();
+        let pretty = row.pretty_cells();
+        let column = |name: &str| {
+            LinkStakingRow::HEADERS
+                .iter()
+                .position(|h| *h == name)
+                .unwrap()
+        };
+
+        assert_eq!(pretty[column("Network")], plain[column("Network")]);
+        assert_eq!(
+            pretty[column("Warning")],
+            output::colors::yellow(&plain[column("Warning")])
+        );
     }
 }

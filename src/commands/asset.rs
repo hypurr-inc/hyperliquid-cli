@@ -8,8 +8,11 @@ use strsim::levenshtein;
 use crate::assets::asset_id::{
     self, AssetIdLayout, MAX_OUTCOME_SIDE, outcome_coin, outcome_token, split_outcome_encoding,
 };
-use crate::assets::{AssetResolver, Market};
+use crate::assets::{
+    AssetResolver, OutcomeSideRow, PerpAsset, SpotAsset, load_outcome_sides, normalize_asset_name,
+};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::rows::or_missing;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
@@ -315,7 +318,7 @@ impl TableData for AssetSearchOutput {
                     row.asset_id.to_string(),
                     row.kind.as_str().to_string(),
                     row.lookup_status.as_str().to_string(),
-                    row.cli_input.clone().unwrap_or_else(|| "n/a".to_string()),
+                    or_missing(row.cli_input.as_deref()),
                     row.symbol.clone().unwrap_or_default(),
                     row.market_title.clone().unwrap_or_default(),
                     row.condition.clone().unwrap_or_default(),
@@ -425,15 +428,12 @@ async fn search_assets(
 ) -> Vec<DecodedAssetId> {
     let mut candidates = Vec::new();
 
-    let resolver = or_warn("asset metadata", AssetResolver::load_raw(api).await);
+    let resolver = load_resolver(api).await;
     if let Some(resolver) = resolver.as_ref() {
         candidates.extend(search_resolver_assets(resolver, network));
     }
 
-    let outcome_rows = or_warn(
-        "outcome metadata",
-        crate::commands::outcomes::outcome_side_rows(api).await,
-    );
+    let outcome_rows = or_warn("outcome metadata", load_outcome_sides(api).await);
     if let Some(rows) = outcome_rows.as_ref() {
         candidates.extend(rows.iter().cloned().filter_map(|row| {
             let asset_id = row.asset_id;
@@ -485,7 +485,7 @@ fn search_resolver_assets(resolver: &AssetResolver, network: &str) -> Vec<Decode
     for perp in resolver.perps() {
         if let Ok(asset_id) = u64::try_from(perp.index) {
             let mut decoded = decode_asset_id(asset_id, network);
-            enrich_from_loaded_resolver(resolver, &mut decoded);
+            apply_perp(&mut decoded, perp.clone());
             rows.push(decoded);
         }
     }
@@ -493,7 +493,7 @@ fn search_resolver_assets(resolver: &AssetResolver, network: &str) -> Vec<Decode
     for spot in resolver.spots() {
         if let Ok(asset_id) = u64::try_from(spot.index) {
             let mut decoded = decode_asset_id(asset_id, network);
-            enrich_from_loaded_resolver(resolver, &mut decoded);
+            apply_spot(&mut decoded, spot.clone());
             rows.push(decoded);
         }
     }
@@ -526,7 +526,7 @@ fn ranked_search_results(
 }
 
 fn search_score(query: &str, candidate: &DecodedAssetId) -> Option<usize> {
-    let query = normalize_search_text(query);
+    let query = normalize_asset_name(query);
     if query.is_empty() {
         return None;
     }
@@ -535,7 +535,7 @@ fn search_score(query: &str, candidate: &DecodedAssetId) -> Option<usize> {
         .search_fields()
         .into_iter()
         .filter_map(|field| {
-            let field = normalize_search_text(&field);
+            let field = normalize_asset_name(&field);
             if field.is_empty() {
                 None
             } else if field == query {
@@ -562,12 +562,20 @@ fn fuzzy_search_threshold(query: &str) -> usize {
     if query.len() <= 3 { 1 } else { 2 }
 }
 
-fn normalize_search_text(raw: &str) -> String {
-    raw.trim().to_ascii_lowercase()
+/// The raw-metadata resolver, which lists every HIP-3 market. A dex that failed
+/// to load is named on stderr: its markets are missing from the answer.
+async fn load_resolver(api: &ApiClient) -> Option<AssetResolver> {
+    let resolver = or_warn("asset metadata", AssetResolver::load_raw(api).await)?;
+    for dex in resolver.unavailable_dexes() {
+        warn(&format!(
+            "HIP-3 dex {dex} metadata unavailable, results are limited"
+        ));
+    }
+    Some(resolver)
 }
 
 async fn enrich_from_resolver(api: &ApiClient, decoded: &mut DecodedAssetId) {
-    let Some(resolver) = or_warn("asset metadata", AssetResolver::load_raw(api).await) else {
+    let Some(resolver) = load_resolver(api).await else {
         return;
     };
     enrich_from_loaded_resolver(&resolver, decoded);
@@ -578,32 +586,34 @@ pub fn enrich_from_loaded_resolver(resolver: &AssetResolver, decoded: &mut Decod
         return;
     };
 
-    let resolved = match decoded.kind {
-        AssetIdKind::Perp | AssetIdKind::Hip3Perp => resolver
-            .perp_by_protocol_asset_id(asset_id)
-            .map(Market::Perp),
-        AssetIdKind::Spot => resolver
-            .spot_by_protocol_asset_id(asset_id)
-            .map(Market::Spot),
-        AssetIdKind::Outcome => None,
-    };
-
-    match resolved {
-        Some(Market::Perp(perp)) => {
-            decoded.lookup_status = LookupStatus::MetadataFound;
-            decoded.cli_input = Some(perp.display_name());
-            decoded.symbol = Some(perp.name);
-            decoded.dex = perp.dex;
+    match decoded.kind {
+        AssetIdKind::Perp | AssetIdKind::Hip3Perp => {
+            if let Some(perp) = resolver.perp_by_protocol_asset_id(asset_id) {
+                apply_perp(decoded, perp);
+            }
         }
-        Some(Market::Spot(spot)) => {
-            decoded.lookup_status = LookupStatus::MetadataFound;
-            decoded.cli_input = Some(spot.symbol.clone());
-            decoded.symbol = Some(spot.symbol);
-            decoded.base = Some(spot.base);
-            decoded.quote = Some(spot.quote);
+        AssetIdKind::Spot => {
+            if let Some(spot) = resolver.spot_by_protocol_asset_id(asset_id) {
+                apply_spot(decoded, spot);
+            }
         }
-        Some(Market::Outcome(_)) | None => {}
+        AssetIdKind::Outcome => {}
     }
+}
+
+fn apply_perp(decoded: &mut DecodedAssetId, perp: PerpAsset) {
+    decoded.lookup_status = LookupStatus::MetadataFound;
+    decoded.cli_input = Some(perp.display_name());
+    decoded.symbol = Some(perp.name);
+    decoded.dex = perp.dex;
+}
+
+fn apply_spot(decoded: &mut DecodedAssetId, spot: SpotAsset) {
+    decoded.lookup_status = LookupStatus::MetadataFound;
+    decoded.cli_input = Some(spot.symbol.clone());
+    decoded.symbol = Some(spot.symbol);
+    decoded.base = Some(spot.base);
+    decoded.quote = Some(spot.quote);
 }
 
 async fn enrich_outcome(api: &ApiClient, decoded: &mut DecodedAssetId) {
@@ -614,10 +624,7 @@ async fn enrich_outcome(api: &ApiClient, decoded: &mut DecodedAssetId) {
     let Some(encoding) = decoded.encoding else {
         return;
     };
-    let Some(rows) = or_warn(
-        "outcome metadata",
-        crate::commands::outcomes::outcome_side_rows(api).await,
-    ) else {
+    let Some(rows) = or_warn("outcome metadata", load_outcome_sides(api).await) else {
         return;
     };
     let Some(row) = rows.into_iter().find(|row| row.encoding == encoding) else {
@@ -627,7 +634,7 @@ async fn enrich_outcome(api: &ApiClient, decoded: &mut DecodedAssetId) {
     apply_outcome_row(decoded, row);
 }
 
-fn apply_outcome_row(decoded: &mut DecodedAssetId, row: crate::commands::outcomes::OutcomeSideRow) {
+fn apply_outcome_row(decoded: &mut DecodedAssetId, row: OutcomeSideRow) {
     decoded.lookup_status = LookupStatus::MetadataFound;
     decoded.cli_input = Some(row.coin.clone());
     decoded.coin = Some(row.coin);

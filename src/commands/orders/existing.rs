@@ -18,8 +18,9 @@ use super::validation::MarketPrecision;
 use crate::assets::asset_id::{
     outcome_coin, parse_spot_coin_key, spot_asset_index, spot_coin_key, spot_internal_coin_key,
 };
-use crate::assets::{AssetQuery, AssetResolver, Market, parse_asset_query, qualify_dex_asset};
-use crate::commands::support::canonical_dex;
+use crate::assets::{
+    AssetQuery, AssetResolver, Market, canonical_dex, parse_asset_query, qualify_dex_asset,
+};
 use crate::errors::{CliError, from_sdk};
 
 #[derive(Debug, Clone)]

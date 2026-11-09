@@ -38,6 +38,7 @@ use super::{
     batch_create, cancel, cancel_all, create, modify, scale, schedule_cancel, tpsl, twap_cancel,
     twap_create,
 };
+use crate::assets::canonical_dex;
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk, StreamBound, arg,
 };

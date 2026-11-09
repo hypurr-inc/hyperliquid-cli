@@ -13,9 +13,10 @@ use super::args::{
 };
 use super::cloid::parse_cloid;
 use crate::assets::{Market, PerpAsset};
-use crate::commands::builder;
+use crate::builder_fee::MaxFeeRate;
 use crate::errors::CliError;
 use crate::input_hardening::{FilePolicy, read_json_file};
+use crate::wire::{self, AddressRole};
 
 pub(super) const BPS_DENOMINATOR: i64 = 10_000;
 pub(super) const MAX_BATCH_ORDER_COUNT: usize = 500;
@@ -214,8 +215,8 @@ impl BuilderRequest {
     ) -> Result<Self, CliError> {
         match (builder, fee_rate) {
             (Some(raw_builder), Some(raw_fee)) => Ok(Self::Explicit {
-                address: builder::parse_builder_address(raw_builder)?,
-                fee: builder::validate_max_fee_rate(raw_fee)?,
+                address: wire::address(raw_builder, AddressRole::Builder)?,
+                fee: MaxFeeRate::parse(raw_fee)?.tenths_bps(),
             }),
             (Some(_), None) | (None, Some(_)) => Err(CliError::Configuration(
                 "--builder and --builder-fee-rate must be given together".to_string(),
