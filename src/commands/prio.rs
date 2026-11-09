@@ -3,9 +3,9 @@
 use clap::Args;
 use hypersdk::Decimal;
 use hypersdk::hypercore::types::{Action, GossipPriorityBid};
-use rust_decimal::prelude::FromPrimitive;
 use serde::Serialize;
 
+use crate::assets::find_spot_token;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
 use crate::commands::actions::{nonce_now, send_l1_action_raw};
 use crate::commands::support::{dry_run_details, print_dry_run};
@@ -13,6 +13,7 @@ use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
 use crate::output::TableData;
+use crate::quantity::{self, Scale};
 use crate::signing::SelectedSigner;
 
 /// Arguments for `prio bid`.
@@ -120,7 +121,7 @@ impl TableData for PriorityBidOutput {
     }
 }
 
-pub async fn status(inv: &Invocation) -> Result<(), anyhow::Error> {
+async fn status(inv: &Invocation) -> Result<(), anyhow::Error> {
     let status = inv
         .remote()?
         .api()
@@ -156,7 +157,24 @@ pub async fn status(inv: &Invocation) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-pub async fn bid(
+/// Wei decimals of HYPE when the spot token list does not name them.
+const DEFAULT_HYPE_WEI_DECIMALS: u32 = 18;
+
+fn validate_bid_args(args: &BidArgs) -> Result<(), CliError> {
+    if args.max <= Decimal::ZERO {
+        return Err(CliError::Configuration(
+            "prio bid requires --max to be positive".to_string(),
+        ));
+    }
+    if args.ip.trim().is_empty() {
+        return Err(CliError::Configuration(
+            "prio bid requires a non-empty --ip".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn bid(
     inv: &Invocation,
     signer: &SelectedSigner,
     args: &BidArgs,
@@ -164,35 +182,18 @@ pub async fn bid(
     let remote = inv.remote()?;
     let client = remote.api().sdk();
     let api = remote.api();
-    if args.max <= Decimal::ZERO {
-        return Err(
-            CliError::Configuration("prio bid requires --max to be positive".to_string()).into(),
-        );
-    }
-    if args.ip.trim().is_empty() {
-        return Err(
-            CliError::Configuration("prio bid requires a non-empty --ip".to_string()).into(),
-        );
-    }
     let max = args.max;
     let ip = args.ip.as_str();
     signer.ensure_can_attempt_live_signing()?;
 
-    let decimals = client
-        .spot_tokens()
-        .await
-        .map_err(from_sdk)?
-        .into_iter()
-        .find(|token| token.name == "HYPE")
-        .map(|token| token.wei_decimals as u32)
-        .unwrap_or(18);
-    let max_gas = hype_to_wei_u64(max, decimals, "--max")?;
-    if max_gas == 0 {
-        return Err(CliError::Configuration(
-            "--max is too small for HYPE wei precision".to_string(),
-        )
-        .into());
-    }
+    let decimals = match find_spot_token(client, "HYPE").await? {
+        Some(token) => u32::try_from(token.wei_decimals).map_err(|_| {
+            CliError::Unsupported("HYPE wei decimals are outside supported bounds".to_string())
+        })?,
+        None => DEFAULT_HYPE_WEI_DECIMALS,
+    };
+    let scale = Scale::places(decimals);
+    let max_gas = quantity::positive::<u64>(max, scale).map_err(|err| err.config("--max", scale))?;
 
     let status = client
         .gossip_priority_auction_status()
@@ -203,14 +204,15 @@ pub async fn bid(
         .get(args.slot as usize)
         .ok_or_else(|| CliError::Configuration(format!("invalid priority slot {}", args.slot)))?;
     let current = match slot.current_gas {
-        Some(gas) => hype_to_wei_u64(gas, decimals, "current gas")?,
+        Some(gas) => quantity::non_negative::<u64>(gas, scale)
+            .map_err(|err| err.config("current gas", scale))?,
         None => 0,
     };
 
     if current >= max_gas && current > 0 {
         return Err(CliError::Unsupported(format!(
             "priority bid not submitted: current gas {} is at or above --max {max}",
-            fmt_wei(current, decimals)
+            scale.amount(current)
         ))
         .into());
     }
@@ -235,29 +237,18 @@ pub async fn bid(
         {
             "submitted".to_string()
         }
-        other => format!("submitted with response: {other:?}"),
+        other => format!("submitted with response: {other}"),
     };
 
     let row = PriorityBidRow {
         slot: args.slot,
         ip: ip.to_string(),
         max_hype: max.to_string(),
-        bid_hype: fmt_wei(bid, decimals).to_string(),
+        bid_hype: scale.amount(bid).to_string(),
         status,
     };
     inv.print(&PriorityBidOutput { rows: vec![row] });
     Ok(())
-}
-
-fn fmt_wei(wei: u64, decimals: u32) -> Decimal {
-    Decimal::from_u64(wei).unwrap_or_default()
-        / Decimal::from_u64(10u64.saturating_pow(decimals)).unwrap_or(Decimal::ONE)
-}
-
-fn hype_to_wei_u64(amount: Decimal, decimals: u32, label: &str) -> Result<u64, CliError> {
-    hypersdk::hyperevm::to_wei(amount, decimals)
-        .try_into()
-        .map_err(|_| CliError::Configuration(format!("{label} is too large")))
 }
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["prio"], "Manage gossip priority bids");
@@ -300,6 +291,7 @@ impl CliCommand for PrioBid {
     ]);
 
     async fn run(inv: &Invocation, args: &BidArgs) -> Result<(), anyhow::Error> {
+        validate_bid_args(args)?;
         if inv.dry_run() {
             return print_dry_run(
                 inv,
@@ -329,10 +321,26 @@ mod tests {
     }
 
     #[test]
-    fn decimal_current_gas_uses_hype_to_wei_conversion() {
+    fn decimal_current_gas_uses_hype_wei_scale() {
+        let scale = Scale::places(18);
         assert_eq!(
-            hype_to_wei_u64("0.01".parse::<Decimal>().unwrap(), 18, "current gas").unwrap(),
-            10_000_000_000_000_000
+            quantity::non_negative::<u64>("0.01".parse::<Decimal>().unwrap(), scale),
+            Ok(10_000_000_000_000_000)
         );
+        assert_eq!(scale.amount(10_000_000_000_000_001).to_string(), "0.010000000000000001");
+    }
+
+    #[test]
+    fn bid_args_are_validated_before_any_dry_run() {
+        let args = |max: &str, ip: &str| BidArgs {
+            max: max.parse().unwrap(),
+            ip: ip.to_string(),
+            slot: 0,
+        };
+
+        assert!(validate_bid_args(&args("1", "203.0.113.10")).is_ok());
+        assert_eq!(validate_bid_args(&args("-1", "203.0.113.10")).unwrap_err().exit_code(), 2);
+        assert_eq!(validate_bid_args(&args("0", "203.0.113.10")).unwrap_err().exit_code(), 2);
+        assert_eq!(validate_bid_args(&args("1", "  ")).unwrap_err().exit_code(), 2);
     }
 }

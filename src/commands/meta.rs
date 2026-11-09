@@ -4,12 +4,13 @@ use hypersdk::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::assets::{SpotListing, load_spot_markets};
+use crate::assets::{RawPerpDex, SpotListing, load_raw_perp_dexes, load_spot_markets};
 use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
+use crate::wire::InfoRequest;
 use crate::output::format::thousands;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -53,16 +54,6 @@ pub struct DexRow {
     pub name: String,
     #[serde(with = "rust_decimal::serde::str_option")]
     pub deployer_fee_scale: Option<Decimal>,
-}
-
-/// One `perpDexs` entry. hypersdk 0.3's `Dex` no longer carries the deployer fee
-/// scale, so the CLI reads it from the raw response to keep the `meta` output stable.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawPerpDex {
-    name: String,
-    #[serde(default, with = "rust_decimal::serde::str_option")]
-    deployer_fee_scale: Option<Decimal>,
 }
 
 impl From<RawPerpDex> for DexRow {
@@ -194,13 +185,6 @@ impl MetaAndAssetContexts {
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
-enum RawInfoRequest {
-    MetaAndAssetCtxs,
-    PerpDexs,
-}
-
 pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
     let raw_meta_and_contexts = fetch_meta_and_asset_contexts(api).await?;
@@ -212,16 +196,14 @@ pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
 
 async fn fetch_meta_and_asset_contexts(api: &ApiClient) -> Result<MetaAndAssetContexts, CliError> {
     api.info(
-        &RawInfoRequest::MetaAndAssetCtxs,
+        &InfoRequest::new("metaAndAssetCtxs"),
         "loading raw exchange metadata",
     )
     .await
 }
 
 async fn fetch_dexes(api: &ApiClient) -> Result<Vec<DexRow>, CliError> {
-    let dexes: Vec<Option<RawPerpDex>> = api
-        .info(&RawInfoRequest::PerpDexs, "loading raw exchange metadata")
-        .await?;
+    let dexes = load_raw_perp_dexes(api).await?;
     Ok(dexes.into_iter().flatten().map(DexRow::from).collect())
 }
 

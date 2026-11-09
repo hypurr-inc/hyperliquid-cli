@@ -11,28 +11,37 @@ use futures::future::try_join_all;
 use hypersdk::Address;
 use hypersdk::Decimal;
 use hypersdk::hypercore::Chain;
-use rust_decimal::prelude::ToPrimitive;
 use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::commands::actions;
 use crate::commands::support::print_signed_dry_run;
+use crate::commands::user_signed::{self, UserSigned};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::mode::Mode;
 use crate::output::TableData;
+use crate::quantity::{self, Scale, ScaleError};
+use crate::resolvers::{HexAddressError, parse_exact_hex_address};
 use crate::settings::{BuilderDefaultSetting, Settings};
 use crate::signing::SelectedSigner;
+use crate::wire::InfoRequest;
+
+const APPROVE_REVERSIBILITY: ActionReversibility = ActionReversibility::Reversible;
 
 sol! {
+    #[derive(Serialize)]
     struct ApproveBuilderFee {
         string hyperliquidChain;
         string maxFeeRate;
         address builder;
         uint64 nonce;
     }
+}
+
+impl UserSigned for ApproveBuilderFee {
+    const ACTION_TYPE: &'static str = "approveBuilderFee";
 }
 
 #[derive(Args, Debug, Clone)]
@@ -101,59 +110,6 @@ struct BuilderApproveRow {
 
 struct BuilderApproveOutput {
     row: BuilderApproveRow,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BuilderActionKind {
-    ApproveFee,
-}
-
-impl BuilderActionKind {
-    #[must_use]
-    pub fn reversibility(self) -> ActionReversibility {
-        match self {
-            Self::ApproveFee => ActionReversibility::Reversible,
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MaxBuilderFeeRequest {
-    #[serde(rename = "type")]
-    request_type: &'static str,
-    user: Address,
-    builder: Address,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ApprovedBuildersRequest {
-    #[serde(rename = "type")]
-    request_type: &'static str,
-    user: Address,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ApproveBuilderFeeMessage {
-    signature_chain_id: String,
-    hyperliquid_chain: Chain,
-    max_fee_rate: String,
-    builder: Address,
-    nonce: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ApproveBuilderFeeAction {
-    #[serde(rename = "type")]
-    action_type: &'static str,
-    signature_chain_id: String,
-    hyperliquid_chain: Chain,
-    max_fee_rate: String,
-    builder: Address,
-    nonce: u64,
 }
 
 const BUILDER_FEE_HEADERS: &[&str] = &["User", "Builder", "Max Fee", "Tenths Bps"];
@@ -233,11 +189,7 @@ impl TableData for BuilderApproveOutput {
     }
 }
 
-pub async fn max_fee(
-    inv: &Invocation,
-    user: Address,
-    builder: Address,
-) -> Result<(), anyhow::Error> {
+async fn max_fee(inv: &Invocation, user: Address, builder: Address) -> Result<(), anyhow::Error> {
     let max_fee_tenths_bps = load_max_fee(inv.remote()?.api(), user, builder).await?;
     inv.print(&BuilderMaxFeeOutput {
         row: BuilderFeeRow {
@@ -250,14 +202,11 @@ pub async fn max_fee(
     Ok(())
 }
 
-pub async fn approved(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
+async fn approved(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
     let builders = api
         .info::<Vec<Address>>(
-            &ApprovedBuildersRequest {
-                request_type: "approvedBuilders",
-                user,
-            },
+            &InfoRequest::user("approvedBuilders", user),
             "loading approved builders",
         )
         .await?;
@@ -277,7 +226,7 @@ pub async fn approved(inv: &Invocation, user: Address) -> Result<(), anyhow::Err
     Ok(())
 }
 
-pub fn approve_dry_run_value(
+fn approve_dry_run_value(
     chain: Chain,
     signer: Option<Address>,
     query_address: Option<Address>,
@@ -292,9 +241,9 @@ pub fn approve_dry_run_value(
         "builder": builder.to_string(),
         "max_fee_rate": args.max_fee_rate,
         "max_fee_tenths_bps": max_fee_tenths_bps,
-        "reversibility": BuilderActionKind::ApproveFee.reversibility(),
+        "reversibility": APPROVE_REVERSIBILITY,
         "action": {
-            "type": "approveBuilderFee",
+            "type": ApproveBuilderFee::ACTION_TYPE,
             "hyperliquidChain": chain.to_string(),
             "signatureChainId": chain.arbitrum_id().to_string(),
             "builder": builder.to_string(),
@@ -305,35 +254,29 @@ pub fn approve_dry_run_value(
 
 async fn load_max_fee(api: &ApiClient, user: Address, builder: Address) -> Result<u64, CliError> {
     api.info::<u64>(
-        &MaxBuilderFeeRequest {
-            request_type: "maxBuilderFee",
-            user,
-            builder,
-        },
+        &InfoRequest::user("maxBuilderFee", user).address("builder", builder),
         "loading max builder fee",
     )
     .await
 }
 
-pub async fn approve(
+async fn approve(
     inv: &Invocation,
     signer: &SelectedSigner,
     builder: Address,
     args: &ApproveArgs,
-    require_confirmation: bool,
 ) -> Result<(), anyhow::Error> {
     let max_fee_tenths_bps = validate_max_fee_rate(&args.max_fee_rate)?;
-    if require_confirmation && !args.yes {
+    if !args.yes {
         confirm_builder_approval(inv.mode(), builder, &args.max_fee_rate, max_fee_tenths_bps)?;
     }
 
     let remote = inv.remote()?;
-    let chain = remote.chain();
     submit_approval(remote.api(), signer, builder, &args.max_fee_rate).await?;
 
     inv.print(&BuilderApproveOutput {
         row: approve_output_row(
-            chain,
+            remote.chain(),
             signer,
             builder,
             &args.max_fee_rate,
@@ -349,31 +292,13 @@ pub async fn submit_approval(
     builder: Address,
     max_fee_rate: &str,
 ) -> Result<u64, anyhow::Error> {
-    let chain = api.chain();
     let max_fee_tenths_bps = validate_max_fee_rate(max_fee_rate)?;
-    let nonce = actions::nonce_now();
-    let message = ApproveBuilderFeeMessage {
-        signature_chain_id: chain.arbitrum_id().to_string(),
-        hyperliquid_chain: chain,
-        max_fee_rate: max_fee_rate.to_string(),
+    user_signed::submit(api, signer, |hyperliquid_chain, nonce| ApproveBuilderFee {
+        hyperliquidChain: hyperliquid_chain,
+        maxFeeRate: max_fee_rate.to_string(),
         builder,
         nonce,
-    };
-    let signature = actions::sign_user_action::<ApproveBuilderFee>(signer, chain, &message)?;
-    let action = ApproveBuilderFeeAction {
-        action_type: "approveBuilderFee",
-        signature_chain_id: chain.arbitrum_id().to_string(),
-        hyperliquid_chain: chain,
-        max_fee_rate: max_fee_rate.to_string(),
-        builder,
-        nonce,
-    };
-    actions::send_user_signed_json_action(
-        api,
-        serde_json::to_value(action).map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?,
-        nonce,
-        signature,
-    )
+    })
     .await?;
     Ok(max_fee_tenths_bps)
 }
@@ -394,22 +319,19 @@ fn approve_output_row(
         max_fee_rate: max_fee_rate.to_string(),
         max_fee_tenths_bps,
         network: chain.to_string(),
-        reversibility: (BuilderActionKind::ApproveFee.reversibility())
-            .as_str()
-            .to_string(),
+        reversibility: APPROVE_REVERSIBILITY.as_str().to_string(),
     }
 }
 
 pub fn parse_builder_address(raw: &str) -> Result<Address, CliError> {
-    let address = raw
-        .parse::<Address>()
-        .map_err(|_| CliError::Unsupported(format!("Invalid builder address: {raw}")))?;
-    if address == Address::ZERO {
-        return Err(CliError::Unsupported(
-            "builder address cannot be the zero address".to_string(),
-        ));
-    }
-    Ok(address)
+    parse_exact_hex_address(raw, true).map_err(|err| match err {
+        HexAddressError::Format => {
+            CliError::Unsupported(format!("Invalid builder address: {raw}"))
+        }
+        HexAddressError::Zero => {
+            CliError::Unsupported("builder address cannot be the zero address".to_string())
+        }
+    })
 }
 
 /// Resolve the default builder address and fee rate.
@@ -493,14 +415,13 @@ pub fn validate_max_fee_rate(raw: &str) -> Result<u64, CliError> {
             "builder max fee rate cannot exceed 1%".to_string(),
         ));
     }
-    let tenths_bps = value * Decimal::from(1000);
-    if tenths_bps.fract() != Decimal::ZERO {
-        return Err(CliError::Unsupported(
+    quantity::non_negative(value, Scale::TENTHS_BPS_PER_PERCENT).map_err(|err| match err {
+        ScaleError::TooPrecise => CliError::Unsupported(
             "builder max fee rate must be a multiple of 0.001%".to_string(),
-        ));
-    }
-    tenths_bps.to_u64().ok_or_else(|| {
-        CliError::Unsupported("builder max fee rate is outside supported bounds".to_string())
+        ),
+        ScaleError::Negative | ScaleError::NotPositive | ScaleError::TooLarge => {
+            CliError::Unsupported("builder max fee rate is outside supported bounds".to_string())
+        }
     })
 }
 
@@ -523,6 +444,7 @@ fn confirm_builder_approval(
 
 pub const GROUP: GroupSpec =
     GroupSpec::new(&["builder"], "Manage builder fee approvals").aliases(&["builders"]);
+
 
 pub struct BuilderMaxFee;
 
@@ -616,7 +538,7 @@ impl CliCommand for BuilderApprove {
                 inv,
                 "builder approve",
                 "approve_builder_fee",
-                BuilderActionKind::ApproveFee.reversibility(),
+                APPROVE_REVERSIBILITY,
                 preview_args,
             );
         }
@@ -628,7 +550,7 @@ impl CliCommand for BuilderApprove {
         )
         .into());
         }
-        approve(inv, &resolved.selected_signer(), builder, args, true).await
+        approve(inv, &resolved.selected_signer(), builder, args).await
     }
 }
 
@@ -655,14 +577,6 @@ mod tests {
         assert!(validate_max_fee_rate("1.001%").is_err());
         assert!(validate_max_fee_rate("1").is_err());
         assert!(validate_max_fee_rate("-0.001%").is_err());
-    }
-
-    #[test]
-    fn builder_actions_declare_reversibility() {
-        assert_eq!(
-            BuilderActionKind::ApproveFee.reversibility(),
-            ActionReversibility::Reversible
-        );
     }
 
     fn settings(env: &[(&str, &str)]) -> Settings {

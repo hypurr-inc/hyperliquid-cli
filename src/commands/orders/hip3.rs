@@ -43,7 +43,7 @@ pub async fn plan_hip3_margin_transfer(
         return Ok(None);
     }
 
-    let Ok(abstraction) = fetch_abstraction(api, &user.to_string()).await else {
+    let Ok(abstraction) = fetch_abstraction(api, user).await else {
         return Ok(None);
     };
     if matches!(
