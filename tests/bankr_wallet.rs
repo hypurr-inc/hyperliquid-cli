@@ -26,7 +26,7 @@ fn wallet_me_body() -> serde_json::Value {
 }
 
 fn config_json(env: &IsolatedHome) -> Value {
-    let text = std::fs::read_to_string(env.config_file_path()).unwrap();
+    let text = std::fs::read_to_string(env.config_file()).unwrap();
     serde_json::from_str(&text).unwrap()
 }
 
@@ -57,7 +57,7 @@ async fn wallet_login_stores_the_key_and_address_and_logout_removes_them() {
         .stdout(predicate::str::contains(BANKR_ADDRESS));
 
     assert_eq!(
-        env.config_file_path(),
+        env.config_file(),
         env.config.join("hyperliquid").join("config.json")
     );
     let config = config_json(&env);
@@ -142,9 +142,7 @@ async fn wallet_login_refuses_a_key_the_api_rejects() {
         .stderr(predicate::str::contains("wallet login"));
 
     assert!(
-        env.config_file_candidates()
-            .iter()
-            .all(|path| !path.exists()),
+        !env.config_file().exists(),
         "a rejected key must not be written to the config"
     );
 }
@@ -167,9 +165,7 @@ fn wallet_login_dry_run_does_not_call_the_api() {
         .stdout(predicate::str::contains("Would execute"));
 
     assert!(
-        env.config_file_candidates()
-            .iter()
-            .all(|path| !path.exists()),
+        !env.config_file().exists(),
         "a dry run must not store the key"
     );
 }

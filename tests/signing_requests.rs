@@ -8,11 +8,11 @@ mod support;
 use assert_cmd::Command;
 use hyperliquid_cli::env;
 use hypersdk::hypercore::Chain;
-use hypersdk::hypercore::types::ActionRequest;
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use std::process::Stdio;
 use support::exchange::ExchangeFixture;
+use support::signing::{recover_signer, test_signer};
 use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, json_stdout, unix_millis};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
@@ -26,10 +26,9 @@ async fn exchange() -> ExchangeFixture {
     server
 }
 
-/// A signing command against `server` on the testnet, JSON output.
 fn signed(env: &IsolatedHome, server: &ExchangeFixture, args: &[&str]) -> Command {
-    let mut command = env.live_command(server);
-    command.args(["--format", "json", "--testnet"]).args(args);
+    let mut command = env.live_json(server);
+    command.args(args);
     command
 }
 
@@ -38,17 +37,6 @@ fn nonces(bodies: &[Value]) -> Vec<u64> {
         .iter()
         .map(|body| body["nonce"].as_u64().expect("nonce"))
         .collect()
-}
-
-/// The address that signed `body`, recovered by hypersdk from the action, the
-/// nonce, the vault and the expiry the request carries. It is the signer only
-/// if the CLI hashed those the way hypersdk does.
-fn recovered_signer(body: &Value, chain: Chain) -> String {
-    serde_json::from_value::<ActionRequest>(body.clone())
-        .expect("a request hypersdk can read")
-        .recover(chain)
-        .expect("a signature that recovers")
-        .to_string()
 }
 
 fn mark_file(env: &IsolatedHome) -> std::path::PathBuf {
@@ -249,10 +237,7 @@ async fn expires_after_is_hashed_and_sent_for_hypersdk_actions() {
         (before + 30_000..=after + 30_000).contains(&expires),
         "{expires}"
     );
-    assert_eq!(
-        recovered_signer(body, Chain::Testnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
@@ -274,10 +259,7 @@ async fn expires_after_is_hashed_and_sent_for_raw_l1_actions() {
         (before + 300_000..=after + 300_000).contains(&expires),
         "{expires}"
     );
-    assert_eq!(
-        recovered_signer(body, Chain::Testnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
@@ -293,10 +275,7 @@ async fn without_expires_after_the_wire_is_unchanged() {
     for body in server.exchange_bodies().await {
         assert!(body["expiresAfter"].is_null(), "{body}");
         assert!(body.as_object().unwrap().contains_key("expiresAfter"));
-        assert_eq!(
-            recovered_signer(&body, Chain::Testnet),
-            expected_address(VALID_PRIVATE_KEY)
-        );
+        assert_eq!(recover_signer(&body, Chain::Testnet), test_signer());
     }
 }
 
@@ -508,10 +487,7 @@ async fn invalidate_nonce_sends_a_signed_noop_carrying_the_nonce_to_burn() {
     assert_eq!(body["nonce"], nonce);
     assert!(body["vaultAddress"].is_null());
     assert!(body["expiresAfter"].is_null());
-    assert_eq!(
-        recovered_signer(body, Chain::Mainnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Mainnet), test_signer());
 }
 
 #[tokio::test]
@@ -531,10 +507,7 @@ async fn invalidate_nonce_honors_expires_after() {
 
     let body = &server.exchange_bodies().await[0];
     assert!(body["expiresAfter"].as_u64().unwrap() > unix_millis());
-    assert_eq!(
-        recovered_signer(body, Chain::Testnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
@@ -664,10 +637,7 @@ async fn reserve_weight_signs_the_l1_action_for_the_signer() {
         json!({"type": "reserveRequestWeight", "weight": 10})
     );
     assert!(body["vaultAddress"].is_null());
-    assert_eq!(
-        recovered_signer(body, Chain::Testnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
@@ -700,10 +670,7 @@ async fn reserve_weight_hashes_the_destination_as_lowercase_hex() {
             "destination": DESTINATION.to_lowercase()
         })
     );
-    assert_eq!(
-        recovered_signer(body, Chain::Testnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]

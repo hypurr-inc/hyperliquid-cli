@@ -1,5 +1,7 @@
 mod support;
 
+use support::stdout_json;
+
 use serde_json::Value;
 use support::IsolatedHome;
 use wiremock::matchers::{body_partial_json, method, path};
@@ -87,10 +89,6 @@ async fn healthcheck_only_server() -> MockServer {
     server
 }
 
-fn json_stdout(output: Vec<u8>) -> Value {
-    serde_json::from_slice(&output).expect("stdout should be valid JSON")
-}
-
 #[tokio::test]
 async fn asset_decode_resolves_perp_spot_and_outcome_ids() {
     let env = IsolatedHome::new();
@@ -104,7 +102,7 @@ async fn asset_decode_resolves_perp_spot_and_outcome_ids() {
         .get_output()
         .stdout
         .clone();
-    let perp = json_stdout(perp);
+    let perp = stdout_json(&perp);
     assert_eq!(perp["asset_id"], 0);
     assert_eq!(perp["kind"], "perp");
     assert_eq!(perp["lookup_status"], "metadata_found");
@@ -119,7 +117,7 @@ async fn asset_decode_resolves_perp_spot_and_outcome_ids() {
         .get_output()
         .stdout
         .clone();
-    let spot = json_stdout(spot);
+    let spot = stdout_json(&spot);
     assert_eq!(spot["kind"], "spot");
     assert_eq!(spot["lookup_status"], "metadata_found");
     assert_eq!(spot["cli_input"], "PURR/USDC");
@@ -135,7 +133,7 @@ async fn asset_decode_resolves_perp_spot_and_outcome_ids() {
         .get_output()
         .stdout
         .clone();
-    let outcome = json_stdout(outcome);
+    let outcome = stdout_json(&outcome);
     assert_eq!(outcome["kind"], "outcome");
     assert_eq!(outcome["lookup_status"], "metadata_found");
     assert_eq!(outcome["coin"], "#400");
@@ -173,7 +171,7 @@ async fn asset_decode_returns_formula_only_for_unresolved_but_valid_ids() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     assert_eq!(json["kind"], "hip3_perp");
     assert_eq!(json["lookup_status"], "formula_only");
     assert_eq!(json["cli_input"], Value::Null);
@@ -188,7 +186,7 @@ async fn asset_decode_returns_formula_only_for_unresolved_but_valid_ids() {
         .get_output()
         .stdout
         .clone();
-    let outcome = json_stdout(outcome);
+    let outcome = stdout_json(&outcome);
     assert_eq!(outcome["kind"], "outcome");
     assert_eq!(outcome["lookup_status"], "formula_only");
     assert_eq!(outcome["cli_input"], "#410");
@@ -210,7 +208,7 @@ async fn asset_decode_metadata_failures_degrade_to_formula_only() {
         .get_output()
         .stdout
         .clone();
-    let perp = json_stdout(perp);
+    let perp = stdout_json(&perp);
     assert_eq!(perp["kind"], "perp");
     assert_eq!(perp["lookup_status"], "formula_only");
     assert_eq!(perp["cli_input"], Value::Null);
@@ -224,7 +222,7 @@ async fn asset_decode_metadata_failures_degrade_to_formula_only() {
         .get_output()
         .stdout
         .clone();
-    let outcome = json_stdout(outcome);
+    let outcome = stdout_json(&outcome);
     assert_eq!(outcome["kind"], "outcome");
     assert_eq!(outcome["lookup_status"], "formula_only");
     assert_eq!(outcome["cli_input"], "#401");
@@ -245,7 +243,7 @@ async fn asset_search_finds_symbols_pairs_and_outcome_slugs() {
         .get_output()
         .stdout
         .clone();
-    let btc = json_stdout(btc);
+    let btc = stdout_json(&btc);
     let rows = btc.as_array().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["asset_id"], 0);
@@ -268,7 +266,7 @@ async fn asset_search_finds_symbols_pairs_and_outcome_slugs() {
         .get_output()
         .stdout
         .clone();
-    let spot = json_stdout(spot);
+    let spot = stdout_json(&spot);
     let rows = spot.as_array().unwrap();
     assert_eq!(rows[0]["asset_id"], 10000);
     assert_eq!(rows[0]["kind"], "spot");
@@ -290,7 +288,7 @@ async fn asset_search_finds_symbols_pairs_and_outcome_slugs() {
         .get_output()
         .stdout
         .clone();
-    let outcome = json_stdout(outcome);
+    let outcome = stdout_json(&outcome);
     let rows = outcome.as_array().unwrap();
     assert_eq!(rows[0]["asset_id"], 100000400);
     assert_eq!(rows[0]["kind"], "outcome");
@@ -314,7 +312,7 @@ async fn asset_search_numeric_query_falls_back_to_decode() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     let rows = json.as_array().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["asset_id"], 110035);
@@ -346,7 +344,7 @@ async fn asset_decode_supports_json_projection_for_agents() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     assert_eq!(
         json,
         serde_json::json!({
@@ -371,7 +369,7 @@ async fn asset_decode_invalid_outcome_side_is_structured_not_a_hard_failure() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     assert_eq!(json["kind"], "outcome");
     assert_eq!(json["lookup_status"], "invalid_id");
     assert_eq!(json["cli_input"], Value::Null);
@@ -397,7 +395,7 @@ async fn asset_search_says_on_stderr_when_metadata_is_unavailable() {
         .get_output()
         .clone();
 
-    let rows = json_stdout(output.stdout);
+    let rows = stdout_json(&output.stdout);
     assert_eq!(rows.as_array().unwrap().len(), 1);
     assert_eq!(rows[0]["lookup_status"], "formula_only");
     let stderr = String::from_utf8(output.stderr).unwrap();

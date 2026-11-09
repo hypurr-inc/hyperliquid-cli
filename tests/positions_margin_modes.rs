@@ -8,20 +8,10 @@ mod support;
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, Hip3Dex};
-use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, fixture_perp_meta, json_stdout};
+use support::wire::{self, MarginRule};
+use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, json_stdout};
 
 const VAULT: &str = "0x0000000000000000000000000000000000000001";
-
-fn perp(name: &str, only_isolated: bool, margin_mode: Value) -> Value {
-    json!({
-        "name": name,
-        "szDecimals": 2,
-        "maxLeverage": 10,
-        "onlyIsolated": only_isolated,
-        "marginMode": margin_mode,
-        "growthMode": "disabled"
-    })
-}
 
 /// Default dex: BTC and ETH trade either way, PUMP is `strictIsolated`.
 /// Dex `xyz` (slot 1, asset ids 110000..): HOOD `noCross`, STRICT
@@ -29,16 +19,16 @@ fn perp(name: &str, only_isolated: bool, margin_mode: Value) -> Value {
 /// OPEN trades either way.
 async fn exchange() -> ExchangeFixture {
     exchange_listing(vec![
-        perp("BTC", false, Value::Null),
-        perp("ETH", false, Value::Null),
-        perp("PUMP", true, json!("strictIsolated")),
+        wire::perp("BTC", MarginRule::Either),
+        wire::perp("ETH", MarginRule::Either),
+        wire::perp("PUMP", MarginRule::StrictIsolated),
     ])
     .await
 }
 
 /// [`exchange`] with `universe` as the default dex's markets.
 async fn exchange_listing(universe: Vec<Value>) -> ExchangeFixture {
-    exchange_with_meta(fixture_perp_meta(universe)).await
+    exchange_with_meta(wire::perp_meta(universe)).await
 }
 
 /// [`exchange`] answering the default dex's `meta` with `meta`.
@@ -46,10 +36,10 @@ async fn exchange_with_meta(meta: Value) -> ExchangeFixture {
     let server = ExchangeFixture::start_with(vec![Hip3Dex {
         name: "xyz",
         universe: vec![
-            perp("xyz:HOOD", true, json!("noCross")),
-            perp("xyz:STRICT", true, json!("strictIsolated")),
-            perp("xyz:LEGACY", true, Value::Null),
-            perp("xyz:OPEN", false, Value::Null),
+            wire::perp("xyz:HOOD", MarginRule::NoCross),
+            wire::perp("xyz:STRICT", MarginRule::StrictIsolated),
+            wire::perp("xyz:LEGACY", MarginRule::OnlyIsolatedFlag),
+            wire::perp("xyz:OPEN", MarginRule::Either),
         ],
         mids: json!({}),
     }])
@@ -59,25 +49,6 @@ async fn exchange_with_meta(meta: Value) -> ExchangeFixture {
         .mount_exchange(json!({"status": "ok", "response": {"type": "default"}}))
         .await;
     server
-}
-
-fn position(coin: &str, leverage_type: &str) -> Value {
-    json!({
-        "type": "oneWay",
-        "position": {
-            "coin": coin,
-            "szi": "1",
-            "leverage": {"type": leverage_type, "value": 4},
-            "entryPx": "100",
-            "positionValue": "100",
-            "unrealizedPnl": "0",
-            "returnOnEquity": "0",
-            "liquidationPx": null,
-            "marginUsed": "25",
-            "maxLeverage": 10,
-            "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
-        }
-    })
 }
 
 async fn mount_positions(server: &ExchangeFixture, positions: Vec<Value>) {
@@ -317,11 +288,11 @@ async fn the_raw_metadata_fallback_applies_the_same_margin_rules() {
     let env = IsolatedHome::new();
     let server = exchange_with_meta(json!({
         "universe": [
-            perp("BTC", false, Value::Null),
-            perp("PUMP", true, json!("strictIsolated")),
-            perp("NOCROSS", true, json!("noCross")),
-            perp("LEGACY", true, Value::Null),
-            perp("FLEX", false, Value::Null),
+            wire::perp("BTC", MarginRule::Either),
+            wire::perp("PUMP", MarginRule::StrictIsolated),
+            wire::perp("NOCROSS", MarginRule::NoCross),
+            wire::perp("LEGACY", MarginRule::OnlyIsolatedFlag),
+            wire::perp("FLEX", MarginRule::Either),
         ],
         "collateralToken": 99
     }))
@@ -367,7 +338,7 @@ async fn the_raw_metadata_fallback_applies_the_same_margin_rules() {
 async fn update_margin_removal_sends_a_negative_ntli() {
     let env = IsolatedHome::new();
     let server = exchange().await;
-    mount_positions(&server, vec![position("ETH", "isolated")]).await;
+    mount_positions(&server, vec![wire::position("ETH", "isolated")]).await;
 
     run(
         &env,
@@ -388,7 +359,7 @@ async fn update_margin_removal_sends_a_negative_ntli() {
 async fn update_margin_addition_still_sends_a_positive_ntli() {
     let env = IsolatedHome::new();
     let server = exchange().await;
-    mount_positions(&server, vec![position("ETH", "isolated")]).await;
+    mount_positions(&server, vec![wire::position("ETH", "isolated")]).await;
 
     run(
         &env,
@@ -422,7 +393,7 @@ async fn update_margin_zero_is_refused_as_a_configuration_error() {
 async fn update_margin_removal_is_refused_on_a_strict_isolated_market_before_any_lookup() {
     let env = IsolatedHome::new();
     let server = exchange().await;
-    mount_positions(&server, vec![position("xyz:STRICT", "isolated")]).await;
+    mount_positions(&server, vec![wire::position("xyz:STRICT", "isolated")]).await;
 
     for coin in ["xyz:STRICT", "PUMP"] {
         run(
@@ -452,8 +423,8 @@ async fn update_margin_removal_is_allowed_on_no_cross_and_legacy_isolated_only_m
     mount_positions(
         &server,
         vec![
-            position("xyz:HOOD", "isolated"),
-            position("xyz:LEGACY", "isolated"),
+            wire::position("xyz:HOOD", "isolated"),
+            wire::position("xyz:LEGACY", "isolated"),
         ],
     )
     .await;
@@ -479,7 +450,7 @@ async fn update_margin_removal_is_allowed_on_no_cross_and_legacy_isolated_only_m
 async fn update_margin_addition_is_allowed_on_a_strict_isolated_market() {
     let env = IsolatedHome::new();
     let server = exchange().await;
-    mount_positions(&server, vec![position("xyz:STRICT", "isolated")]).await;
+    mount_positions(&server, vec![wire::position("xyz:STRICT", "isolated")]).await;
 
     run(
         &env,
@@ -496,7 +467,7 @@ async fn update_margin_addition_is_allowed_on_a_strict_isolated_market() {
 async fn update_margin_checks_the_dex_qualified_position_of_the_signer() {
     let env = IsolatedHome::new();
     let server = exchange().await;
-    mount_positions(&server, vec![position("xyz:HOOD", "isolated")]).await;
+    mount_positions(&server, vec![wire::position("xyz:HOOD", "isolated")]).await;
 
     run(
         &env,
@@ -521,9 +492,9 @@ async fn update_margin_without_an_open_position_is_refused_with_the_fix() {
     let server = exchange().await;
     // A position on another market must not satisfy the check, and a closed
     // one on this market is not open.
-    let mut closed = position("ETH", "isolated");
+    let mut closed = wire::position("ETH", "isolated");
     closed["position"]["szi"] = json!("0");
-    mount_positions(&server, vec![position("BTC", "isolated"), closed]).await;
+    mount_positions(&server, vec![wire::position("BTC", "isolated"), closed]).await;
 
     run(
         &env,
@@ -544,7 +515,7 @@ async fn update_margin_without_an_open_position_is_refused_with_the_fix() {
 async fn update_margin_on_a_cross_position_is_refused_with_the_fix() {
     let env = IsolatedHome::new();
     let server = exchange().await;
-    mount_positions(&server, vec![position("ETH", "cross")]).await;
+    mount_positions(&server, vec![wire::position("ETH", "cross")]).await;
 
     run(
         &env,
@@ -565,7 +536,7 @@ async fn update_margin_on_a_cross_position_is_refused_with_the_fix() {
 async fn update_margin_on_behalf_of_checks_the_vault_and_puts_it_on_the_wire() {
     let env = IsolatedHome::new();
     let server = exchange().await;
-    mount_positions(&server, vec![position("ETH", "isolated")]).await;
+    mount_positions(&server, vec![wire::position("ETH", "isolated")]).await;
 
     run(
         &env,
@@ -594,7 +565,7 @@ async fn update_margin_on_behalf_of_checks_the_vault_and_puts_it_on_the_wire() {
 async fn update_margin_fix_command_keeps_the_acting_account() {
     let env = IsolatedHome::new();
     let server = exchange().await;
-    mount_positions(&server, vec![position("ETH", "cross")]).await;
+    mount_positions(&server, vec![wire::position("ETH", "cross")]).await;
 
     run(
         &env,

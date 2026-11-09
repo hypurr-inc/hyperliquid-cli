@@ -2,7 +2,7 @@ mod support;
 
 use predicates::prelude::*;
 use serde_json::Value;
-use support::{IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address};
+use support::{IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address, stdout_json};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -28,10 +28,6 @@ async fn builder_server() -> MockServer {
         .mount(&server)
         .await;
     server
-}
-
-fn json_stdout(output: Vec<u8>) -> Value {
-    serde_json::from_slice(&output).expect("stdout should be valid JSON")
 }
 
 #[tokio::test]
@@ -67,7 +63,7 @@ async fn builder_max_fee_reads_tenths_bps_and_percent() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     assert_eq!(json["user"].as_str().unwrap().to_ascii_lowercase(), USER);
     assert_eq!(
         json["builder"].as_str().unwrap().to_ascii_lowercase(),
@@ -122,7 +118,7 @@ async fn builder_approved_lists_builders_with_fee_caps() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     let rows = json.as_array().unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["user"].as_str().unwrap().to_ascii_lowercase(), USER);
@@ -163,7 +159,7 @@ async fn builder_approved_empty_list_returns_empty_json_array() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     assert_eq!(json.as_array().unwrap().len(), 0);
 }
 
@@ -205,7 +201,7 @@ fn builder_approve_dry_run_previews_action() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     assert_eq!(json["dry_run"], true);
     assert_eq!(json["command"], "builder approve");
     assert_eq!(json["would_execute"], "approve_builder_fee");
@@ -275,7 +271,7 @@ async fn builder_approve_submits_signed_payload_with_yes() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     assert_eq!(json["status"], "submitted");
     assert_eq!(json["signer"], user);
     assert_eq!(json["query_address"], user);

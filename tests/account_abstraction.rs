@@ -1,5 +1,7 @@
 mod support;
 
+use support::stdout_json;
+
 use serde_json::Value;
 use support::IsolatedHome;
 use wiremock::matchers::{body_partial_json, method, path};
@@ -18,10 +20,6 @@ async fn mock_info_server() -> MockServer {
         .mount(&server)
         .await;
     server
-}
-
-fn json_stdout(output: Vec<u8>) -> Value {
-    serde_json::from_slice(&output).expect("stdout should be valid JSON")
 }
 
 #[tokio::test]
@@ -56,7 +54,7 @@ async fn account_abstraction_read_normalizes_every_protocol_mode() {
             .stdout
             .clone();
 
-        let json = json_stdout(out);
+        let json = stdout_json(&out);
         assert_eq!(
             json["user"].as_str().unwrap().to_ascii_lowercase(),
             USER.to_ascii_lowercase()
@@ -128,7 +126,7 @@ fn account_abstraction_set_dry_run_never_invents_the_user_it_signs_for() {
             .get_output()
             .stdout
             .clone();
-        json_stdout(out)
+        stdout_json(&out)
     };
 
     let unsigned = run(None);
@@ -147,22 +145,8 @@ fn account_abstraction_set_dry_run_never_invents_the_user_it_signs_for() {
 
 #[test]
 fn master_only_actions_refuse_a_stored_api_wallet_even_under_dry_run() {
-    let env = IsolatedHome::new();
-    let agent = support::expected_address(support::VALID_PRIVATE_KEY);
-    for db in env.accounts_db_candidates() {
-        let key_file = db.parent().unwrap().join("accounts.key");
-        support::legacy_accounts_fixture::create_accounts_db_with_key_file(
-            &db,
-            &key_file,
-            &[support::legacy_accounts_fixture::Row::new(
-                "bot",
-                &agent,
-                support::VALID_PRIVATE_KEY,
-            )
-            .agent_of(USER)
-            .default_account()],
-        );
-    }
+    let env =
+        IsolatedHome::new().with_stored_account("bot", support::VALID_PRIVATE_KEY, Some(USER));
 
     // `account abstraction set` is not here: an API wallet signs it as
     // `agentSetAbstraction` (tests/agent_signed_actions.rs).
@@ -239,21 +223,6 @@ fn account_abstraction_set_help_and_schema_carry_the_protocol_cautions() {
     }
 }
 
-fn perp_state() -> Value {
-    let summary = serde_json::json!({
-        "accountValue": "626469", "totalNtlPos": "0",
-        "totalRawUsd": "626469", "totalMarginUsed": "0"
-    });
-    serde_json::json!({
-        "marginSummary": summary,
-        "crossMarginSummary": summary,
-        "crossMaintenanceMarginUsed": "0",
-        "withdrawable": "479227",
-        "assetPositions": [],
-        "time": 1_700_000_000_000_u64
-    })
-}
-
 async fn portfolio_server(raw_mode: &str) -> MockServer {
     let server = mock_info_server().await;
     for (request, response) in [
@@ -263,7 +232,7 @@ async fn portfolio_server(raw_mode: &str) -> MockServer {
         ),
         (
             serde_json::json!({"type": "clearinghouseState"}),
-            perp_state(),
+            support::wire::perp_state_with("626469", "0", "0", "479227", vec![]),
         ),
         (
             serde_json::json!({"type": "spotClearinghouseState"}),

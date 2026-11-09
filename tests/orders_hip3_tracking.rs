@@ -5,7 +5,7 @@
 mod support;
 
 use serde_json::{Value, json};
-use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY};
+use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, json_stdout};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -155,10 +155,6 @@ fn command_against(env: &IsolatedHome, server: &MockServer, args: &[&str]) -> as
         .args(["--format", "json", "--testnet"])
         .args(args);
     command
-}
-
-fn json_stdout(assert: &assert_cmd::assert::Assert) -> Value {
-    serde_json::from_slice(&assert.get_output().stdout).expect("one JSON document on stdout")
 }
 
 #[tokio::test]

@@ -5,11 +5,7 @@ mod support;
 
 use serde_json::{Value, json};
 use support::exchange::ExchangeFixture;
-use support::legacy_accounts_fixture::{self, Row};
-use support::{
-    API_OVERRIDE_ENV, IsolatedHome, VALID_PRIVATE_KEY, expected_address,
-    fixture_clearinghouse_state,
-};
+use support::{API_OVERRIDE_ENV, IsolatedHome, VALID_PRIVATE_KEY, expected_address, wire};
 
 const MASTER: &str = "0x00000000000000000000000000000000000000aa";
 
@@ -23,7 +19,7 @@ async fn server_with_state(user: &str) -> ExchangeFixture {
     server
         .mount_info_containing(
             json!({"type": "clearinghouseState", "user": user}),
-            fixture_clearinghouse_state("900", 5),
+            wire::clearinghouse_state("900", 5),
         )
         .await;
     server
@@ -126,18 +122,7 @@ async fn an_unreadable_role_does_not_block_the_read() {
 
 #[tokio::test]
 async fn a_stored_api_wallet_already_reads_its_master_and_asks_nothing() {
-    let env = IsolatedHome::new();
-    let agent = expected_address(VALID_PRIVATE_KEY);
-    for db in env.accounts_db_candidates() {
-        let key_file = db.parent().unwrap().join("accounts.key");
-        legacy_accounts_fixture::create_accounts_db_with_key_file(
-            &db,
-            &key_file,
-            &[Row::new("bot", &agent, VALID_PRIVATE_KEY)
-                .agent_of(MASTER)
-                .default_account()],
-        );
-    }
+    let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
     let server = server_with_state(MASTER).await;
 
     let mut command = env.account_command_without_passphrase();

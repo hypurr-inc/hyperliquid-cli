@@ -3,7 +3,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use assert_cmd::Command;
 use hyperliquid_cli::command_registry::CommandRegistry;
 use hyperliquid_cli::command_spec::Risk;
 use hyperliquid_cli::commands::schema::schema_query;
@@ -42,18 +41,6 @@ pub fn assert_json_fixture(name: &str, actual: &Value) {
     );
 }
 
-pub fn schema_all() -> Vec<Value> {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["--format", "json", "schema"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    serde_json::from_slice(&output).unwrap()
-}
-
 pub fn command_path(schema: &Value) -> String {
     schema["command_path"]
         .as_array()
@@ -65,7 +52,7 @@ pub fn command_path(schema: &Value) -> String {
 }
 
 /// The command schemas exactly as `hyperliquid schema` prints them.
-fn registry_schemas() -> Vec<Value> {
+pub fn schema_all() -> Vec<Value> {
     match schema_query(&[]).unwrap().to_json_value() {
         Value::Array(schemas) => schemas,
         other => panic!("schema output is not an array: {other}"),
@@ -85,7 +72,7 @@ fn wrap(commands: impl Into<Value>) -> Value {
 /// them and, with `HYPERLIQUID_UPDATE_CONTRACTS=1`, rewrites them.
 pub fn registry_fixtures() -> Vec<(&'static str, Value)> {
     let registry = CommandRegistry::get();
-    let schemas = registry_schemas();
+    let schemas = schema_all();
 
     let inventory = registry
         .commands()

@@ -3,10 +3,7 @@
 mod support;
 
 use serde_json::Value;
-use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, fixture_all_mids,
-    fixture_perp_meta_btc_only, fixture_spot_meta_usdc_only,
-};
+use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, wire};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -22,9 +19,9 @@ async fn mount_info(server: &MockServer, request_type: &str, response: ResponseT
 async fn market_server() -> MockServer {
     let server = MockServer::start().await;
     let ok = |body: Value| ResponseTemplate::new(200).set_body_json(body);
-    mount_info(&server, "allMids", ok(fixture_all_mids())).await;
-    mount_info(&server, "spotMeta", ok(fixture_spot_meta_usdc_only())).await;
-    mount_info(&server, "meta", ok(fixture_perp_meta_btc_only())).await;
+    mount_info(&server, "allMids", ok(wire::all_mids())).await;
+    mount_info(&server, "spotMeta", ok(wire::spot_meta_usdc_only())).await;
+    mount_info(&server, "meta", ok(wire::perp_meta_btc_only())).await;
     mount_info(&server, "perpDexs", ok(serde_json::json!([]))).await;
     server
 }

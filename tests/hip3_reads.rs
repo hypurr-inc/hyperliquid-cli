@@ -4,15 +4,11 @@ mod support;
 
 use predicates::prelude::*;
 use serde_json::{Value, json};
-use support::{IsolatedHome, mount_override_healthcheck};
+use support::{IsolatedHome, mount_override_healthcheck, stdout_json};
 use wiremock::matchers::{body_json, body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const USER: &str = "0x0000000000000000000000000000000000000001";
-
-fn json_stdout(output: Vec<u8>) -> Value {
-    serde_json::from_slice(&output).expect("stdout should be valid JSON")
-}
 
 /// The minimum `/info` reads `orders open` needs to build an asset resolver.
 async fn mount_standard_account_mode(server: &MockServer) {
@@ -118,7 +114,7 @@ async fn mids_scopes_all_mids_to_a_dex() {
         .stdout
         .clone();
 
-    assert_eq!(json_stdout(output)["xyz:XYZ100"], "123.5");
+    assert_eq!(stdout_json(&output)["xyz:XYZ100"], "123.5");
     server.verify().await;
 }
 
@@ -278,7 +274,7 @@ async fn portfolio_dex_view_skips_account_wide_reads() {
         .stdout
         .clone();
 
-    let portfolio = json_stdout(output);
+    let portfolio = stdout_json(&output);
     assert_eq!(portfolio["summary"]["account_value"], "42");
     assert_eq!(portfolio["spot_balances"].as_array().unwrap().len(), 0);
     server.verify().await;
@@ -307,7 +303,7 @@ async fn blank_dex_is_the_default_dex() {
         .stdout
         .clone();
 
-    assert_eq!(json_stdout(output)["BTC"], "50000");
+    assert_eq!(stdout_json(&output)["BTC"], "50000");
     server.verify().await;
 }
 
@@ -383,7 +379,7 @@ async fn blank_dex_keeps_account_wide_portfolio_rows() {
         .stdout
         .clone();
 
-    let portfolio = json_stdout(output);
+    let portfolio = stdout_json(&output);
     assert_eq!(portfolio["summary"]["account_value"], "11");
     assert_eq!(portfolio["spot_balances"].as_array().unwrap().len(), 1);
     server.verify().await;

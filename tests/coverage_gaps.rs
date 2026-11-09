@@ -8,40 +8,26 @@ mod support;
 
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, order_reply};
-use support::{
-    IsolatedHome, VALID_PRIVATE_KEY, expected_address, fixture_basic_order,
-    fixture_clearinghouse_state, json_stdout,
-};
+use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, json_stdout, wire};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, ResponseTemplate};
 
 const RATE_LIMIT: &str = "Too many requests: rate limit exceeded";
 const CREDENTIALS: &str = "Unauthorized: invalid key";
 
-/// A signing command against `server` on testnet, JSON output.
-fn live(env: &IsolatedHome, server: &ExchangeFixture, args: &[&str]) -> assert_cmd::Command {
-    let mut command = env.live_command(server);
-    command.args(["--format", "json", "--testnet"]).args(args);
-    command
-}
-
-fn resting(oid: u64) -> Value {
-    json!({"resting": {"oid": oid, "cloid": null}})
-}
-
-fn filled(total_size: &str, oid: u64) -> Value {
-    json!({"filled": {"totalSz": total_size, "avgPx": "1", "oid": oid}})
-}
-
 // ---- dry-run names, subaccount list, report-incident ----
 
-#[test]
-fn outcome_shortcuts_preview_under_their_own_command_name() {
+#[tokio::test]
+async fn outcome_shortcuts_preview_under_their_own_command_name() {
     let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_info(json!({"type": "outcomeMeta"}), wire::outcome_meta(&[10]))
+        .await;
 
     for (command, side) in [("outcome-buy", "buy"), ("outcome-sell", "sell")] {
         let assert = env
-            .command()
+            .command_with_server(&server)
             .args([
                 "--format",
                 "json",
@@ -102,7 +88,7 @@ async fn subaccount_list_prints_the_accounts_of_a_master_address() {
                 "name": "market-maker-1",
                 "subAccountUser": subaccount,
                 "master": master,
-                "clearinghouseState": fixture_clearinghouse_state("900", 5),
+                "clearinghouseState": wire::clearinghouse_state("900", 5),
                 "spotState": {"balances": []}
             }]),
         )
@@ -150,7 +136,7 @@ async fn batch_create_truncates_each_leg_to_its_market_precision() {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server
-        .mount_order_statuses(vec![resting(1), resting(2)])
+        .mount_order_statuses(vec![wire::resting_status(1), wire::resting_status(2)])
         .await;
     let orders = env.tmp_path().join("orders.json");
     std::fs::write(
@@ -163,14 +149,11 @@ async fn batch_create_truncates_each_leg_to_its_market_precision() {
     )
     .unwrap();
 
-    live(
-        &env,
-        &server,
-        &["orders", "batch-create", "--orders-file", "orders.json"],
-    )
-    .current_dir(env.tmp_path())
-    .assert()
-    .success();
+    env.live_json(&server)
+        .args(["orders", "batch-create", "--orders-file", "orders.json"])
+        .current_dir(env.tmp_path())
+        .assert()
+        .success();
 
     let actions = server.exchange_actions().await;
     assert_eq!(actions.len(), 1);
@@ -187,7 +170,9 @@ async fn batch_create_truncates_each_leg_to_its_market_precision() {
 async fn batch_create_rejects_a_leg_that_truncates_to_zero_before_sending() {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
-    server.mount_order_statuses(vec![resting(1)]).await;
+    server
+        .mount_order_statuses(vec![wire::resting_status(1)])
+        .await;
     let orders = env.tmp_path().join("orders.json");
     std::fs::write(
         &orders,
@@ -196,15 +181,12 @@ async fn batch_create_rejects_a_leg_that_truncates_to_zero_before_sending() {
     )
     .unwrap();
 
-    live(
-        &env,
-        &server,
-        &["orders", "batch-create", "--orders-file", "orders.json"],
-    )
-    .current_dir(env.tmp_path())
-    .assert()
-    .code(2)
-    .stdout(predicates::str::contains("BTC"));
+    env.live_json(&server)
+        .args(["orders", "batch-create", "--orders-file", "orders.json"])
+        .current_dir(env.tmp_path())
+        .assert()
+        .code(2)
+        .stdout(predicates::str::contains("BTC"));
 
     assert!(server.exchange_actions().await.is_empty());
 }
@@ -221,13 +203,12 @@ async fn chase_truncates_its_quote_price_and_size() {
         .await;
     // The quote is reported filled in full, which ends the chase at once.
     server
-        .mount_exchange(order_reply(vec![filled("0.1234567", 1)]))
+        .mount_exchange(order_reply(vec![wire::filled_status("0.1234567", 1)]))
         .await;
 
-    let assert = live(
-        &env,
-        &server,
-        &[
+    let assert = env
+        .live_json(&server)
+        .args([
             "orders",
             "chase",
             "--coin",
@@ -238,10 +219,9 @@ async fn chase_truncates_its_quote_price_and_size() {
             "0.1234567",
             "--timeout",
             "10s",
-        ],
-    )
-    .assert()
-    .success();
+        ])
+        .assert()
+        .success();
 
     assert_eq!(json_stdout(&assert)["status"], "filled");
     let actions = server.exchange_actions().await;
@@ -271,12 +251,13 @@ async fn chase_refuses_a_spot_market_before_sending_anything() {
             }),
         )
         .await;
-    server.mount_order_statuses(vec![resting(1)]).await;
+    server
+        .mount_order_statuses(vec![wire::resting_status(1)])
+        .await;
 
-    let assert = live(
-        &env,
-        &server,
-        &[
+    let assert = env
+        .live_json(&server)
+        .args([
             "orders",
             "chase",
             "--coin",
@@ -287,10 +268,9 @@ async fn chase_refuses_a_spot_market_before_sending_anything() {
             "10",
             "--timeout",
             "10s",
-        ],
-    )
-    .assert()
-    .code(13);
+        ])
+        .assert()
+        .code(13);
 
     let error = json_stdout(&assert)["error"].as_str().unwrap().to_string();
     assert!(
@@ -307,13 +287,11 @@ async fn chase_does_not_read_the_default_builder_configuration() {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server
-        .mount_exchange(order_reply(vec![filled("0.5", 1)]))
+        .mount_exchange(order_reply(vec![wire::filled_status("0.5", 1)]))
         .await;
 
-    live(
-        &env,
-        &server,
-        &[
+    env.live_json(&server)
+        .args([
             "orders",
             "chase",
             "--coin",
@@ -324,14 +302,13 @@ async fn chase_does_not_read_the_default_builder_configuration() {
             "0.5",
             "--timeout",
             "10s",
-        ],
-    )
-    .env(
-        hyperliquid_cli::env::DEFAULT_BUILDER_ADDRESS,
-        "0x00000000000000000000000000000000000000bb",
-    )
-    .assert()
-    .success();
+        ])
+        .env(
+            hyperliquid_cli::env::DEFAULT_BUILDER_ADDRESS,
+            "0x00000000000000000000000000000000000000bb",
+        )
+        .assert()
+        .success();
 
     let actions = server.exchange_actions().await;
     assert_eq!(actions.len(), 1);
@@ -344,22 +321,24 @@ async fn bracket_truncates_its_entry_and_the_protection_prices() {
     let server = ExchangeFixture::start().await;
     // The entry fills at once, so the protection legs follow.
     server
-        .mount_exchange_once(order_reply(vec![filled("0.00012", 1)]))
+        .mount_exchange_once(order_reply(vec![wire::filled_status("0.00012", 1)]))
         .await;
     server
-        .mount_exchange(order_reply(vec![resting(2), resting(3)]))
+        .mount_exchange(order_reply(vec![
+            wire::resting_status(2),
+            wire::resting_status(3),
+        ]))
         .await;
     // The protection prices come from the position's entry price.
-    let mut state = fixture_clearinghouse_state("900", 5);
+    let mut state = wire::clearinghouse_state("900", 5);
     state["assetPositions"][0]["position"]["entryPx"] = json!("1234.5678");
     server
         .mount_info_containing(json!({"type": "clearinghouseState"}), state)
         .await;
 
-    let assert = live(
-        &env,
-        &server,
-        &[
+    let assert = env
+        .live_json(&server)
+        .args([
             "orders",
             "bracket",
             "--coin",
@@ -376,10 +355,9 @@ async fn bracket_truncates_its_entry_and_the_protection_prices() {
             "+10%",
             "--stop-loss",
             "-5%",
-        ],
-    )
-    .assert()
-    .success();
+        ])
+        .assert()
+        .success();
 
     let actions = server.exchange_actions().await;
     assert_eq!(actions.len(), 2, "entry, then the protection legs");
@@ -415,7 +393,7 @@ async fn assert_rejection_exit_codes(
         prepare(&server).await;
         server.mount_exchange(reply(text)).await;
 
-        let assert = live(&env, &server, args).assert();
+        let assert = env.live_json(&server).args(args).assert();
         let code = assert.get_output().status.code().unwrap();
         match expected {
             Some(expected) => assert_eq!(code, expected, "{args:?} on {text:?}"),
@@ -432,24 +410,13 @@ async fn assert_rejection_exit_codes(
     }
 }
 
-fn order_status_reply(oid: u64) -> Value {
-    json!({
-        "status": "order",
-        "order": {
-            "status": "open",
-            "statusTimestamp": 1_700_000_000_001_u64,
-            "order": fixture_basic_order("BTC", oid)
-        }
-    })
-}
-
 #[tokio::test]
 async fn cancel_status_rejections_keep_their_exit_codes() {
     assert_rejection_exit_codes(
         &["orders", "cancel", "12345"],
         async |server| {
             server
-                .mount_info_containing(json!({"type": "orderStatus"}), order_status_reply(12345))
+                .mount_info_containing(json!({"type": "orderStatus"}), wire::order_status_reply(wire::basic_order("BTC", 12345)))
                 .await;
         },
         |text| json!({"status": "ok", "response": {"type": "cancel", "data": {"statuses": [{"error": text}]}}}),
@@ -465,7 +432,10 @@ async fn modify_status_rejections_keep_their_exit_codes() {
         ],
         async |server| {
             server
-                .mount_info_containing(json!({"type": "orderStatus"}), order_status_reply(12345))
+                .mount_info_containing(
+                    json!({"type": "orderStatus"}),
+                    wire::order_status_reply(wire::basic_order("BTC", 12345)),
+                )
                 .await;
         },
         |text| order_reply(vec![json!({"error": text})]),
@@ -545,7 +515,7 @@ fn history_mock(response: ResponseTemplate) -> Mock {
 async fn orders_history_falls_back_to_the_raw_list_on_a_shape_mismatch() {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
-    history_mock(ResponseTemplate::new(200).set_body_json(json!([fixture_basic_order("BTC", 5)])))
+    history_mock(ResponseTemplate::new(200).set_body_json(json!([wire::basic_order("BTC", 5)])))
         .mount(&server)
         .await;
 

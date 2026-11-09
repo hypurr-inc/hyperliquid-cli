@@ -4,21 +4,12 @@
 //! that a rename or a new variable silently misses. Tests (everything from the
 //! first `#[cfg(test)]` of a file) and comments are exempt.
 
+mod support;
+
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use hyperliquid_cli::env;
-
-fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, found);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            found.push(path);
-        }
-    }
-}
 
 /// The contents of every string literal in `source`, skipping comments.
 fn string_literals(source: &str) -> Vec<String> {
@@ -69,8 +60,6 @@ fn mentions(literal: &str, name: &str) -> bool {
 #[test]
 fn environment_variable_names_are_spelled_only_in_the_env_table() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    rust_files(&root, &mut files);
     // A bare word such as `CI` or `TERM` is ordinary prose; every other name has an underscore.
     let names: Vec<&str> = env::ALL
         .iter()
@@ -79,7 +68,7 @@ fn environment_variable_names_are_spelled_only_in_the_env_table() {
         .collect();
 
     let mut offenders = Vec::new();
-    for file in files {
+    for file in support::rust_files(&root) {
         if file.ends_with("env.rs") {
             continue;
         }

@@ -1,8 +1,8 @@
 mod contract_support;
+mod support;
 
 use serde_json::json;
 
-use assert_cmd::Command;
 use contract_support::schema_all;
 
 #[test]
@@ -76,8 +76,7 @@ fn wallet_export_schema_advertises_yes_as_confirmation_bypass() {
 
 #[test]
 fn schema_group_lookup_returns_child_schemas() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .args([
             "--format",
             "json",
@@ -103,8 +102,7 @@ fn schema_group_lookup_returns_child_schemas() {
 
 #[test]
 fn schema_leaf_lookup_still_returns_single_schema_object() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .args(["--format", "json", "schema", "account", "portfolio"])
         .assert()
         .success()

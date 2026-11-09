@@ -1,12 +1,12 @@
-use assert_cmd::Command;
+mod support;
+
 use predicates::prelude::*;
 
 #[test]
 fn every_format_is_accepted_by_its_long_and_short_flag() {
     for flag in ["--format", "-f"] {
         for format in ["pretty", "table", "json"] {
-            Command::cargo_bin("hyperliquid")
-                .unwrap()
+            support::hermetic_command()
                 .args([flag, format, "--help"])
                 .assert()
                 .success();
@@ -16,8 +16,7 @@ fn every_format_is_accepted_by_its_long_and_short_flag() {
 
 #[test]
 fn test_json_flag_enables_json_mode() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .arg("--json")
         .arg("--version")
         .assert()
@@ -32,8 +31,7 @@ fn test_json_flag_enables_json_mode() {
 
 #[test]
 fn top_level_help_explains_dynamic_agent_json_default() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+    support::hermetic_command()
         .arg("--help")
         .assert()
         .success()
@@ -48,8 +46,7 @@ fn top_level_help_explains_dynamic_agent_json_default() {
 
 #[test]
 fn schema_help_includes_agent_examples() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+    support::hermetic_command()
         .args(["schema", "--help"])
         .assert()
         .success()
@@ -59,8 +56,7 @@ fn schema_help_includes_agent_examples() {
 
 #[test]
 fn orders_create_help_surfaces_risk_and_dry_run() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+    support::hermetic_command()
         .args(["orders", "create", "--help"])
         .assert()
         .success()
@@ -71,8 +67,7 @@ fn orders_create_help_surfaces_risk_and_dry_run() {
 
 #[test]
 fn json_payload_parse_errors_do_not_echo_secret_content() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+    support::hermetic_command()
         .args([
             "--format",
             "json",

@@ -1,29 +1,29 @@
 mod support;
 
-use assert_cmd::Command;
+use support::exchange::ExchangeFixture;
+
 use predicates::prelude::*;
-use serde_json::Value;
-use wiremock::MockServer;
+use serde_json::{Value, json};
 
 use support::{
     API_OVERRIDE_ENV, FORMAT_ENV, IsolatedHome, TEST_ACCOUNT_PASSPHRASE, TESTNET_API_OVERRIDE_ENV,
-    fixture_malformed_spot_meta, fixture_perp_meta_btc_only, mock_market_server, mount_market_meta,
-    mount_override_healthcheck, mount_perp_dexs, mount_spot_meta,
+    wire,
 };
 
-async fn mock_malformed_spot_meta_server() -> MockServer {
-    let server = MockServer::start().await;
-    mount_override_healthcheck(&server).await;
-    mount_spot_meta(&server, fixture_malformed_spot_meta()).await;
-    mount_market_meta(&server, fixture_perp_meta_btc_only()).await;
-    mount_perp_dexs(&server, serde_json::json!([null])).await;
+async fn mock_malformed_spot_meta_server() -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
+    server
+        .override_info(json!({"type": "spotMeta"}), wire::malformed_spot_meta())
+        .await;
+    server
+        .override_info(json!({"type": "meta"}), wire::perp_meta_btc_only())
+        .await;
     server
 }
 
 #[test]
 fn test_version_json_is_one_document_and_pretty_is_plain() {
-    let json = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let json = support::hermetic_command()
         .args(["--format", "json", "orders", "create", "--version"])
         .assert()
         .success()
@@ -33,8 +33,7 @@ fn test_version_json_is_one_document_and_pretty_is_plain() {
     let value: serde_json::Value = serde_json::from_slice(&json).unwrap();
     assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+    support::hermetic_command()
         .args(["--format", "pretty", "-v"])
         .assert()
         .success()
@@ -47,8 +46,7 @@ fn test_version_json_is_one_document_and_pretty_is_plain() {
 #[test]
 fn test_group_without_action_prints_help_on_stdout_and_exits_zero() {
     for format in ["json", "pretty"] {
-        Command::cargo_bin("hyperliquid")
-            .unwrap()
+        support::hermetic_command()
             .args(["--format", format, "orders"])
             .assert()
             .success()
@@ -60,16 +58,14 @@ fn test_group_without_action_prints_help_on_stdout_and_exits_zero() {
 
 #[test]
 fn test_short_and_long_help_match() {
-    let short = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let short = support::hermetic_command()
         .args(["orders", "create", "-h"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let long = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let long = support::hermetic_command()
         .args(["orders", "create", "--help"])
         .assert()
         .success()
@@ -82,8 +78,7 @@ fn test_short_and_long_help_match() {
 
 #[test]
 fn test_no_args_shows_info() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+    support::hermetic_command()
         .assert()
         .success()
         .stdout(predicates::str::contains("Usage: hyperliquid"));
@@ -91,8 +86,7 @@ fn test_no_args_shows_info() {
 
 #[test]
 fn orders_create_help_only_lists_accepted_grouping_values() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .args(["orders", "create", "--help"])
         .assert()
         .success()
@@ -107,8 +101,7 @@ fn orders_create_help_only_lists_accepted_grouping_values() {
 
 #[test]
 fn orders_create_rejects_position_tpsl_grouping() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+    support::hermetic_command()
         .env("HYPERLIQUID_FORMAT", "pretty")
         .args([
             "--dry-run",
@@ -136,8 +129,7 @@ fn orders_create_rejects_position_tpsl_grouping() {
 
 #[test]
 fn schema_orders_status_requires_oid_or_cloid() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .args(["--format", "json", "schema", "orders", "status"])
         .assert()
         .success()
@@ -159,8 +151,7 @@ fn schema_orders_status_requires_oid_or_cloid() {
 #[test]
 fn missing_required_argument_exits_2() {
     for args in [["perps", "get"], ["spot", "get"]] {
-        Command::cargo_bin("hyperliquid")
-            .unwrap()
+        support::hermetic_command()
             .env("HYPERLIQUID_FORMAT", "pretty")
             .args(args)
             .assert()
@@ -171,8 +162,7 @@ fn missing_required_argument_exits_2() {
 
 #[test]
 fn test_candles_invalid_interval_exits_2() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+    support::hermetic_command()
         .env("HYPERLIQUID_FORMAT", "pretty")
         .args(["candles", "BTC", "--interval", "999x"])
         .assert()
@@ -182,8 +172,7 @@ fn test_candles_invalid_interval_exits_2() {
 
 #[test]
 fn mistyped_subcommand_suggests_the_fix_and_points_at_its_group_help() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .args(["--format", "json", "orders", "cancl"])
         .assert()
         .code(2)
@@ -198,7 +187,7 @@ fn mistyped_subcommand_suggests_the_fix_and_points_at_its_group_help() {
 
 #[tokio::test]
 async fn test_select_filters_perps_json_through_command_context() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
 
@@ -236,7 +225,7 @@ async fn test_select_filters_perps_json_through_command_context() {
 
 #[tokio::test]
 async fn non_tty_defaults_to_json_for_read_commands() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
 
@@ -258,7 +247,7 @@ async fn non_tty_defaults_to_json_for_read_commands() {
 
 #[tokio::test]
 async fn explicit_pretty_overrides_non_tty_json_default() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
 
@@ -273,7 +262,7 @@ async fn explicit_pretty_overrides_non_tty_json_default() {
 
 #[tokio::test]
 async fn hyperliquid_format_env_overrides_non_tty_default() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
 
@@ -313,7 +302,7 @@ fn invalid_hyperliquid_format_env_returns_json_configuration_error() {
 
 #[tokio::test]
 async fn test_max_results_limits_arrays_before_select() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
     let output = command
@@ -342,7 +331,7 @@ async fn test_max_results_limits_arrays_before_select() {
 
 #[tokio::test]
 async fn orders_create_dry_run_validates_and_does_not_require_auth() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
     let output = command
@@ -378,7 +367,7 @@ async fn orders_create_dry_run_validates_and_does_not_require_auth() {
 
 #[tokio::test]
 async fn orders_create_dry_run_reports_reduce_only_for_limit_and_market() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let cases: [&[&str]; 2] = [
         &["--type", "limit", "--price", "90000", "--size", "0.001"],
@@ -403,7 +392,7 @@ async fn orders_create_dry_run_reports_reduce_only_for_limit_and_market() {
 
 #[tokio::test]
 async fn orders_create_dry_run_shows_normal_tpsl_children() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
     let output = command
@@ -458,7 +447,7 @@ async fn orders_create_dry_run_shows_normal_tpsl_children() {
 
 #[tokio::test]
 async fn orders_create_dry_run_surfaces_margin_mode_intent() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
     let output = command
@@ -491,7 +480,7 @@ async fn orders_create_dry_run_surfaces_margin_mode_intent() {
 
 #[tokio::test]
 async fn orders_tpsl_dry_run_shows_position_tpsl_children_without_auth() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
     let output = command
@@ -546,7 +535,7 @@ async fn orders_tpsl_dry_run_shows_position_tpsl_children_without_auth() {
 
 #[tokio::test]
 async fn orders_twap_create_dry_run_shows_validated_intent() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
     let output = command
@@ -585,7 +574,7 @@ async fn orders_twap_create_dry_run_shows_validated_intent() {
 
 #[tokio::test]
 async fn orders_twap_cancel_dry_run_shows_validated_intent() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
     let output = command
@@ -742,7 +731,7 @@ async fn orders_cancel_dry_run_shows_normalized_identifier() {
 
 #[tokio::test]
 async fn orders_cancel_all_dry_run_shows_resolved_coin_filter() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
     let output = command
@@ -770,7 +759,7 @@ async fn orders_cancel_all_dry_run_shows_resolved_coin_filter() {
 
 #[tokio::test]
 async fn dry_run_payload_redacts_private_key_like_fields() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
     let output = command
@@ -827,8 +816,7 @@ async fn dry_run_payload_redacts_private_key_like_fields() {
 
 #[test]
 fn hardening_rejects_traversal_like_resource_ids() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+    support::hermetic_command()
         .args([
             "--format",
             "json",
