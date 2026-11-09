@@ -1,11 +1,9 @@
 mod support;
 
-use support::exchange::ExchangeFixture;
-
 use predicates::prelude::*;
-use wiremock::matchers::{body_partial_json, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
-
+use serde_json::json;
+use support::exchange::ExchangeFixture;
+use support::reads::read_json;
 use support::{
     API_OVERRIDE_ENV, IsolatedHome, MAINNET_API_OVERRIDE_ENV, TEST_ACCOUNT_PASSPHRASE,
     TESTNET_API_OVERRIDE_ENV, mount_account_state, mount_successful_exchange_actions, wire,
@@ -16,113 +14,67 @@ const IMPORT_PRIVATE_KEY: &str =
 const USER_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const VALIDATOR_ADDRESS: &str = "0x0000000000000000000000000000000000000002";
 
-async fn mount_borrowlend_and_staking_public(server: &MockServer) {
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({
-            "type": "allBorrowLendReserveStates"
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            [
-                0,
-                {
-                    "borrowYearlyRate": "0.05",
-                    "supplyYearlyRate": "0.0142",
-                    "balance": "1000",
-                    "utilization": "0.2",
-                    "oraclePx": "1.0",
-                    "ltv": "0.0",
-                    "totalSupplied": "1000",
-                    "totalBorrowed": "200"
-                }
-            ]
-        ])))
-        .mount(server)
+async fn mount_borrowlend_and_staking_public(server: &ExchangeFixture) {
+    server
+        .mount_info(
+            json!({"type": "allBorrowLendReserveStates"}),
+            json!([[0, {
+                "borrowYearlyRate": "0.05",
+                "supplyYearlyRate": "0.0142",
+                "balance": "1000",
+                "utilization": "0.2",
+                "oraclePx": "1.0",
+                "ltv": "0.0",
+                "totalSupplied": "1000",
+                "totalBorrowed": "200"
+            }]]),
+        )
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "borrowLendUserState"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "tokenToState": [[0, {
-                "borrow": {"basis": "0.0", "value": "0.0"},
-                "supply": {"basis": "1000.0", "value": "1000.0"}
-            }]],
-            "health": "healthy",
-            "healthFactor": null
-        })))
-        .mount(server)
+    server
+        .mount_info_containing(
+            json!({"type": "borrowLendUserState"}),
+            json!({
+                "tokenToState": [[0, {
+                    "borrow": {"basis": "0.0", "value": "0.0"},
+                    "supply": {"basis": "1000.0", "value": "1000.0"}
+                }]],
+                "health": "healthy",
+                "healthFactor": null
+            }),
+        )
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "delegatorSummary"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "delegated": "123.45",
-            "undelegated": "10",
-            "totalPendingWithdrawal": "5.5",
-            "nPendingWithdrawals": 2
-        })))
-        .mount(server)
+    server
+        .mount_info_containing(
+            json!({"type": "delegatorSummary"}),
+            json!({
+                "delegated": "123.45",
+                "undelegated": "10",
+                "totalPendingWithdrawal": "5.5",
+                "nPendingWithdrawals": 2
+            }),
+        )
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "delegations"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
+    server
+        .mount_info_containing(
+            json!({"type": "delegations"}),
+            json!([{
                 "validator": VALIDATOR_ADDRESS,
                 "amount": "100.0",
                 "lockedUntilTimestamp": 1700000000000_u64
-            }
-        ])))
-        .mount(server)
+            }]),
+        )
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "delegatorRewards"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
-                "time": 1700000000000_u64,
-                "source": "staking",
-                "totalAmount": "1.25"
-            }
-        ])))
-        .mount(server)
+    server
+        .mount_info_containing(
+            json!({"type": "delegatorRewards"}),
+            json!([{"time": 1700000000000_u64, "source": "staking", "totalAmount": "1.25"}]),
+        )
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "validatorSummaries"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
-                "validator": VALIDATOR_ADDRESS,
-                "signer": "0x0000000000000000000000000000000000000003",
-                "name": "Validator One",
-                "description": "test validator",
-                "nRecentBlocks": 1,
-                "stake": 123456789_u64,
-                "isJailed": false,
-                "unjailableAfter": null,
-                "isActive": true,
-                "commission": "0.04",
-                "stats": [
-                    ["day", {"uptimeFraction": "1.0", "predictedApr": "0.025", "nSamples": 1440}]
-                ]
-            }
-        ])))
-        .mount(server)
+    server
+        .mount_info(
+            json!({"type": "validatorSummaries"}),
+            json!([wire::validator(VALIDATOR_ADDRESS, "Validator One")]),
+        )
         .await;
 }
 
@@ -342,11 +294,10 @@ async fn stored_account_aliases_resolve_for_public_user_lookup_commands() {
 
 #[tokio::test]
 async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
-    let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server
         .override_info(
-            serde_json::json!({"type": "meta"}),
+            json!({"type": "meta"}),
             wire::perp_meta(vec![
                 wire::perp_with("BTC", 5, 50, wire::MarginRule::Either),
                 wire::perp_with("kPEPE", 0, 10, wire::MarginRule::Either),
@@ -355,8 +306,8 @@ async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
         .await;
     server
         .override_info(
-            serde_json::json!({"type": "spotMeta"}),
-            serde_json::json!({
+            json!({"type": "spotMeta"}),
+            json!({
                 "universe": [{"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}],
                 "tokens": [
                     {"name": "USDC", "index": 0, "tokenId": "0x00000000000000000000000000000000", "szDecimals": 6, "weiDecimals": 6, "evmContract": null},
@@ -365,60 +316,37 @@ async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
             }),
         )
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "spotMetaAndAssetCtxs"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {"universe": [], "tokens": []},
-            [{"coin": "PURR/USDC", "markPx": "0.1", "midPx": "0.1"}]
-        ])))
-        .mount(&server)
+    server
+        .mount_info(
+            json!({"type": "spotMetaAndAssetCtxs"}),
+            json!([
+                {"universe": [], "tokens": []},
+                [{"coin": "PURR/USDC", "markPx": "0.1", "midPx": "0.1"}]
+            ]),
+        )
         .await;
 
-    let run = |args: &[&str]| -> serde_json::Value {
-        let output = env
-            .command_with_server(&server)
-            .args(["--format", "json"])
-            .args(args)
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        serde_json::from_slice(&output).unwrap()
-    };
-
-    let tick = |market: &serde_json::Value| -> f64 {
-        market["tick_size_at_price_1"]
-            .as_str()
-            .expect("tick size is a decimal string")
-            .parse()
-            .unwrap()
-    };
-    let perps = run(&["perps", "list"]);
+    let perps = read_json(&server, &["perps", "list"]);
     assert_eq!(perps[0]["name"], "BTC");
     assert_eq!(perps[0]["index"], 0);
     assert_eq!(perps[0]["max_leverage"], 50);
     assert_eq!(perps[0]["sz_decimals"], 5);
     assert_eq!(perps[0]["collateral"], "USDC");
-    assert_eq!(tick(&perps[0]), 0.1);
+    assert_eq!(perps[0]["tick_size_at_price_1"], "0.10");
     assert_eq!(perps[1]["name"], "kPEPE");
     assert_eq!(perps[1]["sz_decimals"], 0);
-    assert_eq!(tick(&perps[1]), 0.0001);
-    assert_eq!(run(&["perps", "get", "kPEPE"]), perps[1]);
+    assert_eq!(perps[1]["tick_size_at_price_1"], "0.0001");
+    assert_eq!(read_json(&server, &["perps", "get", "kPEPE"]), perps[1]);
 
-    let spot = run(&["spot", "list"]);
+    let spot = read_json(&server, &["spot", "list"]);
     assert_eq!(spot[0]["symbol"], "PURR/USDC");
     assert_eq!(spot[0]["index"], 10_000);
     assert_eq!(spot[0]["base"], "PURR");
     assert_eq!(spot[0]["quote"], "USDC");
     assert_eq!(spot[0]["base_sz_decimals"], 0);
     assert_eq!(spot[0]["quote_sz_decimals"], 6);
-    assert_eq!(tick(&spot[0]), 0.0001);
-    let pair = run(&["spot", "get", "PURR/USDC"]);
+    assert_eq!(spot[0]["tick_size_at_price_1"], "0.0001");
+    let pair = read_json(&server, &["spot", "get", "PURR/USDC"]);
     for (key, value) in spot[0].as_object().unwrap() {
         assert_eq!(&pair[key], value, "spot get repeats the list field {key}");
     }
@@ -427,17 +355,29 @@ async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
 #[tokio::test]
 async fn testnet_mode_uses_testnet_endpoint_override() {
     let env = IsolatedHome::new();
-    let mainnet = MockServer::start().await;
+    let mainnet = ExchangeFixture::start().await;
     let testnet = mock_cross_area_server(wire::order_success_response(4242)).await;
 
-    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+    let status = env
+        .account_command(TEST_ACCOUNT_PASSPHRASE)
         .env(MAINNET_API_OVERRIDE_ENV, mainnet.uri())
         .env(TESTNET_API_OVERRIDE_ENV, testnet.uri())
         .args(["--format", "json", "--testnet", "status"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("testnet"))
-        .stdout(predicate::str::contains(testnet.uri()));
+        .success();
+
+    let status = support::json_stdout(&status);
+    assert_eq!(status["network"], "testnet");
+    assert!(
+        status["api_url"]
+            .as_str()
+            .unwrap()
+            .starts_with(&testnet.uri())
+    );
+    assert!(
+        mainnet.received_requests().await.unwrap().is_empty(),
+        "the mainnet endpoint is never read on the testnet"
+    );
 }
 
 #[tokio::test]

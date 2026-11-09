@@ -7,6 +7,7 @@ mod support;
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use support::exchange::ExchangeFixture;
+use support::reads::{read, read_json};
 use support::{IsolatedHome, json_stdout};
 
 fn fixture(name: &str) -> Value {
@@ -37,16 +38,12 @@ async fn exchange() -> ExchangeFixture {
     exchange_with(fixture("outcome_meta.json")).await
 }
 
-fn run(env: &IsolatedHome, server: &ExchangeFixture, args: &[&str]) -> assert_cmd::assert::Assert {
-    env.command_with_server(server)
-        .args(["--format", "json", "outcomes"])
-        .args(args)
-        .assert()
-        .success()
+fn outcomes(server: &ExchangeFixture, args: &[&str]) -> Value {
+    read_json(server, &[&["outcomes"], args].concat())
 }
 
-fn rows_of(assert: &assert_cmd::assert::Assert) -> Vec<Value> {
-    json_stdout(assert).as_array().unwrap().clone()
+fn outcome_rows(server: &ExchangeFixture, args: &[&str]) -> Vec<Value> {
+    outcomes(server, args).as_array().unwrap().clone()
 }
 
 fn side(rows: &[Value], outcome: u64, side: u64) -> &Value {
@@ -57,10 +54,9 @@ fn side(rows: &[Value], outcome: u64, side: u64) -> &Value {
 
 #[tokio::test]
 async fn list_shows_the_newest_outcome_first_and_oldest_first_restores_the_old_order() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let newest = rows_of(&run(&env, &server, &["list"]));
+    let newest = outcome_rows(&server, &["list"]);
     let order: Vec<(u64, u64)> = newest
         .iter()
         .map(|row| {
@@ -72,22 +68,26 @@ async fn list_shows_the_newest_outcome_first_and_oldest_first_restores_the_old_o
         .collect();
     assert_eq!(order[..4], [(30337, 0), (30337, 1), (30018, 0), (30018, 1)]);
     assert_eq!(order.last(), Some(&(23745, 1)));
+    // Each side row carries the encoding the side trades under.
+    assert_eq!(newest[0]["encoding"], 303_370);
+    assert_eq!(newest[0]["coin"], "#303370");
+    assert_eq!(newest[0]["token"], "+303370");
+    assert_eq!(newest[0]["asset_id"], 100_303_370);
 
-    let oldest = rows_of(&run(&env, &server, &["list", "--oldest-first"]));
+    let oldest = outcome_rows(&server, &["list", "--oldest-first"]);
     assert_eq!(oldest[0]["outcome"], 23745);
     assert_eq!(oldest.last().unwrap()["outcome"], 30337);
 
-    let limited = rows_of(&run(&env, &server, &["list", "--limit", "3"]));
+    let limited = outcome_rows(&server, &["list", "--limit", "3"]);
     assert_eq!(limited.len(), 3);
     assert_eq!(limited[2]["outcome"], 30018);
 }
 
 #[tokio::test]
 async fn list_resolves_template_names_and_side_names() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let rows = rows_of(&run(&env, &server, &["list", "--limit", "100"]));
+    let rows = outcome_rows(&server, &["list", "--limit", "100"]);
 
     let contest = side(&rows, 27949, 0);
     assert_eq!(
@@ -121,7 +121,6 @@ async fn list_resolves_template_names_and_side_names() {
 
 #[tokio::test]
 async fn list_carries_quote_token_venue_and_deployer_fee_scale() {
-    let env = IsolatedHome::new();
     let mut meta = fixture("outcome_meta.json");
     // Live outcomes mix quote tokens (`settledOutcome 1` is USDH).
     for outcome in meta["outcomes"].as_array_mut().unwrap() {
@@ -131,7 +130,7 @@ async fn list_carries_quote_token_venue_and_deployer_fee_scale() {
     }
     let server = exchange_with(meta).await;
 
-    let rows = rows_of(&run(&env, &server, &["list", "--limit", "100"]));
+    let rows = outcome_rows(&server, &["list", "--limit", "100"]);
 
     let usdh = side(&rows, 30337, 0);
     assert_eq!(usdh["quote_token"], "USDH");
@@ -152,10 +151,9 @@ async fn list_carries_quote_token_venue_and_deployer_fee_scale() {
 
 #[tokio::test]
 async fn list_tells_which_outcomes_belong_to_which_question_and_which_is_the_fallback() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let rows = rows_of(&run(&env, &server, &["list", "--limit", "100"]));
+    let rows = outcome_rows(&server, &["list", "--limit", "100"]);
 
     let fallback = side(&rows, 29101, 0);
     assert_eq!(fallback["question"], 620);
@@ -181,10 +179,9 @@ async fn list_tells_which_outcomes_belong_to_which_question_and_which_is_the_fal
 
 #[tokio::test]
 async fn questions_lists_named_fallback_and_settled_outcomes_newest_first() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let rows = rows_of(&run(&env, &server, &["questions"]));
+    let rows = outcome_rows(&server, &["questions"]);
 
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["question"], 627);
@@ -201,31 +198,29 @@ async fn questions_lists_named_fallback_and_settled_outcomes_newest_first() {
     assert_eq!(rows[1]["settled_named_outcomes"], json!([]));
     assert_eq!(rows[1]["warnings"], json!([]));
 
-    let oldest = rows_of(&run(&env, &server, &["questions", "--oldest-first"]));
+    let oldest = outcome_rows(&server, &["questions", "--oldest-first"]);
     assert_eq!(oldest[0]["question"], 620);
 }
 
 #[tokio::test]
 async fn a_question_naming_an_unlisted_outcome_says_so_and_settled_named_outcomes_are_flagged() {
-    let env = IsolatedHome::new();
     let mut meta = fixture("outcome_meta.json");
     meta["questions"][1]["namedOutcomes"] = json!([30016, 30017, 30018, 31000]);
     meta["questions"][1]["settledNamedOutcomes"] = json!([30017]);
     let server = exchange_with(meta).await;
 
-    let questions = rows_of(&run(&env, &server, &["questions"]));
+    let questions = outcome_rows(&server, &["questions"]);
     assert_eq!(
         questions[0]["warnings"],
         json!(["outcomes not listed by outcomeMeta: 31000"])
     );
-    let rows = rows_of(&run(&env, &server, &["list", "--limit", "100"]));
+    let rows = outcome_rows(&server, &["list", "--limit", "100"]);
     assert_eq!(side(&rows, 30017, 0)["settled"], true);
     assert_eq!(side(&rows, 30016, 0)["settled"], false);
 }
 
 #[tokio::test]
 async fn one_odd_outcome_is_reported_and_does_not_fail_the_listing() {
-    let env = IsolatedHome::new();
     let mut meta = fixture("outcome_meta.json");
     let outcomes = meta["outcomes"].as_array_mut().unwrap();
     outcomes.push(
@@ -236,16 +231,13 @@ async fn one_odd_outcome_is_reported_and_does_not_fail_the_listing() {
     outcomes.push(json!({"outcome": "not a number"}));
     let server = exchange_with(meta).await;
 
-    let assert = env
-        .command_with_server(&server)
-        .args(["--format", "json", "outcomes", "list", "--limit", "100"])
-        .assert()
+    let assert = read(&server, &["outcomes", "list", "--limit", "100"])
         .success()
         .stderr(predicate::str::contains(
             "outcome 40002 ('Empty') lists no sides",
         ))
         .stderr(predicate::str::contains("outcomeMeta outcome"));
-    let rows = rows_of(&assert);
+    let rows = json_stdout(&assert).as_array().unwrap().clone();
 
     let three_way = side(&rows, 40001, 0);
     assert_eq!(three_way["quote_token"], "USDH");
@@ -265,14 +257,13 @@ async fn one_odd_outcome_is_reported_and_does_not_fail_the_listing() {
 
 #[tokio::test]
 async fn unavailable_templates_keep_raw_names_and_say_why_on_each_affected_row() {
-    let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server
         .mount_info(json!({"type": "outcomeMeta"}), fixture("outcome_meta.json"))
         .await;
     // `outcomeTemplates` is not mounted: the mock server answers 404.
 
-    let rows = rows_of(&run(&env, &server, &["list", "--limit", "100"]));
+    let rows = outcome_rows(&server, &["list", "--limit", "100"]);
 
     let contest = side(&rows, 27949, 0);
     assert_eq!(contest["outcome_name"], "template:sportsContestWinner");
@@ -291,7 +282,6 @@ async fn unavailable_templates_keep_raw_names_and_say_why_on_each_affected_row()
 
 #[tokio::test]
 async fn a_template_missing_from_outcome_templates_is_reported_on_the_row() {
-    let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server
         .mount_info(json!({"type": "outcomeMeta"}), fixture("outcome_meta.json"))
@@ -307,7 +297,7 @@ async fn a_template_missing_from_outcome_templates_is_reported_on_the_row() {
         .mount_info(json!({"type": "outcomeTemplates"}), json!(templates))
         .await;
 
-    let rows = rows_of(&run(&env, &server, &["list", "--limit", "100"]));
+    let rows = outcome_rows(&server, &["list", "--limit", "100"]);
 
     let price = side(&rows, 30337, 0);
     assert_eq!(price["outcome_name"], "template:binaryPrice");
@@ -322,11 +312,10 @@ async fn a_template_missing_from_outcome_templates_is_reported_on_the_row() {
 
 #[tokio::test]
 async fn get_shows_the_same_fields_as_list_for_one_side() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let by_coin = json_stdout(&run(&env, &server, &["get", "#291011"]));
-    let by_token = json_stdout(&run(&env, &server, &["get", "+291011"]));
+    let by_coin = outcomes(&server, &["get", "#291011"]);
+    let by_token = outcomes(&server, &["get", "+291011"]);
 
     assert_eq!(by_coin, by_token);
     assert_eq!(by_coin["outcome"], 29101);
@@ -339,10 +328,9 @@ async fn get_shows_the_same_fields_as_list_for_one_side() {
 
 #[tokio::test]
 async fn list_table_adds_quote_venue_question_and_role_columns() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let output = env
+    let output = IsolatedHome::new()
         .command_with_server(&server)
         .args(["--format", "table", "outcomes", "list", "--limit", "100"])
         .assert()
@@ -369,7 +357,6 @@ async fn list_table_adds_quote_venue_question_and_role_columns() {
 
 #[tokio::test]
 async fn settled_reports_the_fraction_the_payouts_and_the_details() {
-    let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server
         .mount_info(
@@ -378,7 +365,7 @@ async fn settled_reports_the_fraction_the_payouts_and_the_details() {
         )
         .await;
 
-    let row = json_stdout(&run(&env, &server, &["settled", "95"]));
+    let row = outcomes(&server, &["settled", "95"]);
 
     assert_eq!(row["outcome"], 95);
     assert_eq!(row["name"], "Recurring");
@@ -393,7 +380,6 @@ async fn settled_reports_the_fraction_the_payouts_and_the_details() {
 
 #[tokio::test]
 async fn settled_names_the_question_state_of_a_question_outcome() {
-    let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server
         .mount_info(
@@ -402,7 +388,7 @@ async fn settled_names_the_question_state_of_a_question_outcome() {
         )
         .await;
 
-    let row = json_stdout(&run(&env, &server, &["settled", "200"]));
+    let row = outcomes(&server, &["settled", "200"]);
 
     assert_eq!(row["name"], "Netherlands");
     assert_eq!(row["question"], 32);
@@ -412,7 +398,6 @@ async fn settled_names_the_question_state_of_a_question_outcome() {
 
 #[tokio::test]
 async fn settled_resolves_a_template_name_through_outcome_templates() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
     server
         .mount_info(
@@ -427,7 +412,7 @@ async fn settled_resolves_a_template_name_through_outcome_templates() {
         )
         .await;
 
-    let row = json_stdout(&run(&env, &server, &["settled", "27949"]));
+    let row = outcomes(&server, &["settled", "27949"]);
 
     assert_eq!(
         row["name"],
@@ -440,7 +425,6 @@ async fn settled_resolves_a_template_name_through_outcome_templates() {
 
 #[tokio::test]
 async fn settled_for_an_unsettled_or_unknown_outcome_is_unsupported() {
-    let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server
         .mount_info(
@@ -449,9 +433,7 @@ async fn settled_for_an_unsettled_or_unknown_outcome_is_unsupported() {
         )
         .await;
 
-    env.command_with_server(&server)
-        .args(["--format", "json", "outcomes", "settled", "30337"])
-        .assert()
+    read(&server, &["outcomes", "settled", "30337"])
         .code(13)
         .stdout(predicate::str::contains(
             "has not settled or does not exist",
@@ -460,10 +442,9 @@ async fn settled_for_an_unsettled_or_unknown_outcome_is_unsupported() {
 
 #[tokio::test]
 async fn templates_lists_roles_parents_side_names_and_keyword_types() {
-    let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let rows = rows_of(&run(&env, &server, &["templates"]));
+    let rows = outcome_rows(&server, &["templates"]);
 
     let by_id = |id: &str| rows.iter().find(|row| row["id"] == id).unwrap();
     let price = by_id("binaryPrice");

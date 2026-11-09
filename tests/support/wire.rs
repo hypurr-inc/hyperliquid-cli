@@ -288,3 +288,48 @@ pub fn outcome_meta(ids: &[u64]) -> Value {
         .collect();
     json!({"outcomes": outcomes, "questions": []})
 }
+
+/// One vault of the stats dataset `vault list` reads. `kind` is the
+/// relationship type: `normal`, `parent` or `child`.
+pub fn stats_vault(
+    name: &str,
+    address: &str,
+    leader: &str,
+    tvl: &str,
+    apr: Value,
+    kind: &str,
+) -> Value {
+    json!({
+        "apr": apr,
+        "pnls": [["day", ["0.0"]]],
+        "summary": {
+            "name": name,
+            "vaultAddress": address,
+            "leader": leader,
+            "tvl": tvl,
+            "isClosed": false,
+            "relationship": {"type": kind},
+            "createTimeMillis": 1_700_000_000_000_i64
+        }
+    })
+}
+
+/// An active validator as `validatorSummaries` lists it, with a 4%
+/// commission and one day of stats.
+pub fn validator(address: &str, name: &str) -> Value {
+    json!({
+        "validator": address,
+        "signer": "0x0000000000000000000000000000000000000003",
+        "name": name,
+        "description": "test validator",
+        "nRecentBlocks": 1,
+        "stake": 123456789_u64,
+        "isJailed": false,
+        "unjailableAfter": null,
+        "isActive": true,
+        "commission": "0.04",
+        "stats": [
+            ["day", {"uptimeFraction": "1.0", "predictedApr": "0.025", "nSamples": 1440}]
+        ]
+    })
+}

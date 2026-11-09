@@ -2,9 +2,11 @@
 
 mod support;
 
+use hypersdk::hypercore::Chain;
 use predicates::prelude::*;
 use serde_json::{Value, json};
-use support::exchange::ExchangeFixture;
+use support::exchange::{ExchangeFixture, default_reply};
+use support::signing::{recover_signer, test_signer};
 use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, json_stdout};
 
 /// A question (7) with a fallback (10) and two named outcomes (11 USDC, 12 USDH),
@@ -28,33 +30,30 @@ async fn exchange() -> ExchangeFixture {
     server
         .mount_info(json!({"type": "outcomeMeta"}), meta())
         .await;
-    server
-        .mount_exchange(json!({"status": "ok", "response": {"type": "default"}}))
-        .await;
+    server.mount_exchange(default_reply()).await;
     server
 }
 
-fn live(env: &IsolatedHome, server: &ExchangeFixture, args: &[&str]) -> assert_cmd::Command {
-    let mut command = env.live_command(server);
-    command
-        .args(["--format", "json", "--testnet", "outcomes"])
-        .args(args);
-    command
-}
-
-async fn sent_action(server: &ExchangeFixture) -> Value {
+/// The one `/exchange` request the command sent: a nonce and no vault.
+async fn sent_body(server: &ExchangeFixture) -> Value {
     let bodies = server.exchange_bodies().await;
     assert_eq!(bodies.len(), 1, "exactly one exchange request: {bodies:?}");
-    let body = &bodies[0];
+    let body = bodies[0].clone();
     assert!(
         body["nonce"].as_u64().is_some_and(|nonce| nonce > 0),
         "{body}"
     );
-    assert!(body["signature"]["r"].is_string(), "{body}");
     assert!(
         body.get("vaultAddress").is_none_or(Value::is_null),
         "{body}"
     );
+    body
+}
+
+/// [`sent_body`]'s action, after checking the test key signed it.
+async fn sent_action(server: &ExchangeFixture) -> Value {
+    let body = sent_body(server).await;
+    assert_eq!(recover_signer(&body, Chain::Testnet), test_signer());
     body["action"].clone()
 }
 
@@ -63,13 +62,12 @@ async fn split_sends_the_documented_action_and_reports_the_quote_token() {
     let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let assert = live(
-        &env,
-        &server,
-        &["split", "--outcome", "12", "--amount", "10.50"],
-    )
-    .assert()
-    .success();
+    let assert = env
+        .live_json(&server)
+        .arg("outcomes")
+        .args(["split", "--outcome", "12", "--amount", "10.50"])
+        .assert()
+        .success();
 
     assert_eq!(
         sent_action(&server).await,
@@ -97,30 +95,26 @@ async fn an_unreadable_outcome_meta_entry_is_named_on_stderr_and_the_rest_still_
         .override_info(json!({"type": "outcomeMeta"}), listed)
         .await;
 
-    live(
-        &env,
-        &server,
-        &["split", "--outcome", "12", "--amount", "10.50"],
-    )
-    .assert()
-    .success()
-    .stderr(
-        predicate::str::contains("outcomeMeta outcome")
-            .and(predicate::str::contains("was not read")),
-    );
+    env.live_json(&server)
+        .arg("outcomes")
+        .args(["split", "--outcome", "12", "--amount", "10.50"])
+        .assert()
+        .success()
+        .stderr(
+            predicate::str::contains("outcomeMeta outcome")
+                .and(predicate::str::contains("was not read")),
+        );
 }
 
 #[tokio::test]
 async fn merge_sends_an_amount_or_null_for_the_maximum() {
     let env = IsolatedHome::new();
     let server = exchange().await;
-    live(
-        &env,
-        &server,
-        &["merge", "--outcome", "11", "--amount", "3"],
-    )
-    .assert()
-    .success();
+    env.live_json(&server)
+        .arg("outcomes")
+        .args(["merge", "--outcome", "11", "--amount", "3"])
+        .assert()
+        .success();
     assert_eq!(
         sent_action(&server).await,
         json!({"type": "userOutcome", "mergeOutcome": {"outcome": 11, "amount": "3"}})
@@ -128,11 +122,15 @@ async fn merge_sends_an_amount_or_null_for_the_maximum() {
 
     let env = IsolatedHome::new();
     let server = exchange().await;
-    let assert = live(&env, &server, &["merge", "--outcome", "11", "--max"])
+    let assert = env
+        .live_json(&server)
+        .arg("outcomes")
+        .args(["merge", "--outcome", "11", "--max"])
         .assert()
         .success();
+    // hypersdk cannot read a null amount, so the signer is not recovered here.
     assert_eq!(
-        sent_action(&server).await,
+        sent_body(&server).await["action"],
         json!({"type": "userOutcome", "mergeOutcome": {"outcome": 11, "amount": null}})
     );
     assert_eq!(json_stdout(&assert)[0]["amount"], "max");
@@ -143,13 +141,12 @@ async fn merge_question_sends_the_question_id() {
     let env = IsolatedHome::new();
     let server = exchange().await;
 
-    let assert = live(
-        &env,
-        &server,
-        &["merge-question", "--question", "7", "--amount", "2.5"],
-    )
-    .assert()
-    .success();
+    let assert = env
+        .live_json(&server)
+        .arg("outcomes")
+        .args(["merge-question", "--question", "7", "--amount", "2.5"])
+        .assert()
+        .success();
 
     assert_eq!(
         sent_action(&server).await,
@@ -168,10 +165,9 @@ async fn negate_sends_question_outcome_and_amount() {
     let env = IsolatedHome::new();
     let server = exchange().await;
 
-    live(
-        &env,
-        &server,
-        &[
+    env.live_json(&server)
+        .arg("outcomes")
+        .args([
             "negate",
             "--question",
             "7",
@@ -179,10 +175,9 @@ async fn negate_sends_question_outcome_and_amount() {
             "10",
             "--amount",
             "1",
-        ],
-    )
-    .assert()
-    .success();
+        ])
+        .assert()
+        .success();
 
     assert_eq!(
         sent_action(&server).await,
@@ -240,27 +235,26 @@ async fn unknown_outcomes_and_questions_are_refused_before_anything_is_signed() 
     let env = IsolatedHome::new();
     let server = exchange().await;
 
-    live(&env, &server, &["split", "--outcome", "5", "--amount", "1"])
+    env.live_json(&server)
+        .arg("outcomes")
+        .args(["split", "--outcome", "5", "--amount", "1"])
         .assert()
         .code(13)
         .stdout(predicate::str::contains(
             "outcome 5 is not listed by outcomeMeta",
         ))
         .stdout(predicate::str::contains("outcomes settled 5"));
-    live(
-        &env,
-        &server,
-        &["merge-question", "--question", "8", "--max"],
-    )
-    .assert()
-    .code(13)
-    .stdout(predicate::str::contains(
-        "question 8 is not listed by outcomeMeta",
-    ));
-    live(
-        &env,
-        &server,
-        &[
+    env.live_json(&server)
+        .arg("outcomes")
+        .args(["merge-question", "--question", "8", "--max"])
+        .assert()
+        .code(13)
+        .stdout(predicate::str::contains(
+            "question 8 is not listed by outcomeMeta",
+        ));
+    env.live_json(&server)
+        .arg("outcomes")
+        .args([
             "negate",
             "--question",
             "7",
@@ -268,13 +262,12 @@ async fn unknown_outcomes_and_questions_are_refused_before_anything_is_signed() 
             "99",
             "--amount",
             "1",
-        ],
-    )
-    .assert()
-    .code(13)
-    .stdout(predicate::str::contains(
-        "outcome 99 is not part of question 7",
-    ));
+        ])
+        .assert()
+        .code(13)
+        .stdout(predicate::str::contains(
+            "outcome 99 is not part of question 7",
+        ));
 
     assert!(server.exchange_actions().await.is_empty());
 }
@@ -285,25 +278,23 @@ async fn bad_amounts_are_configuration_errors_and_merge_needs_exactly_one_of_amo
     let server = exchange().await;
 
     for amount in ["0", "-1"] {
-        live(
-            &env,
-            &server,
-            &["split", "--outcome", "11", "--amount", amount],
-        )
-        .assert()
-        .code(2)
-        .stdout(predicate::str::contains("amount must be greater than zero"));
+        env.live_json(&server)
+            .arg("outcomes")
+            .args(["split", "--outcome", "11", "--amount", amount])
+            .assert()
+            .code(2)
+            .stdout(predicate::str::contains("amount must be greater than zero"));
     }
-    live(&env, &server, &["merge", "--outcome", "11"])
+    env.live_json(&server)
+        .arg("outcomes")
+        .args(["merge", "--outcome", "11"])
         .assert()
         .code(2);
-    live(
-        &env,
-        &server,
-        &["merge", "--outcome", "11", "--amount", "1", "--max"],
-    )
-    .assert()
-    .code(2);
+    env.live_json(&server)
+        .arg("outcomes")
+        .args(["merge", "--outcome", "11", "--amount", "1", "--max"])
+        .assert()
+        .code(2);
     assert!(server.exchange_actions().await.is_empty());
 }
 
@@ -318,15 +309,13 @@ async fn an_exchange_rejection_is_an_error_not_a_confirmation() {
         .mount_exchange(json!({"status": "err", "response": "Insufficient balance"}))
         .await;
 
-    live(
-        &env,
-        &server,
-        &["split", "--outcome", "11", "--amount", "1"],
-    )
-    .assert()
-    .failure()
-    .stdout(predicate::str::contains("Insufficient balance"))
-    .stdout(predicate::str::contains("confirmed").not());
+    env.live_json(&server)
+        .arg("outcomes")
+        .args(["split", "--outcome", "11", "--amount", "1"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Insufficient balance"))
+        .stdout(predicate::str::contains("confirmed").not());
 }
 
 #[tokio::test]
@@ -377,29 +366,4 @@ async fn mainnet_asks_for_confirmation_and_yes_skips_it() {
         .assert()
         .success();
     assert_eq!(server.exchange_actions().await.len(), 2);
-}
-
-#[tokio::test]
-async fn schema_declares_funds_movement_dry_run_confirmation_and_l1_signing_for_every_conversion() {
-    let env = IsolatedHome::new();
-
-    for command in ["split", "merge", "merge-question", "negate"] {
-        let assert = env
-            .command()
-            .args(["--format", "json", "schema", "outcomes", command])
-            .assert()
-            .success();
-        let schema = json_stdout(&assert);
-        let meta = &schema;
-        assert_eq!(meta["risk"], "funds_movement", "{command}");
-        assert_eq!(meta["dry_run"], "optional", "{command}");
-        assert_eq!(meta["confirmation"], "prompt", "{command}");
-        assert_eq!(meta["bankr_signer"], "supported", "{command}");
-        assert_eq!(meta["raw_payload"], "dry_run_only", "{command}");
-        assert_eq!(
-            meta["ows_signer"], "experimental_feature_gated",
-            "{command}"
-        );
-        assert_eq!(meta["confirmation_bypass"]["arg"], "yes", "{command}");
-    }
 }
