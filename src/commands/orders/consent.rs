@@ -15,9 +15,57 @@ use crate::network::Network;
 use crate::output;
 use crate::signing::SelectedSigner;
 
+/// What a command asks approval for. It is the one place a request pairs the
+/// block the person is shown with the error a decline fails with, so neither
+/// can name another request's.
+pub(super) enum Consent<'a> {
+    Order(&'a PreparedOrder),
+    Tpsl(&'a PreparedTpslBatch),
+    Scale(&'a PreparedOrderBatch),
+    BatchCreate(&'a PreparedOrderBatch),
+    Twap(&'a TwapCreatePlan),
+    ScheduleCancel(&'a ScheduleCancelPlan),
+    TrailingStop(&'a TrailingStopPlan),
+    ModifyOrders { count: usize },
+    CancelAll { coin: Option<&'a str>, count: usize },
+}
+
+impl Consent<'_> {
+    /// The block and question shown to the person; whether they approved.
+    pub(super) fn ask(&self, target: &ConsentTarget<'_>) -> Result<bool, CliError> {
+        match self {
+            Self::Order(prepared) => confirm_order(prepared, target),
+            Self::Tpsl(batch) => confirm_tpsl_batch(batch, target),
+            Self::Scale(batch) => confirm_order_batch("scale", batch, target),
+            Self::BatchCreate(batch) => confirm_order_batch("batch-create", batch, target),
+            Self::Twap(plan) => confirm_twap(plan, target),
+            Self::ScheduleCancel(plan) => confirm_schedule_cancel(plan, target),
+            Self::TrailingStop(plan) => confirm_trailing_stop(plan, target),
+            Self::ModifyOrders { count } => confirm_batch_modify(*count, target),
+            Self::CancelAll { coin, count } => confirm_cancel_all(*coin, *count, target),
+        }
+    }
+
+    /// The error a decline fails with.
+    pub(super) fn declined(&self) -> CliError {
+        match self {
+            Self::Order(_) => ConsentKind::Order,
+            Self::Tpsl(_) => ConsentKind::Tpsl,
+            Self::Scale(_) => ConsentKind::ScaleOrders,
+            Self::BatchCreate(_) => ConsentKind::BatchOrders,
+            Self::Twap(_) => ConsentKind::Twap,
+            Self::ScheduleCancel(_) => ConsentKind::ScheduleCancel,
+            Self::TrailingStop(_) => ConsentKind::TrailingStop,
+            Self::ModifyOrders { .. } => ConsentKind::ModifyOrders,
+            Self::CancelAll { .. } => ConsentKind::CancelAll,
+        }
+        .declined()
+    }
+}
+
 /// It names the error a decline fails with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ConsentKind {
+enum ConsentKind {
     Order,
     Tpsl,
     ScaleOrders,
@@ -30,7 +78,7 @@ pub(super) enum ConsentKind {
 }
 
 impl ConsentKind {
-    pub(super) fn declined(self) -> CliError {
+    fn declined(self) -> CliError {
         let (label, cancelled) = match self {
             Self::Order => ("order", "order placement"),
             Self::Tpsl => ("TP/SL", "order placement"),
@@ -48,10 +96,7 @@ impl ConsentKind {
     }
 }
 
-pub(super) fn confirm_batch_modify(
-    count: usize,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
+fn confirm_batch_modify(count: usize, target: &ConsentTarget<'_>) -> Result<bool, CliError> {
     let orders = output::format::noun(count, "order", "orders");
     ask_confirmation(
         target,
@@ -60,7 +105,7 @@ pub(super) fn confirm_batch_modify(
     )
 }
 
-pub(super) fn confirm_cancel_all(
+fn confirm_cancel_all(
     coin: Option<&str>,
     count: usize,
     target: &ConsentTarget<'_>,
@@ -74,7 +119,7 @@ pub(super) fn confirm_cancel_all(
     ask_confirmation(target, &[], &question)
 }
 
-pub(super) fn confirm_schedule_cancel(
+fn confirm_schedule_cancel(
     plan: &ScheduleCancelPlan,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
@@ -90,10 +135,7 @@ pub(super) fn confirm_schedule_cancel(
     ask_confirmation(target, &[], &question)
 }
 
-pub(super) fn confirm_order(
-    prepared: &PreparedOrder,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
+fn confirm_order(prepared: &PreparedOrder, target: &ConsentTarget<'_>) -> Result<bool, CliError> {
     let amount = prepared
         .amount
         .as_ref()
@@ -141,7 +183,7 @@ fn priority_line(rate: u32) -> String {
     )
 }
 
-pub(super) fn confirm_order_batch(
+fn confirm_order_batch(
     label: &str,
     prepared: &PreparedOrderBatch,
     target: &ConsentTarget<'_>,
@@ -159,7 +201,7 @@ pub(super) fn confirm_order_batch(
     )
 }
 
-pub(super) fn confirm_tpsl_batch(
+fn confirm_tpsl_batch(
     prepared: &PreparedTpslBatch,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
@@ -203,10 +245,7 @@ pub(super) fn confirm_tpsl_batch(
     )
 }
 
-pub(super) fn confirm_twap(
-    plan: &TwapCreatePlan,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
+fn confirm_twap(plan: &TwapCreatePlan, target: &ConsentTarget<'_>) -> Result<bool, CliError> {
     let details = [format!(
         "TWAP: {} {} {} over {} seconds",
         plan.side, plan.size, plan.coin, plan.duration_seconds
@@ -218,7 +257,7 @@ pub(super) fn confirm_twap(
     )
 }
 
-pub(super) fn confirm_trailing_stop(
+fn confirm_trailing_stop(
     plan: &TrailingStopPlan,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
@@ -315,7 +354,7 @@ impl<'a> ConsentTarget<'a> {
 
 /// Runs that can't prompt fail with `--yes` as the way to answer before the block
 /// is printed.
-pub(super) fn ask_confirmation(
+fn ask_confirmation(
     target: &ConsentTarget<'_>,
     details: &[String],
     question: &str,

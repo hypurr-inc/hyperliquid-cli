@@ -1199,3 +1199,66 @@ fn the_outcome_shortcuts_refuse_a_market_that_is_not_an_outcome() {
         .stderr(predicate::str::contains("invalid outcome notation 'BTC'"));
     }
 }
+
+/// Every order command names the account it acts for before it reads
+/// anything: a selector that resolves to nothing is refused without a market
+/// read, whatever else the command would have loaded first. A command that
+/// loaded metadata before naming the account would send those requests and, on
+/// an unreachable API, fail with the connection error instead.
+#[tokio::test]
+async fn a_bad_acting_account_is_refused_before_any_market_read() {
+    let lines = [
+        LIMIT_BUY,
+        "buy --coin BTC --price 50000 --size 0.1",
+        "sell --coin BTC --price 50000 --size 0.1",
+        "outcome-buy --coin #10 --price 0.5 --size 1",
+        "orders scale --coin BTC --side buy --start-price 80000 --end-price 90000 --total-size 0.005 --orders 5",
+        "orders batch-create --orders-file orders.json",
+        "orders tpsl --coin BTC --take-profit 60000",
+        "orders trailing-stop --coin BTC --side sell --size 0.01 --retracement-pct 5",
+        "orders cancel 12345",
+        "orders cancel-all --yes",
+        "orders modify 12345 --price 51000",
+        "orders batch-modify --orders-file mods.json",
+        "orders twap-create --coin BTC --side buy --size 1.0 --duration 3600",
+        "orders twap-cancel 42 --coin BTC",
+        "orders schedule-cancel --in 30s",
+        "orders chase --coin BTC --side buy --size 0.5 --timeout 10s",
+        "orders bracket --coin BTC --side buy --size 0.01 --take-profit +10% --stop-loss -5%",
+    ];
+    for line in lines {
+        let env = IsolatedHome::new();
+        // Only the override probe is answered; any other read gets a 404.
+        let server = ExchangeFixture::probe_only().await;
+        write_orders_file(
+            &env,
+            "orders.json",
+            &json!([{"coin": "BTC", "side": "buy", "price": "50000", "size": "0.1"}]),
+        );
+        write_orders_file(
+            &env,
+            "mods.json",
+            &json!([{"order_id": 1, "price": "50000"}]),
+        );
+
+        let assert = env
+            .live_json(&server)
+            .args(words(line))
+            .args(["--on-behalf-of", "no-such-vault"])
+            .current_dir(env.tmp_path())
+            .assert()
+            .failure();
+
+        let document = json_stdout(&assert);
+        assert!(
+            error_text(&document).contains("account selector 'no-such-vault' was not found"),
+            "{line}: {document}"
+        );
+        let reads = support::request_bodies(&server, "/info").await;
+        assert!(
+            reads.iter().all(|body| body["type"] == "allMids"),
+            "{line}: read {reads:?} before naming the account"
+        );
+        assert_nothing_sent(&server).await;
+    }
+}

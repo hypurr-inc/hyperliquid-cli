@@ -15,8 +15,8 @@ use crate::settings::Settings;
 use super::args::{BracketArgs, CreateOrderType, TifArg};
 use super::cloid::{cloid_text, generated_cloid};
 use super::context::OrderSubmissionContext;
-use super::exchange::{Placement, rejection_error};
-use super::live_order::{CloidAsset, LiveOrder, elapsed_ms, send_tracked_action};
+use super::exchange::{Placement, Wording, rejection_error};
+use super::live_order::{CloidAsset, LiveOrder, elapsed_ms};
 use super::planning::{
     OrderEcho, create_dry_run_preview, market_dex, prepare_order_in, resolve_perp_market,
     resolve_trigger_prices, tpsl_dry_run_plan, validate_tpsl_price_ordering,
@@ -368,12 +368,9 @@ impl Bracket<'_> {
     }
 
     async fn cancel_entry(&self, tracking: &LiveOrder) -> Result<(), CliError> {
-        send_tracked_action(
-            self.context,
-            tracking.cancel_prefer_oid(),
-            "bracket entry cancel failed",
-        )
-        .await?;
+        self.context
+            .send(tracking.cancel_prefer_oid(), Wording::BRACKET_ENTRY_CANCEL)
+            .await?;
         Ok(())
     }
 

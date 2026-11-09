@@ -4,9 +4,12 @@
 //! `{"status":"err","response":"<text>"}`; the words other services use for the
 //! same error (`error`, `failed`, `failure`) are one set, [`is_error_status`].
 //! [`Reply`] reads the envelope, [`typed`] reads the `type`/`data` of an ok
-//! payload, and [`info_request_unavailable`] says when `/info` does not know a
-//! request type at all.
+//! payload, [`ok_response`] decodes it into the SDK's type, and
+//! [`info_request_unavailable`] says when `/info` does not know a request type
+//! at all.
 
+use hypersdk::hypercore::types::OkResponse;
+use serde::Deserialize;
 use serde_json::Value;
 
 /// The `status` values that mean the request failed. Case-insensitive.
@@ -81,6 +84,13 @@ pub fn typed(payload: &Value) -> Option<Typed<'_>> {
         kind: payload.get("type")?.as_str()?,
         data: payload.get("data"),
     })
+}
+
+/// An ok payload as the SDK types it: order and cancel statuses, TWAP and
+/// trailing-stop answers, the bare `default`. The error is serde's, for a
+/// payload that is none of these.
+pub fn ok_response(payload: &Value) -> Result<OkResponse, serde_json::Error> {
+    OkResponse::deserialize(payload)
 }
 
 /// Whether an `/info` answer says the request type itself is unknown or

@@ -55,10 +55,6 @@ impl OrderIdentifier {
         }
     }
 
-    pub(super) fn names_same_order_as(&self, other: &Self) -> bool {
-        self.to_status_identifier() == other.to_status_identifier()
-    }
-
     pub(super) fn display(&self) -> String {
         match self {
             Self::Oid(oid) => oid.to_string(),
@@ -95,13 +91,27 @@ impl BatchModifyOrder {
     }
 }
 
-/// The error for two names of one order in a batch. The check needs two
-/// moments: the orders file, where the same order id or cloid repeats, and the
-/// lookup, where an order id and a cloid turn out to name one order.
-pub(super) fn same_order_error(index: usize, earlier: usize) -> CliError {
-    CliError::Configuration(format!(
-        "orders[{index}] modifies the same order as orders[{earlier}]"
-    ))
+/// Fail when a batch names one order twice: the exchange would apply one
+/// modification over the other. `earlier` are the keys of the orders before
+/// the one at `index`. The check runs in two phases, which differ in what
+/// they can know of an order:
+///
+/// - reading the orders file, the key is the identifier as written
+///   ([`OrderIdentifier::to_status_identifier`]), so the same order id or the
+///   same cloid repeats;
+/// - at lookup, the key is the order id each order resolved to, so an order
+///   id and a cloid turn out to name one order.
+pub(super) fn ensure_distinct<K: PartialEq>(
+    index: usize,
+    key: K,
+    earlier: impl Iterator<Item = K>,
+) -> Result<(), CliError> {
+    match earlier.enumerate().find(|(_, earlier)| *earlier == key) {
+        Some((earlier, _)) => Err(CliError::Configuration(format!(
+            "orders[{index}] modifies the same order as orders[{earlier}]"
+        ))),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]
