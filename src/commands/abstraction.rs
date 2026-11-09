@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use hypersdk::hypercore::AbstractionMode;
 use hypersdk::hypercore::types::{ClearinghouseState, LeverageType};
 use hypersdk::{Address, Decimal};
 use serde::{Deserialize, Serialize};
@@ -36,28 +37,47 @@ pub enum AccountMode {
     Unknown,
 }
 
+/// Every known mode with the protocol `userAbstraction` value that names it and
+/// the spelling the CLI shows and accepts. The one place the spellings live.
+const SPELLINGS: [(AccountMode, &str, &str); 5] = [
+    (AccountMode::Unified, "unifiedAccount", "unified-account"),
+    (
+        AccountMode::PortfolioMargin,
+        "portfolioMargin",
+        "portfolio-margin",
+    ),
+    (
+        AccountMode::Standard { is_default: false },
+        "disabled",
+        "disabled",
+    ),
+    (
+        AccountMode::Standard { is_default: true },
+        "default",
+        "default",
+    ),
+    (
+        AccountMode::DexAbstraction,
+        "dexAbstraction",
+        "dex-abstraction",
+    ),
+];
+
 impl AccountMode {
     pub fn parse(raw: &str) -> Self {
-        match raw {
-            "unifiedAccount" => Self::Unified,
-            "portfolioMargin" => Self::PortfolioMargin,
-            "disabled" => Self::Standard { is_default: false },
-            "default" => Self::Standard { is_default: true },
-            "dexAbstraction" => Self::DexAbstraction,
-            _ => Self::Unknown,
-        }
+        SPELLINGS
+            .iter()
+            .find(|(_, protocol, _)| *protocol == raw)
+            .map_or(Self::Unknown, |(mode, _, _)| *mode)
     }
 
-    /// The spelling `account abstraction get` reports.
+    /// The spelling `account abstraction` reports and `account abstraction
+    /// set --mode` takes.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Unified => "unified-account",
-            Self::PortfolioMargin => "portfolio-margin",
-            Self::Standard { is_default: false } => "disabled",
-            Self::Standard { is_default: true } => "default",
-            Self::DexAbstraction => "dex-abstraction",
-            Self::Unknown => "unknown",
-        }
+        SPELLINGS
+            .iter()
+            .find(|(mode, _, _)| *mode == self)
+            .map_or("unknown", |(_, _, cli)| cli)
     }
 
     /// Balances live in the spot clearinghouse state; perp dex user states are
@@ -69,6 +89,14 @@ impl AccountMode {
     /// The exchange itself moves collateral to a HIP-3 dex an order trades on.
     pub fn moves_dex_collateral_itself(self) -> bool {
         self.pools_collateral() || self == Self::DexAbstraction
+    }
+}
+
+impl From<AbstractionMode> for AccountMode {
+    /// Through the SDK's protocol spelling (its `Standard` is `disabled`), so
+    /// a mode is spelled in [`SPELLINGS`] only.
+    fn from(mode: AbstractionMode) -> Self {
+        Self::parse(mode.api_str())
     }
 }
 
@@ -229,6 +257,22 @@ mod tests {
         ] {
             assert_eq!(AccountMode::parse(raw).as_str(), name, "{raw}");
         }
+    }
+
+    #[test]
+    fn the_sdks_modes_are_the_modes_their_protocol_spelling_names() {
+        for (sdk, name) in [
+            (AbstractionMode::Standard, "disabled"),
+            (AbstractionMode::UnifiedAccount, "unified-account"),
+            (AbstractionMode::PortfolioMargin, "portfolio-margin"),
+        ] {
+            assert_eq!(AccountMode::from(sdk).as_str(), name, "{sdk:?}");
+        }
+        // `default` is a protocol value no SDK mode sets.
+        assert_ne!(
+            AccountMode::from(AbstractionMode::Standard),
+            AccountMode::parse("default")
+        );
     }
 
     #[test]

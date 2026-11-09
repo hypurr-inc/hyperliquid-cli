@@ -130,6 +130,11 @@ pub fn read_secret(mode: &Mode, label: &str, input: &str) -> Result<String, CliE
     Ok(value)
 }
 
+/// A wallet's private key, read as [`read_secret`] reads a secret.
+pub fn read_private_key(mode: &Mode) -> Result<String, CliError> {
+    read_secret(mode, "Private key: ", "a private key on stdin")
+}
+
 fn write_label(label: &str) -> Result<(), CliError> {
     let mut stderr = io::stderr().lock();
     write!(stderr, "{label}")

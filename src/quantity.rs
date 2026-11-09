@@ -93,6 +93,27 @@ fn scaled<T: TryFrom<i128>>(amount: Decimal, scale: Scale) -> Result<T, ScaleErr
     T::try_from(units).map_err(|_| ScaleError::TooLarge)
 }
 
+/// `amount` in the wire units of `scale`, or the configuration error naming
+/// `name`: the one check every USDC and HYPE amount a command sends goes
+/// through.
+pub(crate) fn units<T: TryFrom<i128>>(
+    amount: Decimal,
+    scale: Scale,
+    name: &str,
+) -> Result<T, CliError> {
+    positive(amount, scale).map_err(|err| err.config(name, scale))
+}
+
+/// The USDC micro-units of a positive `--amount`.
+pub(crate) fn usdc_units<T: TryFrom<i128>>(amount: Decimal) -> Result<T, CliError> {
+    units(amount, Scale::USDC, "amount")
+}
+
+/// `amount` as the exchange takes a decimal string: no trailing zeros.
+pub(crate) fn wire_text(amount: Decimal) -> String {
+    amount.normalize().to_string()
+}
+
 /// Reject an amount that is not greater than zero where no scaling applies.
 pub(crate) fn require_positive(amount: Decimal, name: &str) -> Result<(), CliError> {
     if amount <= Decimal::ZERO {
@@ -188,5 +209,28 @@ mod tests {
                 .exit_code(),
             2
         );
+    }
+
+    #[test]
+    fn command_amounts_report_the_flag_they_came_from() {
+        assert_eq!(usdc_units::<u64>(dec("1.5")).unwrap(), 1_500_000);
+        assert!(
+            usdc_units::<u64>(dec("0.0000001"))
+                .unwrap_err()
+                .to_string()
+                .ends_with("amount supports at most 6 decimal places")
+        );
+        assert!(
+            units::<u64>(Decimal::ZERO, Scale::HYPE_CORE, "--max")
+                .unwrap_err()
+                .to_string()
+                .ends_with("--max must be greater than zero")
+        );
+    }
+
+    #[test]
+    fn wire_text_drops_trailing_zeros() {
+        assert_eq!(wire_text(dec("1.500")), "1.5");
+        assert_eq!(wire_text(dec("10.0")), "10");
     }
 }

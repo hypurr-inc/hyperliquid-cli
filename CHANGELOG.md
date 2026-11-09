@@ -72,6 +72,7 @@
 - The `rate_limited` entry in `.claude/error-catalog.json` points agents at `data.hint` for the address limit instead of repeating its text; the hint itself is unchanged.
 - A one-shot WebSocket read that times out (the `book` snapshot and funding context) reports the reason `timeout` (exit `12` as before) instead of `network_error`, like a silent `subscribe`.
 - `update` reports a failed release request as `Couldn't reach <host>. <cause>.` (refused, timed out, DNS, TLS) like API calls do, instead of the raw HTTP client text.
+- `subaccount create`, `transfer` and `spot-transfer` receipts no longer carry the `vault_address` key (always `null`: those actions are not sent for a vault) or its table column.
 
 ## 0.18.0 - 2026-11-09
 

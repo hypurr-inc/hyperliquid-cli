@@ -1,4 +1,3 @@
-use alloy::sol;
 use clap::Args;
 use futures::future::try_join_all;
 use hypersdk::Address;
@@ -7,10 +6,11 @@ use serde::Serialize;
 
 use crate::builder_fee::{MaxFeeRate, percent_from_tenths_bps};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::builder_approval::{self, ApproveBuilderFee};
 use crate::commands::confirm;
 use crate::commands::rows::{ListRow, One, Row, Rows};
 use crate::commands::support::print_dry_run;
-use crate::commands::user_signed::{self, UserSigned};
+use crate::commands::user_signed::UserSigned;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
@@ -19,20 +19,6 @@ use crate::signing::{SelectedSigner, Signs};
 use crate::wire::{AddressRole, InfoRequest, address};
 
 const APPROVE_REVERSIBILITY: ActionReversibility = ActionReversibility::Reversible;
-
-sol! {
-    #[derive(Serialize)]
-    struct ApproveBuilderFee {
-        string hyperliquidChain;
-        string maxFeeRate;
-        address builder;
-        uint64 nonce;
-    }
-}
-
-impl UserSigned for ApproveBuilderFee {
-    const ACTION_TYPE: &'static str = "approveBuilderFee";
-}
 
 #[derive(Args, Debug, Clone)]
 pub struct MaxFeeArgs {
@@ -190,15 +176,14 @@ async fn approved(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> 
 
 fn approve_dry_run_value(
     chain: Chain,
-    signer: Option<Address>,
-    query_address: Option<Address>,
+    signer: Option<&SelectedSigner>,
     request: &ApproveRequest,
 ) -> serde_json::Value {
     let max_fee_rate = request.max_fee_rate.percent();
     serde_json::json!({
         "network": chain.to_string(),
-        "signer": signer.map(|address| address.to_string()),
-        "query_address": query_address.map(|address| address.to_string()),
+        "signer": signer.map(|signer| signer.address().to_string()),
+        "query_address": signer.map(|signer| signer.query_address().to_string()),
         "builder": request.builder.to_string(),
         "max_fee_rate": max_fee_rate,
         "max_fee_tenths_bps": request.max_fee_rate.tenths_bps(),
@@ -242,7 +227,7 @@ async fn approve(
     )?;
 
     let remote = inv.remote()?;
-    submit_approval(remote.api(), signer, request.builder, &request.max_fee_rate).await?;
+    builder_approval::submit(remote.api(), signer, request.builder, &request.max_fee_rate).await?;
 
     inv.print(&One::new(BuilderApproveRow {
         status: "submitted".to_string(),
@@ -255,22 +240,6 @@ async fn approve(
         network: remote.chain().to_string(),
         reversibility: APPROVE_REVERSIBILITY.as_str().to_string(),
     }));
-    Ok(())
-}
-
-pub async fn submit_approval(
-    api: &ApiClient,
-    signer: &SelectedSigner,
-    builder: Address,
-    max_fee_rate: &MaxFeeRate,
-) -> Result<(), anyhow::Error> {
-    user_signed::submit(api, signer, |hyperliquid_chain, nonce| ApproveBuilderFee {
-        hyperliquidChain: hyperliquid_chain,
-        maxFeeRate: max_fee_rate.percent().to_string(),
-        builder,
-        nonce,
-    })
-    .await?;
     Ok(())
 }
 
@@ -353,17 +322,11 @@ impl CliCommand for BuilderApprove {
 
     async fn run(inv: &Invocation, args: &ApproveArgs) -> Result<(), anyhow::Error> {
         let request = ApproveRequest::parse(args)?;
-        let resolved = inv.resolve_signer();
         if inv.dry_run() {
-            let signer = resolved.ok();
-            let preview_args = approve_dry_run_value(
-                inv.remote()?.chain(),
-                signer.as_ref().map(|resolved| resolved.address()),
-                signer.as_ref().map(|resolved| resolved.query_address()),
-                &request,
-            );
+            let preview_args =
+                approve_dry_run_value(inv.remote()?.chain(), inv.dry_run_signer()?, &request);
             return print_dry_run(inv, "approve_builder_fee", preview_args);
         }
-        approve(inv, &resolved?, &request, args.yes).await
+        approve(inv, &inv.resolve_signer()?, &request, args.yes).await
     }
 }

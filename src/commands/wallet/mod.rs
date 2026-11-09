@@ -36,7 +36,7 @@ use output::{
 const OWS_WALLET_SOURCE: &str = "OWS wallet";
 
 pub(crate) fn prompt_private_key(mode: &Mode) -> Result<String, CliError> {
-    prompt::read_secret(mode, "Private key: ", "a private key on stdin")
+    prompt::read_private_key(mode)
 }
 
 /// A secret from its command-line argument, which exposes it and is warned

@@ -5,6 +5,7 @@
 //! `signatureChainId`. A command declares the struct once and names its tag.
 
 use alloy::sol_types::SolStruct;
+use hypersdk::Address;
 use serde::Serialize;
 
 use crate::commands::actions;
@@ -16,6 +17,24 @@ use crate::signing::SelectedSigner;
 pub(crate) trait UserSigned: SolStruct + Serialize {
     /// The exchange action's `type` tag.
     const ACTION_TYPE: &'static str;
+}
+
+/// The agent form of an action: an API wallet cannot sign the user-signed
+/// (EIP-712) form, so the actions that have one are signed by it as L1 actions
+/// that apply to the master it acts for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AgentForm {
+    pub master: Address,
+}
+
+impl AgentForm {
+    /// The form `signer` signs in: `Some` for a stored API wallet, `None` for
+    /// any other signer, which signs the user-signed form.
+    pub(crate) fn of(signer: &SelectedSigner) -> Option<Self> {
+        signer.is_stored_agent().then(|| Self {
+            master: signer.query_address(),
+        })
+    }
 }
 
 /// Sign and submit the action `build` describes.

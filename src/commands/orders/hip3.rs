@@ -8,10 +8,9 @@ use serde_json::json;
 use super::prepared::PreparedOrder;
 use super::validation::BPS_DENOMINATOR;
 use crate::commands::abstraction::fetch_abstraction;
-use crate::commands::transfers::{self, SendAssetArgs};
+use crate::commands::transfers::{self, AssetMove, AssetVenue};
 use crate::http_api::ApiClient;
 use crate::invocation::Remote;
-use crate::mode::Mode;
 use crate::signing::SelectedSigner;
 
 /// The leverage an order is assumed to run at when sizing its margin.
@@ -120,25 +119,22 @@ fn required_margin(notional: Decimal) -> Decimal {
 }
 
 pub async fn execute_hip3_margin_transfers(
-    mode: &Mode,
     remote: &Remote,
     signer: &SelectedSigner,
     user: Address,
     plans: &[Hip3MarginPlan],
 ) -> Result<(), anyhow::Error> {
     for plan in plans {
-        transfers::execute_send_asset(
-            mode,
+        transfers::send_asset(
             remote,
             signer,
-            &SendAssetArgs {
-                to: user.to_string(),
-                source: "perp".to_string(),
-                dest: format!("dex:{}", plan.dest_dex),
+            AssetMove {
+                to: user,
+                source: AssetVenue::perp(),
+                dest: AssetVenue::dex(&plan.dest_dex),
                 token: plan.token.clone(),
                 amount: plan.amount,
                 from_subaccount: None,
-                yes: true,
             },
         )
         .await?;
