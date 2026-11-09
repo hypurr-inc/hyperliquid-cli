@@ -41,17 +41,17 @@ pub enum Notice {
     /// The result has no rows; the sentence names what was empty.
     Empty(String),
     /// `--max-results` clipped a table.
-    Clipped { shown: usize, total: usize },
-    /// A stream lost its connection and is reconnecting.
+    Clipped {
+        shown: usize,
+        total: usize,
+    },
     ConnectionLost,
-    /// A request failed and is being sent again.
     Retrying,
     /// A human format on a pipe or an unattended run prints JSON lines.
     JsonLines(JsonLinesReason),
 }
 
 impl Notice {
-    /// The sentence for a person.
     #[must_use]
     pub fn text(&self) -> String {
         match self {

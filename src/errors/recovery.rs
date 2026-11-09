@@ -31,7 +31,6 @@ pub struct Recovery {
 }
 
 impl CliError {
-    /// Recovery commands for this error, when one is known.
     #[must_use]
     pub fn recovery(&self) -> Option<Recovery> {
         match self {

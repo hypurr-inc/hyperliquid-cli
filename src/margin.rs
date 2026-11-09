@@ -83,7 +83,6 @@ pub fn isolated_only_market(perp: &PerpAsset) -> String {
     )
 }
 
-/// Where a [`MarginPlan`]'s mode comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarginSource {
     /// The user asked for it (`--margin-mode`).
@@ -263,7 +262,6 @@ mod tests {
         let asked = MarginPlan::for_market(&open, Some(MarginModeArg::Cross)).unwrap();
         assert!(!asked.account_decides_preview());
         assert_eq!(asked.required_account_mode(), Some(MarginModeArg::Cross));
-        // What the user asked for outranks what the account says.
         assert_eq!(
             asked.with_account_mode(MarginModeArg::Isolated).mode(),
             MarginModeArg::Cross

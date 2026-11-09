@@ -15,7 +15,7 @@
 //!   truncation notices go to stderr in pretty and table modes, as [`Notice`]s.
 //!
 //! Timing feedback:
-//! - "Completed in 1.2s" is printed to stderr only for human formats on a terminal
+//! - "Completed in 1.2s" is printed to stderr only for human formats on a terminal, with no agent or CI (`Mode::timing_footer`)
 
 use serde_json::Value;
 use std::io::Write;
@@ -307,10 +307,8 @@ pub trait TableData {
 
     fn rows(&self) -> Vec<Vec<String>>;
 
-    /// Row data for pretty output.
-    ///
-    /// Implementors can override this to apply human-facing ANSI styling to
-    /// selected cells while keeping [`Self::rows`] plain for table output.
+    /// Override to apply human-facing ANSI styling to selected cells while
+    /// keeping [`Self::rows`] plain for table output.
     fn pretty_rows(&self) -> Vec<Vec<String>> {
         self.rows()
     }
@@ -1210,8 +1208,7 @@ mod tests {
 
     #[test]
     fn cells_hide_every_format_character_the_sanitizer_hides() {
-        // Arabic number sign and a tag character are `Cf` but were outside the
-        // table cells used before it was shared with the error sanitizer.
+        // Arabic number sign and a tag character are `Cf` characters.
         assert_eq!(
             sanitize_cell("a\u{0600}b\u{E0041}c", false),
             "a\\u{600}b\\u{e0041}c"

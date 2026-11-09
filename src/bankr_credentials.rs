@@ -19,8 +19,6 @@ pub enum KeySource {
     BankrCli,
 }
 
-/// The Bankr API key of a run and the host to send it to; see
-/// [`Settings::bankr_credentials`].
 #[derive(Clone)]
 pub struct BankrCredentials {
     pub api_key: String,

@@ -85,7 +85,6 @@ impl ConsentBlock {
     }
 }
 
-/// How the question is written to the terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
     /// Styled as a warning on a terminal.

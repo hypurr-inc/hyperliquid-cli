@@ -482,7 +482,6 @@ impl CommandSpec {
         self
     }
 
-    /// The MCP server never offers this command as a tool.
     #[must_use]
     pub const fn hidden_from_mcp(mut self) -> Self {
         self.hidden_from_mcp = true;
@@ -604,7 +603,6 @@ impl CommandSpec {
         !matches!(self.network, NetworkUse::None)
     }
 
-    /// Whether a `--dry-run` preview of the command names the signer.
     #[must_use]
     pub const fn dry_run_names_signer(&self) -> bool {
         self.auth_required && matches!(self.lifecycle, Lifecycle::LiveMutating)
@@ -692,7 +690,6 @@ pub trait CliCommand: 'static {
     ) -> impl Future<Output = Result<(), anyhow::Error>> + 'a;
 }
 
-/// The parsed args of the selected command.
 pub trait Bound {
     fn validate(&self) -> Result<(), CliError>;
     fn run<'a>(&'a self, inv: &'a Invocation) -> RunFuture<'a>;

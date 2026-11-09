@@ -86,7 +86,6 @@ pub(crate) enum AddressRole<'a> {
     Agent,
 }
 
-/// Parse an address argument as `role` describes.
 pub(crate) fn address(raw: &str, role: AddressRole<'_>) -> Result<Address, CliError> {
     match role {
         AddressRole::Explicit(flag) => parse_exact_hex_address(raw, true).map_err(|err| {

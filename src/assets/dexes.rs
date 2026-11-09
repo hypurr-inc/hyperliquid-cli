@@ -30,7 +30,6 @@ pub(crate) struct CoinDecimal(
     #[serde(with = "rust_decimal::serde::str")] pub Decimal,
 );
 
-/// One builder-deployed perp dex.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PerpDex {
     pub name: String,
@@ -181,7 +180,6 @@ pub async fn canonical_dexs(
         .collect()
 }
 
-/// One market of a dex's `meta`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DexMarket {
     /// As the exchange names it: a HIP-3 market carries its `dex:` prefix.
@@ -345,7 +343,6 @@ impl DexMeta {
     }
 }
 
-/// One market's deployer fee scale.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MarketFeeScale {
     pub coin: String,

@@ -194,7 +194,6 @@ fn validate_env_bound(env: StreamEnv, source: &EnvSource) -> Result<(), CliError
     })
 }
 
-/// Resolved stop conditions of one stream.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StreamBounds {
     /// Ticks, events or alerts, depending on the stream.

@@ -75,8 +75,6 @@ pub fn address_rate_limit_in_body(body: &str) -> Option<CliError> {
         .then(|| CliError::AddressRateLimited(Untrusted::from_remote(&text)))
 }
 
-/// Return true when an HTTP response should be classified as a rate-limit error.
-///
 /// Body phrase matching is intentionally limited to non-success HTTP statuses so
 /// successful payloads can mention rate-limit concepts as ordinary data. Success
 /// responses still count as rate-limited when they use an explicit structured
@@ -159,7 +157,6 @@ pub enum Decisive {
     /// The address spent its request budget (the exchange's `Too many
     /// cumulative requests` text, kept for the message).
     AddressRateLimited(Untrusted),
-    /// The exchange refused the credentials.
     AuthRejected(Untrusted),
     /// The signature recovered to an address that is no user or API wallet.
     SignerNotRegistered(Untrusted),
@@ -289,8 +286,6 @@ fn recover_typed(err: anyhow::Error) -> Result<CliError, anyhow::Error> {
     err.downcast::<CliError>()
 }
 
-/// Convert an [`anyhow::Error`] into a [`CliError`] while preserving typed `CliError`s.
-///
 /// Command handlers often return `anyhow::Error` so they can use `?` with multiple error
 /// sources. If the original error was already a `CliError`, this helper recovers it instead
 /// of wrapping it as an internal error and losing the structured exit code.
@@ -298,8 +293,6 @@ pub fn from_anyhow(err: anyhow::Error) -> CliError {
     recover_typed(err).unwrap_or_else(CliError::Internal)
 }
 
-/// Classify an error returned by `hypersdk` into a [`CliError`].
-///
 /// hypersdk 0.3 returns `anyhow::Error`. API failures carry a
 /// [`hypersdk::hypercore::ApiError`] (HTTP non-2xx arrives as
 /// `HTTP {status} body={text}`) and transport failures carry a

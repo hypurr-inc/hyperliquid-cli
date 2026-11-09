@@ -12,7 +12,6 @@ use serde_json::Value;
 /// The `status` values that mean the request failed. Case-insensitive.
 const ERROR_STATUSES: &[&str] = &["err", "error", "failed", "failure"];
 
-/// Whether `status` is one of the words an error reply uses.
 #[must_use]
 pub fn is_error_status(status: &str) -> bool {
     ERROR_STATUSES
@@ -20,7 +19,6 @@ pub fn is_error_status(status: &str) -> bool {
         .any(|word| status.eq_ignore_ascii_case(word))
 }
 
-/// The status envelope of one reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reply<'a> {
     /// `status: ok`, with the `response` payload (`null` when absent).

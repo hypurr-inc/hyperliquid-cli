@@ -18,11 +18,9 @@ use super::outcome_templates::{
     resolve_side_name,
 };
 
-/// How a question lists an outcome.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionRole {
-    /// One of the question's named outcomes.
     Named,
     /// The outcome the protocol created for "none of the named outcomes".
     Fallback,
@@ -57,7 +55,6 @@ impl QuestionState {
     }
 }
 
-/// One side of an outcome market.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OutcomeSideRow {
     pub outcome: u64,
@@ -80,7 +77,6 @@ pub struct OutcomeSideRow {
     pub deployer_fee_scale: Option<Decimal>,
     /// The template id when the outcome was deployed from a template.
     pub template: Option<String>,
-    /// The question this outcome belongs to, if any.
     pub question: Option<u64>,
     pub question_name: Option<String>,
     pub question_role: Option<QuestionRole>,
@@ -114,7 +110,6 @@ pub struct OutcomeCatalog {
     pub skipped: Vec<String>,
 }
 
-/// Which names a catalog carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Names {
     /// As the exchange sends them: a template outcome is named `template:<id>`.
@@ -459,7 +454,6 @@ struct RawQuestion {
     settled_named_outcomes: Vec<u64>,
 }
 
-/// How an outcome settled, from `settledOutcome`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SettledOutcomeRow {
     pub outcome: u64,

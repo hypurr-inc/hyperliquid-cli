@@ -171,7 +171,6 @@ pub enum Market {
 }
 
 impl Market {
-    /// Protocol asset id used in exchange actions.
     pub fn asset_index(&self) -> Result<usize, CliError> {
         match self {
             Self::Perp(perp) => Ok(perp.index),

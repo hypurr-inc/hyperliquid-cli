@@ -29,22 +29,17 @@ pub use transport::{network_error, transport_cause};
 
 #[derive(Error, Debug)]
 pub enum CliError {
-    /// Unexpected internal error (exit 1).
-    ///
     /// Wraps anyhow errors from any part of the application. Build one that
     /// quotes remote text with [`CliError::internal_with_remote`].
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
 
-    /// The exchange answered and rejected the action (exit 1).
     #[error("{context}: {remote}")]
     ExchangeRejected {
         context: &'static str,
         remote: Untrusted,
     },
 
-    /// A run that can't prompt reached a required confirmation (exit 13).
-    ///
     /// `preview` is a runnable `--dry-run` command; `approve` is the same
     /// command with `--yes`, offered only for use after a human approves.
     #[error("{headline}")]
@@ -54,41 +49,38 @@ pub enum CliError {
         approve: Option<String>,
     },
 
-    /// Invalid CLI configuration, config file, or environment setting (exit 2).
+    /// Invalid CLI configuration, config file, or environment setting.
     #[error("Configuration error: {0}")]
     Configuration(String),
 
-    /// Required input is missing and this invocation can't prompt for it (exit 2).
+    /// Required input is missing and this invocation can't prompt for it.
     #[error("{0}")]
     MissingInput(String),
 
-    /// No wallet or private key configured (exit 10).
+    /// No wallet or private key configured.
     #[error("Authentication required.")]
     AuthRequired,
 
-    /// Invalid key format or expired credentials (exit 10).
+    /// Invalid key format or expired credentials.
     #[error("Invalid authentication: {0}")]
     InvalidAuth(String),
 
-    /// A remote service rejected the credentials (exit 10).
+    /// A remote service rejected the credentials.
     #[error("Invalid authentication: {0}")]
     AuthRejected(Untrusted),
 
     /// The exchange could not find the signer: the signature recovered to an
-    /// address that is neither a user nor an approved API wallet (exit 10).
+    /// address that is neither a user nor an approved API wallet.
     #[error("Invalid authentication: {0}")]
     SignerNotRegistered(Untrusted),
 
-    /// OWS wallet not found in vault (exit 10).
     #[error("OWS wallet '{wallet}' was not found")]
     OwsWalletNotFound { wallet: String },
 
-    /// OWS wallet has no Hyperliquid or EVM account for signer resolution (exit 10).
+    /// OWS wallet has no Hyperliquid or EVM account for signer resolution.
     #[error("OWS wallet '{wallet}' has no Hyperliquid ({caip2}) or EVM (eip155:1) account")]
     OwsNoChainAccount { wallet: String, caip2: String },
 
-    /// Hyperliquid API returned a rate-limit response (exit 11).
-    ///
     /// `retry_after` is the `Retry-After` header in seconds when present.
     /// `retryable` is true only for reads, which are safe to resend.
     /// Build the no-information form with [`CliError::rate_limited`].
@@ -98,19 +90,17 @@ pub enum CliError {
         retryable: bool,
     },
 
-    /// The address spent its request budget (exit 11). The exchange answers
+    /// The address spent its request budget. The exchange answers
     /// this with HTTP 200 and its own counts, which the message quotes.
     #[error(
         "Too many requests from this address: its request allowance is used up. Exchange said: {0}"
     )]
     AddressRateLimited(Untrusted),
 
-    /// Network or API unreachable. The message is complete user-facing copy (exit 12).
+    /// Network or API unreachable. The message is complete user-facing copy.
     #[error("{0}")]
     Unavailable(String),
 
-    /// The API answered with a failure status (exit 12).
-    ///
     /// The server was reached, so this is not a connectivity problem. The
     /// status goes in [`CliError::detail`], not in the headline.
     #[error("{}", api_status_headline(*.status))]
@@ -121,42 +111,33 @@ pub enum CliError {
         remote: Option<Untrusted>,
     },
 
-    /// Operation exceeded a requested timeout (exit 12).
     #[error("{0}")]
     Timeout(String),
 
-    /// A mutation request was sent but its result is unknown (exit 12).
-    ///
-    /// Construct with [`CliError::unknown_outcome`].
+    /// A mutation request was sent but its result is unknown. Construct with
+    /// [`CliError::unknown_outcome`].
     #[error("Can't confirm whether the exchange applied this action. {0}")]
     UnknownOutcome(String),
 
-    /// Unsupported / invalid input (exit 13).
     #[error("Unsupported input: {0}")]
     Unsupported(String),
 
-    /// The exchange refused an order with one of its documented messages (exit
-    /// 13). `text` is the complete message, ending with the labelled remote text.
+    /// The exchange refused an order with one of its documented messages.
+    /// `text` is the complete message, ending with the labelled remote text.
     #[error("Unsupported input: {text}")]
     ExchangeRefused { refusal: Refusal, text: String },
 
-    /// Asset not found with a close-match suggestion (exit 13).
     #[error("Couldn't find asset \"{asset}\". Did you mean {suggestions}?")]
     AssetNotFound {
-        /// The asset name the user typed.
         asset: String,
         /// The single closest match.
         suggestions: String,
     },
 
-    /// Asset not found with no close suggestions (exit 13).
     #[error("Couldn't find asset \"{asset}\".")]
-    AssetNotFoundNoSuggestion {
-        /// The asset name the user typed.
-        asset: String,
-    },
+    AssetNotFoundNoSuggestion { asset: String },
 
-    /// Partial success in a batch operation (exit 15).
+    /// Partial success in a batch operation.
     #[error("Partial results: {0}")]
     PartialResults(String),
 }
@@ -232,7 +213,6 @@ impl CliError {
         self.spec().exit_code
     }
 
-    /// Stable high-level category for JSON error envelopes.
     #[must_use]
     pub fn category(&self) -> &'static str {
         self.spec().category

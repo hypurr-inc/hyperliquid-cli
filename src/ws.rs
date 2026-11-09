@@ -145,7 +145,6 @@ pub fn closed_before(what: &str) -> CliError {
     CliError::Unavailable(format!("WebSocket closed before receiving {what}."))
 }
 
-/// The wait for `awaited` ran out of time.
 fn timed_out(awaited: &Awaited) -> CliError {
     CliError::Timeout(format!(
         "Timed out waiting for Hyperliquid {}. Check your network connection.",

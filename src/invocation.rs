@@ -28,7 +28,6 @@ use crate::signing::{SelectedSigner, SignerRole};
 use crate::terminal::OutputFormat;
 use crate::wire::InfoRequest;
 
-/// The parsed global flags that shape an invocation.
 #[derive(Debug, Clone, Default)]
 pub struct InvocationFlags {
     pub testnet: bool,
@@ -103,7 +102,6 @@ impl Remote {
     }
 }
 
-/// The context of one CLI run.
 #[derive(Debug)]
 pub struct Invocation {
     settings: Settings,

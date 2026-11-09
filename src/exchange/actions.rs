@@ -116,7 +116,6 @@ pub(crate) async fn send_default_l1_action_with_nonce(
     ensure_default_response(parsed, EXCHANGE_ACTION)
 }
 
-/// Sign `action` and post it, decoding the reply as `T`.
 async fn sign_and_post<T: DeserializeOwned>(
     api: &ApiClient,
     signer: &SelectedSigner,

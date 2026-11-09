@@ -24,15 +24,12 @@ use hyperliquid_cli::terminal::{OutputFormat, Terminal};
 
 use crate::{Cli, GLOBAL_OPTIONS, SECRET_GLOBALS};
 
-/// The command the line selected, with its args parsed.
 pub(super) struct Selected {
     pub(super) entry: &'static Entry,
-    /// The matches of the selected command itself.
     pub(super) matches: ArgMatches,
     pub(super) bound: Box<dyn hyperliquid_cli::command_spec::Bound>,
     /// The command line after the program name, as typed.
     pub(super) args: Vec<String>,
-    /// The secret inputs of this line.
     pub(super) redactions: Redactions,
 }
 
@@ -1003,7 +1000,6 @@ mod tests {
         assert_eq!(requested_format(&lenient), Some(OutputFormat::Table));
     }
 
-    /// Expected strings are what the pre-refactor binary printed for these lines.
     #[test]
     fn the_usage_envelope_matches_the_pre_refactor_binary_byte_for_byte() {
         let cases: &[(&str, &[&str], &[&str], &str)] = &[

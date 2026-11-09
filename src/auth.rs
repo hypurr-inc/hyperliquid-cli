@@ -75,7 +75,6 @@ pub struct SignerFlags {
     pub bankr: bool,
 }
 
-/// The one signer a run names.
 #[derive(Debug, Clone)]
 pub enum SignerSelection {
     Bankr,

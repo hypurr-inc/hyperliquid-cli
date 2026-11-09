@@ -263,7 +263,6 @@ impl ApiClient {
         self
     }
 
-    /// The nonce source of signed actions sent through this client.
     pub(crate) fn nonces(&self) -> &NonceStore {
         &self.nonces
     }
@@ -309,7 +308,6 @@ impl ApiClient {
         &self.label
     }
 
-    /// POST `request` to `/info` and decode the JSON answer.
     pub async fn info<T: DeserializeOwned>(
         &self,
         request: &impl Serialize,
@@ -804,7 +802,6 @@ mod tests {
             tables(Some(StatusCode::TOO_MANY_REQUESTS), None),
             &RATE_LIMIT_RETRY_BACKOFF
         );
-        // A 429 that names its wait is waited out by that wait.
         assert_eq!(
             tables(Some(StatusCode::TOO_MANY_REQUESTS), Some(2)),
             &READ_RETRY_BACKOFF

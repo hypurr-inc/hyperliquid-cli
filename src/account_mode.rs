@@ -19,7 +19,6 @@ use crate::http_api::ApiClient;
 use crate::spot_balances::RawSpotBalance;
 use crate::wire::InfoRequest;
 
-/// What `userAbstraction` answers: the protocol value and the mode it names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserAbstraction {
     pub raw_mode: String,
@@ -126,7 +125,6 @@ pub async fn fetch_abstraction(
     })
 }
 
-/// The collateral token of one perp dex.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DexCollateral {
     /// `None` is the default dex.
@@ -135,7 +133,6 @@ pub struct DexCollateral {
     pub token: u32,
 }
 
-/// The collateral token of the default dex and of every HIP-3 dex.
 pub async fn load_dex_collateral(api: &ApiClient) -> Result<Vec<DexCollateral>, CliError> {
     let default = DexMeta::load(api, None).await?;
     let dexes = PerpDexList::load(api).await?;
@@ -358,11 +355,8 @@ mod tests {
         let covered = state("99", "0", "0");
 
         for (dexes, balances, token) in [
-            // No balance for the token at all.
             (vec![(0, &dex)], vec![], 0),
-            // A zero balance.
             (vec![(0, &dex)], vec![balance(0, "0")], 0),
-            // The whole balance is isolated margin.
             (vec![(8, &swallowed)], vec![balance(8, "60")], 8),
             // Uncovered outranks a token at 99%.
             (

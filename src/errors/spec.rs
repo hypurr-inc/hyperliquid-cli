@@ -29,7 +29,6 @@ pub enum StdoutDocument {
     CommandResult,
 }
 
-/// What a failure reports to callers and machine consumers.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Spec {
     pub exit_code: i32,
@@ -37,7 +36,6 @@ pub(super) struct Spec {
     pub reason: &'static str,
     pub retry: Retry,
     pub stdout: StdoutDocument,
-    /// What an agent should do next.
     pub agent_action: &'static str,
     /// What to do about this specific failure, when it has a specific answer.
     /// The JSON envelope carries it as `data.hint`.

@@ -79,8 +79,6 @@ pub fn confirm_typed(
     Ok(answer.trim() == expected)
 }
 
-/// Read a secret without echoing it.
-///
 /// On a terminal the value is typed at a masked prompt, which needs a run that
 /// can prompt. Piped stdin supplies the secret directly: the first line, without
 /// its line ending. End of input is missing input.

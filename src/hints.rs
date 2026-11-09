@@ -8,7 +8,6 @@ use std::fmt;
 
 pub(crate) mod wallet;
 
-/// The command that shows what is live on the exchange.
 pub const CHECK_LIVE_COMMAND: &str = "hyperliquid orders open";
 
 /// The command that cancels an order, which takes the order id or `--cloid`.
@@ -56,7 +55,6 @@ pub fn cancel_order_command(target: &str, on_behalf_of: Option<&str>) -> String 
     )
 }
 
-/// The command that places the TP/SL a position needs.
 #[must_use]
 pub fn protect_position_command(
     coin: &str,
@@ -81,8 +79,6 @@ mod tests {
             .expect("a suggested command starts with the binary name")
             .split_whitespace()
             .collect();
-        // The command's path is the longest run of words naming a command; the
-        // rest are its arguments.
         (1..=words.len())
             .rev()
             .any(|length| CommandRegistry::get().find_path(&words[..length]).is_some())
