@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 use clap::{Args, ValueEnum};
 use serde::Serialize;
-use serde_json::{Map, Number, Value};
+use serde_json::Value;
 use strsim::levenshtein;
 
 use crate::assets::asset_id::{
@@ -16,9 +16,10 @@ use crate::assets::asset_id::{
 };
 use crate::assets::{AssetResolver, Market};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::output::TableData;
+use crate::output::{TableData, json_cell, serialize_row, warn};
 use crate::stream::parse_positive_usize;
 
 #[derive(Args, Debug, Clone)]
@@ -28,14 +29,29 @@ pub struct AssetDecodeArgs {
     pub asset_id: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+/// A market venue. `All` is only a search filter; a decoded id's venue is never `All`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
 #[clap(rename_all = "kebab_case")]
 pub enum SearchVenueFilter {
+    #[default]
     All,
     Perp,
     Hip3,
     Spot,
     Outcome,
+}
+
+impl SearchVenueFilter {
+    fn admits(self, venue: Self) -> bool {
+        self == Self::All || self == venue
+    }
+}
+
+impl Serialize for SearchVenueFilter {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let value = self.to_possible_value().expect("no variant is skipped");
+        serializer.serialize_str(value.get_name())
+    }
 }
 
 #[derive(Args, Debug, Clone)]
@@ -58,13 +74,25 @@ pub struct AssetSearchArgs {
     pub limit: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// What an asset id's range says it is: the layout's name, as the JSON `kind`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AssetIdKind {
+    #[default]
     Perp,
     Spot,
     Hip3Perp,
     Outcome,
+}
+
+impl From<AssetIdLayout> for AssetIdKind {
+    fn from(layout: AssetIdLayout) -> Self {
+        match layout {
+            AssetIdLayout::Perp { .. } => Self::Perp,
+            AssetIdLayout::Spot { .. } => Self::Spot,
+            AssetIdLayout::Hip3Perp { .. } => Self::Hip3Perp,
+            AssetIdLayout::Outcome { .. } => Self::Outcome,
+        }
+    }
 }
 
 impl AssetIdKind {
@@ -77,30 +105,26 @@ impl AssetIdKind {
         }
     }
 
-    fn venue(self) -> &'static str {
+    fn venue(self) -> SearchVenueFilter {
         match self {
-            Self::Perp => "perp",
-            Self::Spot => "spot",
-            Self::Hip3Perp => "hip3",
-            Self::Outcome => "outcome",
-        }
-    }
-
-    fn matches_filter(self, filter: SearchVenueFilter) -> bool {
-        match filter {
-            SearchVenueFilter::All => true,
-            SearchVenueFilter::Perp => matches!(self, Self::Perp),
-            SearchVenueFilter::Hip3 => matches!(self, Self::Hip3Perp),
-            SearchVenueFilter::Spot => matches!(self, Self::Spot),
-            SearchVenueFilter::Outcome => matches!(self, Self::Outcome),
+            Self::Perp => SearchVenueFilter::Perp,
+            Self::Spot => SearchVenueFilter::Spot,
+            Self::Hip3Perp => SearchVenueFilter::Hip3,
+            Self::Outcome => SearchVenueFilter::Outcome,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+impl Serialize for AssetIdKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LookupStatus {
     MetadataFound,
+    #[default]
     FormulaOnly,
     InvalidId,
 }
@@ -115,118 +139,78 @@ impl LookupStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl Serialize for LookupStatus {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+/// One asset id as `asset decode` and `asset search` print it. Unknown fields
+/// are left out of the JSON; `cli_input` is always present, `null` when no
+/// selector reproduces the id.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct DecodedAssetId {
     pub asset_id: u64,
     pub kind: AssetIdKind,
+    pub venue: SearchVenueFilter,
     pub lookup_status: LookupStatus,
     pub network: String,
     pub cli_input: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub perp_index: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub spot_index: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub dex_slot: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub market_index: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub quote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub encoding: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub side: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub side_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub coin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub market_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub slug: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub condition_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub underlying: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expiry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub target_price: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub period: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub outcome_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
 
 impl DecodedAssetId {
-    fn new(asset_id: u64, kind: AssetIdKind, network: impl Into<String>) -> Self {
-        Self {
-            asset_id,
-            kind,
-            lookup_status: LookupStatus::FormulaOnly,
-            network: network.into(),
-            cli_input: None,
-            symbol: None,
-            dex: None,
-            perp_index: None,
-            spot_index: None,
-            dex_slot: None,
-            market_index: None,
-            base: None,
-            quote: None,
-            encoding: None,
-            outcome: None,
-            side: None,
-            side_name: None,
-            coin: None,
-            token: None,
-            market_title: None,
-            slug: None,
-            condition: None,
-            condition_class: None,
-            underlying: None,
-            expiry: None,
-            target_price: None,
-            period: None,
-            outcome_name: None,
-            description: None,
-            reason: None,
-        }
-    }
-
-    fn json_value(&self) -> Value {
-        let mut object = Map::new();
-        insert_u64(&mut object, "asset_id", self.asset_id);
-        insert_str(&mut object, "kind", self.kind.as_str());
-        insert_str(&mut object, "venue", self.kind.venue());
-        insert_str(&mut object, "lookup_status", self.lookup_status.as_str());
-        insert_str(&mut object, "network", &self.network);
-        insert_option_str(&mut object, "cli_input", self.cli_input.as_deref());
-        insert_option_str(&mut object, "symbol", self.symbol.as_deref());
-        insert_option_str(&mut object, "dex", self.dex.as_deref());
-        insert_option_u64(&mut object, "dex_slot", self.dex_slot);
-        insert_option_u64(&mut object, "perp_index", self.perp_index);
-        insert_option_u64(&mut object, "spot_index", self.spot_index);
-        insert_option_u64(&mut object, "market_index", self.market_index);
-        insert_option_str(&mut object, "base", self.base.as_deref());
-        insert_option_str(&mut object, "quote", self.quote.as_deref());
-        insert_option_u64(&mut object, "encoding", self.encoding);
-        insert_option_u64(&mut object, "outcome", self.outcome);
-        insert_option_u64(&mut object, "side", self.side);
-        insert_option_str(&mut object, "side_name", self.side_name.as_deref());
-        insert_option_str(&mut object, "coin", self.coin.as_deref());
-        insert_option_str(&mut object, "token", self.token.as_deref());
-        insert_option_str(&mut object, "market_title", self.market_title.as_deref());
-        insert_option_str(&mut object, "slug", self.slug.as_deref());
-        insert_option_str(&mut object, "condition", self.condition.as_deref());
-        insert_option_str(
-            &mut object,
-            "condition_class",
-            self.condition_class.as_deref(),
-        );
-        insert_option_str(&mut object, "underlying", self.underlying.as_deref());
-        insert_option_str(&mut object, "expiry", self.expiry.as_deref());
-        insert_option_str(&mut object, "target_price", self.target_price.as_deref());
-        insert_option_str(&mut object, "period", self.period.as_deref());
-        insert_option_str(&mut object, "outcome_name", self.outcome_name.as_deref());
-        insert_option_str(&mut object, "description", self.description.as_deref());
-        insert_option_str(&mut object, "reason", self.reason.as_deref());
-        Value::Object(object)
-    }
-
     fn field_rows(&self) -> Vec<Vec<String>> {
-        let Value::Object(object) = self.json_value() else {
+        let Value::Object(object) = serialize_row(self) else {
             return Vec::new();
         };
         object
@@ -300,7 +284,7 @@ impl TableData for AssetDecodeOutput {
     }
 
     fn to_json_value(&self) -> Value {
-        self.decoded.json_value()
+        serialize_row(&self.decoded)
     }
 }
 
@@ -347,7 +331,7 @@ impl TableData for AssetSearchOutput {
     }
 
     fn to_json_value(&self) -> Value {
-        Value::Array(self.rows.iter().map(DecodedAssetId::json_value).collect())
+        serialize_row(&self.rows)
     }
 }
 
@@ -384,32 +368,35 @@ pub async fn search(inv: &Invocation, args: &AssetSearchArgs) -> Result<(), anyh
 
 #[must_use]
 pub fn decode_asset_id(asset_id: u64, network: &str) -> DecodedAssetId {
-    match asset_id::classify(asset_id) {
-        AssetIdLayout::Outcome { encoding } => decode_outcome_asset_id(asset_id, encoding, network),
+    let layout = asset_id::classify(asset_id);
+    let kind = AssetIdKind::from(layout);
+    let mut decoded = DecodedAssetId {
+        asset_id,
+        kind,
+        venue: kind.venue(),
+        network: network.to_string(),
+        ..DecodedAssetId::default()
+    };
+    match layout {
+        AssetIdLayout::Outcome { encoding } => decode_outcome_fields(&mut decoded, encoding),
         AssetIdLayout::Hip3Perp { dex_slot, index } => {
-            let mut decoded = DecodedAssetId::new(asset_id, AssetIdKind::Hip3Perp, network);
             decoded.dex_slot = Some(dex_slot);
             decoded.perp_index = Some(index);
             decoded.market_index = Some(index);
-            decoded
         }
         AssetIdLayout::Spot { spot_index } => {
-            let mut decoded = DecodedAssetId::new(asset_id, AssetIdKind::Spot, network);
             decoded.spot_index = Some(spot_index);
             decoded.market_index = Some(spot_index);
-            decoded
         }
         AssetIdLayout::Perp { index } => {
-            let mut decoded = DecodedAssetId::new(asset_id, AssetIdKind::Perp, network);
             decoded.perp_index = Some(index);
             decoded.market_index = Some(index);
-            decoded
         }
     }
+    decoded
 }
 
-fn decode_outcome_asset_id(asset_id: u64, encoding: u64, network: &str) -> DecodedAssetId {
-    let mut decoded = DecodedAssetId::new(asset_id, AssetIdKind::Outcome, network);
+fn decode_outcome_fields(decoded: &mut DecodedAssetId, encoding: u64) {
     let (outcome, side) = split_outcome_encoding(encoding);
     decoded.encoding = Some(encoding);
     decoded.outcome = Some(outcome);
@@ -419,14 +406,20 @@ fn decode_outcome_asset_id(asset_id: u64, encoding: u64, network: &str) -> Decod
 
     if side > MAX_OUTCOME_SIDE {
         decoded.lookup_status = LookupStatus::InvalidId;
-        decoded.cli_input = None;
         decoded.reason = Some("only binary outcome sides 0 and 1 are supported".to_string());
     } else {
         decoded.cli_input = decoded.coin.clone();
         decoded.side_name = Some(if side == 0 { "Yes" } else { "No" }.to_string());
     }
+}
 
-    decoded
+/// Metadata only enriches an asset id: when a source is down the command still
+/// answers from the id's own layout. The answer says so on stderr instead of
+/// looking like a complete one.
+fn or_warn<T>(what: &str, loaded: Result<T, CliError>) -> Option<T> {
+    loaded
+        .map_err(|err| warn(&format!("{what} unavailable, results are limited: {err}")))
+        .ok()
 }
 
 async fn search_assets(
@@ -438,12 +431,15 @@ async fn search_assets(
 ) -> Vec<DecodedAssetId> {
     let mut candidates = Vec::new();
 
-    let resolver = AssetResolver::load_raw(api).await.ok();
+    let resolver = or_warn("asset metadata", AssetResolver::load_raw(api).await);
     if let Some(resolver) = resolver.as_ref() {
         candidates.extend(search_resolver_assets(resolver, network));
     }
 
-    let outcome_rows = crate::commands::outcomes::outcome_side_rows(api).await.ok();
+    let outcome_rows = or_warn(
+        "outcome metadata",
+        crate::commands::outcomes::outcome_side_rows(api).await,
+    );
     if let Some(rows) = outcome_rows.as_ref() {
         candidates.extend(rows.iter().cloned().filter_map(|row| {
             let asset_id = row.asset_id;
@@ -484,7 +480,7 @@ async fn search_assets(
 
     let candidates = candidates
         .into_iter()
-        .filter(|candidate| candidate.kind.matches_filter(venue))
+        .filter(|candidate| venue.admits(candidate.venue))
         .collect();
     ranked_search_results(query, candidates, limit)
 }
@@ -577,7 +573,7 @@ fn normalize_search_text(raw: &str) -> String {
 }
 
 async fn enrich_from_resolver(api: &ApiClient, decoded: &mut DecodedAssetId) {
-    let Ok(resolver) = AssetResolver::load_raw(api).await else {
+    let Some(resolver) = or_warn("asset metadata", AssetResolver::load_raw(api).await) else {
         return;
     };
     enrich_from_loaded_resolver(&resolver, decoded);
@@ -624,7 +620,10 @@ async fn enrich_outcome(api: &ApiClient, decoded: &mut DecodedAssetId) {
     let Some(encoding) = decoded.encoding else {
         return;
     };
-    let Ok(rows) = crate::commands::outcomes::outcome_side_rows(api).await else {
+    let Some(rows) = or_warn(
+        "outcome metadata",
+        crate::commands::outcomes::outcome_side_rows(api).await,
+    ) else {
         return;
     };
     let Some(row) = rows.into_iter().find(|row| row.encoding == encoding) else {
@@ -830,43 +829,6 @@ pub fn parse_asset_id(raw: &str) -> Result<u64, String> {
         .map_err(|err| format!("invalid asset id: {err}"))
 }
 
-fn insert_str(object: &mut Map<String, Value>, key: &str, value: &str) {
-    object.insert(key.to_string(), Value::String(value.to_string()));
-}
-
-fn insert_u64(object: &mut Map<String, Value>, key: &str, value: u64) {
-    object.insert(key.to_string(), Value::Number(Number::from(value)));
-}
-
-fn insert_option_str(object: &mut Map<String, Value>, key: &str, value: Option<&str>) {
-    if key == "cli_input" {
-        object.insert(
-            key.to_string(),
-            value
-                .map(|value| Value::String(value.to_string()))
-                .unwrap_or(Value::Null),
-        );
-    } else if let Some(value) = value {
-        insert_str(object, key, value);
-    }
-}
-
-fn insert_option_u64(object: &mut Map<String, Value>, key: &str, value: Option<u64>) {
-    if let Some(value) = value {
-        insert_u64(object, key, value);
-    }
-}
-
-fn json_cell(value: &Value) -> String {
-    match value {
-        Value::Null => "null".to_string(),
-        Value::String(value) => value.clone(),
-        Value::Number(value) => value.to_string(),
-        Value::Bool(value) => value.to_string(),
-        _ => value.to_string(),
-    }
-}
-
 fn humanize_field(field: &str) -> String {
     field
         .split('_')
@@ -997,6 +959,40 @@ mod tests {
             assert_eq!(decoded.dex_slot, dex_slot, "asset_id={asset_id}");
             assert_eq!(decoded.encoding, encoding, "asset_id={asset_id}");
         }
+    }
+
+    #[test]
+    fn decoded_id_json_keeps_cli_input_and_omits_unknown_fields() {
+        assert_eq!(
+            serialize_row(&decode_asset_id(0, "mainnet")),
+            serde_json::json!({
+                "asset_id": 0,
+                "kind": "perp",
+                "venue": "perp",
+                "lookup_status": "formula_only",
+                "network": "mainnet",
+                "cli_input": null,
+                "perp_index": 0,
+                "market_index": 0,
+            })
+        );
+        let hip3 = serialize_row(&decode_asset_id(110_035, "testnet"));
+        assert_eq!(hip3["kind"], "hip3_perp");
+        assert_eq!(hip3["venue"], "hip3");
+    }
+
+    #[test]
+    fn an_unknown_cli_input_is_an_empty_table_cell() {
+        let rows = decode_asset_id(0, "mainnet").field_rows();
+        assert!(rows.contains(&vec!["Cli Input".to_string(), String::new()]));
+        assert!(rows.contains(&vec!["Perp Index".to_string(), "0".to_string()]));
+    }
+
+    #[test]
+    fn venue_filter_admits_its_own_venue_and_all() {
+        assert!(SearchVenueFilter::All.admits(SearchVenueFilter::Spot));
+        assert!(SearchVenueFilter::Hip3.admits(SearchVenueFilter::Hip3));
+        assert!(!SearchVenueFilter::Perp.admits(SearchVenueFilter::Hip3));
     }
 
     #[test]

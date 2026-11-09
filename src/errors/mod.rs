@@ -31,7 +31,7 @@ pub use classify::{
     http_response_indicates_rate_limit, is_server_status,
 };
 pub use envelope::{ErrorEnvelope, partial_results_fields};
-pub use last_error::{LastError, set_command_path};
+pub use last_error::{LastError, command_path, set_command_path};
 pub use recovery::NextCommand;
 pub use render::{ErrorOutput, exit_with_error};
 pub use spec::StdoutDocument;
@@ -284,6 +284,17 @@ impl CliError {
         }
     }
 
+    /// The error for a non-2xx reply from a service the CLI calls once, such as
+    /// the release host: a rate limit, else the failure status.
+    #[must_use]
+    pub fn failed_reply(status: reqwest::StatusCode, body: &str) -> Self {
+        if http_response_indicates_rate_limit(status.as_u16(), body) {
+            Self::rate_limited()
+        } else {
+            Self::api_status(status, body)
+        }
+    }
+
     /// Build an [`CliError::Internal`] whose message ends with remote text.
     #[must_use]
     pub fn internal_with_remote(prefix: impl std::fmt::Display, remote: &Untrusted) -> Self {
@@ -336,6 +347,16 @@ impl CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_reply_is_a_rate_limit_or_an_api_status() {
+        assert_eq!(
+            CliError::failed_reply(reqwest::StatusCode::TOO_MANY_REQUESTS, "").exit_code(),
+            11
+        );
+        let err = CliError::failed_reply(reqwest::StatusCode::NOT_FOUND, "missing");
+        assert!(matches!(err, CliError::ApiStatus { status: 404, .. }));
+    }
 
     fn every_variant() -> Vec<CliError> {
         vec![

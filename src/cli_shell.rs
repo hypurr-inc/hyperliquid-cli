@@ -7,7 +7,6 @@
 
 use std::ffi::OsString;
 use std::io::Write;
-use std::sync::OnceLock;
 
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches};
@@ -22,8 +21,6 @@ use crate::{Cli, GLOBAL_OPTIONS};
 
 const ENV_FORMAT: &str = "HYPERLIQUID_FORMAT";
 const REPORT_URL: &str = "https://github.com/hypurr-inc/hyperliquid-cli/issues/new";
-
-pub(super) static PANIC_COMMAND: OnceLock<String> = OnceLock::new();
 
 /// The command the line selected, with its args parsed.
 pub(super) struct Selected {
@@ -454,9 +451,9 @@ pub(super) fn install_panic_hook() {
         if is_broken_pipe_panic(&message) {
             std::process::exit(0);
         }
-        let command = match PANIC_COMMAND.get() {
-            Some(path) if !path.is_empty() => format!("hyperliquid {path}"),
-            _ => "hyperliquid".to_string(),
+        let command = match errors::command_path() {
+            Some(path) => format!("hyperliquid {path}"),
+            None => "hyperliquid".to_string(),
         };
         let _ = write!(
             std::io::stderr(),

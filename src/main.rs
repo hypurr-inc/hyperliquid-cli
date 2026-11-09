@@ -15,7 +15,7 @@ mod cli_runtime;
 mod cli_shell;
 
 use cli_shell::{
-    PANIC_COMMAND, ParsedCli, exit_for_clap_error, install_panic_hook, print_help_to_stdout,
+    ParsedCli, exit_for_clap_error, install_panic_hook, print_help_to_stdout,
     resolve_output_format, try_parse_cli_from,
 };
 
@@ -166,15 +166,7 @@ async fn main() {
     };
     output::colors::init(cli.no_color);
     if let Some(selected) = &selected {
-        let path: Vec<String> = selected
-            .entry
-            .spec
-            .path
-            .iter()
-            .map(|part| (*part).to_string())
-            .collect();
-        let _ = PANIC_COMMAND.set(path.join(" "));
-        errors::set_command_path(&path);
+        errors::set_command_path(selected.entry.spec.path);
     }
     let env = output::terminal::OutputEnv::probe(requested_format.is_some());
     // Nothing can report an unreadable HYPERLIQUID_FORMAT in that format.

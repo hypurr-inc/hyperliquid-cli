@@ -383,3 +383,24 @@ async fn asset_decode_invalid_outcome_side_is_structured_not_a_hard_failure() {
         "only binary outcome sides 0 and 1 are supported"
     );
 }
+
+#[tokio::test]
+async fn asset_search_says_on_stderr_when_metadata_is_unavailable() {
+    let env = IsolatedHome::new();
+    let server = healthcheck_only_server().await;
+
+    let output = env
+        .command_with_server(&server)
+        .args(["--format", "json", "asset", "search", "110035"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let rows = json_stdout(output.stdout);
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["lookup_status"], "formula_only");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("asset metadata unavailable"), "{stderr}");
+    assert!(stderr.contains("outcome metadata unavailable"), "{stderr}");
+}

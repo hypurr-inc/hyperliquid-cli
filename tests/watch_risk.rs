@@ -36,7 +36,7 @@ fn watch_risk_requires_bounds_in_agent_mode() {
             "0x0000000000000000000000000000000000000001",
         ])
         .assert()
-        .code(2)
+        .code(13)
         .stdout(predicate::str::contains("--max-events 20"))
         .stdout(predicate::str::contains(
             "hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20",
