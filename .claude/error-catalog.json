@@ -96,7 +96,7 @@
       "retry": "sometimes",
       "retry_when": "reads only; a rate-limited mutation is never marked retryable",
       "stdout": "envelope",
-      "agent_action": "Back off for `retry_after` seconds when present; prefer streaming over REST polling. The address-based limit (`Too many cumulative requests`) only grows with trading volume or the `reserveRequestWeight` action; meanwhile the address may send one request every 10 seconds. `hyperliquid account rate-limit` shows its usage."
+      "agent_action": "Back off for `retry_after` seconds when present; prefer streaming over REST polling. When `data.hint` is present the address's request budget is spent: follow it."
     },
     {
       "exit_code": 12,

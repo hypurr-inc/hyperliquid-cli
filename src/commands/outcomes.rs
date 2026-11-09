@@ -2,8 +2,8 @@ use clap::Args;
 
 use crate::assets::asset_id::parse_outcome_notation;
 use crate::assets::{
-    OutcomeQuestionRow, OutcomeSideRow, OutcomeTemplate, SettledOutcomeRow, load_outcome_catalog,
-    load_outcome_templates, load_settled_outcome, report_skipped,
+    Names, OutcomeCatalog, OutcomeQuestionRow, OutcomeSideRow, OutcomeTemplate, QuestionState,
+    SettledOutcomeRow, load_outcome_templates, load_settled_outcome,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
 use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
@@ -72,10 +72,7 @@ impl Row for OutcomeSideRow {
 
     fn cells(&self) -> Vec<String> {
         let role = self.question_role.map(|role| {
-            let role = match role {
-                crate::assets::QuestionRole::Named => "named",
-                crate::assets::QuestionRole::Fallback => "fallback",
-            };
+            let role = role.as_str();
             if self.settled {
                 format!("{role} (settled)")
             } else {
@@ -156,7 +153,7 @@ impl Row for SettledOutcomeRow {
                 .join(","),
             self.details.clone(),
             or_missing(self.question),
-            or_missing(self.question_state.as_ref()),
+            or_missing(self.question_state.map(QuestionState::as_str)),
             warnings_cell(&self.warnings),
         ]
     }
@@ -169,7 +166,7 @@ impl Row for OutcomeTemplate {
     fn cells(&self) -> Vec<String> {
         vec![
             self.id.clone(),
-            self.role.clone(),
+            self.role.as_str().to_string(),
             or_missing(self.parent.as_ref()),
             self.name.clone(),
             self.keywords
@@ -187,7 +184,9 @@ impl ListRow for OutcomeTemplate {
 }
 
 pub async fn list(inv: &Invocation, args: &OutcomeListArgs) -> Result<(), anyhow::Error> {
-    let mut rows = load_outcome_catalog(inv.remote()?.api()).await?.sides;
+    let mut rows = OutcomeCatalog::load(inv.remote()?.api(), Names::Resolved)
+        .await?
+        .sides;
     if !args.oldest_first {
         rows.sort_by_key(|row| (std::cmp::Reverse(row.outcome), row.side));
     }
@@ -198,7 +197,7 @@ pub async fn list(inv: &Invocation, args: &OutcomeListArgs) -> Result<(), anyhow
 
 pub async fn get(inv: &Invocation, args: &OutcomeGetArgs) -> Result<(), anyhow::Error> {
     let parsed = parse_outcome_notation(&args.notation)?;
-    let row = load_outcome_catalog(inv.remote()?.api())
+    let row = OutcomeCatalog::load(inv.remote()?.api(), Names::Resolved)
         .await?
         .sides
         .into_iter()
@@ -282,9 +281,11 @@ impl CliCommand for OutcomesQuestions {
     ]);
 
     async fn run(inv: &Invocation, args: &OutcomeQuestionsArgs) -> Result<(), anyhow::Error> {
-        let mut rows = load_outcome_catalog(inv.remote()?.api()).await?.questions;
+        let mut rows = OutcomeCatalog::load(inv.remote()?.api(), Names::Resolved)
+            .await?
+            .questions;
         if !args.oldest_first {
-            rows.reverse();
+            rows.sort_by_key(|row| std::cmp::Reverse(row.question));
         }
         rows.truncate(args.limit);
         inv.print(&Rows::new(rows));
@@ -335,7 +336,6 @@ impl CliCommand for OutcomesTemplates {
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         let list = load_outcome_templates(inv.remote()?.api()).await?;
-        report_skipped(&list.skipped);
         inv.print(&Rows::new(list.templates));
         Ok(())
     }

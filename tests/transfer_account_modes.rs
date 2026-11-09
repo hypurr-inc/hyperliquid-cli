@@ -171,3 +171,30 @@ async fn spot_to_perp_never_reads_the_abstraction() {
 
     assert_eq!(server.info_requests("userAbstraction").await.len(), 0);
 }
+
+#[tokio::test]
+async fn usdc_is_the_spot_token_at_index_zero_not_any_balance_named_usdc() {
+    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_info_containing(json!({"type": "userAbstraction"}), json!("unifiedAccount"))
+        .await;
+    server
+        .mount_info_containing(
+            json!({"type": "spotClearinghouseState"}),
+            json!({"balances": [
+                {"coin": "USDC", "token": 7, "hold": "0", "total": "1000", "entryNtl": "0"}
+            ]}),
+        )
+        .await;
+
+    run(
+        &env,
+        &server,
+        &[
+            "transfer", "send", "--to", RECIPIENT, "--amount", "100", "--yes",
+        ],
+    )
+    .code(13)
+    .stdout(predicates::str::contains("available spot USDC 0"));
+}

@@ -166,6 +166,11 @@ fn env_bool(env: &EnvSource, name: &str) -> Result<Option<bool>, CliError> {
     flag_value(name, env_flag(env, name))
 }
 
+/// [`env_bool`] for a switch that is off unless the variable says otherwise.
+pub fn env_enabled(env: &EnvSource, name: &str) -> Result<bool, CliError> {
+    Ok(env_bool(env, name)?.unwrap_or(false))
+}
+
 fn flag_value(name: &str, flag: EnvFlag) -> Result<Option<bool>, CliError> {
     match flag {
         EnvFlag::Unset => Ok(None),

@@ -96,7 +96,7 @@ fn print_rendered(rendered: &Rendered) {
         println!("{}", rendered.text);
     }
     for notice in &rendered.notices {
-        eprintln!("{notice}");
+        eprintln!("{}", notice.text());
     }
 }
 

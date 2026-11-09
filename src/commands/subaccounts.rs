@@ -11,7 +11,7 @@ use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
-use crate::quantity::{self, Scale};
+use crate::quantity;
 use crate::signing::SelectedSigner;
 
 /// Arguments for `subaccount create`.
@@ -81,15 +81,14 @@ impl TransferDirection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubaccountActionKind {
+enum SubaccountActionKind {
     Create,
     TransferUsdc,
     TransferSpot,
 }
 
 impl SubaccountActionKind {
-    #[must_use]
-    pub fn reversibility(self) -> ActionReversibility {
+    fn reversibility(self) -> ActionReversibility {
         match self {
             Self::Create => ActionReversibility::Irreversible,
             Self::TransferUsdc | Self::TransferSpot => ActionReversibility::PartiallyReversible,
@@ -114,13 +113,39 @@ struct SubaccountActionConfirmation {
     signer: String,
     acting_as: String,
     reversibility: String,
-    vault_address: Option<String>,
     subaccount: Option<String>,
     name: Option<String>,
     direction: Option<String>,
     amount: Option<String>,
     usd: Option<u64>,
     token: Option<String>,
+}
+
+impl SubaccountActionConfirmation {
+    /// A receipt with the fields every subaccount action reports; the caller
+    /// fills in the ones its action has.
+    fn new(
+        action: &str,
+        status: &str,
+        chain: Chain,
+        signer: &SelectedSigner,
+        kind: SubaccountActionKind,
+    ) -> Self {
+        Self {
+            action: action.to_string(),
+            status: status.to_string(),
+            network: chain.to_string(),
+            signer: signer.address().to_string(),
+            acting_as: signer.query_address().to_string(),
+            reversibility: kind.reversibility().as_str().to_string(),
+            subaccount: None,
+            name: None,
+            direction: None,
+            amount: None,
+            usd: None,
+            token: None,
+        }
+    }
 }
 
 impl Row for SubaccountActionConfirmation {
@@ -131,7 +156,6 @@ impl Row for SubaccountActionConfirmation {
         "Signer",
         "Acting As",
         "Reversibility",
-        "Vault Address",
         "Subaccount",
         "Name",
         "Direction",
@@ -148,7 +172,6 @@ impl Row for SubaccountActionConfirmation {
             self.signer.clone(),
             self.acting_as.clone(),
             self.reversibility.clone(),
-            self.vault_address.clone().unwrap_or_default(),
             self.subaccount.clone().unwrap_or_default(),
             self.name.clone().unwrap_or_default(),
             self.direction.clone().unwrap_or_default(),
@@ -163,33 +186,58 @@ impl ListRow for SubaccountActionConfirmation {
     const EMPTY: &'static str = "No results.";
 }
 
+/// The exchange actions of this module: each is the JSON that is sent and the
+/// source of what the dry run previews of it.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "type", rename = "createSubAccount")]
 struct CreateSubaccountAction {
-    #[serde(rename = "type")]
-    action_type: &'static str,
     name: String,
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "type", rename = "subAccountTransfer", rename_all = "camelCase")]
 struct SubaccountTransferAction {
-    #[serde(rename = "type")]
-    action_type: &'static str,
     sub_account_user: String,
     is_deposit: bool,
     usd: u64,
 }
 
+impl SubaccountTransferAction {
+    fn new(subaccount: Address, direction: TransferDirection, usd: u64) -> Self {
+        Self {
+            sub_account_user: lowercase_address(subaccount),
+            is_deposit: direction.is_deposit(),
+            usd,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(
+    tag = "type",
+    rename = "subAccountSpotTransfer",
+    rename_all = "camelCase"
+)]
 struct SubaccountSpotTransferAction {
-    #[serde(rename = "type")]
-    action_type: &'static str,
     sub_account_user: String,
     is_deposit: bool,
     token: String,
     amount: String,
+}
+
+impl SubaccountSpotTransferAction {
+    fn new(subaccount: Address, token: &str, args: &SpotTransferArgs) -> Self {
+        Self {
+            sub_account_user: lowercase_address(subaccount),
+            is_deposit: args.direction.is_deposit(),
+            token: token.to_string(),
+            amount: quantity::wire_text(args.amount),
+        }
+    }
+}
+
+fn lowercase_address(address: Address) -> String {
+    address.to_string().to_lowercase()
 }
 
 /// The subaccount name, trimmed; it must not be empty.
@@ -214,9 +262,9 @@ fn validated_token(args: &SpotTransferArgs) -> Result<&str, CliError> {
     Ok(token)
 }
 
-fn create_dry_run_value(chain: Chain, name: &str) -> serde_json::Value {
+fn create_dry_run_value(chain: Chain, action: &CreateSubaccountAction) -> serde_json::Value {
     serde_json::json!({
-        "name": name,
+        "name": action.name,
         "network": chain.to_string(),
         "reversibility": SubaccountActionKind::Create.reversibility(),
     })
@@ -225,15 +273,15 @@ fn create_dry_run_value(chain: Chain, name: &str) -> serde_json::Value {
 fn transfer_dry_run_value(
     chain: Chain,
     subaccount: Address,
-    usd: u64,
+    action: &SubaccountTransferAction,
     args: &TransferArgs,
 ) -> serde_json::Value {
     serde_json::json!({
         "subaccount": subaccount.to_string(),
         "amount": args.amount.to_string(),
         "direction": args.direction.to_string(),
-        "is_deposit": args.direction.is_deposit(),
-        "usd": usd,
+        "is_deposit": action.is_deposit,
+        "usd": action.usd,
         "asset": "USDC",
         "network": chain.to_string(),
         "reversibility": SubaccountActionKind::TransferUsdc.reversibility(),
@@ -243,39 +291,29 @@ fn transfer_dry_run_value(
 fn spot_transfer_dry_run_value(
     chain: Chain,
     subaccount: Address,
-    token: &str,
+    action: &SubaccountSpotTransferAction,
     args: &SpotTransferArgs,
 ) -> serde_json::Value {
     serde_json::json!({
         "subaccount": subaccount.to_string(),
-        "token": token,
+        "token": action.token,
         "amount": args.amount.to_string(),
         "direction": args.direction.to_string(),
-        "is_deposit": args.direction.is_deposit(),
-        "asset": token,
+        "is_deposit": action.is_deposit,
+        "asset": action.token,
         "network": chain.to_string(),
         "reversibility": SubaccountActionKind::TransferSpot.reversibility(),
     })
 }
 
-fn usdc_to_wire_units(amount: Decimal) -> Result<u64, CliError> {
-    quantity::positive(amount, Scale::USDC).map_err(|err| err.config("amount", Scale::USDC))
-}
-
 async fn create(
     inv: &Invocation,
     signer: &SelectedSigner,
-    name: &str,
+    action: CreateSubaccountAction,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let (api, chain) = (remote.api(), remote.chain());
-    let action = CreateSubaccountAction {
-        action_type: "createSubAccount",
-        name: name.to_string(),
-    };
-
     actions::send_raw_l1_json_action(
-        api,
+        remote.api(),
         signer,
         &action,
         actions::RawL1ActionMetadata::new(actions::nonce_now()),
@@ -283,25 +321,17 @@ async fn create(
     )
     .await?;
 
-    let signer_address = signer.address().to_string();
     print_action(
         inv,
         SubaccountActionConfirmation {
-            action: "create".to_string(),
-            status: "submitted".to_string(),
-            network: chain.to_string(),
-            signer: signer_address,
-            acting_as: signer.query_address().to_string(),
-            reversibility: (SubaccountActionKind::Create.reversibility())
-                .as_str()
-                .to_string(),
-            vault_address: None,
-            subaccount: None,
-            name: Some(name.to_string()),
-            direction: None,
-            amount: None,
-            usd: None,
-            token: None,
+            name: Some(action.name),
+            ..SubaccountActionConfirmation::new(
+                "create",
+                "submitted",
+                remote.chain(),
+                signer,
+                SubaccountActionKind::Create,
+            )
         },
     );
     Ok(())
@@ -311,11 +341,11 @@ async fn transfer(
     inv: &Invocation,
     signer: &SelectedSigner,
     subaccount: Address,
-    usd: u64,
+    action: SubaccountTransferAction,
     args: &TransferArgs,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let (api, chain) = (remote.api(), remote.chain());
+    let chain = remote.chain();
     confirm::unless_yes(
         args.yes,
         inv.mode(),
@@ -323,14 +353,8 @@ async fn transfer(
         &transfer_prompt(subaccount, args),
         "subaccount transfer aborted",
     )?;
-    let action = SubaccountTransferAction {
-        action_type: "subAccountTransfer",
-        sub_account_user: subaccount.to_string().to_lowercase(),
-        is_deposit: args.direction.is_deposit(),
-        usd,
-    };
     actions::send_raw_l1_json_action(
-        api,
+        remote.api(),
         signer,
         &action,
         actions::RawL1ActionMetadata::new(actions::nonce_now()),
@@ -338,25 +362,21 @@ async fn transfer(
     )
     .await?;
 
-    let signer_address = signer.address().to_string();
     print_action(
         inv,
         SubaccountActionConfirmation {
-            action: "transfer".to_string(),
-            status: "confirmed".to_string(),
-            network: chain.to_string(),
-            signer: signer_address,
-            acting_as: signer.query_address().to_string(),
-            reversibility: (SubaccountActionKind::TransferUsdc.reversibility())
-                .as_str()
-                .to_string(),
-            vault_address: None,
             subaccount: Some(subaccount.to_string()),
-            name: None,
             direction: Some(args.direction.to_string()),
-            amount: Some(args.amount.normalize().to_string()),
-            usd: Some(usd),
+            amount: Some(quantity::wire_text(args.amount)),
+            usd: Some(action.usd),
             token: Some("USDC".to_string()),
+            ..SubaccountActionConfirmation::new(
+                "transfer",
+                "confirmed",
+                chain,
+                signer,
+                SubaccountActionKind::TransferUsdc,
+            )
         },
     );
     Ok(())
@@ -366,11 +386,11 @@ async fn spot_transfer(
     inv: &Invocation,
     signer: &SelectedSigner,
     subaccount: Address,
-    token: &str,
+    action: SubaccountSpotTransferAction,
     args: &SpotTransferArgs,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let (api, chain) = (remote.api(), remote.chain());
+    let chain = remote.chain();
     confirm::unless_yes(
         args.yes,
         inv.mode(),
@@ -379,16 +399,8 @@ async fn spot_transfer(
         "subaccount spot transfer aborted",
     )?;
 
-    let amount = args.amount.normalize().to_string();
-    let action = SubaccountSpotTransferAction {
-        action_type: "subAccountSpotTransfer",
-        sub_account_user: subaccount.to_string().to_lowercase(),
-        is_deposit: args.direction.is_deposit(),
-        token: token.to_string(),
-        amount: amount.clone(),
-    };
     actions::send_raw_l1_json_action(
-        api,
+        remote.api(),
         signer,
         &action,
         actions::RawL1ActionMetadata::new(actions::nonce_now()),
@@ -396,25 +408,20 @@ async fn spot_transfer(
     )
     .await?;
 
-    let signer_address = signer.address().to_string();
     print_action(
         inv,
         SubaccountActionConfirmation {
-            action: "spot-transfer".to_string(),
-            status: "confirmed".to_string(),
-            network: chain.to_string(),
-            signer: signer_address,
-            acting_as: signer.query_address().to_string(),
-            reversibility: (SubaccountActionKind::TransferSpot.reversibility())
-                .as_str()
-                .to_string(),
-            vault_address: None,
             subaccount: Some(subaccount.to_string()),
-            name: None,
             direction: Some(args.direction.to_string()),
-            amount: Some(amount),
-            usd: None,
-            token: Some(token.to_string()),
+            amount: Some(action.amount),
+            token: Some(action.token),
+            ..SubaccountActionConfirmation::new(
+                "spot-transfer",
+                "confirmed",
+                chain,
+                signer,
+                SubaccountActionKind::TransferSpot,
+            )
         },
     );
     Ok(())
@@ -511,16 +518,18 @@ impl CliCommand for SubaccountCreate {
         .resource_id("subaccount name")]);
 
     async fn run(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error> {
-        let name = validated_name(args)?;
+        let action = CreateSubaccountAction {
+            name: validated_name(args)?.to_string(),
+        };
         if inv.dry_run() {
             return print_dry_run(
                 inv,
                 "create_subaccount",
-                create_dry_run_value(inv.remote()?.chain(), name),
+                create_dry_run_value(inv.remote()?.chain(), &action),
             );
         }
         let resolved = inv.resolve_signer()?;
-        create(inv, &resolved, name).await
+        create(inv, &resolved, action).await
     }
 }
 
@@ -544,17 +553,18 @@ impl CliCommand for SubaccountTransfer {
     ]);
 
     async fn run(inv: &Invocation, args: &TransferArgs) -> Result<(), anyhow::Error> {
-        let usd = usdc_to_wire_units(args.amount)?;
+        let usd = quantity::usdc_units(args.amount)?;
         let subaccount = inv.resolve_account(&args.subaccount)?;
+        let action = SubaccountTransferAction::new(subaccount, args.direction, usd);
         if inv.dry_run() {
             return print_dry_run(
                 inv,
                 "subaccount_usdc_transfer",
-                transfer_dry_run_value(inv.remote()?.chain(), subaccount, usd, args),
+                transfer_dry_run_value(inv.remote()?.chain(), subaccount, &action, args),
             );
         }
         let resolved = inv.resolve_signer()?;
-        transfer(inv, &resolved, subaccount, usd, args).await
+        transfer(inv, &resolved, subaccount, action, args).await
     }
 }
 
@@ -581,14 +591,71 @@ impl CliCommand for SubaccountSpotTransfer {
     async fn run(inv: &Invocation, args: &SpotTransferArgs) -> Result<(), anyhow::Error> {
         let token = validated_token(args)?;
         let subaccount = inv.resolve_account(&args.subaccount)?;
+        let action = SubaccountSpotTransferAction::new(subaccount, token, args);
         if inv.dry_run() {
             return print_dry_run(
                 inv,
                 "subaccount_spot_transfer",
-                spot_transfer_dry_run_value(inv.remote()?.chain(), subaccount, token, args),
+                spot_transfer_dry_run_value(inv.remote()?.chain(), subaccount, &action, args),
             );
         }
         let resolved = inv.resolve_signer()?;
-        spot_transfer(inv, &resolved, subaccount, token, args).await
+        spot_transfer(inv, &resolved, subaccount, action, args).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_exchange_actions_keep_their_wire_shape() {
+        let subaccount = Address::repeat_byte(0xab);
+        let lower = "0xabababababababababababababababababababab";
+
+        let create = CreateSubaccountAction {
+            name: "mm".to_string(),
+        };
+        assert_eq!(
+            serde_json::to_value(&create).unwrap(),
+            serde_json::json!({"type": "createSubAccount", "name": "mm"})
+        );
+
+        let transfer = SubaccountTransferAction::new(subaccount, TransferDirection::Withdraw, 10);
+        assert_eq!(
+            serde_json::to_value(&transfer).unwrap(),
+            serde_json::json!({
+                "type": "subAccountTransfer",
+                "subAccountUser": lower,
+                "isDeposit": false,
+                "usd": 10
+            })
+        );
+        // The L1 action hash covers the msgpack of the action, so the key
+        // order is part of the contract.
+        let mut msgpack = b"\x84\xa4type\xb2subAccountTransfer\xaesubAccountUser".to_vec();
+        msgpack.extend(b"\xd9\x2a");
+        msgpack.extend(lower.as_bytes());
+        msgpack.extend(b"\xa9isDeposit\xc2\xa3usd\x0a");
+        assert_eq!(rmp_serde::to_vec_named(&transfer).unwrap(), msgpack);
+
+        let spot_args = SpotTransferArgs {
+            subaccount: String::new(),
+            token: "PURR:0xc4bf3f870c0e9465323c0b6ed28096c2".to_string(),
+            amount: "1.50".parse().unwrap(),
+            direction: TransferDirection::Deposit,
+            yes: true,
+        };
+        let spot = SubaccountSpotTransferAction::new(subaccount, &spot_args.token, &spot_args);
+        assert_eq!(
+            serde_json::to_value(&spot).unwrap(),
+            serde_json::json!({
+                "type": "subAccountSpotTransfer",
+                "subAccountUser": lower,
+                "isDeposit": true,
+                "token": "PURR:0xc4bf3f870c0e9465323c0b6ed28096c2",
+                "amount": "1.5"
+            })
+        );
     }
 }

@@ -107,8 +107,6 @@ pub enum InputKind {
     Amount,
     FilePath,
     Duration,
-    JsonObject,
-    Url,
     Identifier,
 }
 
@@ -121,6 +119,19 @@ pub enum Mutability {
     Streaming,
     LocalOnly,
     LiveMutating,
+}
+
+/// Whether and how a command reaches the Hyperliquid API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkUse {
+    /// Never: the run resolves no endpoint and its dry-run preview names no network.
+    None,
+    /// Maybe: the endpoint is resolved, but the run may finish without it, so
+    /// a configured API override is not probed up front.
+    Optional,
+    /// Always: the endpoint is resolved and a configured override is probed
+    /// before the command starts.
+    Required,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -191,31 +202,52 @@ impl StreamBound {
     }
 
     /// What a machine-context run is told when it declares no stop condition:
-    /// the flags and the environment variable that would bound it.
+    /// the flags and the environment variable that would bound it. `command`
+    /// names the run for a stream that is a command of its own (`Polled`),
+    /// whose message also carries a runnable example.
     #[must_use]
-    pub fn unbounded_message(self) -> String {
-        let subject = match self {
-            Self::SnapshotWatch => "watch",
-            Self::Subscribe => "subscribe",
-            Self::Polled => {
-                return "watch risk requires --max-events or --idle-timeout-ms in agent mode.\n  \
-                        hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20"
-                    .to_string();
-            }
-        };
+    pub fn unbounded_message(self, command: &str) -> String {
         let mut ways: Vec<String> = self
             .cli_args()
             .iter()
             .map(|id| format!("--{} <N>", id.replace('_', "-")))
             .collect();
         ways.extend(self.env().map(|env| env.name.to_string()));
-        let last = ways.pop().unwrap_or_default();
-        let joined = match ways.len() {
-            0 => last,
-            1 => format!("{} or {last}", ways[0]),
-            _ => format!("{}, or {last}", ways.join(", ")),
-        };
-        format!("JSON {subject} output must be bounded with {joined}")
+        match self {
+            Self::SnapshotWatch => format!(
+                "JSON watch output must be bounded with {}",
+                join_alternatives(ways)
+            ),
+            Self::Subscribe => format!(
+                "JSON subscribe output must be bounded with {}",
+                join_alternatives(ways)
+            ),
+            Self::Polled => {
+                let flags = self
+                    .cli_args()
+                    .iter()
+                    .map(|id| format!("--{}", id.replace('_', "-")))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                format!(
+                    "{command} requires {flags} in agent mode.\n  \
+                     hyperliquid --format json {command} {POLLED_EXAMPLE_ARGS} --max-events 20"
+                )
+            }
+        }
+    }
+}
+
+/// The address a polled stream's example names: every polled stream watches an
+/// address.
+const POLLED_EXAMPLE_ARGS: &str = "--user 0x0000000000000000000000000000000000000001";
+
+fn join_alternatives(mut ways: Vec<String>) -> String {
+    let last = ways.pop().unwrap_or_default();
+    match ways.len() {
+        0 => last,
+        1 => format!("{} or {last}", ways[0]),
+        _ => format!("{}, or {last}", ways.join(", ")),
     }
 }
 
@@ -354,9 +386,11 @@ pub struct CommandSpec {
     pub testnet_unprompted: bool,
     /// The confirmation prompt applies only when this arg is present.
     pub confirms_with_arg: Option<&'static str>,
-    /// Runs without resolving the network, signer or API endpoint, so its
-    /// dry-run preview names neither.
-    pub local: bool,
+    /// Whether and how the run reaches the API; the pipeline resolves the
+    /// endpoint, signer and override probe from this alone.
+    pub network: NetworkUse,
+    /// The MCP server never offers the command as a tool (it is the server).
+    pub hidden_from_mcp: bool,
     /// The command is itself the update: the passive update check stays off.
     pub skips_update_check: bool,
     pub stream: Option<StreamBound>,
@@ -399,7 +433,8 @@ impl CommandSpec {
             ows_signer: OwsSupport::NotRequired,
             testnet_unprompted: false,
             confirms_with_arg: None,
-            local: false,
+            network: NetworkUse::Required,
+            hidden_from_mcp: false,
             skips_update_check: false,
             stream: None,
             dry_run_refusal: None,
@@ -422,7 +457,7 @@ impl CommandSpec {
     ) -> Self {
         let mut spec = Self::read(path, category, about, description);
         spec.lifecycle = Lifecycle::InteractiveLocal;
-        spec.local = true;
+        spec.network = NetworkUse::None;
         spec
     }
 
@@ -533,9 +568,22 @@ impl CommandSpec {
         self
     }
 
+    /// Shorthand for [`NetworkUse::None`]: the command runs on this machine alone.
     #[must_use]
-    pub const fn local(mut self) -> Self {
-        self.local = true;
+    pub const fn local(self) -> Self {
+        self.network(NetworkUse::None)
+    }
+
+    #[must_use]
+    pub const fn network(mut self, network: NetworkUse) -> Self {
+        self.network = network;
+        self
+    }
+
+    /// The MCP server never offers this command as a tool.
+    #[must_use]
+    pub const fn hidden_from_mcp(mut self) -> Self {
+        self.hidden_from_mcp = true;
         self
     }
 
@@ -639,11 +687,19 @@ impl CommandSpec {
         matches!(self.lifecycle, Lifecycle::ReadOnly) && matches!(self.risk, Risk::None)
     }
 
-    /// Whether running the command talks to the API. A [`Self::local`] command
-    /// never reaches the pipeline step that asks.
+    /// Whether the MCP server offers the command as a tool: public reads by
+    /// default, and every command but the ones hidden from it when the
+    /// operator opts in. Tool discovery and tool calls both ask this.
     #[must_use]
-    pub const fn uses_api(&self) -> bool {
-        !matches!(self.mutability(), Mutability::LocalOnly)
+    pub const fn exposed_to_mcp(&self, allow_unsafe: bool) -> bool {
+        !self.hidden_from_mcp && (allow_unsafe || self.is_public_read())
+    }
+
+    /// Whether running the command may reach the API at all, so a preview
+    /// names the network it would use.
+    #[must_use]
+    pub const fn uses_network(&self) -> bool {
+        !matches!(self.network, NetworkUse::None)
     }
 
     /// Whether a `--dry-run` preview of the command names the signer.

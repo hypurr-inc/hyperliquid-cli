@@ -10,7 +10,6 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use hypersdk::Address;
 use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::UserRole;
 
@@ -22,9 +21,9 @@ use crate::http_api::ApiClient;
 use crate::input_hardening::{FilePolicy, parse_json_text, read_json_file};
 use crate::mode::Mode;
 use crate::network::Network;
-use crate::output::{OutputFormat, Session, TableData};
+use crate::output::{Notice, OutputFormat, Session, TableData};
 use crate::settings::Settings;
-use crate::signing::SelectedSigner;
+use crate::signing::{SelectedSigner, SignerRole};
 use crate::wire::InfoRequest;
 
 /// The parsed global flags that shape an invocation.
@@ -70,9 +69,10 @@ pub struct Remote {
     network: Network,
     api: ApiClient,
     signer: OnceLock<SelectedSigner>,
-    /// The master account when the selected signer proved to be an API wallet:
-    /// `None` for any other signer and when the role could not be read.
-    signer_master: OnceLock<Option<Address>>,
+    /// What the exchange says the selected signer is, for a signer no stored
+    /// account describes; [`SignerRole::Unverified`] when the role could not be
+    /// read.
+    signer_role: OnceLock<SignerRole>,
 }
 
 impl std::fmt::Debug for Remote {
@@ -225,7 +225,7 @@ impl Invocation {
             network,
             api: self.api_client_for(network)?,
             signer: OnceLock::new(),
-            signer_master: OnceLock::new(),
+            signer_role: OnceLock::new(),
         };
         Ok(self.remote.get_or_init(|| remote))
     }
@@ -237,7 +237,7 @@ impl Invocation {
         let api = ApiClient::new(network, self.settings.api_base_url_override(network)?)
             .with_request_lifetime(self.flags.expires_after);
         Ok(if self.mode.person_on_stderr() {
-            api.on_retry(|| eprintln!("Retrying automatically…"))
+            api.on_retry(|| Notice::Retrying.eprint(false))
         } else {
             api
         })
@@ -327,12 +327,12 @@ impl Invocation {
     /// signer's. An API wallet has no account data of its own, so a bare key
     /// that turns out to be one (a stored API wallet already reads its master)
     /// is refused with the master it signs for, instead of answering with an
-    /// empty result. The role is read once per run; a failed read is not a reason
-    /// to refuse.
+    /// empty result. The role is read once per run; a role that cannot be
+    /// read ([`SignerRole::Unverified`]) is not a reason to refuse.
     pub async fn resolve_signer_account(&self) -> Result<hypersdk::Address, anyhow::Error> {
         let signer = self.resolve_signer()?;
         if !signer.is_stored_agent()
-            && let Some(master) = self.signer_master(&signer).await
+            && let SignerRole::Agent { master } = self.role_of(&signer).await
         {
             return Err(CliError::Unsupported(format!(
                 "the selected signer {} is an API wallet for {master}, which has no account data of its own and would read empty; query the master account instead: pass {master} as the account argument, or select the master wallet",
@@ -343,13 +343,40 @@ impl Invocation {
         Ok(signer.query_address())
     }
 
-    /// The master `signer` is an API wallet of, if its `userRole` says so.
-    async fn signer_master(&self, signer: &SelectedSigner) -> Option<Address> {
-        let remote = self.remote().ok()?;
-        if let Some(known) = remote.signer_master.get() {
-            return *known;
+    /// What the selected signer is to the exchange: the one definition of an
+    /// agent wallet. A stored account that records a master is an agent of it;
+    /// any other key is asked of the exchange (`userRole`), once per run. A
+    /// lookup that fails is [`SignerRole::Unverified`], cached like an answer:
+    /// the role guards are best-effort and never turn a flaky request into a
+    /// refusal.
+    pub async fn signer_role(&self) -> Result<SignerRole, anyhow::Error> {
+        let signer = self.signer_identity()?;
+        Ok(self.role_of(signer).await)
+    }
+
+    /// Whether the selected signer is known, without a request, to sign as an
+    /// agent wallet: the question `master_only` commands and the agent form of
+    /// an action ask, live or dry run, so it cannot wait for the network. The
+    /// master is [`SelectedSigner::query_address`]. A signer that does not
+    /// resolve is not an agent here; the live run reports why it cannot sign.
+    #[must_use]
+    pub fn acts_as_agent(&self) -> bool {
+        self.signer_identity()
+            .is_ok_and(SelectedSigner::is_stored_agent)
+    }
+
+    async fn role_of(&self, signer: &SelectedSigner) -> SignerRole {
+        let known = signer.local_role();
+        if known != SignerRole::Unverified {
+            return known;
         }
-        let master = match remote
+        let Ok(remote) = self.remote() else {
+            return SignerRole::Unverified;
+        };
+        if let Some(role) = remote.signer_role.get() {
+            return *role;
+        }
+        let role = match remote
             .api
             .info::<UserRole>(
                 &InfoRequest::user("userRole", signer.address()),
@@ -357,11 +384,12 @@ impl Invocation {
             )
             .await
         {
-            Ok(UserRole::Agent { user }) => Some(user),
-            Ok(_) | Err(_) => None,
+            Ok(UserRole::Agent { user }) => SignerRole::Agent { master: user },
+            Ok(_) => SignerRole::Master,
+            Err(_) => SignerRole::Unverified,
         };
-        let _ = remote.signer_master.set(master);
-        master
+        let _ = remote.signer_role.set(role);
+        role
     }
 
     /// The address an account selector names, whether a command reads its data
@@ -397,6 +425,7 @@ mod tests {
     use crate::output::JsonRenderOptions;
     use crate::settings::{EnvSource, env};
     use crate::signing::Signs;
+    use hypersdk::Address;
     use tempfile::TempDir;
 
     struct Probe;
@@ -640,5 +669,92 @@ mod tests {
             after_direct * 2,
             "only the SDK's own load ran again, not the raw metadata fallback"
         );
+    }
+
+    /// An invocation signing with `KEY` as a bare private key against a mock
+    /// exchange whose every `/info` reply is `reply`.
+    async fn role_invocation(
+        reply: wiremock::ResponseTemplate,
+    ) -> (wiremock::MockServer, Invocation) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/info"))
+            .respond_with(reply)
+            .mount(&server)
+            .await;
+        let settings =
+            Settings::detached(EnvSource::fixed([(env::API_BASE_URL, server.uri())]), None);
+        let mut flags = InvocationFlags::default();
+        flags.signer.private_key = Some(KEY.to_string());
+        (server, invocation_over(settings, flags, &TRADE))
+    }
+
+    #[tokio::test]
+    async fn a_bare_key_is_an_agent_when_the_exchange_says_so_and_is_asked_once() {
+        use wiremock::ResponseTemplate;
+
+        let (server, inv) = role_invocation(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"role": "agent", "data": {"user": RAW_ADDRESS}})),
+        )
+        .await;
+
+        let master: Address = RAW_ADDRESS.parse().unwrap();
+        assert_eq!(
+            inv.signer_role().await.unwrap(),
+            SignerRole::Agent { master }
+        );
+        assert_eq!(
+            inv.signer_role().await.unwrap(),
+            SignerRole::Agent { master }
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert!(
+            !inv.acts_as_agent(),
+            "the offline answer never waits for the network: a bare key is not known to be an agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_key_the_exchange_calls_a_user_is_a_master() {
+        use wiremock::ResponseTemplate;
+
+        let (_server, inv) = role_invocation(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"role": "user"})),
+        )
+        .await;
+        assert_eq!(inv.signer_role().await.unwrap(), SignerRole::Master);
+    }
+
+    #[tokio::test]
+    async fn a_role_that_cannot_be_read_is_unverified_and_not_asked_again() {
+        use wiremock::ResponseTemplate;
+
+        let (server, inv) = role_invocation(ResponseTemplate::new(404)).await;
+        assert_eq!(inv.signer_role().await.unwrap(), SignerRole::Unverified);
+        let asked = server.received_requests().await.unwrap().len();
+        assert!(asked >= 1);
+
+        assert_eq!(inv.signer_role().await.unwrap(), SignerRole::Unverified);
+        assert_eq!(server.received_requests().await.unwrap().len(), asked);
+        assert!(
+            inv.resolve_signer_account().await.is_ok(),
+            "an unverified role is no reason to refuse a read"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stored_agent_is_known_without_asking_the_exchange() {
+        use wiremock::ResponseTemplate;
+
+        let (server, inv) = role_invocation(ResponseTemplate::new(404)).await;
+        let master: Address = RAW_ADDRESS.parse().unwrap();
+        let agent =
+            SelectedSigner::stored_account(KEY.parse().unwrap(), "agent".to_string(), master);
+        assert_eq!(inv.role_of(&agent).await, SignerRole::Agent { master });
+        assert!(server.received_requests().await.unwrap().is_empty());
     }
 }

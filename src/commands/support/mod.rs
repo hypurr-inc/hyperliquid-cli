@@ -35,7 +35,7 @@ pub(crate) fn print_dry_run_acting_for(
     if inv.command().dry_run_names_signer() {
         envelope = envelope.with_signing(dry_run_signing(inv, vault_address)?);
     }
-    if !inv.command().local {
+    if inv.command().uses_network() {
         envelope = envelope.with_network(inv.remote().ok().map(|remote| remote.network()));
     }
     inv.print_untimed(&envelope);

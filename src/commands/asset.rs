@@ -9,7 +9,8 @@ use crate::assets::asset_id::{
     self, AssetIdLayout, MAX_OUTCOME_SIDE, outcome_coin, outcome_token, split_outcome_encoding,
 };
 use crate::assets::{
-    AssetResolver, OutcomeSideRow, PerpAsset, SpotAsset, load_outcome_sides, normalize_asset_name,
+    AssetResolver, Names, OutcomeCatalog, OutcomeDescription, OutcomeSideRow, PerpAsset, SpotAsset,
+    normalize_asset_name,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::rows::or_missing;
@@ -419,6 +420,17 @@ fn or_warn<T>(what: &str, loaded: Result<T, CliError>) -> Option<T> {
         .ok()
 }
 
+/// The outcome sides with the names the exchange sends: `asset search` and
+/// `asset decode` show template outcomes as `template:<id>`.
+async fn load_outcome_rows(api: &ApiClient) -> Option<Vec<OutcomeSideRow>> {
+    or_warn(
+        "outcome metadata",
+        OutcomeCatalog::load(api, Names::Raw)
+            .await
+            .map(|catalog| catalog.sides),
+    )
+}
+
 async fn search_assets(
     api: &ApiClient,
     network: &str,
@@ -433,7 +445,7 @@ async fn search_assets(
         candidates.extend(search_resolver_assets(resolver, network));
     }
 
-    let outcome_rows = or_warn("outcome metadata", load_outcome_sides(api).await);
+    let outcome_rows = load_outcome_rows(api).await;
     if let Some(rows) = outcome_rows.as_ref() {
         candidates.extend(rows.iter().cloned().filter_map(|row| {
             let asset_id = row.asset_id;
@@ -624,7 +636,7 @@ async fn enrich_outcome(api: &ApiClient, decoded: &mut DecodedAssetId) {
     let Some(encoding) = decoded.encoding else {
         return;
     };
-    let Some(rows) = or_warn("outcome metadata", load_outcome_sides(api).await) else {
+    let Some(rows) = load_outcome_rows(api).await else {
         return;
     };
     let Some(row) = rows.into_iter().find(|row| row.encoding == encoding) else {
@@ -644,89 +656,38 @@ fn apply_outcome_row(decoded: &mut DecodedAssetId, row: OutcomeSideRow) {
     let side_name = row.side_name;
     decoded.side_name = Some(side_name.clone());
     decoded.outcome_name = Some(row.outcome_name.clone());
-    let description = row.description;
-    let parts = parse_outcome_description(&description);
-    decoded.market_title = outcome_market_title(&parts, &side_name, &row.outcome_name);
-    decoded.slug = outcome_slug(&parts, &side_name);
-    decoded.condition = parts.condition;
-    decoded.condition_class = parts.condition_class;
-    decoded.underlying = parts.underlying;
-    decoded.expiry = parts.expiry;
-    decoded.target_price = parts.target_price;
-    decoded.period = parts.period;
-    decoded.description = Some(description);
+    let parsed = OutcomeDescription::parse(&row.description);
+    decoded.market_title = outcome_market_title(&parsed, &side_name, &row.outcome_name);
+    decoded.slug = outcome_slug(&parsed, &side_name);
+    decoded.condition = outcome_condition_summary(&parsed);
+    decoded.condition_class = parsed.class().map(str::to_string);
+    decoded.underlying = parsed.underlying().map(str::to_string);
+    decoded.expiry = parsed.expiry().map(str::to_string);
+    decoded.target_price = parsed.target_price().map(str::to_string);
+    decoded.period = parsed.period().map(str::to_string);
+    decoded.description = Some(row.description);
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct OutcomeDescriptionParts {
-    condition: Option<String>,
-    condition_class: Option<String>,
-    underlying: Option<String>,
-    expiry: Option<String>,
-    target_price: Option<String>,
-    period: Option<String>,
-}
-
-impl OutcomeDescriptionParts {
-    /// `(underlying, target_price, expiry)` of a fully described price-binary market.
-    fn price_binary(&self) -> Option<(&str, &str, &str)> {
-        self.condition_class
-            .as_deref()
-            .filter(|class| class.eq_ignore_ascii_case("priceBinary"))?;
-        Some((
-            self.underlying.as_deref()?,
-            self.target_price.as_deref()?,
-            self.expiry.as_deref()?,
-        ))
-    }
-}
-
-fn parse_outcome_description(description: &str) -> OutcomeDescriptionParts {
-    let mut parts = OutcomeDescriptionParts::default();
-
-    for segment in description.split('|') {
-        let Some((raw_key, raw_value)) = segment.split_once(':') else {
-            continue;
-        };
-        let key = raw_key.trim();
-        let value = raw_value.trim();
-        if value.is_empty() {
-            continue;
-        }
-        match key {
-            "class" => parts.condition_class = Some(value.to_string()),
-            "underlying" => parts.underlying = Some(value.to_string()),
-            "expiry" => parts.expiry = Some(value.to_string()),
-            "targetPrice" | "target_price" => parts.target_price = Some(value.to_string()),
-            "period" => parts.period = Some(value.to_string()),
-            _ => {}
-        }
-    }
-
-    parts.condition = outcome_condition_summary(&parts);
-    parts
-}
-
-fn outcome_condition_summary(parts: &OutcomeDescriptionParts) -> Option<String> {
-    if let Some((underlying, target_price, expiry)) = parts.price_binary() {
+fn outcome_condition_summary(description: &OutcomeDescription) -> Option<String> {
+    if let Some((underlying, target_price, expiry)) = description.price_binary() {
         let expiry = format_expiry_display(expiry).unwrap_or_else(|| expiry.to_string());
         return Some(format!("{underlying} above {target_price} at {expiry}"));
     }
 
     let mut fields = Vec::new();
-    if let Some(condition_class) = parts.condition_class.as_deref() {
+    if let Some(condition_class) = description.class() {
         fields.push(condition_class.to_string());
     }
-    if let Some(underlying) = parts.underlying.as_deref() {
+    if let Some(underlying) = description.underlying() {
         fields.push(format!("underlying={underlying}"));
     }
-    if let Some(target_price) = parts.target_price.as_deref() {
+    if let Some(target_price) = description.target_price() {
         fields.push(format!("target_price={target_price}"));
     }
-    if let Some(expiry) = parts.expiry.as_deref() {
+    if let Some(expiry) = description.expiry() {
         fields.push(format!("expiry={expiry}"));
     }
-    if let Some(period) = parts.period.as_deref() {
+    if let Some(period) = description.period() {
         fields.push(format!("period={period}"));
     }
 
@@ -734,11 +695,11 @@ fn outcome_condition_summary(parts: &OutcomeDescriptionParts) -> Option<String> 
 }
 
 fn outcome_market_title(
-    parts: &OutcomeDescriptionParts,
+    description: &OutcomeDescription,
     side_name: &str,
     fallback_name: &str,
 ) -> Option<String> {
-    if let Some((underlying, target_price, expiry)) = parts.price_binary() {
+    if let Some((underlying, target_price, expiry)) = description.price_binary() {
         let expiry = format_expiry_display(expiry).unwrap_or_else(|| expiry.to_string());
         return Some(format!(
             "{underlying} above {target_price} {side_name} {expiry}"
@@ -748,8 +709,8 @@ fn outcome_market_title(
     (!fallback_name.trim().is_empty()).then(|| fallback_name.to_string())
 }
 
-fn outcome_slug(parts: &OutcomeDescriptionParts, side_name: &str) -> Option<String> {
-    let (underlying, target_price, expiry) = parts.price_binary()?;
+fn outcome_slug(description: &OutcomeDescription, side_name: &str) -> Option<String> {
+    let (underlying, target_price, expiry) = description.price_binary()?;
     let expiry_slug = format_expiry_slug(expiry)?;
     Some(format!(
         "{}-above-{}-{}-{expiry_slug}",

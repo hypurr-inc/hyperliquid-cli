@@ -14,7 +14,7 @@ use super::args::{
 };
 use super::cloid::parse_cloid;
 use super::identifier::{BatchModifyOrder, OrderIdentifier, same_order_error};
-use crate::assets::{Market, PerpAsset};
+use crate::assets::{Market, PerpAsset, perp_price_tick, spot_price_tick};
 use crate::builder_fee::{MaxFeeRate, SubBuilder, parse_sub_builders};
 use crate::errors::CliError;
 use crate::input_hardening::{FilePolicy, read_json_file};
@@ -47,10 +47,6 @@ impl MarketPrecision {
         }
     }
 
-    /// A market whose `szDecimals` exceeds the price's decimal budget (6 for
-    /// perps, 8 for spot) has no decimals left: it takes whole-number prices.
-    /// [`PriceTick`] treats that as an invalid market, so the budget is
-    /// clamped here, once.
     pub(super) fn of_perp(perp: &PerpAsset) -> Self {
         Self::perp(perp.sz_decimals)
     }
@@ -59,14 +55,14 @@ impl MarketPrecision {
     fn perp(sz_decimals: u32) -> Self {
         Self {
             sz_decimals,
-            price_tick: PriceTick::for_perp(i64::from(sz_decimals.min(6))),
+            price_tick: perp_price_tick(i64::from(sz_decimals)),
         }
     }
 
     pub(super) fn spot(sz_decimals: u32) -> Self {
         Self {
             sz_decimals,
-            price_tick: PriceTick::for_spot(i64::from(sz_decimals.min(8))),
+            price_tick: spot_price_tick(i64::from(sz_decimals)),
         }
     }
 

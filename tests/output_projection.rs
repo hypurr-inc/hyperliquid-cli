@@ -1,3 +1,4 @@
+use hyperliquid_cli::assets::DeployerFeeScales;
 use hyperliquid_cli::commands::abstraction::{AbstractionRow, AccountMode};
 use hyperliquid_cli::commands::account::{FillRow, FillsOutput};
 use hyperliquid_cli::commands::meta::{AssetContextRow, DexRow, MetaOutput, MetaSpotRow};
@@ -77,8 +78,7 @@ fn sample_meta_output() -> MetaOutput {
         }],
         vec![DexRow {
             name: "test-dex".to_string(),
-            deployer_fee_scale: None,
-            deployer_fee_scale_by_market: Vec::new(),
+            fees: DeployerFeeScales::default(),
         }],
     )
 }
@@ -276,7 +276,7 @@ fn spread_and_funding_projection_select_requested_fields() {
         spread: dec("1"),
         spread_pct: dec("1"),
     };
-    let spread_rendered = json_session(Some("coin,spread_pct")).render(&spread);
+    let spread_rendered = json_session(Some("coin,spread_pct")).render(&One::new(spread));
     let spread_json: serde_json::Value = serde_json::from_str(&spread_rendered).unwrap();
     assert_eq!(spread_json["coin"], "BTC");
     assert_eq!(spread_json["spread_pct"], "1");
@@ -291,7 +291,8 @@ fn spread_and_funding_projection_select_requested_fields() {
         oracle_price: Some(dec("99")),
         last_funding_time: Some(123),
     };
-    let funding_rendered = json_session(Some("coin,predicted_funding_rate")).render(&funding);
+    let funding_rendered =
+        json_session(Some("coin,predicted_funding_rate")).render(&One::new(funding));
     let funding_json: serde_json::Value = serde_json::from_str(&funding_rendered).unwrap();
     assert_eq!(funding_json["coin"], "BTC");
     assert_eq!(funding_json["predicted_funding_rate"], "0.0002");

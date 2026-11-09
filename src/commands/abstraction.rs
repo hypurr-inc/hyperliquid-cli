@@ -3,11 +3,12 @@
 
 use std::collections::BTreeMap;
 
+use hypersdk::hypercore::AbstractionMode;
 use hypersdk::hypercore::types::{ClearinghouseState, LeverageType};
 use hypersdk::{Address, Decimal};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::assets::load_raw_perp_dexes;
+use crate::assets::{DexMeta, PerpDexList};
 use crate::commands::rows::Row;
 use crate::commands::spot_balances::RawSpotBalance;
 use crate::errors::CliError;
@@ -36,28 +37,47 @@ pub enum AccountMode {
     Unknown,
 }
 
+/// Every known mode with the protocol `userAbstraction` value that names it and
+/// the spelling the CLI shows and accepts. The one place the spellings live.
+const SPELLINGS: [(AccountMode, &str, &str); 5] = [
+    (AccountMode::Unified, "unifiedAccount", "unified-account"),
+    (
+        AccountMode::PortfolioMargin,
+        "portfolioMargin",
+        "portfolio-margin",
+    ),
+    (
+        AccountMode::Standard { is_default: false },
+        "disabled",
+        "disabled",
+    ),
+    (
+        AccountMode::Standard { is_default: true },
+        "default",
+        "default",
+    ),
+    (
+        AccountMode::DexAbstraction,
+        "dexAbstraction",
+        "dex-abstraction",
+    ),
+];
+
 impl AccountMode {
     pub fn parse(raw: &str) -> Self {
-        match raw {
-            "unifiedAccount" => Self::Unified,
-            "portfolioMargin" => Self::PortfolioMargin,
-            "disabled" => Self::Standard { is_default: false },
-            "default" => Self::Standard { is_default: true },
-            "dexAbstraction" => Self::DexAbstraction,
-            _ => Self::Unknown,
-        }
+        SPELLINGS
+            .iter()
+            .find(|(_, protocol, _)| *protocol == raw)
+            .map_or(Self::Unknown, |(mode, _, _)| *mode)
     }
 
-    /// The spelling `account abstraction get` reports.
+    /// The spelling `account abstraction` reports and `account abstraction
+    /// set --mode` takes.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Unified => "unified-account",
-            Self::PortfolioMargin => "portfolio-margin",
-            Self::Standard { is_default: false } => "disabled",
-            Self::Standard { is_default: true } => "default",
-            Self::DexAbstraction => "dex-abstraction",
-            Self::Unknown => "unknown",
-        }
+        SPELLINGS
+            .iter()
+            .find(|(mode, _, _)| *mode == self)
+            .map_or("unknown", |(_, _, cli)| cli)
     }
 
     /// Balances live in the spot clearinghouse state; perp dex user states are
@@ -69,6 +89,14 @@ impl AccountMode {
     /// The exchange itself moves collateral to a HIP-3 dex an order trades on.
     pub fn moves_dex_collateral_itself(self) -> bool {
         self.pools_collateral() || self == Self::DexAbstraction
+    }
+}
+
+impl From<AbstractionMode> for AccountMode {
+    /// Through the SDK's protocol spelling (its `Standard` is `disabled`), so
+    /// a mode is spelled in [`SPELLINGS`] only.
+    fn from(mode: AbstractionMode) -> Self {
+        Self::parse(mode.api_str())
     }
 }
 
@@ -115,32 +143,19 @@ pub struct DexCollateral {
 
 /// The collateral token of the default dex and of every HIP-3 dex.
 pub async fn load_dex_collateral(api: &ApiClient) -> Result<Vec<DexCollateral>, CliError> {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Meta {
-        collateral_token: Option<u32>,
-    }
-
-    let default = api
-        .info::<Meta>(&InfoRequest::new("meta"), "loading perpetual metadata")
-        .await?;
-    let mut dexes = vec![DexCollateral {
+    let default = DexMeta::load(api, None).await?;
+    let dexes = PerpDexList::load(api).await?;
+    let mut collateral = vec![DexCollateral {
         dex: None,
-        token: default.collateral_token.unwrap_or_default(),
+        token: default.collateral_token,
     }];
-    for dex in load_raw_perp_dexes(api).await?.into_iter().flatten() {
-        let meta = api
-            .info::<Meta>(
-                &InfoRequest::new("meta").field("dex", dex.name.clone()),
-                "loading HIP-3 perpetual metadata",
-            )
-            .await?;
-        dexes.push(DexCollateral {
-            dex: Some(dex.name),
-            token: meta.collateral_token.unwrap_or_default(),
+    for (dex, meta) in dexes.metas(api).await? {
+        collateral.push(DexCollateral {
+            dex: Some(dex.name.clone()),
+            token: meta.collateral_token,
         });
     }
-    Ok(dexes)
+    Ok(collateral)
 }
 
 /// How close a unified account is to liquidation, per the account-abstraction
@@ -229,6 +244,22 @@ mod tests {
         ] {
             assert_eq!(AccountMode::parse(raw).as_str(), name, "{raw}");
         }
+    }
+
+    #[test]
+    fn the_sdks_modes_are_the_modes_their_protocol_spelling_names() {
+        for (sdk, name) in [
+            (AbstractionMode::Standard, "disabled"),
+            (AbstractionMode::UnifiedAccount, "unified-account"),
+            (AbstractionMode::PortfolioMargin, "portfolio-margin"),
+        ] {
+            assert_eq!(AccountMode::from(sdk).as_str(), name, "{sdk:?}");
+        }
+        // `default` is a protocol value no SDK mode sets.
+        assert_ne!(
+            AccountMode::from(AbstractionMode::Standard),
+            AccountMode::parse("default")
+        );
     }
 
     #[test]

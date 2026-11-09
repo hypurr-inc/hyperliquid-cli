@@ -86,13 +86,7 @@ pub(super) fn rejected_all(action: &str, failures: &[Rejected]) -> CliError {
     }
     let decisive = distinct
         .iter()
-        .find_map(|(failure, _)| match failure.classify() {
-            Rejection::RateLimited => Some(CliError::rate_limited()),
-            Rejection::AddressRateLimited(remote) => Some(CliError::AddressRateLimited(remote)),
-            Rejection::AuthRejected(remote) => Some(CliError::AuthRejected(remote)),
-            Rejection::SignerNotRegistered(remote) => Some(CliError::SignerNotRegistered(remote)),
-            Rejection::Refused(..) | Rejection::UserState(_) | Rejection::Other(_) => None,
-        });
+        .find_map(|(failure, _)| failure.classify().decisive());
     decisive.unwrap_or_else(|| {
         let lines = distinct
             .iter()

@@ -101,42 +101,6 @@ impl ListRow for PriorityBidRow {
     const EMPTY: &'static str = "No results.";
 }
 
-async fn status(inv: &Invocation) -> Result<(), anyhow::Error> {
-    let status = inv
-        .remote()?
-        .api()
-        .sdk()
-        .gossip_priority_auction_status()
-        .await
-        .map_err(from_sdk)?;
-
-    let rows: Vec<PrioritySlotRow> = status
-        .slots
-        .iter()
-        .enumerate()
-        .map(|(slot, item)| PrioritySlotRow {
-            slot,
-            start_time_seconds: item.start_time_seconds,
-            duration_seconds: item.duration_seconds,
-            start_gas: item.start_gas.to_string(),
-            current_gas: item
-                .current_gas
-                .map_or_else(|| "(no bid)".to_string(), |gas| gas.to_string()),
-            end_gas: item
-                .end_gas
-                .map_or_else(|| MISSING.to_string(), |gas| gas.to_string()),
-            previous_winner: status
-                .prev_winners
-                .get(slot)
-                .and_then(Clone::clone)
-                .unwrap_or_else(|| MISSING.to_string()),
-        })
-        .collect();
-
-    inv.print(&Rows::new(rows));
-    Ok(())
-}
-
 /// The bid cap in wei, once the arguments are known good.
 fn validate_bid_args(args: &BidArgs) -> Result<u64, CliError> {
     if args.ip.trim().is_empty() {
@@ -144,7 +108,7 @@ fn validate_bid_args(args: &BidArgs) -> Result<u64, CliError> {
             "prio bid requires a non-empty --ip".to_string(),
         ));
     }
-    quantity::positive(args.max, HYPE_WEI).map_err(|err| err.config("--max", HYPE_WEI))
+    quantity::units(args.max, HYPE_WEI, "--max")
 }
 
 async fn bid(
@@ -230,7 +194,39 @@ impl CliCommand for PrioStatus {
     );
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
-        status(inv).await
+        let status = inv
+            .remote()?
+            .api()
+            .sdk()
+            .gossip_priority_auction_status()
+            .await
+            .map_err(from_sdk)?;
+
+        let rows: Vec<PrioritySlotRow> = status
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(slot, item)| PrioritySlotRow {
+                slot,
+                start_time_seconds: item.start_time_seconds,
+                duration_seconds: item.duration_seconds,
+                start_gas: item.start_gas.to_string(),
+                current_gas: item
+                    .current_gas
+                    .map_or_else(|| "(no bid)".to_string(), |gas| gas.to_string()),
+                end_gas: item
+                    .end_gas
+                    .map_or_else(|| MISSING.to_string(), |gas| gas.to_string()),
+                previous_winner: status
+                    .prev_winners
+                    .get(slot)
+                    .and_then(Clone::clone)
+                    .unwrap_or_else(|| MISSING.to_string()),
+            })
+            .collect();
+
+        inv.print(&Rows::new(rows));
+        Ok(())
     }
 }
 

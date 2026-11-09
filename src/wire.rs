@@ -80,6 +80,10 @@ pub(crate) enum AddressRole<'a> {
     /// A watched account; the `0x` prefix is optional and the zero address is
     /// allowed. Unsupported error.
     Watched,
+    /// The API wallet an `api-wallet` command approves: the same form and
+    /// error class as a watched account (the zero address included), named for
+    /// what it is.
+    Agent,
 }
 
 /// Parse an address argument as `role` describes.
@@ -106,9 +110,16 @@ pub(crate) fn address(raw: &str, role: AddressRole<'_>) -> Result<Address, CliEr
                 CliError::Configuration(format!("{subject} address must not be the zero address"))
             }
         }),
-        AddressRole::Watched => parse_hex_address(raw, false)
+        AddressRole::Watched | AddressRole::Agent => parse_hex_address(raw, false)
             .map_err(|_| CliError::Unsupported(format!("Invalid address: {raw}"))),
     }
+}
+
+/// `selector` as an address when it is one. A selector (`--account`,
+/// `--ows-signer`, an account argument) is an address or a wallet name, so a
+/// text that is no address is not an error here but a name.
+pub(crate) fn selector_address(selector: &str) -> Option<Address> {
+    parse_hex_address(selector, false).ok()
 }
 
 #[cfg(test)]
@@ -183,5 +194,21 @@ mod tests {
 
         assert_eq!(class("nope", AddressRole::Watched), 13);
         assert!(address(zero, AddressRole::Watched).is_ok());
+
+        assert_eq!(class("nope", AddressRole::Agent), 13);
+        assert_eq!(
+            address("nope", AddressRole::Agent).unwrap_err().to_string(),
+            "Unsupported input: Invalid address: nope"
+        );
+        assert!(address(zero, AddressRole::Agent).is_ok());
+        assert!(address(bare, AddressRole::Agent).is_ok());
+    }
+
+    #[test]
+    fn a_selector_is_an_address_or_a_name() {
+        assert!(selector_address(ADDRESS).is_some());
+        assert!(selector_address(&ADDRESS[2..]).is_some());
+        assert_eq!(selector_address("main"), None);
+        assert_eq!(selector_address(""), None);
     }
 }

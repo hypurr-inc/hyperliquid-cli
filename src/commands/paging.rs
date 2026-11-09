@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::output;
+use crate::output::Notice;
 use crate::wire::InfoRequest;
 
 /// `--all` stops after this many requests even if the API still answers full pages.
@@ -47,21 +47,26 @@ pub(crate) const FUNDING_HISTORY: Endpoint = Endpoint {
     label: "funding rates",
     cap: 500,
 };
-/// `userFills` has no time window: it answers the most recent rows only.
-pub(crate) const USER_FILLS_RECENT: Endpoint = Endpoint {
-    label: "fills",
-    cap: 2000,
-};
+/// `userFills` has no time window: it answers the most recent rows only, up to
+/// the same page size as the windowed read.
+pub(crate) const USER_FILLS_RECENT: Endpoint = USER_FILLS_BY_TIME;
 
-/// The rows read and, when the window held more than they cover, where to
-/// continue.
+/// What lies beyond the rows a read returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum More {
+    Nothing,
+    /// A full page: later rows may exist from this `--start`.
+    From(u64),
+    /// A full page of a request that cannot be continued (no time window), so
+    /// there is no `--start` to name.
+    Unwindowed,
+}
+
+/// The rows read and what lies beyond them.
 #[derive(Debug)]
 pub(crate) struct Window {
     pub rows: Vec<Value>,
-    pub more_from: Option<u64>,
-    /// The response was a full page of a request that cannot be continued
-    /// (no time window), so `more_from` has no value to name.
-    pub capped_without_window: bool,
+    more: More,
 }
 
 /// Read the window starting at `start`: one page, or every page under `all`.
@@ -87,15 +92,13 @@ pub(crate) async fn read_window(
         let Some(last) = last.filter(|_| full) else {
             return Ok(Window {
                 rows,
-                more_from: None,
-                capped_without_window: false,
+                more: More::Nothing,
             });
         };
         if !all {
             return Ok(Window {
                 rows,
-                more_from: Some(last),
-                capped_without_window: false,
+                more: More::From(last),
             });
         }
         // A page that added nothing new sits wholly inside one millisecond that
@@ -113,9 +116,11 @@ pub(crate) async fn read_window(
         };
     }
     Ok(Window {
-        more_from: rows.last().and_then(row_time),
+        more: rows
+            .last()
+            .and_then(row_time)
+            .map_or(More::Nothing, More::From),
         rows,
-        capped_without_window: false,
     })
 }
 
@@ -131,12 +136,12 @@ pub(crate) async fn read_recent(
     context: &'static str,
 ) -> Result<Window, CliError> {
     let rows: Vec<Value> = api.info(request, context).await?;
-    let capped = rows.len() >= endpoint.cap;
-    Ok(Window {
-        rows,
-        more_from: None,
-        capped_without_window: capped,
-    })
+    let more = if rows.len() >= endpoint.cap {
+        More::Unwindowed
+    } else {
+        More::Nothing
+    };
+    Ok(Window { rows, more })
 }
 
 /// Say on stderr that `window` stopped at the API's cap. A person reads one
@@ -149,8 +154,8 @@ pub(crate) fn announce_truncation(
     all: bool,
 ) {
     let returned = window.rows.len();
-    let (message, next_start) = match (window.more_from, window.capped_without_window) {
-        (Some(next), _) if all => (
+    let (message, next_start) = match window.more {
+        More::From(next) if all => (
             format!(
                 "Stopped --all after {MAX_PAGES} requests with {returned} {label}; more remain. \
                  Continue with --start {next} (rows at that exact millisecond may repeat).",
@@ -158,7 +163,7 @@ pub(crate) fn announce_truncation(
             ),
             Some(next),
         ),
-        (Some(next), _) => (
+        More::From(next) => (
             format!(
                 "Returned {returned} {label}, the API's per-request limit, so later ones may exist. \
                  Continue with --start {next} (rows at that exact millisecond may repeat) or pass --all.",
@@ -166,7 +171,7 @@ pub(crate) fn announce_truncation(
             ),
             Some(next),
         ),
-        (None, true) => (
+        More::Unwindowed => (
             format!(
                 "Returned the {returned} most recent {label}, the API's per-request limit, so earlier ones are not shown. \
                  Pass --start to page through a time window.",
@@ -174,24 +179,15 @@ pub(crate) fn announce_truncation(
             ),
             None,
         ),
-        (None, false) => return,
+        More::Nothing => return,
     };
-    if inv.mode().machine_format() {
-        eprintln!(
-            "{}",
-            serde_json::json!({
-                "warning": {
-                    "code": "truncated",
-                    "message": message,
-                    "returned": returned,
-                    "cap": endpoint.cap,
-                    "next_start": next_start,
-                }
-            })
-        );
-    } else {
-        output::warn(&message);
+    Notice::Truncated {
+        message,
+        returned,
+        cap: endpoint.cap,
+        next_start,
     }
+    .eprint(inv.mode().machine_format());
 }
 
 #[cfg(test)]
