@@ -3,7 +3,7 @@ use serde_json::{Map, Value};
 
 use crate::assets::{DeployerFeeScales, PerpDexList, SpotListing, load_spot_markets};
 use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
-use crate::commands::rows::MISSING;
+use crate::commands::common::rows::MISSING;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;

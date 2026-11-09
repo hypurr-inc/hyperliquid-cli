@@ -12,11 +12,11 @@ use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, YES_FOR_AUTOMATION, arg};
-use crate::commands::actions::send_l1_action;
-use crate::commands::rows::{One, Row};
-use crate::commands::support::print_dry_run;
+use crate::commands::common::rows::{One, Row};
+use crate::commands::common::support::print_dry_run;
 use crate::consent::{self, ConsentBlock};
 use crate::errors::CliError;
+use crate::exchange::actions::send_l1_action;
 use crate::invocation::Invocation;
 use crate::wire::{AddressRole, address};
 

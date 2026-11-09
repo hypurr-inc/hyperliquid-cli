@@ -14,11 +14,13 @@ use crate::assets::{AssetResolver, PerpAsset};
 use crate::command_spec::{
     ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg,
 };
-use crate::commands::actions;
-use crate::commands::rows::{ListRow, MISSING, Row, Rows, or_missing, style_column};
-use crate::commands::support::{print_dry_run_acting_for, resolve_optional_acting_account_target};
+use crate::commands::common::rows::{ListRow, MISSING, Row, Rows, or_missing, style_column};
+use crate::commands::common::support::{
+    print_dry_run_acting_for, resolve_optional_acting_account_target,
+};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
+use crate::exchange::actions;
 use crate::hints::update_leverage_command;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;

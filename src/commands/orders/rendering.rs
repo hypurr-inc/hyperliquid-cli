@@ -7,7 +7,7 @@ use super::args::TpslGroupingArg;
 use super::exchange::{Placement, Rejected, status_error};
 use super::prepared::{PreparedOrder, PreparedTpslLeg};
 use super::status::Status;
-use crate::commands::rows::{ListRow, Row};
+use crate::commands::common::rows::{ListRow, Row};
 use crate::errors::{CliError, NextCommand, partial_results_fields};
 use crate::hints::CHECK_LIVE_COMMAND;
 use crate::output::{self, TableData};

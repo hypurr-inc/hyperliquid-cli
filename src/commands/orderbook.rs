@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::assets::{AssetResolver, Market, canonical_dex};
 use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
-use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
+use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;

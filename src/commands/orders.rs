@@ -6,8 +6,8 @@ use chrono::Utc;
 use hypersdk::hypercore::types::{Action, OrderResponseStatus, ScheduleCancel};
 
 use crate::assets::{AssetResolver, PerpAsset};
-use crate::commands::actions;
 use crate::errors::CliError;
+use crate::exchange::actions;
 use crate::invocation::Invocation;
 use crate::margin::MarginPlan;
 use crate::output::{self, TableData};
@@ -292,8 +292,8 @@ async fn cancel(
 }
 
 /// A single-row result, as the table and the JSON array the order commands print.
-fn rendering_rows<T>(row: T) -> crate::commands::rows::Rows<T> {
-    crate::commands::rows::Rows::new(vec![row])
+fn rendering_rows<T>(row: T) -> crate::commands::common::rows::Rows<T> {
+    crate::commands::common::rows::Rows::new(vec![row])
 }
 
 async fn cancel_all(

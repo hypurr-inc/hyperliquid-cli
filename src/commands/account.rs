@@ -5,19 +5,19 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::{AssetPosition, ClearinghouseState, SubAccount, UserVaultEquity};
 use serde::{Deserialize, Serialize};
 
+use crate::account_mode::{AccountMode, fetch_abstraction};
 use crate::assets::{AssetResolver, canonical_dex};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::commands::abstraction::{AccountMode, fetch_abstraction};
+use crate::commands::common::paging::{self, Endpoint};
+use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing, style_column};
+use crate::commands::common::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::orders;
-use crate::commands::paging::{self, Endpoint};
 use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
-use crate::commands::rows::{ListRow, One, Row, Rows, or_missing, style_column};
-use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
-use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
 use crate::output::{JsonValueOutput, TableData};
+use crate::spot_balances::{RawSpotBalance, user_spot_balances_raw};
 use crate::wire::InfoRequest;
 
 #[derive(Args, Debug, Clone)]
@@ -1239,6 +1239,26 @@ impl CliCommand for AccountTwapFills {
     }
 }
 
+/// `account abstraction`: the mode `userAbstraction` reports for `user`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AbstractionRow {
+    pub user: String,
+    pub raw_mode: String,
+    pub normalized_mode: AccountMode,
+}
+
+impl Row for AbstractionRow {
+    const HEADERS: &'static [&'static str] = &["User", "Mode", "Raw Mode"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.user.clone(),
+            self.normalized_mode.as_str().to_string(),
+            self.raw_mode.clone(),
+        ]
+    }
+}
+
 pub struct AccountAbstraction;
 
 impl CliCommand for AccountAbstraction {
@@ -1254,8 +1274,12 @@ impl CliCommand for AccountAbstraction {
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
         let user = args.resolve(inv).await?;
-        let row = fetch_abstraction(inv.remote()?.api(), user).await?;
-        inv.print(&One::new(row));
+        let abstraction = fetch_abstraction(inv.remote()?.api(), user).await?;
+        inv.print(&One::new(AbstractionRow {
+            user: user.to_string(),
+            raw_mode: abstraction.raw_mode,
+            normalized_mode: abstraction.normalized_mode,
+        }));
         Ok(())
     }
 }

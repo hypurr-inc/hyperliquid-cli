@@ -9,8 +9,8 @@ use crate::assets::{
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::account::parse_time_millis;
-use crate::commands::paging;
-use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
+use crate::commands::common::paging;
+use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::wire::InfoRequest;
