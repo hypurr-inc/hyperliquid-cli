@@ -5,6 +5,7 @@ use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, YES, arg};
 use crate::commands::common::rows::{ListRow, Row, Rows};
+use crate::commands::common::subaccount_list;
 use crate::commands::common::support::print_dry_run;
 use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
@@ -495,7 +496,7 @@ impl CliCommand for SubaccountList {
 
     async fn run(inv: &Invocation, args: &SubaccountListArgs) -> Result<(), anyhow::Error> {
         let user = inv.resolve_user(args.address.as_deref()).await?;
-        crate::commands::account::subaccounts(inv, user).await
+        subaccount_list::subaccounts(inv, user).await
     }
 }
 

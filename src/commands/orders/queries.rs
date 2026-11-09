@@ -4,8 +4,8 @@ use serde::Deserialize;
 
 use super::args::StatusArgs;
 use super::cloid::{cloid_text, parse_lookup_cloid};
-use super::rendering::{OrderListOutput, OrderListRow};
 use crate::assets::AssetResolver;
+use crate::commands::common::order_list::{OrderListOutput, display_row, open_orders_output};
 use crate::errors::{CliError, from_sdk};
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
@@ -20,50 +20,6 @@ pub(super) async fn open(
 ) -> Result<(), anyhow::Error> {
     inv.print(&open_orders_output(inv.remote()?.api(), resolver, user, dex).await?);
     Ok(())
-}
-
-/// An open order as `frontendOpenOrders` lists it: the SDK's order plus the
-/// child TP/SL orders it drops.
-#[derive(Debug, Deserialize)]
-struct FrontendOrder {
-    #[serde(flatten)]
-    order: BasicOrder,
-    #[serde(default)]
-    children: Vec<FrontendOrder>,
-}
-
-impl FrontendOrder {
-    fn into_row(self, resolver: &AssetResolver) -> OrderListRow {
-        let children = self
-            .children
-            .into_iter()
-            .map(|child| child.into_row(resolver))
-            .collect();
-        display_row(resolver, self.order).with_children(children)
-    }
-}
-
-/// Fetch an account's open orders, trigger fields and TP/SL children
-/// included, without printing them. `account orders` and `orders open` list
-/// the same rows.
-pub async fn open_orders_output(
-    api: &ApiClient,
-    resolver: &AssetResolver,
-    user: Address,
-    dex: Option<&str>,
-) -> Result<OrderListOutput, anyhow::Error> {
-    let request =
-        InfoRequest::user("frontendOpenOrders", user).field_if("dex", dex.map(str::to_string));
-    let orders = api
-        .info::<Vec<FrontendOrder>>(&request, "loading open orders")
-        .await?;
-    Ok(OrderListOutput::from_rows(
-        orders
-            .into_iter()
-            .map(|order| order.into_row(resolver))
-            .collect(),
-        "No open orders.",
-    ))
 }
 
 pub(super) async fn status(
@@ -110,10 +66,6 @@ pub(super) async fn history(
 
     inv.print(&OrderListOutput::from_rows(rows, "No historical orders."));
     Ok(())
-}
-
-fn display_row(resolver: &AssetResolver, order: BasicOrder) -> OrderListRow {
-    OrderListRow::from(order).with_display_coin(&|coin| resolver.display_coin(coin))
 }
 
 /// An order from `historicalOrders` with its status and the time it took it.

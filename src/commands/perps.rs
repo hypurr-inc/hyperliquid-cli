@@ -8,9 +8,9 @@ use crate::assets::{
     parse_asset_query, perp_price_tick, qualify_dex_asset,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::commands::common::time_range::{parse_time_millis, validate_optional_time_range};
 use crate::commands::common::paging;
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
+use crate::commands::common::time_range::{parse_time_millis, validate_optional_time_range};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::wire::InfoRequest;

@@ -727,12 +727,15 @@ pub(super) async fn prepare_position_tpsl_batch(
         ClosingSize::Fixed { side, size } => {
             let entry =
                 if trigger_specs_need_entry(spec.take_profit.as_ref(), spec.stop_loss.as_ref()) {
-                    let position = find_position(client, user, perp, true).await?.ok_or_else(|| {
-                        CliError::Unsupported(format!(
-                            "percent and entry TP/SL require an open {} position",
-                            perp.name
-                        ))
-                    })?;
+                    let position =
+                        find_position(client, user, perp, true)
+                            .await?
+                            .ok_or_else(|| {
+                                CliError::Unsupported(format!(
+                                    "percent and entry TP/SL require an open {} position",
+                                    perp.name
+                                ))
+                            })?;
                     position.position.entry_px
                 } else {
                     None

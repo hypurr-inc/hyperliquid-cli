@@ -8,8 +8,8 @@
 
 use std::fmt;
 
-use hypersdk::{Address, Decimal};
 use hypersdk::hypercore::types::{AssetPosition, LeverageType, PositionData};
+use hypersdk::{Address, Decimal};
 use serde::{Serialize, Serializer};
 
 use crate::assets::PerpAsset;

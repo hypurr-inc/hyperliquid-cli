@@ -7,10 +7,14 @@
 //! in [`crate::exchange`], and a domain fact about accounts or markets in a
 //! module under the crate root.
 
+pub(crate) mod borrow_lend_state;
 pub(crate) mod issue_report;
+pub(crate) mod market_input;
+pub(crate) mod order_list;
 pub(crate) mod paging;
 pub(crate) mod position;
 pub mod rows;
 pub mod selector;
+pub(crate) mod subaccount_list;
 pub(crate) mod support;
 pub(crate) mod time_range;

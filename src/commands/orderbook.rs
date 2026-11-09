@@ -8,9 +8,12 @@ use hypersdk::hypercore::{
 };
 use serde::Serialize;
 
-use crate::assets::{AssetResolver, Market, canonical_dex};
+use crate::assets::canonical_dex;
 use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
+use crate::commands::common::market_input::{
+    parse_candle_interval, resolve_market_coin, resolve_perp_coin_or_fetch,
+};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -23,15 +26,8 @@ use crate::stream_bounds::StreamBound;
 use crate::ws::{Awaited, BookAggregationArgs, first_matching_message};
 
 const WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(15);
-const VALID_INTERVALS: &str = "1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M";
 /// How far back `funding` looks for the latest paid funding rate.
 const FUNDING_LOOKBACK: Duration = Duration::from_secs(24 * 60 * 60);
-
-pub fn parse_candle_interval(input: &str) -> Result<CandleInterval, String> {
-    input
-        .parse::<CandleInterval>()
-        .map_err(|_| format!("invalid interval '{input}'. Valid intervals: {VALID_INTERVALS}"))
-}
 
 pub fn parse_candle_limit(input: &str) -> Result<usize, String> {
     let limit = input
@@ -500,41 +496,6 @@ fn spread_row_from_book(coin: &str, book: &L2Book) -> Result<SpreadRow, CliError
     })
 }
 
-/// The info-endpoint coin a data command subscribes to or queries for `market`.
-fn market_info_coin(market: Market, input: &str) -> Result<String, CliError> {
-    match market {
-        Market::Perp(perp) => Ok(perp.display_name()),
-        Market::Spot(spot) => Ok(spot.info_coin()),
-        Market::Outcome(_) => Err(CliError::unsupported_outcome_notation(input)),
-    }
-}
-
-/// Resolve a perpetual, fetching the market when it belongs to another dex.
-pub(crate) async fn resolve_perp_coin_or_fetch(
-    client: &ApiClient,
-    resolver: &AssetResolver,
-    coin: &str,
-) -> Result<String, CliError> {
-    Ok(resolver
-        .resolve_perp_or_fetch(client, coin)
-        .await
-        .map_err(CliError::from)?
-        .display_name())
-}
-
-/// Resolve any market for a data command, fetching a HIP-3 market when needed.
-pub(crate) async fn resolve_market_coin(
-    client: &ApiClient,
-    resolver: &AssetResolver,
-    coin: &str,
-) -> Result<String, CliError> {
-    let market = resolver
-        .resolve_or_fetch(client, coin)
-        .await
-        .map_err(CliError::from)?;
-    market_info_coin(market, coin)
-}
-
 async fn fetch_l2_book(
     chain: Chain,
     coin: &str,
@@ -858,27 +819,11 @@ async fn watch_candles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assets::AssetMetadata;
-    use crate::assets::test_support::{perp, spot};
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
     fn dec(input: &str) -> Decimal {
         Decimal::from_str(input).unwrap()
-    }
-
-    fn resolve_book_coin(resolver: &AssetResolver, coin: &str) -> Result<String, CliError> {
-        market_info_coin(resolver.resolve(coin).map_err(CliError::from)?, coin)
-    }
-
-    fn fixture_resolver() -> AssetResolver {
-        AssetResolver::new(AssetMetadata::from_assets(
-            vec![perp("BTC", 0), perp("ETH", 1)],
-            vec![
-                spot("PURR/USDC", 10_000, "PURR", "USDC"),
-                spot("HYPE/USDC", 11_035, "HYPE", "USDC"),
-            ],
-        ))
     }
 
     #[test]
@@ -910,28 +855,6 @@ mod tests {
 
         assert_eq!(rows[0].depth, dec("1"));
         assert_eq!(rows[1].depth, dec("3.5"));
-    }
-
-    #[test]
-    fn book_coin_resolves_to_the_info_api_name_of_each_market_kind() {
-        let resolver = fixture_resolver();
-
-        assert_eq!(resolve_book_coin(&resolver, "btc").unwrap(), "BTC");
-        assert_eq!(
-            resolve_book_coin(&resolver, "purr/usdc").unwrap(),
-            "PURR/USDC"
-        );
-        assert_eq!(resolve_book_coin(&resolver, "hype/usdc").unwrap(), "@1035");
-    }
-
-    #[test]
-    fn book_resolution_rejects_outcome_notation_with_outcome_guidance() {
-        let resolver = fixture_resolver();
-        let err = resolve_book_coin(&resolver, "#10").unwrap_err();
-
-        assert_eq!(err.exit_code(), 13);
-        assert!(err.to_string().contains("outcome-aware command path"));
-        assert!(err.to_string().contains("outcomes get #10"));
     }
 
     #[test]

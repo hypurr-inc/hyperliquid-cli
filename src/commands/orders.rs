@@ -56,8 +56,6 @@ use planning::{
     prepare_position_tpsl_batch,
 };
 use prepared::{CreateOrderSubmission, PreparedOrder, PreparedOrderBatch, PreparedTpslBatch};
-pub use queries::open_orders_output;
-pub use rendering::OrderListOutput;
 use rendering::{
     BatchVerb, CancelAllSummary, CancelConfirmation, CancelLeg, Legs, ModifyLeg, OrderConfirmation,
     PartialBatchOutput, ScheduleCancelConfirmation, TpslOrderConfirmation, TwapCancelConfirmation,

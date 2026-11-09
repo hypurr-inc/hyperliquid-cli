@@ -51,6 +51,27 @@ pub fn or_missing(value: Option<impl ToString>) -> String {
     value.map_or_else(|| MISSING.to_string(), |value| value.to_string())
 }
 
+/// Paint the cell under `header` of every row `applies` to, leaving the rows
+/// alone when the table has no such column.
+pub fn paint_column(
+    headers: &[&str],
+    mut rows: Vec<Vec<String>>,
+    header: &str,
+    applies: fn(&str) -> bool,
+    paint: fn(&str) -> String,
+) -> Vec<Vec<String>> {
+    if let Some(column) = headers.iter().position(|name| *name == header) {
+        for row in &mut rows {
+            if let Some(cell) = row.get_mut(column)
+                && applies(cell)
+            {
+                *cell = paint(cell);
+            }
+        }
+    }
+    rows
+}
+
 /// A list of rows: a JSON array and a table.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rows<T> {
