@@ -299,6 +299,13 @@ mod tests {
                     .any(|arg| arg.get_id() == id && arg.get_long().is_some()),
                 "{id} is not a global long option"
             );
+            let redacted = hyperliquid_cli::input_hardening::redact_sensitive_json(
+                serde_json::json!({ *id: "value" }),
+            );
+            assert_eq!(
+                redacted[*id], "[redacted]",
+                "{id} escapes payload redaction"
+            );
         }
     }
 
