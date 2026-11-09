@@ -185,7 +185,7 @@ pub(crate) fn announce_truncation(inv: &Invocation, window: &Window) {
         cap: endpoint.cap,
         next_start,
     }
-    .eprint(inv.mode().machine_format());
+    .eprint_as(inv.mode().machine_format());
 }
 
 #[cfg(test)]

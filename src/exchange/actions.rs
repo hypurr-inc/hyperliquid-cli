@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use crate::clock;
 use crate::errors::{self, CliError};
 use crate::exchange_reply::{self, Reply};
+use crate::hints;
 use crate::http_api::ApiClient;
 use crate::response_sanitization::Untrusted;
 use crate::signing::{SelectedSigner, Signs, USER_SIGNED_PREFIX, ensure_supports_expires_after};
@@ -281,10 +282,10 @@ fn name_unknown_outcome(err: CliError, sent: Sent, chain: Chain) -> CliError {
         .expires_after
         .map(|ms| format!(", expiring at {ms}"))
         .unwrap_or_default();
-    let network = if chain.is_mainnet() { "" } else { " --testnet" };
+    let nonce = sent.nonce;
     CliError::UnknownOutcome(format!(
-        "{cause} It was signed with nonce {nonce}{expiry}. If it may still be in flight, burn the nonce with the same signer: hyperliquid{network} account invalidate-nonce --nonce {nonce}",
-        nonce = sent.nonce
+        "{cause} It was signed with nonce {nonce}{expiry}. If it may still be in flight, burn the nonce with the same signer: {}",
+        hints::invalidate_nonce_command(!chain.is_mainnet(), nonce),
     ))
 }
 

@@ -8,7 +8,7 @@ use super::release::{
 };
 use crate::errors::CliError;
 use crate::invocation::Invocation;
-use crate::output::TableData;
+use crate::output::{TableData, sink};
 use crate::private_fs;
 use crate::terminal::OutputFormat;
 
@@ -263,12 +263,12 @@ impl TableData for UpdateResult {
 fn print_update_result(inv: &Invocation, result: &UpdateResult) {
     match inv.format() {
         OutputFormat::Json | OutputFormat::Table => inv.print_untimed(result),
-        OutputFormat::Pretty => match result.status {
-            "updated" => println!("Updated hyperliquid {} -> {}", result.from, result.to),
-            "would_update" => println!("Would update hyperliquid {} -> {}", result.from, result.to),
-            "up_to_date" => println!("hyperliquid is up to date ({})", result.from),
-            status => println!("hyperliquid update status: {status}"),
-        },
+        OutputFormat::Pretty => sink::out_line(&match result.status {
+            "updated" => format!("Updated hyperliquid {} -> {}", result.from, result.to),
+            "would_update" => format!("Would update hyperliquid {} -> {}", result.from, result.to),
+            "up_to_date" => format!("hyperliquid is up to date ({})", result.from),
+            status => format!("hyperliquid update status: {status}"),
+        }),
     }
 }
 

@@ -17,7 +17,6 @@ use crate::config::{BankrLogin, Config, ConfigFile};
 use crate::env::{self, EnvSource, nonblank};
 use crate::errors::CliError;
 use crate::network::{Network, is_loopback_url};
-use crate::output::Notice;
 use crate::private_fs::FileLock;
 
 const TESTNET_REFERRAL_FALLBACK: &str = "TESTNET";
@@ -234,9 +233,8 @@ impl Settings {
     fn note_parsed(&self, file: &ConfigFile, has_plaintext_key: bool) {
         if let Some(announced) = &self.hygiene {
             announced.call_once(|| {
-                let lines = file.hygiene_warnings(has_plaintext_key);
-                if !lines.is_empty() {
-                    Notice::Advice(lines).eprint(false);
+                for notice in file.hygiene_warnings(has_plaintext_key) {
+                    notice.eprint();
                 }
             });
         }

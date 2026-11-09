@@ -221,9 +221,10 @@ fn replay_command(args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Cli;
     use crate::cli_shell::try_parse_cli_from;
-    use crate::{Cli, SECRET_GLOBALS};
     use clap::CommandFactory;
+    use hyperliquid_cli::auth::SignerFlags;
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_string()).collect()
@@ -263,19 +264,16 @@ mod tests {
     #[test]
     fn global_secret_ids_are_global_options() {
         let cli = Cli::command();
-        for id in SECRET_GLOBALS {
+        for id in SignerFlags::SECRET {
             assert!(
                 cli.get_arguments()
                     .any(|arg| arg.get_id() == id && arg.get_long().is_some()),
                 "{id} is not a global long option"
             );
             let redacted = hyperliquid_cli::input_hardening::redact_sensitive_json(
-                serde_json::json!({ *id: "value" }),
+                serde_json::json!({ id: "value" }),
             );
-            assert_eq!(
-                redacted[*id], "[redacted]",
-                "{id} escapes payload redaction"
-            );
+            assert_eq!(redacted[id], "[redacted]", "{id} escapes payload redaction");
         }
     }
 

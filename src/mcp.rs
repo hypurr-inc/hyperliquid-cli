@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use crate::command_registry::{ArgType, CommandContract, CommandRegistry};
 use crate::command_spec::YES_ARG;
-use crate::env::{self, EnvSource};
+use crate::env::{self, EnvFlag, EnvSource};
 use crate::errors::CliError;
-use crate::mode::env_enabled;
+use crate::output::sink;
 
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 
@@ -94,7 +94,8 @@ struct McpSettings {
 impl McpSettings {
     fn from_env(source: &EnvSource) -> Result<Self, CliError> {
         Ok(Self {
-            allow_unsafe: env_enabled(source, env::MCP_ALLOW_UNSAFE)?,
+            // An unreadable value never gets here: `Mode::resolve` refuses it at startup.
+            allow_unsafe: env::flag(source, env::MCP_ALLOW_UNSAFE) == EnvFlag::On,
             deadline: match source.get(env::MCP_TIMEOUT_MS) {
                 None => DEFAULT_DEADLINE,
                 Some(raw) => parse_deadline(&raw)?,
@@ -121,10 +122,10 @@ fn parse_deadline(raw: &str) -> Result<Duration, CliError> {
 /// ends the server; any other write failure is an error.
 fn write_response(out: &mut impl Write, response: &JsonRpcResponse) -> Result<bool, anyhow::Error> {
     let line = serde_json::to_string(response)?;
-    match writeln!(out, "{line}").and_then(|()| out.flush()) {
+    match sink::write_line(out, &line) {
         Ok(()) => Ok(true),
-        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
-        Err(err) => Err(err.into()),
+        Err(err) if sink::is_stdout_closed(&err) => Ok(false),
+        Err(err) => Err(err),
     }
 }
 
@@ -505,7 +506,6 @@ mod tests {
             ("HYPERLIQUID_MCP_TIMEOUT_MS", "0"),
             ("HYPERLIQUID_MCP_TIMEOUT_MS", "-5"),
             ("HYPERLIQUID_MCP_TIMEOUT_MS", ""),
-            ("HYPERLIQUID_MCP_ALLOW_UNSAFE", "maybe"),
         ] {
             let err = settings_from(&[(name, value)]).unwrap_err();
             assert_eq!(err.exit_code(), 2, "{name}={value:?}");

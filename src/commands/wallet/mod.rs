@@ -26,7 +26,7 @@ use crate::hints::wallet::{
 };
 use crate::invocation::Invocation;
 use crate::mode::Mode;
-use crate::output as out;
+use crate::output::{self as out, Notice, sink};
 use crate::ows::WalletSource;
 use crate::ows::vault::{HyperliquidAccount, Vault};
 use crate::prompt;
@@ -86,7 +86,7 @@ fn no_stored_accounts_error() -> CliError {
 /// Fill the builder and referral defaults the config lacks. A default that
 /// fails validation must not block wallet creation, so it is skipped and
 /// reported in the returned warnings.
-fn apply_setup_defaults(config: &mut Config, settings: &Settings) -> Vec<String> {
+fn apply_setup_defaults(config: &mut Config, settings: &Settings) -> Vec<Notice> {
     let mut skipped = Vec::new();
     if !config.has_builder_default() {
         match builder_fee::suggested_default_builder(settings) {
@@ -95,7 +95,9 @@ fn apply_setup_defaults(config: &mut Config, settings: &Settings) -> Vec<String>
                 config.default_builder_fee_rate = Some(fee);
             }
             Ok(None) => {}
-            Err(err) => skipped.push(format!("! Not saving a default builder: {err}")),
+            Err(err) => skipped.push(Notice::advice(format!(
+                "Not saving a default builder: {err}"
+            ))),
         }
     }
     if !config.has_referral_default() {
@@ -103,7 +105,9 @@ fn apply_setup_defaults(config: &mut Config, settings: &Settings) -> Vec<String>
         {
             Ok(Some(code)) => config.default_referral_code = Some(code),
             Ok(None) => {}
-            Err(err) => skipped.push(format!("! Not saving a default referral code: {err}")),
+            Err(err) => skipped.push(Notice::advice(format!(
+                "Not saving a default referral code: {err}"
+            ))),
         }
     }
     skipped
@@ -112,15 +116,16 @@ fn apply_setup_defaults(config: &mut Config, settings: &Settings) -> Vec<String>
 fn adopt_as_default(settings: &Settings) -> ConfigEdit<'_> {
     Box::new(move |config, wallet, _| {
         for warning in apply_setup_defaults(config, settings) {
-            eprintln!("{warning}");
+            warning.eprint();
         }
         if let Some(previous) = config.default_wallet_id.as_deref()
             && previous != wallet.id
         {
-            eprintln!(
-                "! Default wallet changed from '{previous}' to '{}'.",
+            Notice::advice(format!(
+                "Default wallet changed from '{previous}' to '{}'.",
                 wallet.id
-            );
+            ))
+            .eprint();
         }
         WalletStore::make_default(config, wallet);
     })
@@ -479,8 +484,11 @@ pub fn account_remove(
     }
     store.remove(&wallet, is_default)?;
     if is_default {
-        eprintln!("! The deleted wallet was the default. Pick another:");
-        eprintln!("    {SET_DEFAULT}");
+        Notice::Advice {
+            headline: "The deleted wallet was the default. Pick another:".to_string(),
+            lines: vec![format!("    {SET_DEFAULT}")],
+        }
+        .eprint();
     }
     inv.print_untimed(&WalletReceipt::new(
         inv,
@@ -519,9 +527,9 @@ pub fn export(inv: &Invocation, selector: &str, yes: bool) -> Result<(), anyhow:
     out::warn("this output contains a plaintext private key or mnemonic. Do not share or log it.");
 
     if inv.format() == OutputFormat::Json {
-        println!("{:#}", serde_json::json!({"secret": secret}));
+        sink::out_line(&format!("{:#}", serde_json::json!({"secret": secret})));
     } else {
-        println!("{secret}");
+        sink::out_line(&secret);
     }
     Ok(())
 }
@@ -530,12 +538,12 @@ fn print_wallet_choices(choices: &[(WalletInfo, HyperliquidAccount)]) -> Result<
     if choices.is_empty() {
         return Err(no_stored_accounts_error().into());
     }
-    eprintln!("Stored wallets:");
+    sink::err_line("Stored wallets:");
     for (wallet, account) in choices {
-        eprintln!(
+        sink::err_line(&format!(
             "  {}: {} ({})",
             wallet.id, wallet.name, account.address_text
-        );
+        ));
     }
     Ok(())
 }
@@ -1200,9 +1208,10 @@ mod tests {
 
         assert_eq!(config.default_referral_code, None);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let text = warnings[0].text();
         assert!(
-            warnings[0].contains("default referral code"),
-            "{warnings:?}"
+            text.starts_with("! Not saving a default referral code:"),
+            "{text}"
         );
     }
 }

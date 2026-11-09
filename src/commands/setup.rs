@@ -12,11 +12,12 @@ use crate::command_spec::{
 use crate::env;
 use crate::errors::CliError;
 use crate::exchange::builder_approval;
+use crate::hints::wallet::SETUP;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::mode::Mode;
 use crate::network::Network;
-use crate::output::TableData;
+use crate::output::{TableData, sink};
 use crate::ows::vault::Vault;
 use crate::prompt;
 use crate::referral_code;
@@ -108,7 +109,7 @@ fn ensure_setup_can_run(
     match blocker {
         None => Ok(()),
         Some(reason) => Err(CliError::MissingInput(format!(
-            "Can't run setup with prompts because of {reason}. Accept the defaults instead:\n    hyperliquid setup {YES_FLAG}"
+            "Can't run setup with prompts because of {reason}. Accept the defaults instead:\n    {SETUP} {YES_FLAG}"
         ))),
     }
 }
@@ -124,16 +125,23 @@ struct AnswersSummary<'a> {
 }
 
 fn print_answers_summary(summary: &AnswersSummary<'_>) {
-    eprintln!();
-    eprintln!("Setup will:");
-    eprintln!("  Wallet:           {}", summary.wallet);
-    eprintln!("  Network:          {}", summary.network);
-    eprintln!("  Config file:      {}", summary.config_path);
-    eprintln!("  Vault:            {}", summary.vault_path);
-    eprintln!("  Default builder:  {}", summary.default_builder);
-    eprintln!("  Builder approval: {}", summary.builder_approval);
-    eprintln!("  Default referral: {}", summary.referral);
-    eprintln!();
+    sink::err_line(&format!(
+        "\nSetup will:\n\
+         \x20 Wallet:           {}\n\
+         \x20 Network:          {}\n\
+         \x20 Config file:      {}\n\
+         \x20 Vault:            {}\n\
+         \x20 Default builder:  {}\n\
+         \x20 Builder approval: {}\n\
+         \x20 Default referral: {}\n",
+        summary.wallet,
+        summary.network,
+        summary.config_path,
+        summary.vault_path,
+        summary.default_builder,
+        summary.builder_approval,
+        summary.referral,
+    ));
 }
 
 fn print_replay_command(
@@ -142,10 +150,10 @@ fn print_replay_command(
     network: Network,
     skip_builder_approval: bool,
 ) {
-    eprintln!();
+    sink::err_line("");
     if !replayable {
-        eprintln!(
-            "Importing a wallet or choosing custom builder or referral values can't be repeated without prompts."
+        sink::err_line(
+            "Importing a wallet or choosing custom builder or referral values can't be repeated without prompts.",
         );
         return;
     }
@@ -161,8 +169,7 @@ fn print_replay_command(
     if skip_builder_approval {
         command.push_str(" --no-approve-builder");
     }
-    eprintln!("Run this again without prompts:");
-    eprintln!("    {command}");
+    sink::err_line(&format!("Run this again without prompts:\n    {command}"));
 }
 
 async fn verify_connection(api: &ApiClient) -> Result<String, anyhow::Error> {
@@ -195,12 +202,12 @@ fn prompt_builder_defaults(
 ) -> Result<Option<(String, String)>, anyhow::Error> {
     let suggestion = builder_fee::suggested_default_builder(settings)?;
     if let Some((address, fee)) = suggestion.as_ref() {
-        eprintln!(
-            "Default builder fee setup (optional; press Enter to use the suggested default, or type 'none' to skip):"
-        );
-        eprintln!("Suggested builder: {address} at {fee}");
+        sink::err_line(&format!(
+            "Default builder fee setup (optional; press Enter to use the suggested default, or type 'none' to skip):\n\
+             Suggested builder: {address} at {fee}"
+        ));
     } else {
-        eprintln!("Default builder fee setup (optional; press Enter to skip):");
+        sink::err_line("Default builder fee setup (optional; press Enter to skip):");
     }
 
     let address_prompt = suggestion
@@ -286,12 +293,12 @@ async fn maybe_approve_default_builder(
                 "approved {builder_address} at {fee} ({} tenths bps)",
                 max_fee_rate.tenths_bps()
             );
-            eprintln!("Builder approval submitted: {message}");
+            sink::err_line(&format!("Builder approval submitted: {message}"));
             Ok(message)
         }
         Err(err) => {
             let message = format!("approval failed: {err}");
-            eprintln!("Builder approval failed: {err}");
+            sink::err_line(&format!("Builder approval failed: {err}"));
             Ok(message)
         }
     }
@@ -333,12 +340,12 @@ fn prompt_referral_default(
     let suggestion =
         referral_code::suggested_default_referral_code(settings, network.is_testnet())?;
     if let Some(code) = suggestion.as_ref() {
-        eprintln!(
-            "Default referral setup (optional; press Enter to use the suggested default, or type 'none' to skip):"
-        );
-        eprintln!("Suggested referral code: {code}");
+        sink::err_line(&format!(
+            "Default referral setup (optional; press Enter to use the suggested default, or type 'none' to skip):\n\
+             Suggested referral code: {code}"
+        ));
     } else {
-        eprintln!("Default referral setup (optional; press Enter to skip):");
+        sink::err_line("Default referral setup (optional; press Enter to skip):");
     }
 
     let prompt_label = suggestion
@@ -397,14 +404,14 @@ impl CliCommand for Setup {
         let store = WalletStore::new(settings);
         settings.config()?;
 
-        eprintln!("Welcome to Hyperliquid CLI setup");
-        eprintln!(
-            "This wizard will create or import a wallet, save your local config, and test the API connection."
+        sink::err_line(
+            "Welcome to Hyperliquid CLI setup\n\
+             This wizard will create or import a wallet, save your local config, and test the API connection.\n\
+             \n\
+             Wallet setup:\n  \
+             1) Create new wallet\n  \
+             2) Import existing wallet (private key)",
         );
-        eprintln!();
-        eprintln!("Wallet setup:");
-        eprintln!("  1) Create new wallet");
-        eprintln!("  2) Import existing wallet (private key)");
 
         let wallet_choice = if args.yes {
             "1".to_string()
@@ -431,7 +438,7 @@ impl CliCommand for Setup {
         // wallet state so failures do not leave orphaned wallets behind.
         let api = inv.api_client_for(network)?;
         let connection = verify_connection(&api).await?;
-        eprintln!("{connection}");
+        sink::err_line(&connection);
         let builder_suggestion = builder_fee::suggested_default_builder(settings)?;
         let builder_defaults = if args.yes {
             builder_suggestion.clone()
@@ -503,7 +510,7 @@ impl CliCommand for Setup {
             &WalletName::Exact(&wallet_name),
             Some(record_setup),
         )?;
-        eprintln!("Saved config to {config_path}");
+        sink::err_line(&format!("Saved config to {config_path}"));
 
         let builder_approval = maybe_approve_default_builder(
             &api,

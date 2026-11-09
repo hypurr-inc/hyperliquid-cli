@@ -18,10 +18,10 @@ use hypersdk::hypercore::{Chain, Subscription, WebSocket, ws::Event as WsEvent};
 use crate::env;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
-use crate::mode::{Mode, NON_INTERACTIVE_FLAG};
-use crate::output::notice::{JsonLinesReason, Notice};
-use crate::output::{self, Session, TableData};
-use crate::stream::{EXIT_SIGINT, StreamEnd, run_stream, write_stdout_line};
+use crate::mode::{DisplayBlocker, Mode, NON_INTERACTIVE_FLAG};
+use crate::output::notice::Notice;
+use crate::output::{self, Session, TableData, sink};
+use crate::stream::{EXIT_SIGINT, StreamEnd, run_stream};
 use crate::stream_bounds::StreamBounds;
 use crate::terminal::OutputFormat;
 use crate::ws::websocket_for_chain;
@@ -101,7 +101,7 @@ struct StdoutWatchOutput;
 
 impl WatchOutput for StdoutWatchOutput {
     fn emit_json(&mut self, line: &str) -> Result<(), anyhow::Error> {
-        write_stdout_line(line)
+        sink::stream_line(line)
     }
 
     fn render_tui(
@@ -198,8 +198,11 @@ where
 
     // A human format that reaches the NDJSON path was asked for explicitly:
     // non-terminal stdout defaults to JSON before this point.
-    if render_mode == SnapshotWatchRenderMode::Ndjson && format != OutputFormat::Json {
-        Notice::JsonLines(json_lines_reason(mode)).eprint(false);
+    if render_mode == SnapshotWatchRenderMode::Ndjson
+        && format != OutputFormat::Json
+        && let Some(blocker) = mode.full_screen_blocker()
+    {
+        Notice::JsonLines(blocker).eprint();
     }
 
     run_stream(async move {
@@ -299,35 +302,26 @@ fn snapshot_watch_render_mode(
     if mode.machine_format() {
         return Ok(SnapshotWatchRenderMode::Ndjson);
     }
-    if mode.full_screen() {
-        return Ok(SnapshotWatchRenderMode::Tui(mode.format));
-    }
-    if max_ticks.is_some() {
-        return Ok(SnapshotWatchRenderMode::Ndjson);
-    }
-    Err(tui_refused(mode))
-}
-
-/// Why a human format streams NDJSON instead of drawing the TUI.
-fn json_lines_reason(mode: &Mode) -> JsonLinesReason {
-    if !mode.terminal.stdout {
-        JsonLinesReason::StdoutNotTerminal
-    } else if !mode.terminal.stdin {
-        JsonLinesReason::StdinNotTerminal
-    } else {
-        JsonLinesReason::Driven
+    match mode.full_screen_blocker() {
+        None => Ok(SnapshotWatchRenderMode::Tui(mode.format)),
+        Some(_) if max_ticks.is_some() => Ok(SnapshotWatchRenderMode::Ndjson),
+        Some(blocker) => Err(tui_refused(blocker)),
     }
 }
 
-fn tui_refused(mode: &Mode) -> CliError {
-    let (subject, reason) = match (mode.terminal.stdin, mode.terminal.stdout) {
-        (false, false) => (
+fn tui_refused(blocker: DisplayBlocker) -> CliError {
+    let (subject, reason) = match blocker {
+        DisplayBlocker::NoTerminal => (
             "Non-TTY watch output",
             "stdin and stdout are not TTYs".to_string(),
         ),
-        (false, true) => ("Non-TTY watch output", "stdin is not a TTY".to_string()),
-        (true, false) => ("Non-TTY watch output", "stdout is not a TTY".to_string()),
-        (true, true) => (
+        DisplayBlocker::StdinNotTerminal => {
+            ("Non-TTY watch output", "stdin is not a TTY".to_string())
+        }
+        DisplayBlocker::StdoutNotTerminal => {
+            ("Non-TTY watch output", "stdout is not a TTY".to_string())
+        }
+        DisplayBlocker::Driven => (
             "Watch output of a driven run",
             format!(
                 "{}, {} or {} is driving this run",
@@ -455,8 +449,8 @@ mod tests {
             assert!(message.contains("--format json"), "{name}: {message}");
             assert!(message.contains("is driving this run"), "{name}: {message}");
             assert_eq!(
-                json_lines_reason(&driven),
-                JsonLinesReason::Driven,
+                driven.full_screen_blocker(),
+                Some(DisplayBlocker::Driven),
                 "{name}"
             );
         }
@@ -465,12 +459,12 @@ mod tests {
     #[test]
     fn the_ndjson_notice_names_the_stream_that_is_not_a_terminal() {
         assert_eq!(
-            json_lines_reason(&mode(OutputFormat::Pretty, true, false)),
-            JsonLinesReason::StdoutNotTerminal
+            mode(OutputFormat::Pretty, true, false).full_screen_blocker(),
+            Some(DisplayBlocker::StdoutNotTerminal)
         );
         assert_eq!(
-            json_lines_reason(&mode(OutputFormat::Pretty, false, true)),
-            JsonLinesReason::StdinNotTerminal
+            mode(OutputFormat::Pretty, false, true).full_screen_blocker(),
+            Some(DisplayBlocker::StdinNotTerminal)
         );
     }
 

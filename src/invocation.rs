@@ -21,7 +21,7 @@ use crate::http_api::ApiClient;
 use crate::input_hardening::{FilePolicy, parse_json_text, read_json_file};
 use crate::mode::Mode;
 use crate::network::Network;
-use crate::output::{Notice, Session, TableData};
+use crate::output::{Notice, Session, TableData, sink};
 use crate::settings::Settings;
 use crate::signing::nonce::NonceStore;
 use crate::signing::{SelectedSigner, SignerRole};
@@ -178,7 +178,7 @@ impl Invocation {
     pub fn print(&self, data: &dyn TableData) {
         self.session.print(data);
         if self.mode.timing_footer() {
-            eprintln!("{}", self.session.timing_footer());
+            sink::err_line(&self.session.timing_footer());
         }
     }
 
@@ -252,7 +252,7 @@ impl Invocation {
             api = api.with_nonce_store(NonceStore::recorded_at(mark, crate::output::warn));
         }
         Ok(if self.mode.person_on_stderr() {
-            api.on_retry(|| Notice::Retrying.eprint(false))
+            api.on_retry(|| Notice::Retrying.eprint())
         } else {
             api
         })

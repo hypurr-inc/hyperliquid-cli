@@ -75,6 +75,13 @@ pub struct SignerFlags {
     pub bankr: bool,
 }
 
+impl SignerFlags {
+    /// The flags whose values are secrets: a suggested command never repeats
+    /// them. Kept beside the fields; a test in the shell pins it to the clap
+    /// definition.
+    pub const SECRET: [&'static str; 2] = ["private_key", "keystore_password"];
+}
+
 #[derive(Debug, Clone)]
 pub enum SignerSelection {
     Bankr,
@@ -274,9 +281,9 @@ fn prompt_account_passphrase(
         .into());
     }
 
-    eprintln!(
+    crate::output::sink::err_line(&format!(
         "OS keychain is unavailable ({keychain_error}). Using a passphrase-derived account encryption key instead."
-    );
+    ));
     Ok(crate::prompt::read_secret(
         mode,
         "Account encryption passphrase: ",

@@ -338,7 +338,8 @@ impl CliError {
     #[must_use]
     pub fn unsupported_outcome_notation(raw: &str) -> Self {
         Self::Unsupported(format!(
-            "outcome asset notation '{raw}' requires an outcome-aware command path; use `hyperliquid outcomes get {raw}` to inspect the encoded HIP-4 asset id. Live limit orders support outcome notation."
+            "outcome asset notation '{raw}' requires an outcome-aware command path; use `{}` to inspect the encoded HIP-4 asset id. Live limit orders support outcome notation.",
+            crate::hints::outcome_get_command(raw)
         ))
     }
 

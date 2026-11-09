@@ -18,7 +18,6 @@
 
 use std::borrow::Cow;
 use std::fmt::Display;
-use std::io::{self, Write};
 
 use hypersdk::Address;
 
@@ -26,6 +25,7 @@ use crate::command_spec::YES_FLAG;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::mode::Mode;
+use crate::output::{notice, sink};
 use crate::prompt;
 
 /// The lines a person reads before they approve, in the order they are shown.
@@ -77,9 +77,8 @@ impl ConsentBlock {
     }
 
     fn print(&self) -> Result<(), CliError> {
-        let mut stderr = io::stderr();
         for line in &self.lines {
-            writeln!(stderr, "{line}").map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
+            sink::try_err_line(line).map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
         }
         Ok(())
     }
@@ -114,7 +113,7 @@ pub fn ask(
 ) -> Result<bool, CliError> {
     show(mode, block)?;
     let question = match tone {
-        Tone::Warning => Cow::Owned(prompt::warning(question)),
+        Tone::Warning => Cow::Owned(notice::caution(question)),
         Tone::Plain => Cow::Borrowed(question),
     };
     prompt::confirm(mode, &question, YES_FLAG)

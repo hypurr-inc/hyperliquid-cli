@@ -5,11 +5,11 @@
 //! non-interactive run never blocks or guesses. End of input is also missing
 //! input: an empty stdin never accepts a default.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead};
 
 use crate::errors::CliError;
 use crate::mode::Mode;
-use crate::output::colors;
+use crate::output::sink;
 
 /// Read a yes/no answer: `y` or `yes` is yes, `n` or `no` is no, any case,
 /// and an empty answer is `blank`. `None` is anything else, which a
@@ -34,12 +34,6 @@ pub fn confirm(mode: &Mode, question: &str, bypass: &str) -> Result<bool, CliErr
     Ok(parse_yes_no(&answer, false) == Some(true))
 }
 
-/// Style `text` as a warning for a prompt or consent preview written to stderr.
-#[must_use]
-pub fn warning(text: &str) -> String {
-    colors::stderr::yellow(text)
-}
-
 /// Ask for one line of text and return it without its line ending.
 ///
 /// `input` names the option or argument that supplies the value without a
@@ -48,12 +42,12 @@ pub fn read_line(mode: &Mode, label: &str, input: &str) -> Result<String, CliErr
     ensure_can_prompt(mode, input)?;
     write_label(label)?;
     let Some(line) = read_stdin_line()? else {
-        eprintln!();
+        sink::err_line("");
         return Err(stdin_ended(input, "an answer"));
     };
     if !mode.terminal.stdin {
         // Piped answers aren't echoed, so end the prompt line ourselves.
-        eprintln!();
+        sink::err_line("");
     }
     Ok(line)
 }
@@ -87,7 +81,7 @@ pub fn read_secret(mode: &Mode, label: &str, input: &str) -> Result<String, CliE
         ensure_can_prompt(mode, input)?;
         write_label(label)?;
         let value = rpassword::read_password().map_err(io_error)?;
-        eprintln!();
+        sink::err_line("");
         value
     } else {
         if mode.can_prompt() {
@@ -97,7 +91,7 @@ pub fn read_secret(mode: &Mode, label: &str, input: &str) -> Result<String, CliE
             Some(line) => line,
             None => {
                 if mode.can_prompt() {
-                    eprintln!();
+                    sink::err_line("");
                 }
                 return Err(stdin_ended(input, "a value"));
             }
@@ -117,10 +111,7 @@ pub fn read_private_key(mode: &Mode) -> Result<String, CliError> {
 }
 
 fn write_label(label: &str) -> Result<(), CliError> {
-    let mut stderr = io::stderr().lock();
-    write!(stderr, "{label}")
-        .and_then(|()| stderr.flush())
-        .map_err(io_error)
+    sink::try_err(label).map_err(io_error)
 }
 
 fn io_error(err: io::Error) -> CliError {
@@ -145,8 +136,7 @@ fn stdin_ended(input: &str, given: &str) -> CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_yes_no, warning};
-    use crate::output::colors;
+    use super::parse_yes_no;
 
     #[test]
     fn yes_and_no_read_in_any_case_with_surrounding_space() {
@@ -165,13 +155,5 @@ mod tests {
         for other in ["yep", "nope", "1", "maybe"] {
             assert_eq!(parse_yes_no(other, true), None, "{other:?}");
         }
-    }
-
-    #[test]
-    fn warning_follows_stderr_color_only() {
-        colors::with_streams_for_test(true, false, || assert_eq!(warning("q"), "q"));
-        colors::with_streams_for_test(false, true, || {
-            assert_eq!(warning("q"), colors::paint(colors::YELLOW, "q"));
-        });
     }
 }

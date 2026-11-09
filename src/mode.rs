@@ -1,11 +1,14 @@
 //! The interaction context of one run: who, if anyone, is at the other end.
 //!
-//! [`Mode`] is built once at startup from the probed [`Terminal`], the
-//! environment, the flags and the output format. It is the only owner of
-//! agent, CI and terminal state: each question the CLI asks about its
+//! [`Mode`] is built once at startup by [`Mode::resolve`] from the probed
+//! [`Terminal`], the environment, the flags and the output format. It is the
+//! only owner of agent, CI and terminal state, and of the rule that an agent or
+//! a non-terminal stdout defaults to JSON: each question the CLI asks about its
 //! surroundings has exactly one predicate here, so every command and every
 //! pipeline step agrees. Nothing else reads `HYPERLIQUID_AGENT`, `CI` or a TTY
 //! to decide whether to prompt, bound a stream, announce or redraw.
+
+use clap::ValueEnum;
 
 use crate::env::{self, EnvFlag, EnvSource};
 use crate::errors::CliError;
@@ -30,12 +33,63 @@ pub struct Mode {
     pub stdin_is_payload: bool,
 }
 
+/// Why a run is not a person at a terminal, which a live view, the watch TUI
+/// and a human-format stream each need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayBlocker {
+    /// Neither stdin nor stdout is a terminal.
+    NoTerminal,
+    StdoutNotTerminal,
+    StdinNotTerminal,
+    /// An agent, CI or `--non-interactive` is driving the run.
+    Driven,
+}
+
 impl Mode {
+    /// The mode of one run, from what the command line asked for and what the
+    /// environment says, read in the one order that makes errors reportable:
+    /// the output format first, because it names the format every later error
+    /// is reported in, then the strict boolean variables. The format is
+    /// `requested` (`--json` or `--format`), else `HYPERLIQUID_FORMAT`, else
+    /// JSON for an agent or a non-terminal stdout, else the default.
+    ///
+    /// An unreadable switch counts as off while the format is resolved and is
+    /// then rejected in that format. An unreadable `HYPERLIQUID_FORMAT` cannot
+    /// be reported in the format it names, so it is reported as JSON. The
+    /// error comes with the format to report it in.
+    pub fn resolve(
+        requested: Option<OutputFormat>,
+        non_interactive_flag: bool,
+        stdin_is_payload: bool,
+        terminal: Terminal,
+        source: &EnvSource,
+    ) -> Result<Self, (CliError, OutputFormat)> {
+        let surroundings = Self::surroundings(terminal, source);
+        let format = surroundings
+            .output_format(requested, source)
+            .map_err(|err| (err, OutputFormat::Json))?;
+        validate_env(source).map_err(|err| (err, format))?;
+        Ok(surroundings.running(format, non_interactive_flag, stdin_is_payload))
+    }
+
+    /// The format to report a command line that did not parse in, with
+    /// whatever `requested` it still showed. An unreadable `HYPERLIQUID_FORMAT`
+    /// is reported as JSON.
+    #[must_use]
+    pub fn error_format(
+        requested: Option<OutputFormat>,
+        terminal: Terminal,
+        source: &EnvSource,
+    ) -> OutputFormat {
+        Self::surroundings(terminal, source)
+            .output_format(requested, source)
+            .unwrap_or(OutputFormat::Json)
+    }
+
     /// The surroundings: the probed `terminal` and the agent and CI variables
     /// of `env`. The format and flags join later through [`Self::running`],
     /// because the format itself depends on these surroundings.
-    #[must_use]
-    pub fn new(terminal: Terminal, env: &EnvSource) -> Self {
+    fn surroundings(terminal: Terminal, env: &EnvSource) -> Self {
         Self {
             terminal,
             // An invalid `HYPERLIQUID_AGENT` counts as off here;
@@ -44,6 +98,23 @@ impl Mode {
             ci: env::flag(env, env::CI).on_unless_off(),
             ..Self::default()
         }
+    }
+
+    fn output_format(
+        &self,
+        requested: Option<OutputFormat>,
+        source: &EnvSource,
+    ) -> Result<OutputFormat, CliError> {
+        if let Some(format) = requested {
+            return Ok(format);
+        }
+        if let Some(format) = env_output_format(source) {
+            return format;
+        }
+        if self.agent || !self.terminal.stdout {
+            return Ok(OutputFormat::Json);
+        }
+        Ok(OutputFormat::default())
     }
 
     /// The same surroundings for a run that prints `format` and was given the
@@ -114,6 +185,11 @@ impl Mode {
         self.machine_format() || self.agent
     }
 
+    /// An agent, CI or `--non-interactive` is driving the run.
+    fn driven(&self) -> bool {
+        self.agent || self.ci || self.non_interactive_flag
+    }
+
     /// No person reads this run: a JSON format, an agent or CI.
     fn unattended(&self) -> bool {
         self.machine_format() || self.agent || self.ci
@@ -141,19 +217,61 @@ impl Mode {
         !self.unattended() && self.terminal.stdout && self.terminal.stderr
     }
 
+    /// Why the run may not redraw the terminal in place (a live view), in the
+    /// order they are reported. `None` when it may.
+    #[must_use]
+    pub fn live_display_blocker(&self) -> Option<DisplayBlocker> {
+        if !self.terminal.stdout {
+            Some(DisplayBlocker::StdoutNotTerminal)
+        } else if self.driven() {
+            Some(DisplayBlocker::Driven)
+        } else {
+            None
+        }
+    }
+
     /// The run may redraw the terminal in place (a live view): stdout is a
     /// terminal and neither an agent, CI nor `--non-interactive` is driving.
     #[must_use]
     pub fn live_display(&self) -> bool {
-        self.terminal.stdout && !self.agent && !self.ci && !self.non_interactive_flag
+        self.live_display_blocker().is_none()
     }
 
-    /// The run may take over the whole terminal (the watch TUI): a live
-    /// display that also reads keys from a terminal stdin.
+    /// Why the run may not take over the whole terminal (the watch TUI): a
+    /// live display that also reads keys from a terminal stdin. `None` when it
+    /// may.
+    #[must_use]
+    pub fn full_screen_blocker(&self) -> Option<DisplayBlocker> {
+        match (self.terminal.stdin, self.terminal.stdout) {
+            (false, false) => Some(DisplayBlocker::NoTerminal),
+            (false, true) => Some(DisplayBlocker::StdinNotTerminal),
+            (true, _) => self.live_display_blocker(),
+        }
+    }
+
+    /// The run may take over the whole terminal (the watch TUI).
     #[must_use]
     pub fn full_screen(&self) -> bool {
-        self.live_display() && self.terminal.stdin
+        self.full_screen_blocker().is_none()
     }
+}
+
+fn env_output_format(source: &EnvSource) -> Option<Result<OutputFormat, CliError>> {
+    let raw = source.get(env::FORMAT)?;
+    if raw.trim().is_empty() {
+        return None;
+    }
+    Some(parse_env_output_format(&raw))
+}
+
+fn parse_env_output_format(raw: &str) -> Result<OutputFormat, CliError> {
+    <OutputFormat as ValueEnum>::from_str(raw.trim(), true).map_err(|_| {
+        CliError::Configuration(format!(
+            "{} must be one of pretty, table, or json; got '{}'",
+            env::FORMAT,
+            raw.trim().to_ascii_lowercase()
+        ))
+    })
 }
 
 /// Parse a boolean environment variable strictly.
@@ -161,15 +279,6 @@ impl Mode {
 /// Unset or empty means `None`. Any value outside `1|true|yes|on|0|false|no|off`
 /// (case-insensitive) is a configuration error naming the variable, so a typo
 /// never silently falls back to the default.
-fn env_bool(env: &EnvSource, name: &str) -> Result<Option<bool>, CliError> {
-    flag_value(name, env::flag(env, name))
-}
-
-/// [`env_bool`] for a switch that is off unless the variable says otherwise.
-pub fn env_enabled(env: &EnvSource, name: &str) -> Result<bool, CliError> {
-    Ok(env_bool(env, name)?.unwrap_or(false))
-}
-
 fn flag_value(name: &str, flag: EnvFlag) -> Result<Option<bool>, CliError> {
     match flag {
         EnvFlag::Unset => Ok(None),
@@ -184,9 +293,9 @@ fn flag_value(name: &str, flag: EnvFlag) -> Result<Option<bool>, CliError> {
 /// Reject an invalid value of every strict flag in the [`env`] table, so a
 /// typo in `HYPERLIQUID_AUTO_UPDATE` fails the run like one in `HYPERLIQUID_AGENT`
 /// instead of reading as off.
-pub fn validate_env(source: &EnvSource) -> Result<(), CliError> {
+fn validate_env(source: &EnvSource) -> Result<(), CliError> {
     for name in env::strict_flags() {
-        env_bool(source, name)?;
+        flag_value(name, env::flag(source, name))?;
     }
     Ok(())
 }
@@ -247,14 +356,14 @@ mod tests {
     }
 
     #[test]
-    fn new_reads_agent_and_ci_from_the_environment_and_keeps_the_terminal() {
+    fn the_surroundings_read_agent_and_ci_from_the_environment_and_keep_the_terminal() {
         let terminal = Terminal {
             stdin: true,
             stdout: false,
             stderr: true,
         };
         let env = |pairs: &[(&'static str, &'static str)]| {
-            Mode::new(terminal, &EnvSource::fixed(pairs.iter().copied()))
+            Mode::surroundings(terminal, &EnvSource::fixed(pairs.iter().copied()))
         };
         let plain = env(&[]);
         assert_eq!(plain.terminal, terminal);
@@ -558,6 +667,162 @@ mod tests {
                 ..terminal()
             }
             .full_screen()
+        );
+    }
+
+    #[test]
+    fn the_display_blockers_name_the_first_reason_in_the_order_they_are_reported() {
+        use DisplayBlocker::{Driven, NoTerminal, StdinNotTerminal, StdoutNotTerminal};
+        assert_eq!(terminal().live_display_blocker(), None);
+        assert_eq!(terminal().full_screen_blocker(), None);
+        assert_eq!(
+            tty(true, false, true).live_display_blocker(),
+            Some(StdoutNotTerminal)
+        );
+        assert_eq!(tty(false, true, true).live_display_blocker(), None);
+        assert_eq!(
+            tty(false, false, true).full_screen_blocker(),
+            Some(NoTerminal)
+        );
+        assert_eq!(
+            tty(false, true, true).full_screen_blocker(),
+            Some(StdinNotTerminal)
+        );
+        assert_eq!(
+            tty(true, false, true).full_screen_blocker(),
+            Some(StdoutNotTerminal)
+        );
+        for driver in [
+            Mode {
+                agent: true,
+                ..terminal()
+            },
+            Mode {
+                ci: true,
+                ..terminal()
+            },
+            Mode {
+                non_interactive_flag: true,
+                ..terminal()
+            },
+        ] {
+            assert_eq!(driver.live_display_blocker(), Some(Driven));
+            assert_eq!(driver.full_screen_blocker(), Some(Driven));
+        }
+        let piped_driver = Mode {
+            agent: true,
+            ..tty(false, true, true)
+        };
+        assert_eq!(
+            piped_driver.full_screen_blocker(),
+            Some(StdinNotTerminal),
+            "a missing terminal is reported before a driver"
+        );
+    }
+
+    fn quiet() -> (Terminal, EnvSource) {
+        (Terminal::default(), EnvSource::fixed::<&str, &str>([]))
+    }
+
+    #[test]
+    fn the_requested_format_wins_over_the_environment_facts() {
+        let (terminal, _) = quiet();
+        let source = EnvSource::fixed([(env::FORMAT, "json"), (env::AGENT, "1")]);
+        let mode =
+            Mode::resolve(Some(OutputFormat::Table), false, false, terminal, &source).unwrap();
+        assert_eq!(mode.format, OutputFormat::Table);
+    }
+
+    #[test]
+    fn an_unreadable_format_variable_is_reported_as_json() {
+        let (terminal, _) = quiet();
+        let source = EnvSource::fixed([(env::FORMAT, "yaml"), (env::AGENT, "banana")]);
+        let (err, format) = Mode::resolve(None, false, false, terminal, &source).unwrap_err();
+        assert!(err.to_string().contains(env::FORMAT), "{err}");
+        assert_eq!(format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn an_unreadable_mode_variable_is_reported_in_the_resolved_format() {
+        let (terminal, _) = quiet();
+        for name in [env::AGENT, env::NO_UPDATE_CHECK] {
+            let source = EnvSource::fixed([(name, "banana")]);
+            let (err, format) =
+                Mode::resolve(Some(OutputFormat::Table), false, false, terminal, &source)
+                    .unwrap_err();
+            assert!(err.to_string().contains(name), "{err}");
+            assert_eq!(format, OutputFormat::Table);
+        }
+    }
+
+    #[test]
+    fn the_format_comes_from_the_environment_after_the_command_line() {
+        let (terminal, _) = quiet();
+        let source = EnvSource::fixed([(env::FORMAT, "table")]);
+        let mode = Mode::resolve(None, false, false, terminal, &source).unwrap();
+        assert_eq!(mode.format, OutputFormat::Table);
+        let mode =
+            Mode::resolve(Some(OutputFormat::Pretty), false, false, terminal, &source).unwrap();
+        assert_eq!(mode.format, OutputFormat::Pretty);
+    }
+
+    #[test]
+    fn an_agent_or_a_piped_stdout_defaults_to_json_and_a_terminal_does_not() {
+        let on_a_terminal = Terminal {
+            stdin: true,
+            stdout: true,
+            stderr: true,
+        };
+        let none = EnvSource::fixed::<&str, &str>([]);
+        let agent = EnvSource::fixed([(env::AGENT, "1")]);
+        let format = |terminal, source: &EnvSource| {
+            Mode::resolve(None, false, false, terminal, source)
+                .unwrap()
+                .format
+        };
+        assert_eq!(format(on_a_terminal, &none), OutputFormat::default());
+        assert_eq!(format(on_a_terminal, &agent), OutputFormat::Json);
+        assert_eq!(format(Terminal::default(), &none), OutputFormat::Json);
+    }
+
+    #[test]
+    fn resolve_builds_the_one_mode_of_the_run() {
+        let terminal = Terminal {
+            stdin: true,
+            stdout: true,
+            stderr: true,
+        };
+        let source = EnvSource::fixed([(env::AGENT, "1"), (env::CI, "1")]);
+        let mode = Mode::resolve(None, true, true, terminal, &source).unwrap();
+        assert_eq!(mode.terminal, terminal);
+        assert!(mode.agent && mode.ci && mode.non_interactive_flag && mode.stdin_is_payload);
+        assert_eq!(mode.format, OutputFormat::Json);
+    }
+
+    #[test]
+    fn the_environment_format_is_case_insensitive_and_names_the_variable_when_unreadable() {
+        assert_eq!(
+            parse_env_output_format(" Table ").unwrap(),
+            OutputFormat::Table
+        );
+        let err = parse_env_output_format("YAML").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Configuration error: HYPERLIQUID_FORMAT must be one of pretty, table, or json; got 'yaml'"
+        );
+    }
+
+    #[test]
+    fn a_failed_parse_reports_in_the_requested_format_or_json_when_the_variable_is_unreadable() {
+        let (terminal, source) = quiet();
+        assert_eq!(
+            Mode::error_format(Some(OutputFormat::Pretty), terminal, &source),
+            OutputFormat::Pretty
+        );
+        let unreadable = EnvSource::fixed([(env::FORMAT, "yaml")]);
+        assert_eq!(
+            Mode::error_format(None, terminal, &unreadable),
+            OutputFormat::Json
         );
     }
 }

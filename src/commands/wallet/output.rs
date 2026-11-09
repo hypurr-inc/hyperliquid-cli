@@ -2,7 +2,7 @@ use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
 use crate::invocation::Invocation;
-use crate::output::{TableData, serialize_row};
+use crate::output::{TableData, serialize_row, sink};
 use crate::ows::WalletSource;
 use crate::ows::vault::{HyperliquidAccount, Vault};
 use crate::terminal::OutputFormat;
@@ -211,7 +211,7 @@ pub(super) fn print_wallet_address(inv: &Invocation, address: &str) {
             address: address.to_string(),
         });
     } else {
-        println!("{address}");
+        sink::out_line(address);
     }
 }
 
@@ -222,7 +222,7 @@ pub(super) fn print_status(inv: &Invocation, status: &str, message: &str) {
             message: message.to_string(),
         });
     } else {
-        println!("{message}");
+        sink::out_line(message);
     }
 }
 
@@ -231,7 +231,7 @@ pub(super) fn print_declined(inv: &Invocation, message: &str) {
     if inv.format() == OutputFormat::Json {
         print_status(inv, "cancelled", message);
     } else {
-        eprintln!("{message}");
+        sink::err_line(message);
     }
 }
 

@@ -3,7 +3,7 @@
 //! Every exit code, category, reason, retry policy and agent instruction lives
 //! in a [`Spec`] constant here. [`CliError::spec`](super::CliError) picks one per
 //! variant, the JSON envelope copies its fields, and the checked-in
-//! `.claude/error-catalog.json` is rendered from [`ALL`] (a test fails when the
+//! `.claude/error-catalog.json` is rendered from `catalog_specs` (a test fails when the
 //! file drifts, see `catalog_file_matches_the_spec_table`).
 
 /// Whether a machine consumer may resend the failed request.

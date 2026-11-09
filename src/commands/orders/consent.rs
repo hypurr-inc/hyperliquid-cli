@@ -13,7 +13,6 @@ use crate::errors::CliError;
 use crate::mode::Mode;
 use crate::network::Network;
 use crate::output;
-use crate::prompt;
 use crate::signing::SelectedSigner;
 
 /// It names the error a decline fails with.
@@ -121,7 +120,7 @@ pub(super) fn confirm_order(
         reduce_only
     )];
     if let Some(slippage_warning) = &prepared.warning {
-        details.push(prompt::warning(slippage_warning));
+        details.push(output::notice::caution(slippage_warning));
     }
     if let Some(rate) = prepared.priority_rate {
         details.push(priority_line(rate));
@@ -194,7 +193,7 @@ pub(super) fn confirm_tpsl_batch(
     let mut details = vec![summary];
     for leg in &prepared.legs {
         if let Some(warning) = &leg.warning {
-            details.push(prompt::warning(warning));
+            details.push(output::notice::caution(warning));
         }
     }
     ask_confirmation(

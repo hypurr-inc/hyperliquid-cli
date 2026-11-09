@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::release::{InstallMethod, ReleaseClient, is_newer_version, normalize_version};
 use crate::mode::Mode;
+use crate::output::sink;
 
 use crate::env::{self, EnvSource};
 
@@ -184,10 +185,10 @@ async fn maybe_auto_update(cache_path: &Path, source: &EnvSource) {
     if !claim_auto_update_attempt(cache_path, now).unwrap_or(false) {
         return;
     }
-    eprintln!(
+    sink::err_line(&format!(
         "Automatically updating hyperliquid from {current_version} to {}...",
         cache.latest_version
-    );
+    ));
     if let Err(e) = super::self_update::download_and_replace_binary(
         &client,
         &cache.latest_version,
@@ -196,12 +197,12 @@ async fn maybe_auto_update(cache_path: &Path, source: &EnvSource) {
     )
     .await
     {
-        eprintln!("Automatic update failed: {e}");
+        sink::err_line(&format!("Automatic update failed: {e}"));
     } else {
-        eprintln!(
+        sink::err_line(&format!(
             "Successfully updated hyperliquid to {}.",
             cache.latest_version
-        );
+        ));
     }
 }
 
@@ -256,7 +257,7 @@ fn notify_if_due(cache_path: &Path, source: &EnvSource) {
     else {
         return;
     };
-    eprintln!("{notice}");
+    sink::err_line(&notice);
     let _ = update_version_cache(cache_path, |cache| cache.last_notified_at = Some(now));
 }
 

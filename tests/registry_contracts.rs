@@ -327,3 +327,67 @@ fn authenticated_reads_do_not_inherit_mutating_preview_policy() {
         );
     }
 }
+
+/// A suggested command resolves to a registered command, reading as many words
+/// as name one (the rest are flags and placeholders).
+fn suggested_command_exists(command: &str) -> bool {
+    let words: Vec<&str> = command
+        .strip_prefix("hyperliquid ")
+        .expect("a suggested command starts with the binary name")
+        .split_whitespace()
+        .collect();
+    (1..=words.len())
+        .rev()
+        .any(|length| CommandRegistry::get().find_path(&words[..length]).is_some())
+}
+
+#[test]
+fn every_suggested_command_names_a_command_that_exists() {
+    use hyperliquid_cli::hints::{self, wallet};
+
+    for command in [
+        hints::CHECK_LIVE_COMMAND,
+        hints::CANCEL_ORDER_COMMAND,
+        hints::CANCEL_TWAP_COMMAND,
+        hints::CREATE_TWAP_COMMAND,
+        hints::TRAILING_STOP_COMMAND,
+        hints::ACCOUNT_FILLS_COMMAND,
+        hints::ACCOUNT_RATE_LIMIT_COMMAND,
+        wallet::SETUP,
+        wallet::SET_DEFAULT,
+        wallet::WALLET_CREATE,
+        wallet::WALLET_IMPORT,
+        wallet::WALLET_IMPORT_MNEMONIC,
+        wallet::WALLET_LOGIN,
+        &hints::cancel_order_command("7", None),
+        &hints::protect_position_command("ETH", "+10%", "-5%", None),
+        &hints::builder_approve_command("0x2222222222222222222222222222222222222222", "0.05%"),
+        &hints::invalidate_nonce_command(true, 7),
+        &hints::outcome_get_command("#1"),
+        &wallet::wallet_export("main"),
+        &wallet::wallet_delete("main"),
+        &format!(
+            "hyperliquid {}",
+            hints::update_leverage_command("ETH", "<N>", true, None)
+        ),
+    ] {
+        assert!(suggested_command_exists(command), "{command}");
+    }
+}
+
+#[test]
+fn every_secret_arg_a_command_declares_is_redacted_from_a_payload() {
+    let secret_ids: Vec<&str> = CommandRegistry::get()
+        .commands()
+        .iter()
+        .flat_map(|contract| contract.spec.args.iter())
+        .filter(|arg| arg.secret)
+        .map(|arg| arg.id)
+        .collect();
+    assert!(!secret_ids.is_empty());
+    for id in secret_ids {
+        let redacted =
+            hyperliquid_cli::input_hardening::redact_sensitive_json(json!({ id: "value" }));
+        assert_eq!(redacted[id], "[redacted]", "{id} escapes payload redaction");
+    }
+}

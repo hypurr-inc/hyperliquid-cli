@@ -24,9 +24,9 @@ use crate::commands::common::position::mark_price;
 use crate::commands::common::rows::{One, Row};
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::output::Session;
+use crate::output::{Session, sink};
 use crate::spot_balances::user_spot_balances_raw;
-use crate::stream::{self, StreamEnd, Ticker, emit_json_line, write_stdout_line};
+use crate::stream::{self, StreamEnd, Ticker, emit_json_line};
 use crate::stream_bounds::StreamBound;
 use crate::stream_bounds::{StreamBoundArgs, StreamBounds};
 use crate::terminal::OutputFormat;
@@ -215,7 +215,7 @@ fn emit_alert(alert: RiskAlert, session: &Session) -> Result<(), anyhow::Error> 
             &alert,
             session.json_options(),
         ),
-        _ => write_stdout_line(&session.render(&One::new(alert))),
+        _ => sink::stream_line(&session.render(&One::new(alert))),
     }
 }
 
