@@ -1,5 +1,3 @@
-//! Naming transport failures: why a request never produced an answer.
-
 use std::time::Duration;
 
 use super::CliError;

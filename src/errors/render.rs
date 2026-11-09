@@ -1,5 +1,3 @@
-//! Human error output and process exit.
-
 use super::{CliError, ErrorEnvelope, StdoutDocument, last_error};
 use crate::output::colors;
 

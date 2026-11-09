@@ -1,6 +1,3 @@
-// Integration tests for how output is shaped per stream: styling, tables and
-// JSON on pipes, empty-state and truncation notices, and cell sanitization.
-//
 // `assert_cmd` runs the binary with piped stdout and stderr, so every run here
 // is a non-TTY run unless a test forces color through the environment.
 

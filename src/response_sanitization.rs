@@ -1,5 +1,3 @@
-//! Helpers for presenting untrusted protocol/API text to agents and humans.
-
 /// Label applied when raw protocol, exchange, or user-provided text is surfaced in an error.
 pub const UNTRUSTED_LABEL: &str = "[untrusted remote data]";
 

@@ -1,5 +1,3 @@
-//! Snapshot watch mode.
-//!
 //! Renders snapshots in-place using crossterm's alternate screen for human
 //! formats and emits newline-delimited JSON for `--format json`. Signal,
 //! closed-pipe and bound handling live in [`crate::stream`].
@@ -172,7 +170,6 @@ impl WatchInput for RealWatchInput {
     }
 }
 
-/// Run a refresh-in-place watch loop for data that can be fetched as snapshots.
 pub async fn run_snapshot_watch<T, F, Fut>(
     session: &Session,
     title: &str,

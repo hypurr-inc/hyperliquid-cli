@@ -1,6 +1,3 @@
-//! `hyperliquid update`: download the latest release archive, verify its
-//! checksum and replace the running binary.
-
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -74,7 +71,6 @@ pub async fn update(inv: &Invocation) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Download and replace the current binary in-place with `latest_version`.
 pub async fn download_and_replace_binary(
     client: &ReleaseClient,
     latest_version: &str,

@@ -5,14 +5,6 @@
 //! and agent guidance; the JSON envelope, human rendering, process exit and the
 //! checked-in `.claude/error-catalog.json` all read from those constants. The
 //! exit-code table lives there and nowhere else.
-//!
-//! - `spec`: the table of exit codes, categories and reasons.
-//! - `classify`: turns remote text and SDK errors into `CliError`s.
-//! - `transport`: names `reqwest` transport failures.
-//! - `recovery`: commands to run next.
-//! - `envelope`: the JSON error document.
-//! - `last_error`: the record of the latest failure that `report-incident` reads.
-//! - `render`: human output and process exit.
 
 mod classify;
 mod envelope;
@@ -37,10 +29,6 @@ pub use render::{ErrorOutput, exit_with_error};
 pub use spec::StdoutDocument;
 pub use transport::{network_error, transport_cause};
 
-/// CLI error types mapped to structured exit codes.
-///
-/// Use [`CliError::exit_code`] to get the numeric code and the `Display`
-/// implementation for the message.
 #[derive(Error, Debug)]
 pub enum CliError {
     /// Unexpected internal error (exit 1).
@@ -200,7 +188,6 @@ impl CliError {
         }
     }
 
-    /// Process exit code.
     #[must_use]
     pub fn exit_code(&self) -> i32 {
         self.spec().exit_code
@@ -273,7 +260,6 @@ impl CliError {
         Self::UnknownOutcome(cause)
     }
 
-    /// Build an [`CliError::ApiStatus`] from an HTTP status and response body.
     #[must_use]
     pub fn api_status(status: reqwest::StatusCode, body: &str) -> Self {
         let remote = (!body.trim().is_empty()).then(|| Untrusted::from_remote(body));
@@ -295,7 +281,6 @@ impl CliError {
         }
     }
 
-    /// Build an [`CliError::Internal`] whose message ends with remote text.
     #[must_use]
     pub fn internal_with_remote(prefix: impl std::fmt::Display, remote: &Untrusted) -> Self {
         Self::Internal(anyhow::anyhow!("{prefix}{remote}"))

@@ -1,20 +1,8 @@
-// Integration tests for the error system.
-//
-// Verifies:
-// - Exit codes 0, 1, 2, 10, 11, 12, 13, 14, 15
-// - JSON error envelope format {"error": "..."}
-// - Stderr vs stdout error routing
-// - Clap usage errors exit with code 2
-// - Colored error output for pretty/table mode
-// - hypersdk error mapping
-
 use assert_cmd::Command;
 use predicates::prelude::*;
-// ── Exit code 0 — Success ────────────────────────────────────────────────
 
 #[test]
 fn test_exit_code_0_success() {
-    // No args = success (prints version info)
     Command::cargo_bin("hyperliquid")
         .unwrap()
         .assert()
@@ -43,11 +31,8 @@ fn test_exit_code_0_help() {
         .code(0);
 }
 
-// ── Exit code 2 — Usage error (clap) ─────────────────────────────────────
-
 #[test]
 fn test_exit_code_2_usage_error() {
-    // Clap handles invalid format values with exit code 2
     Command::cargo_bin("hyperliquid")
         .unwrap()
         .arg("--format")
@@ -76,7 +61,6 @@ fn test_exit_code_2_invalid_format() {
 
 #[test]
 fn test_exit_code_2_missing_subcommand_arg() {
-    // `perps get` without a coin argument should exit 2 (clap)
     Command::cargo_bin("hyperliquid")
         .unwrap()
         .arg("perps")
@@ -149,17 +133,8 @@ fn test_hyperliquid_agent_usage_errors_are_structured_json() {
     assert_eq!(json["exit_code"], 2);
 }
 
-// ── Pretty mode: errors on stderr ────────────────────────────────────────
-
-// ── Table mode: errors on stderr ─────────────────────────────────────────
-
-// ── Short flag for format ────────────────────────────────────────────────
-
-// ── Clap usage errors have exit code 2 ───────────────────────────────────
-
 #[test]
 fn test_clap_usage_error_exit_2() {
-    // Invalid global flag value should be exit 2
     Command::cargo_bin("hyperliquid")
         .unwrap()
         .arg("--format")
@@ -179,8 +154,6 @@ fn test_clap_usage_error_has_error_message() {
         .failure()
         .stdout(predicate::str::contains("error").or(predicate::str::contains("invalid")));
 }
-
-// ── No args does not error ───────────────────────────────────────────────
 
 #[test]
 fn test_no_args_success() {

@@ -20,7 +20,6 @@ pub fn confirm(mode: &Mode, question: &str, bypass: &str) -> Result<bool, CliErr
     Ok(is_yes(&answer))
 }
 
-/// Like [`confirm`], with the question styled as a warning on stderr.
 pub fn confirm_warning(mode: &Mode, question: &str, bypass: &str) -> Result<bool, CliError> {
     confirm(mode, &warning(question), bypass)
 }
@@ -72,7 +71,6 @@ pub fn consent(
     }
 }
 
-/// Fail with a missing-input error when this run can't prompt.
 pub fn ensure_can_prompt(mode: &Mode, input: &str) -> Result<(), CliError> {
     match mode.prompt_blocker() {
         None => Ok(()),
@@ -82,7 +80,6 @@ pub fn ensure_can_prompt(mode: &Mode, input: &str) -> Result<(), CliError> {
     }
 }
 
-/// `y` or `yes`, case-insensitive, surrounding whitespace ignored.
 fn is_yes(input: &str) -> bool {
     matches!(input.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }

@@ -1,19 +1,5 @@
-// Integration tests for the output formatting system.
-//
-// Tests verify:
-// - OutputFormat enum works with all three variants (pretty/table/json)
-// - Pretty mode: tabwriter-aligned, cyan headers, colored values
-// - Table mode: bordered tables via tabled, no ANSI codes
-// - Json mode: stable JSON output with snake_case keys
-// - Timing feedback format
-// - Color theme helpers
-// - Error output routing (JSON errors to stdout, others to stderr)
-// - Empty data handling
-
 use assert_cmd::Command;
 use predicates::prelude::*;
-
-// ── CLI format flag tests ───────────────────────────────────────────────
 
 #[test]
 fn test_format_flag_accepts_pretty() {
@@ -77,7 +63,6 @@ fn test_format_flag_rejects_invalid() {
 
 #[test]
 fn test_default_format_is_pretty() {
-    // No --format flag should work (defaults to pretty)
     Command::cargo_bin("hyperliquid")
         .unwrap()
         .arg("--help")

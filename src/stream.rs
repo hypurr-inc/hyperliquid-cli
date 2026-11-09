@@ -41,8 +41,6 @@ pub(crate) const JSON_LINES_STDIN_NOTICE: &str =
 pub(crate) const CONNECTION_LOST_NOTICE: &str = "! Lost connection. Retrying automatically…";
 const STREAM_GAP_MESSAGE: &str = "Connection was lost and restored. Events may have been missed.";
 
-// ── Closed pipe and line output ─────────────────────────────────────────
-
 /// Stdout was closed by the reader (`| head`); the stream should end quietly.
 #[derive(Debug)]
 pub struct StdoutClosed;
@@ -55,7 +53,6 @@ impl fmt::Display for StdoutClosed {
 
 impl StdError for StdoutClosed {}
 
-/// Whether `err` is a closed-stdout condition rather than a real failure.
 pub fn is_stdout_closed(err: &anyhow::Error) -> bool {
     err.downcast_ref::<StdoutClosed>().is_some()
 }
@@ -102,9 +99,6 @@ where
     write_line(output, &line)
 }
 
-// ── Signals and the run loop ────────────────────────────────────────────
-
-/// Stop signals a stream reacts to.
 pub struct ShutdownSignals {
     #[cfg(unix)]
     interrupt: tokio::signal::unix::Signal,
@@ -115,7 +109,6 @@ pub struct ShutdownSignals {
 }
 
 impl ShutdownSignals {
-    /// Register SIGINT, SIGTERM, and SIGHUP handlers.
     #[cfg(unix)]
     pub fn install() -> Result<Self, anyhow::Error> {
         use tokio::signal::unix::{SignalKind, signal};
@@ -137,7 +130,6 @@ impl ShutdownSignals {
         Ok(Self {})
     }
 
-    /// Wait for the first stop signal and return the matching exit status.
     #[cfg(unix)]
     pub async fn recv(&mut self) -> i32 {
         tokio::select! {
@@ -157,7 +149,6 @@ impl ShutdownSignals {
     }
 }
 
-/// How a stream's work ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamEnd {
     Finished,
@@ -193,8 +184,6 @@ where
         Err(err) => Err(err),
     }
 }
-
-// ── Bounds ──────────────────────────────────────────────────────────────
 
 /// A count of at least 1.
 pub fn parse_positive_usize(raw: &str) -> Result<usize, String> {
@@ -251,7 +240,6 @@ fn parse_env_count(raw: &str, zero: EnvZero) -> Option<usize> {
         .filter(|value| zero == EnvZero::StopImmediately || *value > 0)
 }
 
-/// Reject a set but unparsable value.
 fn validate_env_bound(env: StreamEnv) -> Result<(), CliError> {
     let Ok(raw) = std::env::var(env.name) else {
         return Ok(());
@@ -380,7 +368,6 @@ impl IdleTimer {
         Self(idle.map(|idle| (idle, Box::pin(tokio::time::sleep(idle)))))
     }
 
-    /// Resolves with the configured idle duration once it elapses.
     async fn expired(&mut self) -> Duration {
         match &mut self.0 {
             Some((idle, sleep)) => {
@@ -397,8 +384,6 @@ impl IdleTimer {
         }
     }
 }
-
-// ── Polling streams ─────────────────────────────────────────────────────
 
 /// One poll of a source that yields zero or more items per tick.
 pub(crate) trait Ticker {
@@ -436,8 +421,6 @@ pub(crate) async fn poll_stream<T: Ticker>(
         tokio::time::sleep(interval).await;
     }
 }
-
-// ── Subscribe streams ───────────────────────────────────────────────────
 
 /// A WebSocket subscription paired with the messages that belong to it.
 pub struct SubscribeTarget {

@@ -1,5 +1,3 @@
-//! Commands to run after an error.
-
 use super::CliError;
 use crate::settings::env;
 
