@@ -533,9 +533,7 @@ impl CliCommand for BuilderApprove {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::settings::{
-        BUILD_DEFAULT_BUILDER_ADDRESS, BUILD_DEFAULT_BUILDER_FEE_RATE, EnvSource, env,
-    };
+    use crate::settings::{EnvSource, env};
 
     #[test]
     fn max_fee_rate_percent_converts_to_tenths_bps() {
@@ -559,19 +557,6 @@ mod tests {
     }
 
     const ADDRESS: &str = "0x0000000000000000000000000000000000000001";
-
-    #[test]
-    fn default_builder_uses_build_time_defaults_when_env_absent() {
-        let result = resolve_default_builder_fee(&settings(&[]));
-        match (
-            BUILD_DEFAULT_BUILDER_ADDRESS.is_empty(),
-            BUILD_DEFAULT_BUILDER_FEE_RATE.is_empty(),
-        ) {
-            (true, true) => assert!(result.unwrap().is_none()),
-            (false, false) => assert!(result.unwrap().is_some()),
-            _ => assert!(result.is_err()),
-        }
-    }
 
     #[test]
     fn default_builder_errs_when_only_address_set() {

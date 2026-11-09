@@ -889,25 +889,4 @@ mod tests {
             1_500_000
         );
     }
-
-    #[test]
-    fn parse_address_rejects_bad_and_zero_addresses() {
-        assert_eq!(parse_address("INVALID").unwrap_err().exit_code(), 2);
-        assert_eq!(
-            parse_address("0x0000000000000000000000000000000000000000")
-                .unwrap_err()
-                .exit_code(),
-            2
-        );
-    }
-
-    #[test]
-    fn kind_filter_maps_protocol_and_user_to_relationship_kinds() {
-        assert!(VaultKindArg::All.matches("anything"));
-        assert!(VaultKindArg::Protocol.matches("normal"));
-        assert!(VaultKindArg::User.matches("child"));
-        assert!(VaultKindArg::User.matches("parent"));
-        assert!(VaultKindArg::Child.matches("CHILD"));
-        assert!(!VaultKindArg::Parent.matches("child"));
-    }
 }

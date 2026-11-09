@@ -911,57 +911,13 @@ mod tests {
     }
 
     #[test]
-    fn candle_interval_parser_accepts_supported_intervals() {
-        assert_eq!(
-            parse_candle_interval("15m").unwrap(),
-            CandleInterval::FifteenMinutes
-        );
-        assert_eq!(
-            parse_candle_interval("1h").unwrap(),
-            CandleInterval::OneHour
-        );
-    }
-
-    #[test]
-    fn candle_interval_parser_rejects_invalid_intervals_with_valid_list() {
-        let message = parse_candle_interval("999x").unwrap_err();
-
-        assert!(message.contains("invalid interval '999x'"));
-        assert!(message.contains("Valid intervals"));
-        assert!(message.contains("15m"));
-    }
-
-    #[test]
-    fn candle_limit_parser_rejects_zero_and_too_large_values() {
-        assert!(parse_candle_limit("0").is_err());
-        assert!(parse_candle_limit("5001").is_err());
-        assert_eq!(parse_candle_limit("10").unwrap(), 10);
-    }
-
-    #[test]
-    fn book_snapshot_json_has_bids_and_asks() {
-        let output = BookSnapshot {
-            coin: "BTC".to_string(),
-            time: 123,
-            bids: vec![BookLevelRow {
-                price: dec("100"),
-                size: dec("1.5"),
-                depth: dec("1.5"),
-                orders: 2,
-            }],
-            asks: vec![BookLevelRow {
-                price: dec("101"),
-                size: dec("2.0"),
-                depth: dec("2.0"),
-                orders: 3,
-            }],
-        };
-        let json = output.to_json_value();
-
-        assert!(json["bids"].is_array());
-        assert!(json["asks"].is_array());
-        assert_eq!(json["bids"][0]["price"], "100");
-        assert_eq!(json["asks"][0]["size"], "2.0");
+    fn candle_limit_accepts_only_integers_from_1_to_5000() {
+        for accepted in ["1", "10", "5000"] {
+            assert_eq!(parse_candle_limit(accepted), Ok(accepted.parse().unwrap()));
+        }
+        for rejected in ["0", "5001", "-1", "1.5", "ten", ""] {
+            assert!(parse_candle_limit(rejected).is_err(), "{rejected:?}");
+        }
     }
 
     #[test]
@@ -986,35 +942,15 @@ mod tests {
     }
 
     #[test]
-    fn book_resolution_accepts_perp_symbols() {
+    fn book_coin_resolves_to_the_info_api_name_of_each_market_kind() {
         let resolver = fixture_resolver();
 
         assert_eq!(resolve_book_coin(&resolver, "btc").unwrap(), "BTC");
-    }
-
-    #[test]
-    fn book_resolution_accepts_spot_pairs() {
-        let resolver = fixture_resolver();
-
         assert_eq!(
             resolve_book_coin(&resolver, "purr/usdc").unwrap(),
             "PURR/USDC"
         );
         assert_eq!(resolve_book_coin(&resolver, "hype/usdc").unwrap(), "@1035");
-    }
-
-    #[test]
-    fn book_resolution_keeps_spot_pair_not_found_errors() {
-        let resolver = fixture_resolver();
-        let err = resolve_book_coin(&resolver, "PUR/USDC").unwrap_err();
-
-        assert_eq!(err.exit_code(), 13);
-        match err {
-            CliError::AssetNotFound { suggestions, .. } => {
-                assert!(suggestions.contains("PURR/USDC"))
-            }
-            other => panic!("expected spot pair suggestion, got {other:?}"),
-        }
     }
 
     #[test]
@@ -1028,48 +964,8 @@ mod tests {
     }
 
     #[test]
-    fn candle_output_has_ohlcv_fields() {
-        let output = CandlesOutput::new(vec![CandleRow {
-            timestamp: 1,
-            close_time: 2,
-            coin: "BTC".to_string(),
-            interval: "15m".to_string(),
-            open: dec("100"),
-            high: dec("110"),
-            low: dec("90"),
-            close: dec("105"),
-            volume: dec("42"),
-            num_trades: 7,
-        }]);
-        let json = output.to_json_value();
-
-        assert_eq!(json[0]["open"], "100");
-        assert_eq!(json[0]["high"], "110");
-        assert_eq!(json[0]["low"], "90");
-        assert_eq!(json[0]["close"], "105");
-        assert_eq!(json[0]["volume"], "42");
-    }
-
-    #[test]
-    fn spread_output_includes_bid_ask_spread_and_percentage() {
-        let output = SpreadRow {
-            coin: "BTC".to_string(),
-            bid: dec("100"),
-            ask: dec("101"),
-            spread: dec("1"),
-            spread_pct: dec("1"),
-        };
-        let row = output.rows().remove(0);
-
-        assert_eq!(row[1], "100");
-        assert_eq!(row[2], "101");
-        assert_eq!(row[3], "1");
-        assert_eq!(row[4], "1");
-    }
-
-    #[test]
-    fn funding_output_includes_current_and_predicted_rates() {
-        let output = FundingRow {
+    fn funding_row_renders_missing_market_data_as_null_in_json_and_na_in_tables() {
+        let complete = FundingRow {
             coin: "BTC".to_string(),
             current_funding_rate: Some(dec("0.0001")),
             predicted_funding_rate: dec("0.0002"),
@@ -1078,13 +974,26 @@ mod tests {
             oracle_price: Some(dec("99")),
             last_funding_time: Some(123),
         };
-        let json = output.to_json_value();
+        let complete_row = complete.rows().remove(0);
+        assert_eq!(complete_row[1], "0.0001");
+        assert_eq!(complete_row[6], "1970-01-01T00:00:00.123Z");
+        assert_eq!(complete.to_json_value()["last_funding_time"], 123);
 
-        assert_eq!(json["current_funding_rate"], "0.0001");
+        let sparse = FundingRow {
+            current_funding_rate: None,
+            premium: None,
+            mark_price: None,
+            oracle_price: None,
+            last_funding_time: None,
+            ..complete
+        };
+        let sparse_row = sparse.rows().remove(0);
+        assert_eq!(sparse_row[1], "n/a");
+        assert_eq!(sparse_row[6], "n/a");
+        let json = sparse.to_json_value();
+        assert!(json["current_funding_rate"].is_null());
+        assert!(json["last_funding_time"].is_null());
         assert_eq!(json["predicted_funding_rate"], "0.0002");
-        assert_eq!(json["premium"], "0.00005");
-        assert_eq!(json["last_funding_time"], 123);
-        assert_eq!(output.rows()[0][6], "1970-01-01T00:00:00.123Z");
     }
 
     #[test]

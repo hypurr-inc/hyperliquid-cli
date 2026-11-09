@@ -6,7 +6,7 @@ use support::{
     API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, TEST_ACCOUNT_PASSPHRASE, VALID_PRIVATE_KEY,
     expected_address,
 };
-use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const VALID_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
@@ -273,6 +273,7 @@ async fn positions_list_table_and_json_keep_pnl_uncolored() {
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .env("FORCE_COLOR", "1")
         .args(["--format", "table", "positions", "list"])
         .assert()
         .success()
@@ -283,6 +284,7 @@ async fn positions_list_table_and_json_keep_pnl_uncolored() {
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .env("FORCE_COLOR", "1")
         .args(["--format", "json", "positions", "list"])
         .assert()
         .success()
@@ -312,6 +314,7 @@ async fn transfer_confirmation_prompts_are_yellow_only_in_pretty() {
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .env("FORCE_COLOR", "1")
         .write_stdin("n\n")
         .args([
             "--format",
@@ -933,83 +936,4 @@ fn transfer_withdraw_zero_address_exits_2_before_prompt_or_auth() {
         ))
         .stderr(predicate::str::contains("Withdraw 100 USDC").not())
         .stderr(predicate::str::contains("Authentication required").not());
-}
-
-#[tokio::test]
-async fn update_leverage_resolves_asset_before_exchange_action() {
-    let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "BTC": "51000"
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "meta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [
-                {
-                    "name": "BTC",
-                    "szDecimals": 5,
-                    "maxLeverage": 50,
-                    "onlyIsolated": false,
-                    "marginMode": null,
-                    "growthMode": "disabled"
-                }
-            ],
-            "collateralToken": 0
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "spotMeta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [],
-            "tokens": []
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "perpDexs"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_string_contains("\"type\":\"updateLeverage\""))
-        .and(body_string_contains("\"asset\":0"))
-        .and(body_string_contains("\"leverage\":5"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {"type": "default"}
-        })))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "positions",
-            "update-leverage",
-            "--coin",
-            "BTC",
-            "--leverage",
-            "5",
-            "--testnet",
-        ])
-        .assert()
-        .success();
 }

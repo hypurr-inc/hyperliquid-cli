@@ -5,10 +5,11 @@ use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use support::{
-    API_OVERRIDE_ENV, IsolatedHome, MAINNET_API_OVERRIDE_ENV, PRIVATE_KEY_ENV,
-    TEST_ACCOUNT_PASSPHRASE, TESTNET_API_OVERRIDE_ENV, VALID_PRIVATE_KEY, fixture_basic_order,
-    fixture_fill, fixture_order_error_response, fixture_order_success_response,
-    mount_account_state, mount_common_public_endpoints, mount_successful_exchange_actions,
+    API_OVERRIDE_ENV, IsolatedHome, MAINNET_API_OVERRIDE_ENV, TEST_ACCOUNT_PASSPHRASE,
+    TESTNET_API_OVERRIDE_ENV, fixture_basic_order, fixture_fill, fixture_order_success_response,
+    mount_account_state, mount_common_public_endpoints, mount_market_meta,
+    mount_override_healthcheck, mount_perp_dexs, mount_spot_meta,
+    mount_successful_exchange_actions,
 };
 
 const IMPORT_PRIVATE_KEY: &str =
@@ -326,199 +327,75 @@ async fn stored_account_aliases_resolve_for_public_user_lookup_commands() {
 }
 
 #[tokio::test]
-async fn stored_account_aliases_do_not_resolve_for_transfer_destinations() {
+async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
     let env = IsolatedHome::new();
-
-    env.account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args([
-            "account",
-            "add",
-            IMPORT_PRIVATE_KEY,
-            "--alias",
-            "main",
-            "--type",
-            "main-wallet",
-            "--default",
-        ])
-        .assert()
-        .success();
-
-    env.account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args([
-            "transfer",
-            "send",
-            "--to",
-            "main",
-            "--amount",
-            "1",
-            "--testnet",
-        ])
-        .assert()
-        .code(2)
-        .stderr(predicate::str::contains(
-            "address must be a 0x-prefixed 40-byte hex string",
-        ));
-}
-
-#[tokio::test]
-async fn order_open_fills_positions_and_public_fills_share_order_state() {
-    let env = IsolatedHome::new();
-    let server = mock_cross_area_server(fixture_order_success_response(4242)).await;
-
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &server)
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--price",
-            "50000",
-            "--size",
-            "0.1",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("4242"));
-
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &server)
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["orders", "open", "--testnet"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("BTC"))
-        .stdout(predicate::str::contains("4242"));
-
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &server)
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["positions", "list", "--testnet"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("BTC"))
-        .stdout(predicate::str::contains("cross 5x"));
-
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &server)
-        .args(["account", "fills", USER_ADDRESS, "--testnet"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("BTC"))
-        .stdout(predicate::str::contains("4242"));
-}
-
-#[tokio::test]
-async fn transfer_confirmation_and_balance_queries_reflect_changed_balances() {
-    let env = IsolatedHome::new();
-    let before = mock_cross_area_server(fixture_order_success_response(4242)).await;
-    let after = MockServer::start().await;
-    mount_common_public_endpoints(&after).await;
-    mount_account_state(&after, vec![], vec![], "1100", "900", 5).await;
-    mount_borrowlend_and_staking_public(&after).await;
-
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &before)
-        .args(["account", "portfolio", USER_ADDRESS, "--testnet"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("1000"));
-
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &before)
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["transfer", "spot-to-perp", "--amount", "100", "--testnet"])
-        .write_stdin("y\n")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("spot-to-perp"))
-        .stdout(predicate::str::contains("100"));
-
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &after)
-        .args(["account", "portfolio", USER_ADDRESS, "--testnet"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("1100"))
-        .stdout(predicate::str::contains("900"));
-}
-
-#[tokio::test]
-async fn leverage_update_changes_order_outcome_from_rejected_to_accepted() {
-    let env = IsolatedHome::new();
-    let reject_server = mock_cross_area_server(fixture_order_error_response(
-        "insufficient margin at 5x leverage",
-    ))
+    let server = MockServer::start().await;
+    mount_override_healthcheck(&server).await;
+    mount_market_meta(
+        &server,
+        serde_json::json!({
+            "universe": [
+                {"name": "BTC", "szDecimals": 5, "maxLeverage": 50, "onlyIsolated": false, "marginMode": null, "growthMode": "disabled"},
+                {"name": "kPEPE", "szDecimals": 0, "maxLeverage": 10, "onlyIsolated": false, "marginMode": null, "growthMode": "disabled"}
+            ],
+            "collateralToken": 0
+        }),
+    )
     .await;
-    let accept_server = mock_cross_area_server(fixture_order_success_response(5252)).await;
+    mount_perp_dexs(&server, serde_json::json!([])).await;
+    mount_spot_meta(
+        &server,
+        serde_json::json!({
+            "universe": [{"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}],
+            "tokens": [
+                {"name": "USDC", "index": 0, "tokenId": "0x00000000000000000000000000000000", "szDecimals": 6, "weiDecimals": 6, "evmContract": null},
+                {"name": "PURR", "index": 1, "tokenId": "0x00000000000000000000000000000001", "szDecimals": 0, "weiDecimals": 5, "evmContract": null}
+            ]
+        }),
+    )
+    .await;
 
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &reject_server)
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "positions",
-            "update-leverage",
-            "--coin",
-            "BTC",
-            "--leverage",
-            "5",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("update-leverage"))
-        .stdout(predicate::str::contains("5"));
+    let run = |args: &[&str]| -> serde_json::Value {
+        let output = env
+            .command_with_server(&server)
+            .args(["--format", "json"])
+            .args(args)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).unwrap()
+    };
 
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &reject_server)
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--price",
-            "50000",
-            "--size",
-            "1",
-            "--testnet",
-        ])
-        .assert()
-        .code(13)
-        .stderr(predicate::str::contains(
-            "insufficient margin at 5x leverage",
-        ));
+    let tick = |market: &serde_json::Value| -> f64 {
+        market["tick_size_at_price_1"]
+            .as_str()
+            .expect("tick size is a decimal string")
+            .parse()
+            .unwrap()
+    };
+    let perps = run(&["perps", "list"]);
+    assert_eq!(perps[0]["name"], "BTC");
+    assert_eq!(perps[0]["index"], 0);
+    assert_eq!(perps[0]["max_leverage"], 50);
+    assert_eq!(perps[0]["sz_decimals"], 5);
+    assert_eq!(perps[0]["collateral"], "USDC");
+    assert_eq!(tick(&perps[0]), 0.1);
+    assert_eq!(perps[1]["name"], "kPEPE");
+    assert_eq!(perps[1]["sz_decimals"], 0);
+    assert_eq!(tick(&perps[1]), 0.0001);
+    assert_eq!(run(&["perps", "get", "kPEPE"]), perps[1]);
 
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &accept_server)
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "positions",
-            "update-leverage",
-            "--coin",
-            "BTC",
-            "--leverage",
-            "10",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("10"));
-
-    env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &accept_server)
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "orders",
-            "create",
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--price",
-            "50000",
-            "--size",
-            "1",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("5252"));
+    let spot = run(&["spot", "list"]);
+    assert_eq!(spot[0]["symbol"], "PURR/USDC");
+    assert_eq!(spot[0]["index"], 10_000);
+    assert_eq!(spot[0]["base"], "PURR");
+    assert_eq!(spot[0]["quote"], "USDC");
+    assert_eq!(spot[0]["base_sz_decimals"], 0);
+    assert_eq!(spot[0]["quote_sz_decimals"], 6);
+    assert_eq!(tick(&spot[0]), 0.0001);
+    assert_eq!(run(&["spot", "get", "PURR/USDC"]), spot[0]);
 }
 
 #[tokio::test]

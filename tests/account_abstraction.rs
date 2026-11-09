@@ -1,7 +1,7 @@
 mod support;
 
 use serde_json::Value;
-use support::{API_OVERRIDE_ENV, IsolatedHome};
+use support::IsolatedHome;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -25,69 +25,82 @@ fn json_stdout(output: Vec<u8>) -> Value {
 }
 
 #[tokio::test]
-async fn account_abstraction_read_returns_normalized_mode() {
-    let env = IsolatedHome::new();
-    let server = mock_info_server().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({
-            "type": "userAbstraction",
-            "user": USER
-        })))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::Value::String("unifiedAccount".to_string())),
-        )
-        .mount(&server)
-        .await;
+async fn account_abstraction_read_normalizes_every_protocol_mode() {
+    let cases = [
+        ("unifiedAccount", "unified-account"),
+        ("portfolioMargin", "portfolio-margin"),
+        ("dexAbstraction", "dex-abstraction"),
+        ("disabled", "disabled"),
+        ("default", "default"),
+        ("someFutureMode", "unknown"),
+    ];
+    for (raw_mode, normalized_mode) in cases {
+        let env = IsolatedHome::new();
+        let server = mock_info_server().await;
+        Mock::given(method("POST"))
+            .and(path("/info"))
+            .and(body_partial_json(serde_json::json!({
+                "type": "userAbstraction",
+                "user": USER
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Value::String(raw_mode.into())))
+            .mount(&server)
+            .await;
 
-    let out = env
-        .command_with_server(&server)
-        .args(["--format", "json", "account", "abstraction", USER])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+        let out = env
+            .command_with_server(&server)
+            .args(["--format", "json", "account", "abstraction", USER])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
 
-    let json = json_stdout(out);
-    assert_eq!(
-        json["user"].as_str().unwrap().to_ascii_lowercase(),
-        USER.to_ascii_lowercase()
-    );
-    assert_eq!(json["raw_mode"], "unifiedAccount");
-    assert_eq!(json["normalized_mode"], "unified-account");
+        let json = json_stdout(out);
+        assert_eq!(
+            json["user"].as_str().unwrap().to_ascii_lowercase(),
+            USER.to_ascii_lowercase()
+        );
+        assert_eq!(json["raw_mode"], raw_mode);
+        assert_eq!(json["normalized_mode"], normalized_mode, "{raw_mode}");
+    }
 }
 
 #[test]
-fn account_abstraction_set_dry_run_includes_user_set_action() {
-    let env = IsolatedHome::new();
-    let out = env
-        .command()
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "account",
-            "abstraction",
-            "set",
-            "--mode",
-            "disabled",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+fn account_abstraction_set_dry_run_maps_cli_modes_to_protocol_modes() {
+    for (cli_mode, protocol_mode) in [
+        ("disabled", "disabled"),
+        ("unified-account", "unifiedAccount"),
+        ("portfolio-margin", "portfolioMargin"),
+    ] {
+        let env = IsolatedHome::new();
+        let out = env
+            .command()
+            .args([
+                "--format",
+                "json",
+                "--dry-run",
+                "account",
+                "abstraction",
+                "set",
+                "--mode",
+                cli_mode,
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
 
-    let json: Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(json["dry_run"], true);
-    assert_eq!(json["command"], "account abstraction set");
-    assert_eq!(json["would_execute"], "set_abstraction");
-    assert_eq!(json["args"]["mode"], "disabled");
-    assert_eq!(json["args"]["protocol_mode"], "disabled");
-    assert_eq!(json["args"]["action"]["type"], "userSetAbstraction");
-    assert_eq!(json["args"]["action"]["abstraction"], "disabled");
+        let json: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["dry_run"], true);
+        assert_eq!(json["command"], "account abstraction set");
+        assert_eq!(json["would_execute"], "set_abstraction");
+        assert_eq!(json["args"]["mode"], cli_mode);
+        assert_eq!(json["args"]["protocol_mode"], protocol_mode);
+        assert_eq!(json["args"]["action"]["type"], "userSetAbstraction");
+        assert_eq!(json["args"]["action"]["abstraction"], protocol_mode);
+    }
 }
 
 #[test]
@@ -189,36 +202,4 @@ fn master_only_actions_refuse_a_stored_api_wallet_even_under_dry_run() {
             );
         }
     }
-}
-
-#[tokio::test]
-async fn account_abstraction_read_uses_api_override() {
-    let env = IsolatedHome::new();
-    let server = mock_info_server().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({
-            "type": "userAbstraction",
-            "user": USER
-        })))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::Value::String("portfolioMargin".to_string())),
-        )
-        .mount(&server)
-        .await;
-
-    let mut cmd = env.command();
-    cmd.env(API_OVERRIDE_ENV, server.uri());
-    let out = cmd
-        .args(["--format", "json", "account", "abstraction", USER])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let json = json_stdout(out);
-    assert_eq!(json["normalized_mode"], "portfolio-margin");
-    assert_eq!(json["raw_mode"], "portfolioMargin");
 }

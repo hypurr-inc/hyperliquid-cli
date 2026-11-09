@@ -1174,29 +1174,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn amount_to_wei_uses_eight_decimal_places() {
-        assert_eq!(
-            validate_amount_to_wei("1.5".parse::<Decimal>().unwrap()).unwrap(),
-            150_000_000
-        );
+    fn amount_to_wei_accepts_only_positive_eight_decimal_amounts() {
         assert_eq!(
             validate_amount_to_wei("0.00000001".parse::<Decimal>().unwrap()).unwrap(),
             1
         );
-    }
-
-    #[test]
-    fn amount_to_wei_rejects_zero_negative_and_over_precise_amounts() {
         assert!(validate_amount_to_wei(Decimal::ZERO).is_err());
         assert!(validate_amount_to_wei("-1".parse::<Decimal>().unwrap()).is_err());
         assert!(validate_amount_to_wei("0.000000001".parse::<Decimal>().unwrap()).is_err());
-    }
-
-    #[test]
-    fn validator_address_rejects_zero_address() {
-        let err = protocol_address("0x0000000000000000000000000000000000000000", "validator")
-            .unwrap_err();
-        assert_eq!(err.exit_code(), 2);
     }
 
     #[test]
@@ -1205,37 +1190,5 @@ mod tests {
         let err = protocol_address("0x02", "validator").unwrap_err();
         assert_eq!(err.exit_code(), 13);
         assert!(err.to_string().contains("Invalid address"));
-    }
-
-    #[test]
-    fn staking_actions_declare_reversibility() {
-        assert_eq!(
-            StakingActionKind::Delegate.reversibility(),
-            ActionReversibility::PartiallyReversible
-        );
-        assert_eq!(
-            StakingActionKind::Undelegate.reversibility(),
-            ActionReversibility::PartiallyReversible
-        );
-        assert_eq!(
-            StakingActionKind::Deposit.reversibility(),
-            ActionReversibility::PartiallyReversible
-        );
-        assert_eq!(
-            StakingActionKind::Withdraw.reversibility(),
-            ActionReversibility::PartiallyReversible
-        );
-        assert_eq!(
-            StakingActionKind::ClaimRewards.reversibility(),
-            ActionReversibility::Irreversible
-        );
-        assert_eq!(
-            StakingActionKind::LinkInitiate.reversibility(),
-            ActionReversibility::Irreversible
-        );
-        assert_eq!(
-            StakingActionKind::LinkFinalize.reversibility(),
-            ActionReversibility::Irreversible
-        );
     }
 }

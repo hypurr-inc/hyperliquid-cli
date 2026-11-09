@@ -1,27 +1,53 @@
+mod support;
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
+use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const API_OVERRIDE_ENV: &str = "HYPERLIQUID_API_BASE_URL";
-const PRIVATE_KEY_ENV: &str = "HYPERLIQUID_PRIVATE_KEY";
 const TEST_PRIVATE_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000009";
 
-fn hyperliquid_command() -> Command {
-    let mut command = Command::cargo_bin("hyperliquid").unwrap();
+fn hyperliquid_command(env: &IsolatedHome) -> Command {
+    let mut command = env.command();
+    command.env(PRIVATE_KEY_ENV, TEST_PRIVATE_KEY);
     command
-        .env("HYPERLIQUID_FORMAT", "pretty")
-        .env_remove("HYPERLIQUID_NETWORK")
-        .env_remove(API_OVERRIDE_ENV)
-        .env_remove("HYPERLIQUID_DEFAULT_REFERRAL_CODE")
-        .env(PRIVATE_KEY_ENV, TEST_PRIVATE_KEY);
-    command
+}
+
+async fn mount_info(server: &MockServer, response: Value) {
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(response))
+        .mount(server)
+        .await;
+}
+
+async fn mount_exchange_ok(server: &MockServer) {
+    Mock::given(method("POST"))
+        .and(path("/exchange"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "ok",
+            "response": { "type": "default" }
+        })))
+        .mount(server)
+        .await;
+}
+
+async fn exchange_action(server: &MockServer) -> Value {
+    let requests = server.received_requests().await.unwrap();
+    let exchange_request = requests
+        .iter()
+        .find(|request| request.url.path() == "/exchange")
+        .expect("expected /exchange request");
+    let body: Value = serde_json::from_slice(&exchange_request.body).unwrap();
+    body["action"].clone()
 }
 
 #[test]
 fn referral_set_requires_explicit_code_on_mainnet() {
-    hyperliquid_command()
+    let env = IsolatedHome::new();
+    hyperliquid_command(&env)
         .env("HYPERLIQUID_NETWORK", "mainnet")
         .args(["referral", "set"])
         .assert()
@@ -32,10 +58,11 @@ fn referral_set_requires_explicit_code_on_mainnet() {
 
 #[tokio::test]
 async fn referral_status_outputs_code_and_count() {
+    let env = IsolatedHome::new();
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+    mount_info(
+        &server,
+        serde_json::json!({
             "referredBy": {
                 "referrer": "0x0000000000000000000000000000000000000001",
                 "code": "REFERRED"
@@ -54,11 +81,11 @@ async fn referral_status_outputs_code_and_count() {
                     ]
                 }
             }
-        })))
-        .mount(&server)
-        .await;
+        }),
+    )
+    .await;
 
-    let output = hyperliquid_command()
+    let output = hyperliquid_command(&env)
         .env(API_OVERRIDE_ENV, server.uri())
         .args(["--format", "json", "referral", "status"])
         .assert()
@@ -76,10 +103,11 @@ async fn referral_status_outputs_code_and_count() {
 
 #[tokio::test]
 async fn referral_status_success_body_with_rate_limit_text_still_succeeds() {
+    let env = IsolatedHome::new();
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+    mount_info(
+        &server,
+        serde_json::json!({
             "referredBy": {
                 "referrer": "0x0000000000000000000000000000000000000001",
                 "code": "RATE-LIMIT-DOCS"
@@ -91,11 +119,11 @@ async fn referral_status_success_body_with_rate_limit_text_still_succeeds() {
                     "referralStates": []
                 }
             }
-        })))
-        .mount(&server)
-        .await;
+        }),
+    )
+    .await;
 
-    let output = hyperliquid_command()
+    let output = hyperliquid_command(&env)
         .env(API_OVERRIDE_ENV, server.uri())
         .args(["--format", "json", "referral", "status"])
         .assert()
@@ -112,22 +140,12 @@ async fn referral_status_success_body_with_rate_limit_text_still_succeeds() {
 
 #[tokio::test]
 async fn referral_set_testnet_defaults_to_testnet_code() {
+    let env = IsolatedHome::new();
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": { "type": "default" }
-        })))
-        .mount(&server)
-        .await;
+    mount_info(&server, serde_json::json!({})).await;
+    mount_exchange_ok(&server).await;
 
-    let output = hyperliquid_command()
+    let output = hyperliquid_command(&env)
         .env(API_OVERRIDE_ENV, server.uri())
         .args(["--format", "json", "referral", "set", "--testnet"])
         .assert()
@@ -143,34 +161,19 @@ async fn referral_set_testnet_defaults_to_testnet_code() {
     assert_eq!(json["query_address"], signer);
     assert_eq!(json["reversibility"], "irreversible");
 
-    let requests = server.received_requests().await.unwrap();
-    let exchange_request = requests
-        .iter()
-        .find(|request| request.url.path() == "/exchange")
-        .expect("expected /exchange request");
-    let body: Value = serde_json::from_slice(&exchange_request.body).unwrap();
-    assert_eq!(body["action"]["type"], "setReferrer");
-    assert_eq!(body["action"]["code"], "TESTNET");
+    let action = exchange_action(&server).await;
+    assert_eq!(action["type"], "setReferrer");
+    assert_eq!(action["code"], "TESTNET");
 }
 
 #[tokio::test]
 async fn referral_register_submits_register_referrer_action() {
+    let env = IsolatedHome::new();
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": { "type": "default" }
-        })))
-        .mount(&server)
-        .await;
+    mount_info(&server, serde_json::json!({})).await;
+    mount_exchange_ok(&server).await;
 
-    hyperliquid_command()
+    hyperliquid_command(&env)
         .env(API_OVERRIDE_ENV, server.uri())
         .args([
             "--format",
@@ -185,19 +188,15 @@ async fn referral_register_submits_register_referrer_action() {
         .stdout(predicate::str::contains("register-referrer"))
         .stdout(predicate::str::contains("MYCODE"));
 
-    let requests = server.received_requests().await.unwrap();
-    let exchange_request = requests
-        .iter()
-        .find(|request| request.url.path() == "/exchange")
-        .expect("expected /exchange request");
-    let body: Value = serde_json::from_slice(&exchange_request.body).unwrap();
-    assert_eq!(body["action"]["type"], "registerReferrer");
-    assert_eq!(body["action"]["code"], "MYCODE");
+    let action = exchange_action(&server).await;
+    assert_eq!(action["type"], "registerReferrer");
+    assert_eq!(action["code"], "MYCODE");
 }
 
 #[test]
 fn referral_register_rejects_codes_over_twenty_chars() {
-    hyperliquid_command()
+    let env = IsolatedHome::new();
+    hyperliquid_command(&env)
         .args([
             "referral",
             "register",
@@ -214,14 +213,11 @@ fn referral_register_rejects_codes_over_twenty_chars() {
 
 #[tokio::test]
 async fn referral_register_dry_run_previews_action() {
+    let env = IsolatedHome::new();
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-        .mount(&server)
-        .await;
+    mount_info(&server, serde_json::json!({})).await;
 
-    let output = hyperliquid_command()
+    let output = hyperliquid_command(&env)
         .env(API_OVERRIDE_ENV, server.uri())
         .args([
             "--format",
@@ -248,16 +244,22 @@ async fn referral_register_dry_run_previews_action() {
     assert_eq!(json["args"]["action"]["type"], "registerReferrer");
     assert_eq!(json["args"]["reversibility"], "irreversible");
     assert_eq!(json["acting_as"], signer);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.url.path() != "/exchange"),
+        "a dry run must not reach /exchange"
+    );
 }
 
 #[tokio::test]
 async fn referral_set_exchange_rate_limit_exits_11() {
+    let env = IsolatedHome::new();
     let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
-        .mount(&server)
-        .await;
+    mount_info(&server, serde_json::json!({})).await;
     Mock::given(method("POST"))
         .and(path("/exchange"))
         .respond_with(
@@ -266,7 +268,7 @@ async fn referral_set_exchange_rate_limit_exits_11() {
         .mount(&server)
         .await;
 
-    hyperliquid_command()
+    hyperliquid_command(&env)
         .env(API_OVERRIDE_ENV, server.uri())
         .args(["referral", "set", "MYCODE", "--testnet"])
         .assert()

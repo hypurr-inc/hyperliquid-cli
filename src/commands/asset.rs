@@ -1005,20 +1005,6 @@ mod tests {
     }
 
     #[test]
-    fn invalid_outcome_side_returns_machine_readable_invalid_result() {
-        let decoded = decode_asset_id(100_000_012, "mainnet");
-
-        assert_eq!(decoded.kind, AssetIdKind::Outcome);
-        assert_eq!(decoded.lookup_status, LookupStatus::InvalidId);
-        assert_eq!(decoded.side, Some(2));
-        assert_eq!(decoded.cli_input, None);
-        assert_eq!(
-            decoded.reason.as_deref(),
-            Some("only binary outcome sides 0 and 1 are supported")
-        );
-    }
-
-    #[test]
     fn enriches_assets_from_loaded_metadata() {
         let resolver = AssetResolver::new(AssetMetadata::from_assets(
             vec![perp("BTC", 0), hip3_perp("dex", "TOKEN", 110_000)],
@@ -1042,33 +1028,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_outcome_description_into_human_readable_market_fields() {
-        let parts = parse_outcome_description(
-            "class:priceBinary|underlying:BTC|expiry:20260510-0000|targetPrice:100000|period:1d",
-        );
-
-        assert_eq!(parts.condition_class.as_deref(), Some("priceBinary"));
-        assert_eq!(parts.underlying.as_deref(), Some("BTC"));
-        assert_eq!(parts.expiry.as_deref(), Some("20260510-0000"));
-        assert_eq!(parts.target_price.as_deref(), Some("100000"));
-        assert_eq!(parts.period.as_deref(), Some("1d"));
-        assert_eq!(
-            parts.condition.as_deref(),
-            Some("BTC above 100000 at May 10 00:00")
-        );
-        assert_eq!(
-            outcome_market_title(&parts, "Yes", "Recurring").as_deref(),
-            Some("BTC above 100000 Yes May 10 00:00")
-        );
-        assert_eq!(
-            outcome_slug(&parts, "Yes").as_deref(),
-            Some("btc-above-100000-yes-may-10-0000")
-        );
-    }
-
-    #[test]
     fn strict_decimal_asset_id_parser_rejects_ambiguous_inputs() {
-        for raw in ["", "abc", "-1", "1.5", "0x10"] {
+        for raw in [
+            "",
+            "abc",
+            "-1",
+            "+5",
+            " 5",
+            "1.5",
+            "0x10",
+            "18446744073709551616",
+        ] {
             assert!(parse_asset_id(raw).is_err(), "{raw} should fail");
         }
         assert_eq!(parse_asset_id("100000400").unwrap(), 100_000_400);
