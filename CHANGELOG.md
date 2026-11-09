@@ -8,6 +8,13 @@
 - Order prices and sizes are truncated to the exchange tick and lot rules for the asset (5 significant figures and `6 - szDecimals` perp or `8 - szDecimals` spot/outcome decimals for prices, `szDecimals` for sizes) on `orders create`, `batch-create`, `scale`, `tpsl`, `bracket`, `chase`, and `trailing-stop`, so an over-precise value is placed at the representable value instead of being rejected on submission. A value that truncates to zero exits `2` naming the asset.
 - `orders modify` keeps a trigger order's existing trigger price when `--trigger-price` is omitted instead of overwriting it with the order's limit price, and aborts before submitting when the replacement requires `--always-place` (a trigger replacement or an IOC TIF), matching the exchange's `a: false` pre-validation.
 - `orders twap-create` rejects durations above the exchange's 7-day maximum.
+- Bankr now refuses every user-signed action it does not cover (withdrawals, spot/asset sends, staking, builder approvals, `setAbstraction`) with exit `13` before a request is sent, on the typed-data path as well as the L1 path; only trading actions and spot-to-perp USDC moves reach Bankr, as documented.
+- A signature whose recovery byte names no public key is refused as `<provider>_malformed_response` (exit `10`) instead of panicking, for Bankr and OWS alike.
+- `--keystore` is no longer overridden by an ambient `HYPERLIQUID_PRIVATE_KEY` or a legacy config key; a private key given on the command line still wins.
+- Account selectors fail with the vault's own error when the vault can't be read or a name is ambiguous, for data lookups (`--user`, `--account`) as for signing, instead of reporting the account as not found. An address selector now matches a pre-vault stored account in any letter case, as it does a vault wallet.
+- `HYPERLIQUID_API_BASE_URL` (and its network variants) accept an IPv6 loopback host such as `http://[::1]:8080`, like the Bankr endpoint does.
+- `wallet show --account <vault wallet>` describes the wallet by name like the default wallet does. `account ls` no longer prints the always-empty Master, Agent Name and Expires At columns (JSON is unchanged).
+- `Config keys written` in wallet and setup receipts lists the keys the command changed, read from the config diff, and the root help lists every environment variable the CLI reads.
 
 ## 0.17.0 - 2026-11-09
 

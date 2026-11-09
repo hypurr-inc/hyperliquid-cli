@@ -1,4 +1,5 @@
 use assert_cmd::Command;
+use hyperliquid_cli::settings::env;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
@@ -7,16 +8,20 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 #[allow(dead_code)]
 pub mod legacy_accounts_fixture;
 
-pub const API_OVERRIDE_ENV: &str = "HYPERLIQUID_API_BASE_URL";
-pub const MAINNET_API_OVERRIDE_ENV: &str = "HYPERLIQUID_MAINNET_API_BASE_URL";
-pub const TESTNET_API_OVERRIDE_ENV: &str = "HYPERLIQUID_TESTNET_API_BASE_URL";
-pub const FORMAT_ENV: &str = "HYPERLIQUID_FORMAT";
-pub const PRIVATE_KEY_ENV: &str = "HYPERLIQUID_PRIVATE_KEY";
-pub const NETWORK_ENV: &str = "HYPERLIQUID_NETWORK";
-pub const WATCH_MAX_TICKS_ENV: &str = "HYPERLIQUID_WATCH_MAX_TICKS";
-pub const ACCOUNT_KEY_PASSPHRASE_ENV: &str = "HYPERLIQUID_ACCOUNT_KEY_PASSPHRASE";
-pub const ACCOUNT_KEYCHAIN_DISABLED_ENV: &str = "HYPERLIQUID_ACCOUNT_KEYCHAIN_DISABLED";
-pub const ACCOUNT_KEY_STORE_DIR_ENV: &str = "HYPERLIQUID_ACCOUNT_KEY_STORE_DIR";
+pub const API_OVERRIDE_ENV: &str = env::API_BASE_URL;
+pub const MAINNET_API_OVERRIDE_ENV: &str = env::MAINNET_API_BASE_URL;
+pub const TESTNET_API_OVERRIDE_ENV: &str = env::TESTNET_API_BASE_URL;
+pub const FORMAT_ENV: &str = env::FORMAT;
+#[allow(dead_code)]
+pub const PRIVATE_KEY_ENV: &str = env::PRIVATE_KEY;
+#[allow(dead_code)]
+pub const NETWORK_ENV: &str = env::NETWORK;
+#[allow(dead_code)]
+pub const WATCH_MAX_TICKS_ENV: &str = env::WATCH_MAX_TICKS;
+pub const ACCOUNT_KEY_PASSPHRASE_ENV: &str = env::ACCOUNT_KEY_PASSPHRASE;
+pub const ACCOUNT_KEYCHAIN_DISABLED_ENV: &str = env::ACCOUNT_KEYCHAIN_DISABLED;
+#[allow(dead_code)]
+pub const ACCOUNT_KEY_STORE_DIR_ENV: &str = env::ACCOUNT_KEY_STORE_DIR;
 #[allow(dead_code)]
 pub const TEST_ACCOUNT_PASSPHRASE: &str = "deterministic integration account encryption passphrase";
 #[allow(dead_code)]
@@ -63,34 +68,20 @@ impl IsolatedHome {
 
     /// Point `command` at this fixture's directories and clear ambient settings.
     pub fn apply_env(&self, command: &mut Command) {
+        clear_cli_env(command);
         command
             .env("HOME", &self.home)
             // CLI overrides bypass Windows Known Folders, including the
             // profile lookup used for Bankr credentials and the OWS vault.
-            .env("HYPERLIQUID_HOME_DIR", &self.home)
+            .env(env::HOME_DIR, &self.home)
             .env("USERPROFILE", &self.home)
             .env("APPDATA", &self.config)
             .env("LOCALAPPDATA", &self.data)
-            .env("HYPERLIQUID_CONFIG_DIR", self.config.join("hyperliquid"))
+            .env(env::CONFIG_DIR, self.config.join("hyperliquid"))
             .env("XDG_CONFIG_HOME", &self.config)
-            .env("HYPERLIQUID_DATA_DIR", self.data.join("hyperliquid"))
+            .env(env::DATA_DIR, self.data.join("hyperliquid"))
             .env("XDG_DATA_HOME", &self.data)
-            .env(FORMAT_ENV, "pretty")
-            .env_remove("BANKR_API_KEY")
-            .env_remove("BANKR_API_URL")
-            .env_remove(PRIVATE_KEY_ENV)
-            .env_remove(NETWORK_ENV)
-            .env_remove(API_OVERRIDE_ENV)
-            .env_remove(MAINNET_API_OVERRIDE_ENV)
-            .env_remove(TESTNET_API_OVERRIDE_ENV)
-            .env_remove(WATCH_MAX_TICKS_ENV)
-            .env_remove(ACCOUNT_KEY_PASSPHRASE_ENV)
-            .env_remove(ACCOUNT_KEYCHAIN_DISABLED_ENV)
-            .env_remove(ACCOUNT_KEY_STORE_DIR_ENV)
-            .env_remove("CI")
-            .env_remove("HYPERLIQUID_AGENT")
-            .env_remove("NO_COLOR")
-            .env_remove("FORCE_COLOR");
+            .env(FORMAT_ENV, "pretty");
     }
 
     #[allow(dead_code)]
@@ -118,30 +109,24 @@ impl IsolatedHome {
     ) -> Command {
         let mut command = hyperliquid_command();
         command
-            .env("HYPERLIQUID_HOME_DIR", home)
+            .env(env::HOME_DIR, home)
             .env("HOME", home)
             .env("USERPROFILE", home)
             .env("APPDATA", &self.config)
             .env("LOCALAPPDATA", data)
-            .env("HYPERLIQUID_CONFIG_DIR", self.config.join("hyperliquid"))
+            .env(env::CONFIG_DIR, self.config.join("hyperliquid"))
             .env("XDG_CONFIG_HOME", &self.config)
-            .env("HYPERLIQUID_DATA_DIR", data.join("hyperliquid"))
+            .env(env::DATA_DIR, data.join("hyperliquid"))
             .env("XDG_DATA_HOME", data)
             .env(FORMAT_ENV, "pretty")
-            .env(ACCOUNT_KEYCHAIN_DISABLED_ENV, "1")
-            .env_remove(ACCOUNT_KEY_PASSPHRASE_ENV)
-            .env_remove(ACCOUNT_KEY_STORE_DIR_ENV)
-            .env_remove(PRIVATE_KEY_ENV)
-            .env_remove(NETWORK_ENV);
+            .env(ACCOUNT_KEYCHAIN_DISABLED_ENV, "1");
         command
     }
 
     #[allow(dead_code)]
     /// Set or clear the legacy-account environment for `command`.
     pub fn apply_account_env(&self, command: &mut Command, passphrase: Option<&str>) {
-        command
-            .env(ACCOUNT_KEYCHAIN_DISABLED_ENV, "1")
-            .env_remove(ACCOUNT_KEY_STORE_DIR_ENV);
+        command.env(ACCOUNT_KEYCHAIN_DISABLED_ENV, "1");
         match passphrase {
             Some(passphrase) => {
                 command.env(ACCOUNT_KEY_PASSPHRASE_ENV, passphrase);
@@ -318,16 +303,20 @@ impl IsolatedHome {
     }
 }
 
-/// A bare CLI command with ambient prompt and color settings cleared.
+/// Remove every variable the CLI reads from `command`'s environment. The list
+/// is the CLI's own, so a variable added to it is cleared here too.
+fn clear_cli_env(command: &mut Command) {
+    for name in env::ALL {
+        command.env_remove(name);
+    }
+}
+
+/// A bare CLI command with every setting the CLI reads from the environment
+/// cleared. The suite runs under CI, agent harnesses and developer shells that
+/// set some of them; behavior must come from each test, not from the surroundings.
 pub fn hyperliquid_command() -> Command {
     let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    // The suite runs under CI and agent harnesses. Prompt and color behavior
-    // must come from each test, not from the surrounding environment.
-    command
-        .env_remove("CI")
-        .env_remove("HYPERLIQUID_AGENT")
-        .env_remove("NO_COLOR")
-        .env_remove("FORCE_COLOR");
+    clear_cli_env(&mut command);
     command
 }
 

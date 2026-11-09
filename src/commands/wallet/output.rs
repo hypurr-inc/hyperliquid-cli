@@ -65,14 +65,7 @@ fn account_type_label(account_type: &str) -> &str {
 
 impl TableData for AccountsOutput {
     fn headers(&self) -> Vec<&str> {
-        vec![
-            "ID",
-            "Alias",
-            "Address",
-            "Type",
-            "Default",
-            "Created At",
-        ]
+        vec!["ID", "Alias", "Address", "Type", "Default", "Created At"]
     }
 
     fn rows(&self) -> Vec<Vec<String>> {

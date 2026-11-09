@@ -285,3 +285,44 @@ async fn setup_selecting_mainnet_verifies_against_mainnet_endpoint() {
         "mainnet setup must not verify against the testnet endpoint"
     );
 }
+
+#[tokio::test]
+async fn setup_reports_exactly_the_config_keys_it_changed() {
+    let env = IsolatedHome::new();
+    let server = mock_all_mids_server().await;
+    Mock::given(method("POST"))
+        .and(path("/exchange"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": "ok",
+            "response": { "type": "default" }
+        })))
+        .mount(&server)
+        .await;
+
+    let output = env
+        .account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &server)
+        .env(
+            "HYPERLIQUID_DEFAULT_BUILDER_ADDRESS",
+            "0x00000000000000000000000000000000000000bb",
+        )
+        .env("HYPERLIQUID_DEFAULT_BUILDER_FEE_RATE", "0.001%")
+        .env("HYPERLIQUID_DEFAULT_REFERRAL_CODE", "SETUPKEYS")
+        .args(["--format", "json", "setup", "-y"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let summary: Value = serde_json::from_slice(&output).unwrap();
+
+    // Mainnet is the default network, so setup leaves `network` as it was.
+    assert_eq!(
+        summary["config_keys_written"],
+        serde_json::json!([
+            "default_builder_address",
+            "default_builder_fee_rate",
+            "default_referral_code",
+            "default_wallet_id"
+        ])
+    );
+}

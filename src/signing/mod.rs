@@ -19,7 +19,7 @@ use hypersdk::hypercore::types::{Action, ActionRequest, Signature};
 use hypersdk::hypercore::{Chain, PrivateKeySigner};
 use ows_lib::types::WalletInfo;
 
-use crate::bankr::{BankrClient, BankrSigner};
+use crate::bankr::{BankrClient, BankrSigner, BankrTypedData};
 use crate::errors::CliError;
 use crate::ows::signing::{self as ows_signing, OwsSigningConfig};
 use crate::ows::vault::Vault;
@@ -101,11 +101,7 @@ impl SelectedSigner {
     /// A pre-OWS stored account. `query_address` is the account whose data the
     /// key acts on: the master address of an agent wallet.
     #[must_use]
-    pub fn stored_account(
-        signer: PrivateKeySigner,
-        alias: String,
-        query_address: Address,
-    ) -> Self {
+    pub fn stored_account(signer: PrivateKeySigner, alias: String, query_address: Address) -> Self {
         Self::local(
             signer,
             LocalOrigin::StoredAccount {
@@ -187,10 +183,9 @@ impl SelectedSigner {
                 }
             },
             SignerBackend::Ows(config) => config.describe(),
-            SignerBackend::Bankr(signer) => (
-                None,
-                format!("Bankr hosted wallet ({})", signer.address()),
-            ),
+            SignerBackend::Bankr(signer) => {
+                (None, format!("Bankr hosted wallet ({})", signer.address()))
+            }
         };
         SignerDescription { alias, source }
     }
@@ -203,6 +198,18 @@ impl SelectedSigner {
         match &self.backend {
             SignerBackend::Ows(config) => config.ensure_signable(),
             SignerBackend::Local { .. } | SignerBackend::Bankr(_) => Ok(()),
+        }
+    }
+
+    /// Fail now, before any side effect, when this provider cannot sign a
+    /// user-signed action such as `approveAgent`, a withdrawal or a send.
+    pub fn ensure_can_sign_user_actions(&self) -> Result<(), CliError> {
+        match &self.backend {
+            SignerBackend::Ows(config) => config.ensure_signable(),
+            SignerBackend::Bankr(_) => {
+                BankrTypedData::for_payload(&Payload::Digest(B256::ZERO)).map(|_| ())
+            }
+            SignerBackend::Local { .. } => Ok(()),
         }
     }
 
@@ -272,5 +279,260 @@ impl SelectedSigner {
             SignerBackend::Bankr(signer) => signer.sign_async(&payload).await,
             _ => self.sign(&payload),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::dyn_abi::{Eip712Types, Resolver};
+    use alloy::sol_types::SolStruct;
+    use hypersdk::hypercore::types::api::ApproveAgent;
+    use hypersdk::hypercore::types::{Action, ScheduleCancel};
+
+    alloy::sol! {
+        struct UsdClassTransfer {
+            string hyperliquidChain;
+            string amount;
+            bool toPerp;
+            uint64 nonce;
+        }
+
+        struct Withdraw {
+            string hyperliquidChain;
+            string destination;
+            string amount;
+            uint64 time;
+        }
+    }
+
+    const KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000009";
+
+    fn key() -> PrivateKeySigner {
+        KEY.parse().unwrap()
+    }
+
+    /// The typed data a user-signed command signs, built the way the commands build it.
+    fn user_signed<T: SolStruct>(message: &impl serde::Serialize, chain: Chain) -> TypedData {
+        let prefixed = format!("HyperliquidTransaction:{}", T::NAME);
+        let mut resolver = Resolver::from_struct::<T>();
+        resolver.ingest_string(T::eip712_encode_type()).unwrap();
+        let mut types = Eip712Types::from(&resolver);
+        let primary = types.remove(T::NAME).unwrap();
+        types.insert(prefixed.clone(), primary);
+        TypedData {
+            domain: chain.domain(),
+            resolver: Resolver::from(types),
+            primary_type: prefixed,
+            message: serde_json::to_value(message).unwrap(),
+        }
+    }
+
+    fn usd_class_transfer(chain: Chain) -> TypedData {
+        user_signed::<UsdClassTransfer>(
+            &serde_json::json!({
+                "hyperliquidChain": chain.to_string(),
+                "amount": "12.5",
+                "toPerp": true,
+                "nonce": 1_700_000_000_123_u64,
+            }),
+            chain,
+        )
+    }
+
+    fn withdraw(chain: Chain) -> TypedData {
+        user_signed::<Withdraw>(
+            &serde_json::json!({
+                "hyperliquidChain": chain.to_string(),
+                "destination": "0x0000000000000000000000000000000000000001",
+                "amount": "5",
+                "time": 1_700_000_000_123_u64,
+            }),
+            chain,
+        )
+    }
+
+    fn approve_agent(chain: Chain) -> Action {
+        Action::ApproveAgent(ApproveAgent {
+            signature_chain_id: chain.arbitrum_id().to_owned(),
+            hyperliquid_chain: chain,
+            agent_address: "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
+            agent_name: Some("bot".to_string()),
+            nonce: 1_700_000_000_123,
+        })
+    }
+
+    /// A Bankr signer whose API cannot be reached: any request it makes fails
+    /// with a network error, so exit `13` proves the refusal came first.
+    fn unreachable_bankr() -> SelectedSigner {
+        SelectedSigner::bankr(
+            BankrClient::new("http://127.0.0.1:1", "bk_test"),
+            key().address(),
+        )
+    }
+
+    #[test]
+    fn local_signing_matches_hypersdks_own_action_signing() {
+        let signer = SelectedSigner::private_key(key());
+        let vault: Address = "0x0000000000000000000000000000000000000003"
+            .parse()
+            .unwrap();
+        for chain in [Chain::Mainnet, Chain::Testnet] {
+            for (action, vault_address) in [
+                (Action::ScheduleCancel(ScheduleCancel { time: None }), None),
+                (
+                    Action::ScheduleCancel(ScheduleCancel { time: Some(9) }),
+                    Some(vault),
+                ),
+                (approve_agent(chain), None),
+            ] {
+                let nonce = 1_700_000_000_123_u64;
+                let expected = action
+                    .clone()
+                    .sign_sync(&key(), nonce, vault_address, None, chain)
+                    .unwrap();
+                let signed = signer
+                    .sign_l1_action_sync(action, nonce, vault_address, chain)
+                    .unwrap();
+                assert_eq!(signed, serde_json::to_value(expected).unwrap(), "{chain:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn local_typed_data_and_connection_id_signatures_recover_to_the_key() {
+        let signer = SelectedSigner::private_key(key());
+        let typed = withdraw(Chain::Testnet);
+        let signature = signer.sign_typed_data(&typed).unwrap();
+        assert_eq!(
+            alloy::primitives::Signature::from(signature)
+                .recover_address_from_prehash(&typed.eip712_signing_hash().unwrap())
+                .unwrap(),
+            key().address()
+        );
+
+        let connection_id = B256::repeat_byte(0x22);
+        let signature =
+            block_on(signer.sign_l1_connection_id(Chain::Mainnet, connection_id)).unwrap();
+        assert_eq!(
+            alloy::primitives::Signature::from(signature)
+                .recover_address_from_prehash(&agent_signing_hash(Chain::Mainnet, connection_id))
+                .unwrap(),
+            key().address()
+        );
+    }
+
+    fn block_on<T>(future: impl Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn bankr_refuses_every_user_signed_payload_it_does_not_cover_before_a_request() {
+        let signer = unreachable_bankr();
+        for chain in [Chain::Mainnet, Chain::Testnet] {
+            let err = signer.sign_typed_data(&withdraw(chain)).unwrap_err();
+            assert_eq!(err.exit_code(), 13, "withdraw on {chain:?}: {err}");
+
+            let err = signer
+                .sign_l1_action_sync(approve_agent(chain), 1_700_000_000_123, None, chain)
+                .unwrap_err();
+            assert_eq!(err.exit_code(), 13, "approveAgent on {chain:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn bankr_covers_trading_actions_and_the_usd_class_transfer() {
+        // These reach the (unreachable) API, so they fail as network errors
+        // rather than as refusals.
+        let signer = unreachable_bankr();
+        let err = signer
+            .sign_l1_action_sync(
+                Action::ScheduleCancel(ScheduleCancel { time: None }),
+                1_700_000_000_123,
+                None,
+                Chain::Mainnet,
+            )
+            .unwrap_err();
+        assert_ne!(err.exit_code(), 13, "{err}");
+        let err = signer
+            .sign_typed_data(&usd_class_transfer(Chain::Mainnet))
+            .unwrap_err();
+        assert_ne!(err.exit_code(), 13, "{err}");
+    }
+
+    #[test]
+    fn bankr_documents_hash_exactly_like_the_typed_data_they_stand_for() {
+        for chain in [Chain::Mainnet, Chain::Testnet] {
+            let typed = usd_class_transfer(chain);
+            let document =
+                crate::bankr::BankrTypedData::for_payload(&Payload::UserSigned(&typed)).unwrap();
+            assert_eq!(
+                document.signing_hash().unwrap(),
+                typed.eip712_signing_hash().unwrap(),
+                "{chain:?}"
+            );
+            assert_eq!(
+                document.document()["domain"]["chainId"],
+                if chain.is_mainnet() { 42161 } else { 421_614 },
+                "the chain id goes to Bankr as a decimal number"
+            );
+        }
+    }
+
+    #[test]
+    fn user_signed_capability_is_asked_of_the_provider_before_signing() {
+        assert!(
+            SelectedSigner::private_key(key())
+                .ensure_can_sign_user_actions()
+                .is_ok()
+        );
+        let err = unreachable_bankr()
+            .ensure_can_sign_user_actions()
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        let address_only = SelectedSigner::ows_address_only(
+            "0x0000000000000000000000000000000000000001".to_string(),
+            "0x0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(
+            address_only
+                .ensure_can_sign_user_actions()
+                .unwrap_err()
+                .exit_code(),
+            13
+        );
+    }
+
+    #[test]
+    fn describe_names_each_signer_kind() {
+        let alias = |signer: &SelectedSigner| signer.describe();
+        assert_eq!(
+            alias(&SelectedSigner::private_key(key())).source,
+            "private key/config/env"
+        );
+        assert_eq!(alias(&SelectedSigner::keystore(key())).source, "keystore");
+        let stored = SelectedSigner::stored_account(
+            key(),
+            "main".to_string(),
+            "0x0000000000000000000000000000000000000004"
+                .parse()
+                .unwrap(),
+        );
+        assert_eq!(stored.describe().alias.as_deref(), Some("main"));
+        assert!(stored.is_stored_agent());
+        assert!(!SelectedSigner::private_key(key()).is_stored_agent());
+        assert!(
+            unreachable_bankr()
+                .describe()
+                .source
+                .starts_with("Bankr hosted wallet (0x")
+        );
     }
 }

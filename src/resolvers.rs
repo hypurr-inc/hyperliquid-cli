@@ -1,86 +1,49 @@
-//! Typed address classes for command arguments.
+//! Account address resolution for command arguments, and strict address parsing.
 //!
-//! These helpers make the selector boundary explicit:
-//! - public user and acting-account selectors may resolve stored account aliases,
-//! - protocol object and raw destination addresses are explicit addresses only.
-//!
-//! Signer selection lives in [`crate::auth`].
+//! A public user or acting-account selector may name a stored wallet; every
+//! other address argument is an explicit 0x address only. Signer selection and
+//! the account resolver live in [`crate::auth`].
 
 use std::fmt;
 
 use hypersdk::Address;
 
 use crate::auth::lookup_account_address;
-use crate::errors::CliError;
 use crate::mode::Mode;
 use crate::settings::Settings;
 
-macro_rules! address_class {
-    ($(#[$meta:meta])* $name:ident) => {
-        $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        pub struct $name(Address);
+/// An address a selector resolved to: whose data a read command queries, or the
+/// account a signed action acts on behalf of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountAddress(Address);
 
-        impl $name {
-            #[must_use]
-            pub fn address(self) -> Address {
-                self.0
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}", self.0)
-            }
-        }
-    };
+impl AccountAddress {
+    #[must_use]
+    pub fn address(self) -> Address {
+        self.0
+    }
 }
 
-address_class!(
-    /// Whose account data a read command queries.
-    ProtocolUserAddress
-);
-address_class!(
-    /// The account a signed action acts on behalf of.
-    ActingAccountAddress
-);
-address_class!(
-    /// A protocol object such as a vault, validator or builder.
-    ProtocolObjectAddress
-);
-address_class!(
-    /// A transfer recipient.
-    RawDestinationAddress
-);
+impl fmt::Display for AccountAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 pub fn resolve_protocol_user_address(
     selector: &str,
     settings: &Settings,
     mode: &Mode,
-) -> Result<ProtocolUserAddress, anyhow::Error> {
-    lookup_account_address(selector, settings, mode).map(ProtocolUserAddress)
+) -> Result<AccountAddress, anyhow::Error> {
+    lookup_account_address(selector, settings, mode).map(AccountAddress)
 }
 
 pub fn resolve_acting_account_address(
     selector: &str,
     settings: &Settings,
     mode: &Mode,
-) -> Result<ActingAccountAddress, anyhow::Error> {
-    lookup_account_address(selector, settings, mode).map(ActingAccountAddress)
-}
-
-pub fn parse_protocol_object_address(value: &str) -> Result<ProtocolObjectAddress, CliError> {
-    parse_explicit_address(value, ZeroAddressPolicy::Allow).map(ProtocolObjectAddress)
-}
-
-pub fn parse_raw_destination_address(value: &str) -> Result<RawDestinationAddress, CliError> {
-    parse_explicit_address(value, ZeroAddressPolicy::Reject).map(RawDestinationAddress)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ZeroAddressPolicy {
-    Allow,
-    Reject,
+) -> Result<AccountAddress, anyhow::Error> {
+    lookup_account_address(selector, settings, mode).map(AccountAddress)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,42 +66,22 @@ pub fn parse_exact_hex_address(value: &str, reject_zero: bool) -> Result<Address
         .map_err(|_| HexAddressError::Format)
 }
 
-fn parse_explicit_address(
-    value: &str,
-    zero_policy: ZeroAddressPolicy,
-) -> Result<Address, CliError> {
-    parse_exact_hex_address(value.trim(), zero_policy == ZeroAddressPolicy::Reject).map_err(|err| {
-        match err {
-            HexAddressError::Zero => {
-                CliError::Configuration("address must not be the zero address".to_string())
-            }
-            HexAddressError::Format => CliError::Configuration(
-                "address must be a 0x-prefixed 40-byte hex string".to_string(),
-            ),
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn explicit_raw_destinations_do_not_resolve_aliases() {
-        let err = parse_raw_destination_address("main").unwrap_err();
-        assert_eq!(err.exit_code(), 2);
-        assert!(err.to_string().contains("0x-prefixed"));
-
-        let err = parse_protocol_object_address("main").unwrap_err();
-        assert_eq!(err.exit_code(), 2);
-        assert!(err.to_string().contains("0x-prefixed"));
-    }
-
-    #[test]
-    fn zero_address_is_a_valid_object_but_not_a_destination() {
+    fn exact_hex_addresses_reject_aliases_and_optionally_the_zero_address() {
         let zero = "0x0000000000000000000000000000000000000000";
-        assert!(parse_protocol_object_address(zero).is_ok());
-        assert!(parse_raw_destination_address(zero).is_err());
+        assert_eq!(
+            parse_exact_hex_address("main", false),
+            Err(HexAddressError::Format)
+        );
+        assert!(parse_exact_hex_address(zero, false).is_ok());
+        assert_eq!(
+            parse_exact_hex_address(zero, true),
+            Err(HexAddressError::Zero)
+        );
     }
 
     #[test]

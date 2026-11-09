@@ -149,7 +149,6 @@ fn sign_hash(config: &OwsSigningConfig, hash: B256) -> Result<HyperliquidSignatu
     Ok(signature)
 }
 
-
 fn ows_typed_data_json(typed_data: &TypedData) -> Result<String, CliError> {
     let mut value = serde_json::to_value(typed_data).map_err(|err| {
         CliError::Internal(anyhow::anyhow!("failed to encode OWS typed data: {err}"))

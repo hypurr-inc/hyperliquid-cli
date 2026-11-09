@@ -110,7 +110,11 @@ const TESTNET_REFERRAL_FALLBACK: &str = "TESTNET";
 /// The `Environment:` block of the root help text.
 #[must_use]
 pub fn env_help_section() -> String {
-    let advertised = || ENV_HELP.iter().filter(|(_, description)| !description.is_empty());
+    let advertised = || {
+        ENV_HELP
+            .iter()
+            .filter(|(_, description)| !description.is_empty())
+    };
     let width = advertised()
         .map(|(name, _)| name.len())
         .max()
@@ -276,7 +280,12 @@ fn changed_keys(before: &Config, after: &Config) -> Vec<String> {
         .iter()
         .filter(|(key, value)| before.get(*key) != Some(*value))
         .map(|(key, _)| key.clone())
-        .chain(before.keys().filter(|key| !after.contains_key(*key)).cloned())
+        .chain(
+            before
+                .keys()
+                .filter(|key| !after.contains_key(*key))
+                .cloned(),
+        )
         .collect();
     keys.sort();
     keys
@@ -465,7 +474,7 @@ impl Settings {
         Ok(key)
     }
 
-/// Whether to use testnet. Flag, then `HYPERLIQUID_NETWORK`, then the config file; mainnet by default.
+    /// Whether to use testnet. Flag, then `HYPERLIQUID_NETWORK`, then the config file; mainnet by default.
     pub fn testnet(&self, cli_testnet: bool) -> Result<bool, CliError> {
         if cli_testnet {
             return Ok(true);
@@ -763,11 +772,16 @@ mod tests {
 
     #[test]
     fn bankr_login_is_empty_without_a_config_and_read_whole_from_one() {
-        assert_eq!(settings(&[], None).bankr_login().unwrap(), BankrLogin::default());
+        assert_eq!(
+            settings(&[], None).bankr_login().unwrap(),
+            BankrLogin::default()
+        );
         let login = BankrLogin::new(
             "bk_key",
             None,
-            "0x0000000000000000000000000000000000000009".parse().unwrap(),
+            "0x0000000000000000000000000000000000000009"
+                .parse()
+                .unwrap(),
         );
         let config = Config {
             bankr: login.clone(),
@@ -1077,8 +1091,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(url.as_str(), "http://[::1]:4011/");
-        assert!(is_loopback_url(&reqwest::Url::parse("http://LOCALHOST:1").unwrap()));
-        assert!(!is_loopback_url(&reqwest::Url::parse("http://[2001:db8::1]:1").unwrap()));
-        assert!(!is_loopback_url(&reqwest::Url::parse("http://127.example.com").unwrap()));
+        assert!(is_loopback_url(
+            &reqwest::Url::parse("http://LOCALHOST:1").unwrap()
+        ));
+        assert!(!is_loopback_url(
+            &reqwest::Url::parse("http://[2001:db8::1]:1").unwrap()
+        ));
+        assert!(!is_loopback_url(
+            &reqwest::Url::parse("http://127.example.com").unwrap()
+        ));
     }
 }

@@ -49,8 +49,9 @@ impl Provider {
         let label = self.label;
         let canonical = match hex.len() {
             130 => {
-                let v = u8::from_str_radix(&hex[128..130], 16)
-                    .map_err(|err| self.malformed(format!("invalid {label} recovery byte: {err}")))?;
+                let v = u8::from_str_radix(&hex[128..130], 16).map_err(|err| {
+                    self.malformed(format!("invalid {label} recovery byte: {err}"))
+                })?;
                 format!("0x{}{:02x}", &hex[..128], self.canonical_v(v)?)
             }
             128 => {
@@ -202,7 +203,9 @@ mod tests {
         assert_eq!(err.exit_code(), 10);
         assert!(err.to_string().contains("ows_signer_mismatch"), "{err}");
         assert!(err.to_string().contains("OWS signature recovered"), "{err}");
-        let err = Provider::BANKR.verify(&signature, digest, other).unwrap_err();
+        let err = Provider::BANKR
+            .verify(&signature, digest, other)
+            .unwrap_err();
         assert!(err.to_string().contains("bankr_signer_mismatch"), "{err}");
     }
 }

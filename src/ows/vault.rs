@@ -52,6 +52,7 @@ impl Vault {
     }
 
     /// A vault at an explicit directory with no passphrase.
+    #[cfg(test)]
     #[must_use]
     pub fn at(path: impl Into<PathBuf>) -> Self {
         Self {
@@ -390,10 +391,13 @@ mod tests {
                 .filter(|(_, marked)| *marked)
                 .map(|(wallet, _)| wallet.id.clone())
                 .collect();
-            assert_eq!(marked, [signing.id.clone()], "{configured}");
+            assert_eq!(marked, std::slice::from_ref(&signing.id), "{configured}");
             assert!(Vault::is_default(Some(configured), &signing));
         }
-        assert_eq!(Vault::default_markers(&wallets, Some("gone")), [false, false]);
+        assert_eq!(
+            Vault::default_markers(&wallets, Some("gone")),
+            [false, false]
+        );
     }
 
     #[test]

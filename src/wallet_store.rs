@@ -285,7 +285,11 @@ mod tests {
                 make_default(),
             )
             .unwrap();
-        assert!(first.config_keys_written.contains(&"default_wallet_id".to_string()));
+        assert!(
+            first
+                .config_keys_written
+                .contains(&"default_wallet_id".to_string())
+        );
 
         // The same file again: an edit that sets only a referral code reports
         // exactly that key, not the keys it left alone.

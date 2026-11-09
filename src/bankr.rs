@@ -23,9 +23,9 @@ use hypersdk::hypercore::types::Signature as HyperliquidSignature;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::config::BankrLogin;
 use crate::errors::{CliError, network_error};
 use crate::response_sanitization::Untrusted;
-use crate::config::BankrLogin;
 use crate::settings::{EnvSource, Settings, env, is_loopback_url};
 use crate::signing::Payload;
 use crate::signing::signature::Provider;
@@ -612,7 +612,10 @@ mod tests {
         assert_eq!(client.api_url(), DEFAULT_API_URL);
 
         // A padded key is selected trimmed, so authentication sees the key itself.
-        let padded = Settings::detached(EnvSource::fixed([(env::BANKR_API_KEY, "  bk_padded  ")]), None);
+        let padded = Settings::detached(
+            EnvSource::fixed([(env::BANKR_API_KEY, "  bk_padded  ")]),
+            None,
+        );
         let (_, source) = BankrClient::from_settings(&padded).unwrap();
         assert_eq!(source, KeySource::Environment);
     }

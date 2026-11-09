@@ -457,7 +457,8 @@ mod tests {
 
     #[test]
     fn a_malformed_bankr_address_names_the_key() {
-        let config: Config = serde_json::from_str(r#"{"bankr_address":"0xnot-an-address"}"#).unwrap();
+        let config: Config =
+            serde_json::from_str(r#"{"bankr_address":"0xnot-an-address"}"#).unwrap();
         let err = config.bankr.address().unwrap_err();
         assert!(err.to_string().contains("bankr_address"));
     }

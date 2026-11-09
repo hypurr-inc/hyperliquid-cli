@@ -187,7 +187,11 @@ fn resolve_ows_flag(selector: &str, settings: &Settings) -> Result<SelectedSigne
     }
     let vault = Vault::from_settings(settings);
     let (wallet, account) = vault_account_by_name(&vault, selector)?;
-    Ok(SelectedSigner::vault_wallet(&wallet, account.address, vault))
+    Ok(SelectedSigner::vault_wallet(
+        &wallet,
+        account.address,
+        vault,
+    ))
 }
 
 /// The wallet account an account selector or default resolved to.
@@ -218,7 +222,11 @@ impl Found {
                 wallet,
                 account,
                 vault,
-            } => Ok(SelectedSigner::vault_wallet(&wallet, account.address, vault)),
+            } => Ok(SelectedSigner::vault_wallet(
+                &wallet,
+                account.address,
+                vault,
+            )),
             Self::Legacy { store, account } => {
                 let signer = parse_private_key(&store.decrypt_private_key(&account)?)?;
                 let query_address = account.query_address()?;
@@ -274,6 +282,30 @@ fn find_vault_account(
     }
 }
 
+/// Ask on the terminal for the passphrase of pre-OWS stored accounts when the OS
+/// keychain can't unlock them, if this run may prompt at all.
+fn prompt_account_passphrase(
+    mode: &Mode,
+    keychain_error: &anyhow::Error,
+) -> Result<String, anyhow::Error> {
+    if !mode.can_prompt() || !crate::output::terminal::stdin_is_terminal() {
+        return Err(CliError::MissingInput(format!(
+            "Can't unlock account encryption keys because the OS keychain is unavailable ({keychain_error}). Set {} to use a passphrase instead.",
+            env::ACCOUNT_KEY_PASSPHRASE
+        ))
+        .into());
+    }
+
+    eprintln!(
+        "OS keychain is unavailable ({keychain_error}). Using a passphrase-derived account encryption key instead."
+    );
+    Ok(crate::prompt::read_secret(
+        mode,
+        "Account encryption passphrase: ",
+        env::ACCOUNT_KEY_PASSPHRASE,
+    )?)
+}
+
 /// The pre-OWS stored account chosen by `lookup`, when the user still has a
 /// store. Having none, or no account in it, is `missing`.
 fn legacy_account(
@@ -282,7 +314,8 @@ fn legacy_account(
     missing: impl Fn() -> CliError,
     lookup: impl FnOnce(&LegacyAccounts) -> Result<Option<LegacyAccount>, anyhow::Error>,
 ) -> Result<Found, anyhow::Error> {
-    let Some(store) = LegacyAccounts::open_default(settings, mode)? else {
+    let prompt = |keychain_error: &anyhow::Error| prompt_account_passphrase(mode, keychain_error);
+    let Some(store) = LegacyAccounts::open_default(settings, &prompt)? else {
         return Err(missing().into());
     };
     let account = lookup(&store)?.ok_or_else(missing)?;
@@ -290,11 +323,7 @@ fn legacy_account(
 }
 
 /// The account `selector` names: a vault wallet, else a pre-OWS stored account.
-fn find_account(
-    selector: &str,
-    settings: &Settings,
-    mode: &Mode,
-) -> Result<Found, anyhow::Error> {
+fn find_account(selector: &str, settings: &Settings, mode: &Mode) -> Result<Found, anyhow::Error> {
     let selector = selector.trim();
     let vault = Vault::from_settings(settings);
     if let Some((wallet, account)) = find_vault_account(&vault, selector)? {
@@ -425,7 +454,10 @@ mod tests {
         assert_eq!(resolved.query_address(), resolved.address());
         let description = resolved.selected_signer().describe();
         assert_eq!(description.alias, None);
-        assert_eq!(description.source, format!("OWS signer ({RAW_OWS_ADDRESS})"));
+        assert_eq!(
+            description.source,
+            format!("OWS signer ({RAW_OWS_ADDRESS})")
+        );
         assert!(
             resolved
                 .selected_signer()
@@ -620,7 +652,11 @@ mod tests {
         let vault = TempDir::new().unwrap();
         import_test_wallet(vault.path(), "main");
         let wallets = vault.path().join("wallets");
-        let original = std::fs::read_dir(&wallets).unwrap().next().unwrap().unwrap();
+        let original = std::fs::read_dir(&wallets)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap();
         std::fs::copy(original.path(), wallets.join("copy.json")).unwrap();
         let settings = vault_settings(&vault, None);
         (vault, settings)
