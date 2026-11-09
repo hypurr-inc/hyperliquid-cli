@@ -1,14 +1,11 @@
 use clap::Args;
-use serde::{Deserialize, Serialize};
 
-use crate::assets::asset_id::{
-    outcome_asset_id, outcome_coin, outcome_encoding, outcome_token, parse_outcome_notation,
-};
+use crate::assets::asset_id::parse_outcome_notation;
+use crate::assets::{OutcomeSideRow, load_outcome_sides};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, arg};
+use crate::commands::rows::{ListRow, One, Row, Rows};
 use crate::errors::CliError;
-use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::output::TableData;
 use crate::stream::parse_positive_usize;
 
 #[derive(Args, Debug, Clone)]
@@ -24,114 +21,46 @@ pub struct OutcomeGetArgs {
     pub notation: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct OutcomeSideRow {
-    pub outcome: u64,
-    pub side: u64,
-    pub encoding: u64,
-    pub coin: String,
-    pub token: String,
-    pub asset_id: u64,
-    pub outcome_name: String,
-    pub side_name: String,
-    pub description: String,
-    pub side_token: Option<u64>,
-}
+impl Row for OutcomeSideRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Outcome",
+        "Side",
+        "Encoding",
+        "Coin",
+        "Token",
+        "Asset ID",
+        "Outcome Name",
+        "Side Name",
+    ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutcomeSidesOutput {
-    rows: Vec<OutcomeSideRow>,
-}
-
-impl OutcomeSidesOutput {
-    #[must_use]
-    pub fn new(rows: Vec<OutcomeSideRow>) -> Self {
-        Self { rows }
-    }
-}
-
-impl TableData for OutcomeSidesOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Outcome",
-            "Side",
-            "Encoding",
-            "Coin",
-            "Token",
-            "Asset ID",
-            "Outcome Name",
-            "Side Name",
+            self.outcome.to_string(),
+            self.side.to_string(),
+            self.encoding.to_string(),
+            self.coin.clone(),
+            self.token.clone(),
+            self.asset_id.to_string(),
+            self.outcome_name.clone(),
+            self.side_name.clone(),
         ]
     }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.outcome.to_string(),
-                    row.side.to_string(),
-                    row.encoding.to_string(),
-                    row.coin.clone(),
-                    row.token.clone(),
-                    row.asset_id.to_string(),
-                    row.outcome_name.clone(),
-                    row.side_name.clone(),
-                ]
-            })
-            .collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
-    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutcomeSideOutput {
-    row: OutcomeSideRow,
-}
-
-impl OutcomeSideOutput {
-    #[must_use]
-    pub fn new(row: OutcomeSideRow) -> Self {
-        Self { row }
-    }
-}
-
-impl TableData for OutcomeSideOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec![
-            "Outcome",
-            "Side",
-            "Encoding",
-            "Coin",
-            "Token",
-            "Asset ID",
-            "Outcome Name",
-            "Side Name",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        OutcomeSidesOutput::new(vec![self.row.clone()]).rows()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
-    }
+impl ListRow for OutcomeSideRow {
+    const EMPTY: &'static str = "No results.";
 }
 
 pub async fn list(inv: &Invocation, args: &OutcomeListArgs) -> Result<(), anyhow::Error> {
-    let mut rows = outcome_side_rows(inv.remote()?.api()).await?;
+    let mut rows = load_outcome_sides(inv.remote()?.api()).await?;
     rows.truncate(args.limit);
-    inv.print(&OutcomeSidesOutput::new(rows));
+    inv.print(&Rows::new(rows));
     Ok(())
 }
 
 pub async fn get(inv: &Invocation, args: &OutcomeGetArgs) -> Result<(), anyhow::Error> {
     let parsed = parse_outcome_notation(&args.notation)?;
-    let row = outcome_side_rows(inv.remote()?.api())
+    let row = load_outcome_sides(inv.remote()?.api())
         .await?
         .into_iter()
         .find(|row| row.encoding == parsed.encoding)
@@ -141,88 +70,8 @@ pub async fn get(inv: &Invocation, args: &OutcomeGetArgs) -> Result<(), anyhow::
                 args.notation
             ))
         })?;
-    inv.print(&OutcomeSideOutput::new(row));
+    inv.print(&One::new(row));
     Ok(())
-}
-
-pub async fn outcome_side_rows(api: &ApiClient) -> Result<Vec<OutcomeSideRow>, CliError> {
-    let response = api
-        .info::<OutcomeMetaResponse>(
-            &OutcomeMetaRequest {
-                request_type: "outcomeMeta",
-            },
-            "loading outcome metadata",
-        )
-        .await?;
-    Ok(rows_from_meta(response))
-}
-
-fn rows_from_meta(response: OutcomeMetaResponse) -> Vec<OutcomeSideRow> {
-    let mut rows = response
-        .outcomes
-        .into_iter()
-        .flat_map(|outcome| {
-            let outcome_id = outcome.outcome;
-            outcome
-                .side_specs
-                .into_iter()
-                .enumerate()
-                .filter_map(move |(side, side_spec)| {
-                    let side = u64::try_from(side).ok()?;
-                    outcome_encoding(outcome_id, side)
-                        .ok()
-                        .and_then(|encoding| {
-                            let asset_id = outcome_asset_id(encoding).ok()?;
-                            let coin = outcome_coin(encoding);
-                            let token = outcome_token(encoding);
-                            Some(OutcomeSideRow {
-                                outcome: outcome_id,
-                                side,
-                                encoding,
-                                coin,
-                                token,
-                                asset_id,
-                                outcome_name: outcome.name.clone(),
-                                side_name: side_spec.name,
-                                description: outcome.description.clone(),
-                                side_token: side_spec.token,
-                            })
-                        })
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by_key(|row| (row.outcome, row.side));
-    rows
-}
-
-#[derive(Debug, Serialize)]
-struct OutcomeMetaRequest {
-    #[serde(rename = "type")]
-    request_type: &'static str,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct OutcomeMetaResponse {
-    outcomes: Vec<OutcomeMetaOutcome>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct OutcomeMetaOutcome {
-    outcome: u64,
-    name: String,
-    description: String,
-    #[serde(default)]
-    side_specs: Vec<OutcomeSideSpec>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-struct OutcomeSideSpec {
-    name: String,
-    token: Option<u64>,
 }
 
 pub const GROUP: GroupSpec =
@@ -263,7 +112,7 @@ impl CliCommand for OutcomesGet {
     .args(&[arg("notation")]);
 
     fn validate(args: &OutcomeGetArgs) -> Result<(), CliError> {
-        crate::assets::asset_id::parse_outcome_notation(&args.notation)?;
+        parse_outcome_notation(&args.notation)?;
         Ok(())
     }
 

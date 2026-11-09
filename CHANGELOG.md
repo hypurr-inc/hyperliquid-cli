@@ -42,6 +42,11 @@
 - `orders bracket --entry limit` refuses `--amount` with a bracket-specific message (exit `2`).
 - `account orders` shows a missing TIF as a dimmed `n/a` in pretty output, like `orders open`.
 - `orders history` retries the raw order list only when the response shape does not match, not when the body is malformed JSON.
+- `positions update-leverage` and `positions update-margin` accept a HIP-3 market (`xyz:XYZ100`) and send its protocol asset id, as orders do; before they failed with `asset not found`.
+- `prio bid` counts `--max` and the current gas in HyperCore wei (10^8 per HYPE, as the exchange documents) without a token-list lookup; the fallback scale was 10^18, which sent a cap 10^10 times too large when the token list did not name HYPE. A `--max` finer than 8 decimals now exits `2` also under `--dry-run`.
+- `staking link initiate|finalize` pretty output highlights the Warning column, not the Network column.
+- Responses that failed to decode no longer print as empty: `referral status` fails on a field of the wrong type, `vault list|get|search` on an unreadable apr/deposit/account-value, `meta` on a response without a `universe`, `outcomes list` on a side that cannot be encoded, and `watch risk` on a failed fill-history read at start. A HIP-3 dex whose metadata fails to load is reported (`asset search|decode` warn; resolving one of its markets exits `12` instead of `asset not found`), and a failed `perpDexs` listing fails the raw metadata load.
+- Missing table cells read `n/a` in `referral status`, `prio status`, `vault list` and `staking validators`; `transfer send-asset --dest dex:dex:x` keeps the name `dex:x`; subaccount transfer consent previews print the network as `Testnet`/`Mainnet`; the borrow/lend unknown-token error reads `spot token "X" not found`; over-precise USDC amounts for `subaccount transfer` and `positions update-margin` use the shared amount wording.
 
 ## 0.17.0 - 2026-11-09
 

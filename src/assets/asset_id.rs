@@ -6,10 +6,10 @@
 
 use crate::errors::CliError;
 
-pub const SPOT_ASSET_ID_OFFSET: u64 = 10_000;
-pub const HIP3_ASSET_ID_OFFSET: u64 = 100_000;
-pub const HIP3_DEX_SLOT_SIZE: u64 = 10_000;
-pub const OUTCOME_ASSET_ID_OFFSET: u64 = 100_000_000;
+const SPOT_ASSET_ID_OFFSET: u64 = 10_000;
+const HIP3_ASSET_ID_OFFSET: u64 = 100_000;
+const HIP3_DEX_SLOT_SIZE: u64 = 10_000;
+const OUTCOME_ASSET_ID_OFFSET: u64 = 100_000_000;
 
 /// Outcome markets are binary: side 0 is "Yes", side 1 is "No".
 pub const MAX_OUTCOME_SIDE: u64 = 1;

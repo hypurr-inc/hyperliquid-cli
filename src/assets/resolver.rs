@@ -125,13 +125,6 @@ impl AssetResolver {
         }
     }
 
-    /// Spot protocol asset id for an info-endpoint `@N` key, if listed.
-    #[must_use]
-    pub fn spot_asset_index_for_internal_id(&self, internal_id: usize) -> Option<usize> {
-        self.spot_for_internal_id(internal_id)
-            .map(|spot| spot.index)
-    }
-
     #[must_use]
     pub fn display_coin(&self, coin: &str) -> String {
         asset_id::parse_spot_coin_key(coin)
@@ -167,9 +160,11 @@ impl AssetResolver {
         self.metadata.spots()
     }
 
+    /// HIP-3 DEXes whose metadata failed to load; see
+    /// [`AssetMetadata::unavailable_dexes`].
     #[must_use]
-    pub fn suggestions(&self, input: &str) -> Vec<String> {
-        suggestions(input, self.metadata.all_candidate_names())
+    pub fn unavailable_dexes(&self) -> &[String] {
+        self.metadata.unavailable_dexes()
     }
 
     fn spot_for_internal_id(&self, internal_id: usize) -> Option<&SpotAsset> {
@@ -200,7 +195,20 @@ impl AssetResolver {
                     && eq_asset_name(&asset.name, token)
             })
             .cloned()
-            .ok_or_else(|| self.not_found(input, self.perp_candidate_names()))
+            .ok_or_else(|| {
+                if self
+                    .metadata
+                    .unavailable_dexes()
+                    .iter()
+                    .any(|unavailable| eq_asset_name(unavailable, dex))
+                {
+                    AssetError::Load(CliError::Unavailable(format!(
+                        "Metadata for the HIP-3 dex {dex} could not be loaded, so {input} cannot be resolved. Try again."
+                    )))
+                } else {
+                    self.not_found(input, self.perp_candidate_names())
+                }
+            })
     }
 
     fn perp_candidate_names(&self) -> Vec<String> {
@@ -222,7 +230,7 @@ impl AssetResolver {
     fn not_found(&self, input: &str, candidates: Vec<String>) -> AssetError {
         AssetError::NotFound {
             asset: input.to_string(),
-            suggestion: suggestions(input, candidates).into_iter().next(),
+            suggestion: suggestion(input, candidates),
         }
     }
 }
@@ -252,12 +260,12 @@ async fn fetch_hip3_perp(
     }
 }
 
-/// Return at most one close fuzzy match by Levenshtein distance.
+/// The one close fuzzy match by Levenshtein distance, if any.
 ///
 /// The match must be tight (see [`suggestion_threshold`]); a loose match is
 /// worse than none. Ties break by candidate order, then alphabetically.
 #[must_use]
-pub fn suggestions<I, S>(input: &str, candidates: I) -> Vec<String>
+fn suggestion<I, S>(input: &str, candidates: I) -> Option<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
@@ -293,8 +301,6 @@ where
             },
         )
         .map(|(_, _, candidate)| candidate)
-        .into_iter()
-        .collect()
 }
 
 /// Largest edit distance still worth suggesting: one edit per three characters
@@ -330,43 +336,62 @@ mod tests {
     fn suggests_at_most_one_tight_match() {
         let candidates = ["BTC", "LTC", "BCH", "FARTCOIN", "TON", "NFTI"];
 
-        assert_eq!(suggestions("BTCC", candidates), vec!["BTC"]);
-        assert_eq!(suggestions("ETHH", ["ETH", "ETC"]), vec!["ETH"]);
+        assert_eq!(suggestion("BTCC", candidates).as_deref(), Some("BTC"));
+        assert_eq!(suggestion("ETHH", ["ETH", "ETC"]).as_deref(), Some("ETH"));
         assert_eq!(
-            suggestions("BT", ["BTC", "ETH", "BLUR", "BONK", "PURR/USDC"]),
-            vec!["BTC"]
+            suggestion("BT", ["BTC", "ETH", "BLUR", "BONK", "PURR/USDC"]).as_deref(),
+            Some("BTC")
         );
-        assert!(suggestions("NOTACOIN", candidates).is_empty());
-        assert!(suggestions("ZZZZZZZZ", ["ZEC", "BTC", "ETH"]).is_empty());
+        assert_eq!(suggestion("NOTACOIN", candidates), None);
+        assert_eq!(suggestion("ZZZZZZZZ", ["ZEC", "BTC", "ETH"]), None);
     }
 
     #[test]
     fn long_placeholder_names_get_no_loose_suggestion() {
         let candidates = ["BTC", "ETH", "BLUR", "BONK"];
 
-        assert!(suggestions("INVALIDCOIN", candidates).is_empty());
-        assert!(suggestions(&"A".repeat(40), candidates).is_empty());
+        assert_eq!(suggestion("INVALIDCOIN", candidates), None);
+        assert_eq!(suggestion(&"A".repeat(40), candidates), None);
     }
 
     #[test]
     fn typo_tolerance_grows_with_input_length() {
-        assert!(suggestions("BTCC", ["BTXX"]).is_empty());
-        assert_eq!(suggestions("NOTACOIN", ["NOTAXXIN"]), vec!["NOTAXXIN"]);
-        assert!(suggestions("NOTACOIN", ["NOTXXXIN"]).is_empty());
+        assert_eq!(suggestion("BTCC", ["BTXX"]), None);
+        assert_eq!(
+            suggestion("NOTACOIN", ["NOTAXXIN"]).as_deref(),
+            Some("NOTAXXIN")
+        );
+        assert_eq!(suggestion("NOTACOIN", ["NOTXXXIN"]), None);
 
         let long = "A".repeat(40);
         let three_typos = format!("{}BBB", "A".repeat(37));
         let four_typos = format!("{}BBBB", "A".repeat(36));
         assert_eq!(
-            suggestions(&long, [three_typos.as_str()]),
-            vec![three_typos.clone()]
+            suggestion(&long, [three_typos.as_str()]),
+            Some(three_typos.clone())
         );
-        assert!(suggestions(&long, [four_typos.as_str()]).is_empty());
+        assert_eq!(suggestion(&long, [four_typos.as_str()]), None);
     }
 
     #[test]
     fn suggestion_ties_prefer_earlier_candidate() {
-        assert_eq!(suggestions("BTX", ["BTC", "BTT"]), vec!["BTC"]);
+        assert_eq!(suggestion("BTX", ["BTC", "BTT"]).as_deref(), Some("BTC"));
+    }
+
+    #[test]
+    fn a_market_on_a_dex_that_failed_to_load_reports_the_load_failure() {
+        let mut metadata = AssetMetadata::from_assets(vec![perp("BTC", 0)], Vec::new());
+        metadata.unavailable_dexes = vec!["Broken".to_string()];
+        let resolver = AssetResolver::new(metadata);
+
+        let err = resolver.resolve_perp("broken:GOLD").unwrap_err();
+        assert!(matches!(err, AssetError::Load(_)), "{err:?}");
+        assert_eq!(CliError::from(err).exit_code(), 12);
+
+        assert!(matches!(
+            resolver.resolve_perp("other:GOLD"),
+            Err(AssetError::NotFound { .. })
+        ));
     }
 
     #[test]
@@ -436,7 +461,10 @@ mod tests {
         assert_eq!(resolver.display_coin("@0"), "PURR/USDC");
         assert_eq!(resolver.display_coin("@9"), "@9");
         assert_eq!(resolver.display_coin("BTC"), "BTC");
-        assert_eq!(resolver.spot_asset_index_for_internal_id(0), Some(10_000));
+        assert_eq!(
+            resolver.spot_for_internal_id(0).map(|spot| spot.index),
+            Some(10_000)
+        );
     }
 
     #[test]

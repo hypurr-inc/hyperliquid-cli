@@ -11,16 +11,18 @@ use hypersdk::hypercore::types::{Action, AssetPosition, LeverageType, PositionDa
 use serde::{Serialize, Serializer};
 
 use crate::assets::AssetResolver;
+use crate::assets::canonical_dex;
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, StreamBound, arg,
 };
 use crate::commands::actions;
-use crate::commands::support::{canonical_dex, print_dry_run};
+use crate::commands::rows::{ListRow, MISSING, Row, Rows, or_missing, style_column};
+use crate::commands::support::print_dry_run;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
-use crate::output::{self, TableData};
-use crate::quantity::{self, Scale, ScaleError};
+use crate::output;
+use crate::quantity::{self, Scale};
 use crate::stream::SnapshotWatchArgs;
 
 /// Arguments for `positions update-leverage`.
@@ -124,7 +126,18 @@ impl From<AssetPosition> for PositionRow {
 }
 
 impl PositionRow {
-    pub(crate) const HEADERS: [&'static str; 10] = [
+    /// The rows of the positions with a nonzero size.
+    pub(crate) fn open(positions: Vec<AssetPosition>) -> Vec<Self> {
+        positions
+            .into_iter()
+            .map(Self::from)
+            .filter(|row| !row.size.is_zero())
+            .collect()
+    }
+}
+
+impl Row for PositionRow {
+    const HEADERS: &'static [&'static str] = &[
         "Coin",
         "Side",
         "Size",
@@ -136,38 +149,30 @@ impl PositionRow {
         "Margin Used",
         "Liquidation",
     ];
-    const PNL_COLUMN: usize = 5;
 
-    /// The rows of the positions with a nonzero size.
-    pub(crate) fn open(positions: Vec<AssetPosition>) -> Vec<Self> {
-        positions
-            .into_iter()
-            .map(Self::from)
-            .filter(|row| !row.size.is_zero())
-            .collect()
-    }
-
-    pub(crate) fn cells(&self) -> Vec<String> {
+    fn cells(&self) -> Vec<String> {
         vec![
             self.coin.clone(),
             self.side.to_string(),
             self.size.to_string(),
-            optional_cell(self.entry),
+            or_missing(self.entry),
             self.mark.to_string(),
             self.unrealized_pnl.to_string(),
             self.position_value.to_string(),
             self.leverage.to_string(),
             self.margin_used.to_string(),
-            optional_cell(self.liquidation_price),
+            or_missing(self.liquidation_price),
         ]
     }
 
     /// [`Self::cells`] with the PnL coloured by sign and missing values greyed.
-    pub(crate) fn pretty_cells(&self) -> Vec<String> {
+    fn pretty_cells(&self) -> Vec<String> {
         let mut cells = self.cells();
-        cells[Self::PNL_COLUMN] = pretty_pnl(self.unrealized_pnl);
+        style_column::<Self>(&mut cells, "Unrealized PnL", |_| {
+            pretty_pnl(self.unrealized_pnl)
+        });
         for cell in &mut cells {
-            if cell == NOT_AVAILABLE {
+            if cell == MISSING {
                 *cell = output::colors::gray(cell);
             }
         }
@@ -175,10 +180,8 @@ impl PositionRow {
     }
 }
 
-const NOT_AVAILABLE: &str = "n/a";
-
-fn optional_cell(value: Option<Decimal>) -> String {
-    value.map_or_else(|| NOT_AVAILABLE.to_string(), |value| value.to_string())
+impl ListRow for PositionRow {
+    const EMPTY: &'static str = "No open positions.";
 }
 
 /// A PnL value, green when positive and red when negative.
@@ -190,32 +193,6 @@ pub(crate) fn pretty_pnl(value: Decimal) -> String {
         output::colors::red(&formatted)
     } else {
         formatted
-    }
-}
-
-struct PositionsOutput {
-    rows: Vec<PositionRow>,
-}
-
-impl TableData for PositionsOutput {
-    fn headers(&self) -> Vec<&str> {
-        PositionRow::HEADERS.to_vec()
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows.iter().map(PositionRow::cells).collect()
-    }
-
-    fn pretty_rows(&self) -> Vec<Vec<String>> {
-        self.rows.iter().map(PositionRow::pretty_cells).collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No open positions.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
     }
 }
 
@@ -233,45 +210,34 @@ struct PositionActionConfirmation {
     amount: Option<Decimal>,
 }
 
-struct PositionActionOutput {
-    rows: Vec<PositionActionConfirmation>,
-}
+impl Row for PositionActionConfirmation {
+    const HEADERS: &'static [&'static str] = &[
+        "Coin",
+        "Action",
+        "Status",
+        "Leverage",
+        "Margin Mode",
+        "Amount",
+    ];
 
-impl TableData for PositionActionOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Coin",
-            "Action",
-            "Status",
-            "Leverage",
-            "Margin Mode",
-            "Amount",
+            self.coin.clone(),
+            self.action.clone(),
+            self.status.clone(),
+            self.leverage
+                .map(|leverage| leverage.to_string())
+                .unwrap_or_default(),
+            self.margin_mode.clone().unwrap_or_default(),
+            self.amount
+                .map(|amount| amount.to_string())
+                .unwrap_or_default(),
         ]
     }
+}
 
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    row.coin.clone(),
-                    row.action.clone(),
-                    row.status.clone(),
-                    row.leverage
-                        .map(|leverage| leverage.to_string())
-                        .unwrap_or_default(),
-                    row.margin_mode.clone().unwrap_or_default(),
-                    row.amount
-                        .map(|amount| amount.to_string())
-                        .unwrap_or_default(),
-                ]
-            })
-            .collect()
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
-    }
+impl ListRow for PositionActionConfirmation {
+    const EMPTY: &'static str = "No results.";
 }
 
 /// Fetch authenticated user's open positions without printing them.
@@ -279,32 +245,31 @@ async fn list_snapshot(
     client: &HttpClient,
     user: Address,
     dex: Option<&str>,
-) -> Result<PositionsOutput, anyhow::Error> {
+) -> Result<Rows<PositionRow>, anyhow::Error> {
     let positions = client
         .clearinghouse_state(user, dex.map(str::to_string))
         .await
         .map_err(from_sdk)?
         .asset_positions;
 
-    Ok(PositionsOutput {
-        rows: PositionRow::open(positions),
-    })
+    Ok(Rows::new(PositionRow::open(positions)))
 }
 
-/// The perp a `--coin` names: its display name and protocol asset id.
-fn resolve_perp_asset(resolver: &AssetResolver, coin: &str) -> Result<(String, usize), CliError> {
-    let perp = resolver.resolve_perp(coin)?;
+/// The perp a `--coin` names: its display name and protocol asset id. A HIP-3
+/// market (`dex:COIN`) is looked up live when the metadata snapshot lacks it,
+/// as orders do.
+async fn resolve_perp_asset(
+    resolver: &AssetResolver,
+    client: &HttpClient,
+    coin: &str,
+) -> Result<(String, usize), CliError> {
+    let perp = resolver.resolve_perp_or_fetch(client, coin).await?;
     Ok((perp.display_name(), perp.index))
 }
 
 /// Margin to add, in USDC micro-units.
 fn margin_micro_units(amount: Decimal) -> Result<i64, CliError> {
-    quantity::positive(amount, Scale::USDC).map_err(|err| match err {
-        ScaleError::TooLarge => {
-            CliError::Configuration("amount is too large for Hyperliquid micro-units".to_string())
-        }
-        err => err.config("amount", Scale::USDC),
-    })
+    quantity::positive(amount, Scale::USDC).map_err(|err| err.config("amount", Scale::USDC))
 }
 
 pub const GROUP: GroupSpec =
@@ -382,7 +347,8 @@ impl CliCommand for PositionsUpdateLeverage {
 
     async fn run(inv: &Invocation, args: &UpdateLeverageArgs) -> Result<(), anyhow::Error> {
         let resolver = inv.trading_resolver().await?;
-        let (coin, asset) = resolve_perp_asset(&resolver, &args.coin)?;
+        let (coin, asset) =
+            resolve_perp_asset(&resolver, inv.remote()?.api().sdk(), &args.coin).await?;
         let is_cross = !args.isolated;
         let margin_mode = if is_cross { "cross" } else { "isolated" };
         if inv.dry_run() {
@@ -413,16 +379,14 @@ impl CliCommand for PositionsUpdateLeverage {
         )
         .await?;
 
-        inv.print(&PositionActionOutput {
-            rows: vec![PositionActionConfirmation {
-                coin,
-                action: "update-leverage".to_string(),
-                status: "updated".to_string(),
-                leverage: Some(args.leverage),
-                margin_mode: Some(margin_mode.to_string()),
-                amount: None,
-            }],
-        });
+        inv.print(&Rows::new(vec![PositionActionConfirmation {
+            coin,
+            action: "update-leverage".to_string(),
+            status: "updated".to_string(),
+            leverage: Some(args.leverage),
+            margin_mode: Some(margin_mode.to_string()),
+            amount: None,
+        }]));
         Ok(())
     }
 }
@@ -451,7 +415,8 @@ impl CliCommand for PositionsUpdateMargin {
     async fn run(inv: &Invocation, args: &UpdateMarginArgs) -> Result<(), anyhow::Error> {
         let ntli = margin_micro_units(args.amount)?;
         let resolver = inv.trading_resolver().await?;
-        let (coin, asset) = resolve_perp_asset(&resolver, &args.coin)?;
+        let (coin, asset) =
+            resolve_perp_asset(&resolver, inv.remote()?.api().sdk(), &args.coin).await?;
         if inv.dry_run() {
             return print_dry_run(
                 inv,
@@ -480,16 +445,14 @@ impl CliCommand for PositionsUpdateMargin {
         )
         .await?;
 
-        inv.print(&PositionActionOutput {
-            rows: vec![PositionActionConfirmation {
-                coin,
-                action: "update-margin".to_string(),
-                status: "updated".to_string(),
-                leverage: None,
-                margin_mode: None,
-                amount: Some(args.amount),
-            }],
-        });
+        inv.print(&Rows::new(vec![PositionActionConfirmation {
+            coin,
+            action: "update-margin".to_string(),
+            status: "updated".to_string(),
+            leverage: None,
+            margin_mode: None,
+            amount: Some(args.amount),
+        }]));
         Ok(())
     }
 }

@@ -6,7 +6,7 @@ use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::errors::CliError;
-use crate::resolvers::{HexAddressError, parse_exact_hex_address};
+use crate::resolvers::{HexAddressError, parse_exact_hex_address, parse_hex_address};
 
 /// An `/info` request body: `{"type": <kind>, ...fields}`.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,24 +61,54 @@ impl Serialize for InfoRequest {
     }
 }
 
-/// Parse an explicit `0x`-prefixed 40-hex-digit address argument.
-///
-/// Failures are configuration errors worded for `flag` when the address comes
-/// from a named flag. `reject_zero` also refuses the zero address.
-pub(crate) fn config_address(
-    raw: &str,
-    flag: Option<&str>,
-    reject_zero: bool,
-) -> Result<Address, CliError> {
-    parse_exact_hex_address(raw, reject_zero).map_err(|err| {
-        let scope = flag.map(|flag| format!("{flag}: ")).unwrap_or_default();
-        CliError::Configuration(match err {
-            HexAddressError::Zero => format!("{scope}address must not be the zero address"),
-            HexAddressError::Format => {
-                format!("{scope}address must be a 0x-prefixed 40-byte hex string")
+/// What an address argument names. The role fixes how a bad value is judged
+/// and which error class and wording it reports: those differ per command and
+/// are part of the documented exit-code surface (exit 2 `Configuration`,
+/// exit 13 `Unsupported`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AddressRole<'a> {
+    /// An explicit `0x`-prefixed destination, worded for `flag` when it comes
+    /// from a named flag. Never the zero address. Configuration error.
+    Explicit(Option<&'a str>),
+    /// A builder address; the `0x` prefix is optional and the zero address is
+    /// refused. Unsupported error.
+    Builder,
+    /// A protocol user or validator address; the `0x` prefix is optional. A
+    /// malformed value is an unsupported input, the zero address (named by
+    /// `subject`) a configuration error.
+    Protocol(&'a str),
+    /// A watched account; the `0x` prefix is optional and the zero address is
+    /// allowed. Unsupported error.
+    Watched,
+}
+
+/// Parse an address argument as `role` describes.
+pub(crate) fn address(raw: &str, role: AddressRole<'_>) -> Result<Address, CliError> {
+    match role {
+        AddressRole::Explicit(flag) => parse_exact_hex_address(raw, true).map_err(|err| {
+            let scope = flag.map(|flag| format!("{flag}: ")).unwrap_or_default();
+            CliError::Configuration(match err {
+                HexAddressError::Zero => format!("{scope}address must not be the zero address"),
+                HexAddressError::Format => {
+                    format!("{scope}address must be a 0x-prefixed 40-byte hex string")
+                }
+            })
+        }),
+        AddressRole::Builder => parse_hex_address(raw, true).map_err(|err| {
+            CliError::Unsupported(match err {
+                HexAddressError::Format => format!("Invalid builder address: {raw}"),
+                HexAddressError::Zero => "builder address cannot be the zero address".to_string(),
+            })
+        }),
+        AddressRole::Protocol(subject) => parse_hex_address(raw, true).map_err(|err| match err {
+            HexAddressError::Format => CliError::Unsupported(format!("Invalid address: {raw}")),
+            HexAddressError::Zero => {
+                CliError::Configuration(format!("{subject} address must not be the zero address"))
             }
-        })
-    })
+        }),
+        AddressRole::Watched => parse_hex_address(raw, false)
+            .map_err(|_| CliError::Unsupported(format!("Invalid address: {raw}"))),
+    }
 }
 
 #[cfg(test)]
@@ -113,22 +143,45 @@ mod tests {
     }
 
     #[test]
-    fn config_address_words_errors_for_the_flag() {
+    fn explicit_addresses_word_errors_for_the_flag() {
         let zero = "0x0000000000000000000000000000000000000000";
 
-        let err = config_address(zero, Some("--to"), true).unwrap_err();
+        let err = address(zero, AddressRole::Explicit(Some("--to"))).unwrap_err();
         assert_eq!(err.exit_code(), 2);
         assert!(
             err.to_string()
                 .ends_with("--to: address must not be the zero address")
         );
-        assert!(config_address(zero, None, false).is_ok());
 
-        let err = config_address("INVALID", None, true).unwrap_err();
+        let err = address("INVALID", AddressRole::Explicit(None)).unwrap_err();
         assert!(
             err.to_string()
                 .ends_with("address must be a 0x-prefixed 40-byte hex string")
         );
-        assert!(config_address(ADDRESS, None, true).is_ok());
+        assert!(address(ADDRESS, AddressRole::Explicit(None)).is_ok());
+    }
+
+    /// The exit code each role reports is part of the CLI contract: 2 is
+    /// `Configuration`, 13 is `Unsupported`.
+    #[test]
+    fn every_role_keeps_its_error_class() {
+        let zero = "0x0000000000000000000000000000000000000000";
+        let bare = "000000000000000000000000000000000000dEaD";
+        let class = |raw: &str, role| address(raw, role).unwrap_err().exit_code();
+
+        assert_eq!(class("nope", AddressRole::Explicit(Some("--to"))), 2);
+        assert_eq!(class(bare, AddressRole::Explicit(None)), 2);
+        assert_eq!(class(zero, AddressRole::Explicit(None)), 2);
+
+        assert_eq!(class("nope", AddressRole::Builder), 13);
+        assert_eq!(class(zero, AddressRole::Builder), 13);
+        assert!(address(bare, AddressRole::Builder).is_ok());
+
+        assert_eq!(class("0x02", AddressRole::Protocol("validator")), 13);
+        assert_eq!(class(zero, AddressRole::Protocol("validator")), 2);
+        assert!(address(bare, AddressRole::Protocol("validator")).is_ok());
+
+        assert_eq!(class("nope", AddressRole::Watched), 13);
+        assert!(address(zero, AddressRole::Watched).is_ok());
     }
 }
