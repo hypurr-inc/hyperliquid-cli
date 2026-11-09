@@ -490,7 +490,7 @@ impl CliCommand for SubaccountList {
         .schema_required()]);
 
     async fn run(inv: &Invocation, args: &SubaccountListArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_user(args.address.as_deref())?;
+        let user = inv.resolve_user(args.address.as_deref()).await?;
         crate::commands::account::subaccounts(inv, user).await
     }
 }

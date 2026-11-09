@@ -16,8 +16,8 @@ use thiserror::Error;
 use crate::response_sanitization::Untrusted;
 
 pub use classify::{
-    Rejection, classify_rejection, from_anyhow, from_exchange_rejection, from_sdk,
-    http_response_indicates_rate_limit, is_server_status,
+    Refusal, Rejection, address_rate_limit_in_body, classify_rejection, from_anyhow,
+    from_exchange_rejection, from_sdk, http_response_indicates_rate_limit, is_server_status,
 };
 pub use envelope::{ErrorEnvelope, UsageParts, partial_results_fields};
 pub use recovery::NextCommand;
@@ -71,6 +71,11 @@ pub enum CliError {
     #[error("Invalid authentication: {0}")]
     AuthRejected(Untrusted),
 
+    /// The exchange could not find the signer: the signature recovered to an
+    /// address that is neither a user nor an approved API wallet (exit 10).
+    #[error("Invalid authentication: {0}")]
+    SignerNotRegistered(Untrusted),
+
     /// OWS wallet not found in vault (exit 10).
     #[error("OWS wallet '{wallet}' was not found")]
     OwsWalletNotFound { wallet: String },
@@ -89,6 +94,13 @@ pub enum CliError {
         retry_after: Option<u64>,
         retryable: bool,
     },
+
+    /// The address spent its request budget (exit 11). The exchange answers
+    /// this with HTTP 200 and its own counts, which the message quotes.
+    #[error(
+        "Too many requests from this address: its request allowance is used up. Exchange said: {0}"
+    )]
+    AddressRateLimited(Untrusted),
 
     /// Network or API unreachable. The message is complete user-facing copy (exit 12).
     #[error("{0}")]
@@ -120,6 +132,11 @@ pub enum CliError {
     #[error("Unsupported input: {0}")]
     Unsupported(String),
 
+    /// The exchange refused an order with one of its documented messages (exit
+    /// 13). `text` is the complete message, ending with the labelled remote text.
+    #[error("Unsupported input: {text}")]
+    ExchangeRefused { refusal: Refusal, text: String },
+
     /// Asset not found with a close-match suggestion (exit 13).
     #[error("Couldn't find asset \"{asset}\". Did you mean {suggestions}?")]
     AssetNotFound {
@@ -140,6 +157,12 @@ pub enum CliError {
     #[error("Partial results: {0}")]
     PartialResults(String),
 }
+
+/// The address-based limit lets a spent address send one request every 10
+/// seconds.
+const ADDRESS_LIMIT_RETRY_AFTER_SECS: u64 = 10;
+
+const ADDRESS_RATE_LIMIT_HINT: &str = "Each address earns 1 request per USDC of cumulative volume traded, on top of a 10000-request starting buffer. Once that is spent it may send one request every 10 seconds; cancels have a higher cap, so open orders can still be canceled. Trade (taker fills) to free requests, or buy capacity with the `reserveRequestWeight` action (0.0005 USDC per request). `hyperliquid account rate-limit` shows the address's usage.";
 
 fn rate_limit_hint(retry_after: &Option<u64>) -> String {
     match retry_after {
@@ -167,14 +190,16 @@ impl CliError {
             Self::MissingInput(_) => &spec::MISSING_INPUT,
             Self::AuthRequired => &spec::AUTH_REQUIRED,
             Self::InvalidAuth(_) | Self::AuthRejected(_) => &spec::INVALID_AUTH,
+            Self::SignerNotRegistered(_) => &spec::SIGNER_NOT_REGISTERED,
             Self::OwsWalletNotFound { .. } => &spec::WALLET_NOT_FOUND,
             Self::OwsNoChainAccount { .. } => &spec::WALLET_ACCOUNT_MISSING,
-            Self::RateLimited { .. } => &spec::RATE_LIMITED,
+            Self::RateLimited { .. } | Self::AddressRateLimited(_) => &spec::RATE_LIMITED,
             Self::Unavailable(_) => &spec::NETWORK_ERROR,
             Self::ApiStatus { .. } => &spec::API_ERROR,
             Self::Timeout(_) => &spec::TIMEOUT,
             Self::UnknownOutcome(_) => &spec::UNKNOWN_OUTCOME,
             Self::Unsupported(_) => &spec::UNSUPPORTED_INPUT,
+            Self::ExchangeRefused { refusal, .. } => refusal.spec(),
             Self::ConfirmationRequired { .. } => &spec::CONFIRMATION_REQUIRED,
             Self::AssetNotFound { .. } | Self::AssetNotFoundNoSuggestion { .. } => {
                 &spec::ASSET_NOT_FOUND
@@ -230,6 +255,7 @@ impl CliError {
     pub fn retry_after(&self) -> Option<u64> {
         match self {
             Self::RateLimited { retry_after, .. } => *retry_after,
+            Self::AddressRateLimited(_) => Some(ADDRESS_LIMIT_RETRY_AFTER_SECS),
             _ => None,
         }
     }
@@ -289,6 +315,28 @@ impl CliError {
         Self::Unsupported(format!("{prefix}{remote}"))
     }
 
+    /// Build an [`CliError::ExchangeRefused`] whose message is `lead` followed
+    /// by the labelled remote text.
+    #[must_use]
+    pub fn refused(refusal: Refusal, lead: impl std::fmt::Display, remote: &Untrusted) -> Self {
+        Self::ExchangeRefused {
+            refusal,
+            text: format!("{lead}{remote}"),
+        }
+    }
+
+    /// What to do about this failure, for the refusals that have a specific
+    /// answer. The JSON envelope carries it as `data.hint`.
+    #[must_use]
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::ExchangeRefused { refusal, .. } => Some(refusal.spec().agent_action),
+            Self::SignerNotRegistered(_) => Some(spec::SIGNER_NOT_REGISTERED.agent_action),
+            Self::AddressRateLimited(_) => Some(ADDRESS_RATE_LIMIT_HINT),
+            _ => None,
+        }
+    }
+
     /// Outcome asset notation given to a command that only trades or reads perp
     /// and spot markets.
     #[must_use]
@@ -307,7 +355,7 @@ impl CliError {
             } else {
                 format!("HTTP {status} {phrase}")
             }),
-            _ => None,
+            _ => self.hint().map(str::to_string),
         }
     }
 
@@ -339,7 +387,7 @@ mod tests {
     }
 
     fn every_variant() -> Vec<CliError> {
-        vec![
+        let mut variants = vec![
             CliError::Internal(anyhow::anyhow!("test")),
             CliError::ExchangeRejected {
                 context: "order rejected",
@@ -355,6 +403,9 @@ mod tests {
             CliError::AuthRequired,
             CliError::InvalidAuth("bad key".into()),
             CliError::AuthRejected(Untrusted::from_remote("Unauthorized")),
+            CliError::SignerNotRegistered(Untrusted::from_remote(
+                "User or API Wallet 0x1 does not exist.",
+            )),
             CliError::OwsWalletNotFound {
                 wallet: "missing-wallet".into(),
             },
@@ -367,6 +418,9 @@ mod tests {
                 retry_after: Some(3),
                 retryable: true,
             },
+            CliError::AddressRateLimited(Untrusted::from_remote(
+                "Too many cumulative requests sent",
+            )),
             CliError::Unavailable("timeout".into()),
             CliError::api_status(reqwest::StatusCode::BAD_GATEWAY, "body"),
             CliError::Timeout("deadline exceeded".into()),
@@ -378,7 +432,12 @@ mod tests {
             },
             CliError::AssetNotFoundNoSuggestion { asset: "ZZ".into() },
             CliError::PartialResults("half".into()),
-        ]
+        ];
+        variants.extend(
+            Refusal::ALL
+                .map(|refusal| CliError::refused(refusal, "lead: ", &Untrusted::from_remote("x"))),
+        );
+        variants
     }
 
     #[test]
@@ -392,8 +451,10 @@ mod tests {
             (10, "auth", "auth_required"),
             (10, "auth", "invalid_auth"),
             (10, "auth", "invalid_auth"),
+            (10, "auth", "signer_not_registered"),
             (10, "auth", "wallet_not_found"),
             (10, "auth", "wallet_account_missing"),
+            (11, "rate_limited", "rate_limited"),
             (11, "rate_limited", "rate_limited"),
             (11, "rate_limited", "rate_limited"),
             (12, "unavailable", "network_error"),
@@ -404,6 +465,16 @@ mod tests {
             (13, "unsupported", "asset_not_found"),
             (13, "unsupported", "asset_not_found"),
             (15, "partial_results", "partial_failure"),
+            (13, "unsupported", "order_below_minimum_value"),
+            (13, "unsupported", "reduce_only_violation"),
+            (13, "unsupported", "post_only_would_cross"),
+            (13, "unsupported", "ioc_no_match"),
+            (13, "unsupported", "bad_price"),
+            (13, "unsupported", "price_out_of_band"),
+            (13, "unsupported", "zero_size"),
+            (13, "unsupported", "open_interest_cap"),
+            (13, "unsupported", "invalid_trigger_price"),
+            (13, "unsupported", "no_market_liquidity"),
         ];
         let variants = every_variant();
         assert_eq!(variants.len(), expected.len());
@@ -468,6 +539,69 @@ mod tests {
             auth.to_string(),
             "Invalid authentication: [untrusted remote data] Unauthorized"
         );
+    }
+
+    #[test]
+    fn display_of_the_exchange_classes_keeps_the_remote_text_labelled() {
+        let remote = Untrusted::from_remote("Reduce only order would increase position.");
+        assert_eq!(
+            CliError::refused(
+                Refusal::ReduceOnly,
+                "Couldn't place order. Exchange said: ",
+                &remote
+            )
+            .to_string(),
+            "Unsupported input: Couldn't place order. Exchange said: [untrusted remote data] Reduce only order would increase position."
+        );
+        let signer = CliError::SignerNotRegistered(Untrusted::from_remote(
+            "User or API Wallet 0x1 does not exist.",
+        ));
+        assert_eq!(
+            signer.to_string(),
+            "Invalid authentication: [untrusted remote data] User or API Wallet 0x1 does not exist."
+        );
+        let address = CliError::AddressRateLimited(Untrusted::from_remote(
+            "Too many cumulative requests sent (2 > 1)",
+        ));
+        assert_eq!(
+            address.to_string(),
+            "Too many requests from this address: its request allowance is used up. Exchange said: [untrusted remote data] Too many cumulative requests sent (2 > 1)"
+        );
+    }
+
+    #[test]
+    fn only_the_classes_with_a_specific_answer_carry_a_hint() {
+        let hinted = [
+            CliError::SignerNotRegistered(Untrusted::from_remote("x")),
+            CliError::AddressRateLimited(Untrusted::from_remote("x")),
+        ]
+        .into_iter()
+        .chain(
+            Refusal::ALL
+                .map(|refusal| CliError::refused(refusal, "", &Untrusted::from_remote("x"))),
+        );
+        for err in hinted {
+            assert!(err.hint().is_some(), "{err:?}");
+            assert_eq!(err.detail(), err.hint().map(str::to_string), "{err:?}");
+        }
+        for err in [
+            CliError::rate_limited(),
+            CliError::Unsupported("x".into()),
+            CliError::AuthRejected(Untrusted::from_remote("x")),
+            CliError::ExchangeRejected {
+                context: "c",
+                remote: Untrusted::from_remote("x"),
+            },
+        ] {
+            assert!(err.hint().is_none(), "{err:?}");
+        }
+    }
+
+    #[test]
+    fn the_address_limit_names_its_wait_and_never_claims_a_resend_is_safe() {
+        let err = CliError::AddressRateLimited(Untrusted::from_remote("x"));
+        assert_eq!(err.retry_after(), Some(10));
+        assert_eq!(err.retryable(), None);
     }
 
     #[test]

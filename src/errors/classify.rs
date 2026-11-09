@@ -1,10 +1,12 @@
 //! The one place that decides what remote text and SDK errors mean.
 //!
 //! Remote text is classified by narrow phrases for rate limits, rejected
-//! credentials and (for answered exchange rejections only) user-state
-//! problems. A 5xx status is an API failure, never a connectivity problem.
+//! credentials and (for answered exchange rejections only) the refusals the
+//! exchange documents plus user-state problems. A 5xx status is an API
+//! failure, never a connectivity problem.
 
 use super::CliError;
+use super::spec::{self, Spec};
 use super::transport::{network_error, unreachable_from_text};
 use crate::response_sanitization::Untrusted;
 
@@ -16,7 +18,100 @@ const RATE_LIMIT_PHRASES: &[&str] = &[
     "429 too many",
 ];
 
+/// The exchange's answer when an address has spent its request budget: `Too many
+/// cumulative requests sent (x > y) for cumulative volume traded $z. Place
+/// taker orders to free up 1 request per USDC traded.` It arrives as HTTP 200.
+const ADDRESS_RATE_LIMIT_PHRASES: &[&str] = &["too many cumulative requests"];
+
 const AUTH_PHRASES: &[&str] = &["invalid key", "invalid private key", "unauthorized"];
+
+/// What the exchange answers when the signature recovers to an address that is
+/// neither a user nor an approved API wallet: `L1 error: User or API Wallet
+/// 0x… does not exist.` Both parts must be present, because a plain `does not
+/// exist` is also how it refuses a missing vault or similar.
+const SIGNER_PHRASE: &str = "user or api wallet";
+const SIGNER_PHRASE_TAIL: &str = "does not exist";
+
+/// A refusal the exchange documents with a fixed string
+/// (<https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/error-responses>,
+/// plus the strings ccxt's Hyperliquid exception map and the python SDK
+/// issue tracker quote). Each one has its own reason and hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    MinOrderValue,
+    ReduceOnly,
+    PostOnly,
+    IocNoMatch,
+    BadPrice,
+    PriceBand,
+    ZeroSize,
+    OpenInterestCap,
+    TriggerPrice,
+    NoLiquidity,
+}
+
+impl Refusal {
+    pub const ALL: [Self; 10] = [
+        Self::MinOrderValue,
+        Self::ReduceOnly,
+        Self::PostOnly,
+        Self::IocNoMatch,
+        Self::BadPrice,
+        Self::PriceBand,
+        Self::ZeroSize,
+        Self::OpenInterestCap,
+        Self::TriggerPrice,
+        Self::NoLiquidity,
+    ];
+
+    pub(super) fn spec(self) -> &'static Spec {
+        match self {
+            Self::MinOrderValue => &spec::MIN_ORDER_VALUE,
+            Self::ReduceOnly => &spec::REDUCE_ONLY_VIOLATION,
+            Self::PostOnly => &spec::POST_ONLY_WOULD_CROSS,
+            Self::IocNoMatch => &spec::IOC_NO_MATCH,
+            Self::BadPrice => &spec::BAD_PRICE,
+            Self::PriceBand => &spec::PRICE_OUT_OF_BAND,
+            Self::ZeroSize => &spec::ZERO_SIZE,
+            Self::OpenInterestCap => &spec::OPEN_INTEREST_CAP,
+            Self::TriggerPrice => &spec::INVALID_TRIGGER_PRICE,
+            Self::NoLiquidity => &spec::NO_MARKET_LIQUIDITY,
+        }
+    }
+
+    /// Lowercase fragments of the exchange's text. Fragments stop before any
+    /// variable part (`$10`, `{quote_token}`, `bbo was {bbo}`).
+    fn phrases(self) -> &'static [&'static str] {
+        match self {
+            Self::MinOrderValue => &["order must have minimum value of"],
+            Self::ReduceOnly => &["reduce only order would increase position"],
+            Self::PostOnly => &["post only order would have immediately matched"],
+            Self::IocNoMatch => &["order could not immediately match"],
+            Self::BadPrice => &[
+                "price must be divisible by tick size",
+                "order has invalid price",
+            ],
+            Self::PriceBand => &[
+                "order price too far from oracle",
+                "away from the reference price",
+            ],
+            Self::ZeroSize => &["order has zero size"],
+            Self::OpenInterestCap => &[
+                "open interest is capped",
+                "at open interest cap",
+                "increase open interest too quickly",
+            ],
+            Self::TriggerPrice => &["invalid tp/sl price"],
+            Self::NoLiquidity => &["no liquidity available for market order"],
+        }
+    }
+
+    fn recognize(message: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|refusal| contains_any(message, refusal.phrases()))
+    }
+}
 
 /// Exchange rejections caused by the user's account state or the request
 /// values, not by the CLI or the exchange.
@@ -48,7 +143,36 @@ pub fn is_server_status(status: u16) -> bool {
 }
 
 fn looks_like_rate_limit_text(text: &str) -> bool {
-    contains_any(text, RATE_LIMIT_PHRASES)
+    contains_any(text, RATE_LIMIT_PHRASES) || contains_any(text, ADDRESS_RATE_LIMIT_PHRASES)
+}
+
+/// The rate-limit error for remote text that names one: the address-based
+/// form (which carries the exchange's own counts) or the plain one.
+fn rate_limit_for_text(text: &str) -> Option<CliError> {
+    if contains_any(text, ADDRESS_RATE_LIMIT_PHRASES) {
+        Some(CliError::AddressRateLimited(Untrusted::from_remote(text)))
+    } else if contains_any(text, RATE_LIMIT_PHRASES) {
+        Some(CliError::rate_limited())
+    } else {
+        None
+    }
+}
+
+/// The address-limit error for a structured `/exchange` reply body
+/// (`{"status":"err","response":"Too many cumulative requests sent ..."}`),
+/// so the HTTP edge reports the same error a rejected status does.
+pub fn address_rate_limit_in_body(body: &str) -> Option<CliError> {
+    let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
+    if !value
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|status| status.eq_ignore_ascii_case("err"))
+    {
+        return None;
+    }
+    let text = value.get("response")?.as_str()?;
+    contains_any(text, ADDRESS_RATE_LIMIT_PHRASES)
+        .then(|| CliError::AddressRateLimited(Untrusted::from_remote(text)))
 }
 
 /// Return true when an HTTP response should be classified as a rate-limit error.
@@ -110,8 +234,8 @@ fn code_indicates_rate_limit(code: &str) -> bool {
 }
 
 fn rate_limit_or_auth(message: &str) -> Option<CliError> {
-    if looks_like_rate_limit_text(message) {
-        Some(CliError::rate_limited())
+    if let Some(rate_limited) = rate_limit_for_text(message) {
+        Some(rate_limited)
     } else if contains_any(message, AUTH_PHRASES) {
         Some(CliError::AuthRejected(Untrusted::from_remote(message)))
     } else {
@@ -119,31 +243,51 @@ fn rate_limit_or_auth(message: &str) -> Option<CliError> {
     }
 }
 
+fn names_unregistered_signer(message: &str) -> bool {
+    contains_any(message, &[SIGNER_PHRASE]) && contains_any(message, &[SIGNER_PHRASE_TAIL])
+}
+
 /// What an answered exchange rejection (`status: err` text, or an error inside
 /// an order status) means.
 ///
 /// It is never a network problem and its text is never read as an HTTP
 /// status. Every command that surfaces an exchange rejection classifies it
-/// here, then picks its own error for the cases that only it can name.
+/// here, then picks its own error for the cases that only it can name. A
+/// top-level `status: err` and an error inside an order status go through the
+/// same [`classify_rejection`], so recognised text reads the same on both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rejection {
     RateLimited,
+    /// The address spent its request budget (the exchange's `Too many
+    /// cumulative requests` text, kept for the message).
+    AddressRateLimited(Untrusted),
     /// The exchange refused the credentials.
     AuthRejected(Untrusted),
+    /// The signature recovered to an address that is no user or API wallet.
+    SignerNotRegistered(Untrusted),
+    /// One of the documented order refusals.
+    Refused(Refusal, Untrusted),
     /// The user's account state or the request values caused it, such as
-    /// insufficient margin or a size below the minimum.
+    /// insufficient margin.
     UserState(Untrusted),
     /// A refusal the CLI has no narrower meaning for.
     Other(Untrusted),
 }
 
 pub fn classify_rejection(message: &str) -> Rejection {
-    if looks_like_rate_limit_text(message) {
+    if contains_any(message, ADDRESS_RATE_LIMIT_PHRASES) {
+        return Rejection::AddressRateLimited(Untrusted::from_remote(message));
+    }
+    if contains_any(message, RATE_LIMIT_PHRASES) {
         return Rejection::RateLimited;
     }
     let remote = Untrusted::from_remote(message);
     if contains_any(message, AUTH_PHRASES) {
         Rejection::AuthRejected(remote)
+    } else if names_unregistered_signer(message) {
+        Rejection::SignerNotRegistered(remote)
+    } else if let Some(refusal) = Refusal::recognize(message) {
+        Rejection::Refused(refusal, remote)
     } else if contains_any(message, USER_STATE_PHRASES) {
         Rejection::UserState(remote)
     } else {
@@ -152,31 +296,42 @@ pub fn classify_rejection(message: &str) -> Rejection {
 }
 
 impl Rejection {
-    /// The default mapping: a rate limit, rejected credentials, a user-state
-    /// problem (exit 13), or [`CliError::ExchangeRejected`], all quoted after
-    /// `context`.
-    #[must_use]
-    pub fn into_error(self, context: &'static str) -> CliError {
+    /// Every class with its own error; `lead` introduces the exchange's text
+    /// in the refusals that quote it, and `otherwise` words text nothing
+    /// recognises.
+    fn into_error_by(self, lead: &str, otherwise: impl FnOnce(Untrusted) -> CliError) -> CliError {
         match self {
             Self::RateLimited => CliError::rate_limited(),
+            Self::AddressRateLimited(remote) => CliError::AddressRateLimited(remote),
             Self::AuthRejected(remote) => CliError::AuthRejected(remote),
-            Self::UserState(remote) => {
-                CliError::unsupported_with_remote(format!("{context}: "), &remote)
-            }
-            Self::Other(remote) => CliError::ExchangeRejected { context, remote },
+            Self::SignerNotRegistered(remote) => CliError::SignerNotRegistered(remote),
+            Self::Refused(refusal, remote) => CliError::refused(refusal, lead, &remote),
+            Self::UserState(remote) => CliError::unsupported_with_remote(lead, &remote),
+            Self::Other(remote) => otherwise(remote),
         }
     }
 
-    /// A rate limit or rejected credentials keep their own errors. Any other
-    /// rejection becomes `otherwise(remote)`, for commands that report refusals
-    /// in their own words.
+    /// The default mapping for a status that carries no command-specific
+    /// wording: a rate limit, rejected credentials, a recognised refusal or a
+    /// user-state problem (exit 13), or [`CliError::ExchangeRejected`] for
+    /// text nothing recognises (exit 1), all quoted after `context`.
     #[must_use]
-    pub fn into_error_with(self, otherwise: impl FnOnce(Untrusted) -> CliError) -> CliError {
-        match self {
-            Self::RateLimited => CliError::rate_limited(),
-            Self::AuthRejected(remote) => CliError::AuthRejected(remote),
-            Self::UserState(remote) | Self::Other(remote) => otherwise(remote),
-        }
+    pub fn into_error(self, context: &'static str) -> CliError {
+        self.into_error_by(&format!("{context}: "), |remote| {
+            CliError::ExchangeRejected { context, remote }
+        })
+    }
+
+    /// The mapping for commands that report refusals in their own words:
+    /// every class [`Rejection::into_error`] names keeps its error, and text
+    /// nothing recognises reads as `lead` followed by the exchange's words
+    /// and exits 13.
+    #[must_use]
+    pub fn into_error_after(self, lead: impl std::fmt::Display) -> CliError {
+        let lead = lead.to_string();
+        self.into_error_by(&lead, |remote| {
+            CliError::unsupported_with_remote(&lead, &remote)
+        })
     }
 }
 
@@ -301,7 +456,6 @@ mod tests {
     fn exchange_user_state_rejections_are_not_internal_errors() {
         for message in [
             "insufficient balance: requested 100 USDC, available spot USDC 5",
-            "User or API Wallet 0x1111111111111111111111111111111111111111 does not exist.",
             "Must deposit before performing actions. User: 0x1111111111111111111111111111111111111111",
             "Cannot set scheduled cancel time until enough volume traded. Required: $1000000. Traded: $45.63.",
             "Vault deposits must be at least $5.",
@@ -356,16 +510,18 @@ mod tests {
 
     #[test]
     fn unrecognized_exchange_rejection_is_exchange_rejected() {
-        let err =
-            from_exchange_rejection("Order must have minimum value of $10.", "order rejected");
+        // The one convention: text nothing recognises stays exit 1 `exchange_rejected`
+        // at the top level; every recognised class has its own exit code and reason.
+        let err = from_exchange_rejection("Something the exchange invented.", "order rejected");
 
         assert!(matches!(err, CliError::ExchangeRejected { .. }));
         assert_eq!(err.exit_code(), 1);
         assert_eq!(err.reason(), "exchange_rejected");
         assert_eq!(
             err.to_string(),
-            "order rejected: [untrusted remote data] Order must have minimum value of $10."
+            "order rejected: [untrusted remote data] Something the exchange invented."
         );
+        assert!(err.hint().is_none());
     }
 
     #[test]
@@ -556,20 +712,240 @@ mod tests {
 
     #[test]
     fn commands_can_word_other_refusals_themselves() {
-        let own = |remote: Untrusted| {
-            CliError::unsupported_with_remote("Couldn't place the order. Exchange said: ", &remote)
-        };
+        let lead = "Couldn't place the order. Exchange said: ";
 
-        let refused = classify_rejection("Order has invalid size.").into_error_with(own);
+        let refused = classify_rejection("Order has invalid size.").into_error_after(lead);
         assert_eq!(refused.exit_code(), 13);
         assert_eq!(
             refused.to_string(),
             "Unsupported input: Couldn't place the order. Exchange said: [untrusted remote data] Order has invalid size."
         );
 
-        let limited = classify_rejection("too many requests").into_error_with(own);
+        let limited = classify_rejection("too many requests").into_error_after(lead);
         assert_eq!(limited.exit_code(), 11);
-        let credentials = classify_rejection("Unauthorized").into_error_with(own);
+        let credentials = classify_rejection("Unauthorized").into_error_after(lead);
         assert_eq!(credentials.exit_code(), 10);
+    }
+
+    /// Every documented refusal string (docs `error-responses`, ccxt's exception
+    /// map, the python SDK tracker), with the reason and the hint fragment it must get.
+    const REFUSALS: &[(&str, &str, &str)] = &[
+        (
+            "Order must have minimum value of $10.",
+            "order_below_minimum_value",
+            "at least $10",
+        ),
+        (
+            "Order must have minimum value of 10 USDC.",
+            "order_below_minimum_value",
+            "quote token",
+        ),
+        (
+            "Reduce only order would increase position.",
+            "reduce_only_violation",
+            "positions list",
+        ),
+        (
+            "Post only order would have immediately matched, bbo was 50000@50001.",
+            "post_only_would_cross",
+            "--tif gtc",
+        ),
+        (
+            "Order could not immediately match against any resting orders.",
+            "ioc_no_match",
+            "IOC",
+        ),
+        (
+            "Price must be divisible by tick size.",
+            "bad_price",
+            "5 significant figures",
+        ),
+        ("Order has invalid price.", "bad_price", "szDecimals"),
+        (
+            "Order price too far from oracle",
+            "price_out_of_band",
+            "oracle or reference",
+        ),
+        (
+            "Order price cannot be more than 80% away from the reference price",
+            "price_out_of_band",
+            "oracle or reference",
+        ),
+        ("Order has zero size.", "zero_size", "--size"),
+        (
+            "Order would increase open interest while open interest is capped",
+            "open_interest_cap",
+            "open-interest cap",
+        ),
+        (
+            "Order rejected due to price more aggressive than oracle while at open interest cap",
+            "open_interest_cap",
+            "open-interest cap",
+        ),
+        (
+            "Order would increase open interest too quickly",
+            "open_interest_cap",
+            "open-interest cap",
+        ),
+        (
+            "Invalid TP/SL price.",
+            "invalid_trigger_price",
+            "trigger price",
+        ),
+        (
+            "No liquidity available for market order.",
+            "no_market_liquidity",
+            "limit order",
+        ),
+    ];
+
+    #[test]
+    fn documented_refusals_get_their_own_reason_exit_13_and_hint() {
+        for (message, reason, hint) in REFUSALS {
+            let err = from_exchange_rejection(message, "order rejected");
+            assert!(matches!(err, CliError::ExchangeRefused { .. }), "{message}");
+            assert_eq!(err.exit_code(), 13, "{message}");
+            assert_eq!(err.category(), "unsupported", "{message}");
+            assert_eq!(err.reason(), *reason, "{message}");
+            assert_eq!(
+                err.to_string(),
+                format!("Unsupported input: order rejected: [untrusted remote data] {message}")
+            );
+            let text = err.hint().unwrap_or_else(|| panic!("{message} has a hint"));
+            assert!(text.contains(hint), "{message}: {text}");
+            assert_eq!(err.detail().as_deref(), Some(text), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_status_inside_an_order_and_a_top_level_error_classify_identically() {
+        let lead = "Couldn't place order. Exchange said: ";
+        let texts = REFUSALS
+            .iter()
+            .map(|(message, ..)| *message)
+            .chain([
+                "Too many cumulative requests sent (37986 > 10436) for cumulative volume traded $437.92. Place taker orders to free up 1 request per USDC traded.",
+                "Too many requests: rate limit exceeded",
+                "Unauthorized: invalid key",
+                "L1 error: User or API Wallet 0x1111111111111111111111111111111111111111 does not exist.",
+                "Insufficient margin to place order.",
+                "Vault 0x1111111111111111111111111111111111111111 does not exist.",
+            ]);
+        for message in texts {
+            let top_level = from_exchange_rejection(message, "order rejected");
+            let per_order = classify_rejection(message).into_error_after(lead);
+            assert_eq!(top_level.exit_code(), per_order.exit_code(), "{message}");
+            assert_eq!(top_level.category(), per_order.category(), "{message}");
+            assert_eq!(top_level.reason(), per_order.reason(), "{message}");
+            assert_eq!(top_level.hint(), per_order.hint(), "{message}");
+            assert_eq!(
+                top_level.retry_after(),
+                per_order.retry_after(),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cumulative_request_limit_is_a_rate_limit_with_the_address_hint() {
+        let message = "Too many cumulative requests sent (37986 > 10436) for cumulative volume traded $437.92. Place taker orders to free up 1 request per USDC traded.";
+        for err in [
+            from_exchange_rejection(message, "order rejected"),
+            classify_rejection(message).into_error_after("Couldn't cancel order. Exchange said: "),
+            from_sdk(api_error(message)),
+        ] {
+            assert!(matches!(err, CliError::AddressRateLimited(_)), "{err:?}");
+            assert_eq!(err.exit_code(), 11);
+            assert_eq!(err.category(), "rate_limited");
+            assert_eq!(err.reason(), "rate_limited");
+            assert_eq!(err.retry_after(), Some(10));
+            assert_eq!(
+                err.retryable(),
+                None,
+                "a mutation is never marked retryable"
+            );
+            assert!(
+                err.to_string()
+                    .contains(&format!("[untrusted remote data] {message}"))
+            );
+            let hint = err.hint().expect("address limit hint");
+            for fact in [
+                "1 request per USDC",
+                "10000-request",
+                "every 10 seconds",
+                "cancels have a higher cap",
+                "reserveRequestWeight",
+                "hyperliquid account rate-limit",
+            ] {
+                assert!(hint.contains(fact), "{fact} missing from {hint}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_cumulative_request_limit_is_found_in_a_structured_reply_body() {
+        let body = r#"{"status":"err","response":"Too many cumulative requests sent (37986 > 10436) for cumulative volume traded $437.92. Place taker orders to free up 1 request per USDC traded."}"#;
+        assert!(http_response_indicates_rate_limit(200, body));
+        let err = address_rate_limit_in_body(body).expect("address limit");
+        assert!(matches!(err, CliError::AddressRateLimited(_)));
+        for other in [
+            r#"{"status":"err","response":"rate limit exceeded"}"#,
+            r#"{"status":"ok","response":"Too many cumulative requests sent"}"#,
+            "not json",
+        ] {
+            assert!(address_rate_limit_in_body(other).is_none(), "{other}");
+        }
+    }
+
+    #[test]
+    fn an_unregistered_signer_is_a_credential_problem_not_user_state() {
+        let message = "L1 error: User or API Wallet 0x1111111111111111111111111111111111111111 does not exist.";
+        let err = from_exchange_rejection(message, "order rejected");
+
+        assert!(matches!(err, CliError::SignerNotRegistered(_)));
+        assert_eq!(err.exit_code(), 10);
+        assert_eq!(err.category(), "auth");
+        assert_eq!(err.reason(), "signer_not_registered");
+        assert_eq!(
+            err.to_string(),
+            format!("Invalid authentication: [untrusted remote data] {message}")
+        );
+        let hint = err.hint().expect("hint");
+        for fact in [
+            "never approved",
+            "expired or was pruned",
+            "wrong key",
+            "hyperliquid api-wallet list",
+            "hyperliquid api-wallet approve",
+        ] {
+            assert!(hint.contains(fact), "{fact} missing from {hint}");
+        }
+    }
+
+    #[test]
+    fn other_does_not_exist_refusals_stay_user_state() {
+        for message in [
+            "Vault 0x1111111111111111111111111111111111111111 does not exist.",
+            "User does not exist.",
+        ] {
+            let err = from_exchange_rejection(message, "order rejected");
+            assert!(matches!(err, CliError::Unsupported(_)), "{message}");
+            assert_eq!(err.exit_code(), 13);
+            assert_eq!(err.reason(), "unsupported_input");
+        }
+    }
+
+    #[test]
+    fn insufficient_margin_and_balance_stay_user_state() {
+        for message in [
+            "Insufficient margin to place order.",
+            "Order has insufficient spot balance to trade",
+            "Insufficient spot balance asset=10000",
+        ] {
+            let err = from_exchange_rejection(message, "order rejected");
+            assert!(matches!(err, CliError::Unsupported(_)), "{message}");
+            assert_eq!(err.exit_code(), 13);
+            assert_eq!(err.reason(), "unsupported_input");
+        }
     }
 }

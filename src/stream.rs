@@ -14,7 +14,9 @@ use std::time::Duration;
 use clap::{ArgMatches, Args};
 use futures::{Stream, StreamExt};
 use hypersdk::Address;
-use hypersdk::hypercore::{Chain, Incoming, Subscription, UserEvent, ws::Event as WsEvent};
+use hypersdk::hypercore::{
+    Chain, Incoming, Subscription, UserEvent, WebSocket, ws::Event as WsEvent,
+};
 use serde::Serialize;
 use tokio::time::Sleep;
 
@@ -23,6 +25,7 @@ use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::output::JsonRenderOptions;
 use crate::settings::EnvSource;
+use crate::ws::BookAggregationArgs;
 use crate::{output, ws};
 
 /// Exit status for SIGINT and the Ctrl+C key (`128 + 2`). A stop signal exits
@@ -404,67 +407,211 @@ pub(crate) async fn poll_stream<T: Ticker>(
     Ok(())
 }
 
-/// A WebSocket subscription paired with the messages that belong to it.
+/// WebSocket subscriptions paired with the messages that belong to them.
 pub struct SubscribeTarget {
-    subscription: Subscription,
+    subscriptions: Vec<Subscription>,
     matches: fn(&Incoming) -> bool,
+    skip_snapshot: bool,
+}
+
+/// Whether `message` is the `isSnapshot: true` history the exchange sends first
+/// on a user subscription, as opposed to a live update. Only the channels whose
+/// payload carries the flag are known to have one.
+fn is_snapshot(message: &Incoming) -> bool {
+    match message {
+        Incoming::UserFills { is_snapshot, .. } | Incoming::UserFundings { is_snapshot, .. } => {
+            *is_snapshot
+        }
+        Incoming::UserTwapSliceFills(slice_fills) => slice_fills.is_snapshot,
+        _ => false,
+    }
 }
 
 impl SubscribeTarget {
-    pub fn trades(coin: String) -> Self {
+    fn single(subscription: Subscription, matches: fn(&Incoming) -> bool) -> Self {
         Self {
-            subscription: Subscription::Trades { coin },
-            matches: |message| matches!(message, Incoming::Trades(_)),
+            subscriptions: vec![subscription],
+            matches,
+            skip_snapshot: false,
         }
     }
 
-    pub fn orderbook(coin: String) -> Self {
-        Self {
-            subscription: Subscription::L2Book {
-                coin,
-                n_sig_figs: None,
-                mantissa: None,
-                fast: false,
-            },
-            matches: |message| matches!(message, Incoming::L2Book(_)),
+    /// One subscription per dex (`None` is the first perp dex), in order, without repeats.
+    fn per_dex(
+        dexs: Vec<Option<String>>,
+        subscription: impl Fn(Option<String>) -> Subscription,
+        matches: fn(&Incoming) -> bool,
+    ) -> Self {
+        let mut seen = Vec::new();
+        for dex in dexs {
+            if !seen.contains(&dex) {
+                seen.push(dex);
+            }
         }
+        if seen.is_empty() {
+            seen.push(None);
+        }
+        Self {
+            subscriptions: seen.into_iter().map(subscription).collect(),
+            matches,
+            skip_snapshot: false,
+        }
+    }
+
+    /// Drop the `isSnapshot: true` first message of a user subscription: it is
+    /// neither written nor counted against `--max-events`.
+    #[must_use]
+    pub fn skipping_snapshot(mut self, skip: bool) -> Self {
+        self.skip_snapshot = skip;
+        self
+    }
+
+    pub fn trades(coin: String) -> Self {
+        Self::single(Subscription::Trades { coin }, |message| {
+            matches!(message, Incoming::Trades(_))
+        })
+    }
+
+    pub fn orderbook(coin: String, aggregation: BookAggregationArgs) -> Self {
+        Self::single(aggregation.subscription(coin), |message| {
+            matches!(message, Incoming::L2Book(_))
+        })
+    }
+
+    pub fn bbo(coin: String) -> Self {
+        Self::single(Subscription::Bbo { coin }, |message| {
+            matches!(message, Incoming::Bbo(_))
+        })
     }
 
     pub fn candles(coin: String, interval: String) -> Self {
-        Self {
-            subscription: Subscription::Candle { coin, interval },
-            matches: |message| matches!(message, Incoming::Candle(_)),
-        }
+        Self::single(Subscription::Candle { coin, interval }, |message| {
+            matches!(message, Incoming::Candle(_))
+        })
     }
 
-    pub fn all_mids() -> Self {
-        Self {
-            subscription: Subscription::AllMids { dex: None },
-            matches: |message| matches!(message, Incoming::AllMids { .. }),
-        }
+    pub fn all_mids(dex: Option<String>) -> Self {
+        Self::single(Subscription::AllMids { dex }, |message| {
+            matches!(message, Incoming::AllMids { .. })
+        })
+    }
+
+    pub fn active_asset_ctx(coin: String) -> Self {
+        Self::single(Subscription::ActiveAssetCtx { coin }, |message| {
+            matches!(
+                message,
+                Incoming::ActiveAssetCtx { .. } | Incoming::ActiveSpotAssetCtx { .. }
+            )
+        })
+    }
+
+    pub fn active_asset_data(user: Address, coin: String) -> Self {
+        Self::single(Subscription::ActiveAssetData { user, coin }, |message| {
+            matches!(message, Incoming::ActiveAssetData(_))
+        })
     }
 
     pub fn order_updates(user: Address) -> Self {
-        Self {
-            subscription: Subscription::OrderUpdates { user },
-            matches: |message| matches!(message, Incoming::OrderUpdates(_)),
-        }
+        Self::single(Subscription::OrderUpdates { user }, |message| {
+            matches!(message, Incoming::OrderUpdates(_))
+        })
     }
 
     pub fn fills(user: Address) -> Self {
-        Self {
-            subscription: Subscription::UserFills { user },
-            matches: |message| {
-                matches!(
-                    message,
-                    Incoming::UserFills { .. } | Incoming::UserEvents(UserEvent::Fills { .. })
-                )
+        Self::single(Subscription::UserFills { user }, |message| {
+            matches!(
+                message,
+                Incoming::UserFills { .. } | Incoming::UserEvents(UserEvent::Fills { .. })
+            )
+        })
+    }
+
+    pub fn user_events(user: Address) -> Self {
+        Self::single(Subscription::UserEvents { user }, |message| {
+            matches!(message, Incoming::UserEvents(_))
+        })
+    }
+
+    pub fn user_fundings(user: Address) -> Self {
+        Self::single(Subscription::UserFundings { user }, |message| {
+            matches!(message, Incoming::UserFundings { .. })
+        })
+    }
+
+    pub fn notifications(user: Address) -> Self {
+        Self::single(Subscription::Notification { user }, |message| {
+            matches!(message, Incoming::Notification { .. })
+        })
+    }
+
+    pub fn twap_slice_fills(user: Address) -> Self {
+        Self::single(Subscription::UserTwapSliceFills { user }, |message| {
+            matches!(message, Incoming::UserTwapSliceFills(_))
+        })
+    }
+
+    pub fn twap_states(user: Address, dexs: Vec<Option<String>>) -> Self {
+        Self::per_dex(
+            dexs,
+            |dex| Subscription::TwapStates { user, dex },
+            |message| matches!(message, Incoming::TwapStates { .. }),
+        )
+    }
+
+    pub fn clearinghouse_state(user: Address, dexs: Vec<Option<String>>) -> Self {
+        Self::per_dex(
+            dexs,
+            |dex| Subscription::ClearinghouseState { user, dex },
+            |message| matches!(message, Incoming::ClearinghouseState { .. }),
+        )
+    }
+
+    pub fn open_orders(user: Address, dexs: Vec<Option<String>>) -> Self {
+        Self::per_dex(
+            dexs,
+            |dex| Subscription::OpenOrders { user, dex },
+            |message| matches!(message, Incoming::OpenOrders { .. }),
+        )
+    }
+
+    pub fn spot_state(user: Address) -> Self {
+        Self::single(
+            Subscription::SpotState {
+                user,
+                is_portfolio_margin: None,
             },
-        }
+            |message| matches!(message, Incoming::SpotState { .. }),
+        )
+    }
+
+    pub fn subscriptions(&self) -> &[Subscription] {
+        &self.subscriptions
+    }
+
+    /// The `subscription` text of this target's NDJSON lines: one entry per
+    /// subscription, joined by `, `. An aggregated order book names its
+    /// aggregation; every other label is the SDK's.
+    pub fn label(&self) -> String {
+        self.subscriptions
+            .iter()
+            .map(|subscription| match subscription {
+                Subscription::L2Book {
+                    coin,
+                    n_sig_figs: Some(figs),
+                    mantissa,
+                    ..
+                } => match mantissa {
+                    Some(mantissa) => format!("l2Book({coin},nSigFigs={figs},mantissa={mantissa})"),
+                    None => format!("l2Book({coin},nSigFigs={figs})"),
+                },
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     pub fn matches(&self, message: &Incoming) -> bool {
-        (self.matches)(message)
+        (self.matches)(message) && !(self.skip_snapshot && is_snapshot(message))
     }
 }
 
@@ -478,6 +625,7 @@ pub async fn stream_subscription(
     target: SubscribeTarget,
     args: &StreamBoundArgs,
 ) -> Result<(), anyhow::Error> {
+    ws::ensure_within_limits(target.subscriptions())?;
     let mode = inv.mode();
     let projection = inv.session().json_options();
     let bounds = StreamBounds::subscribe(args, inv.settings().env());
@@ -487,15 +635,15 @@ pub async fn stream_subscription(
     let announce_loss = mode.person_on_stderr();
 
     run_stream(async move {
-        let mut ws = ws::websocket_for_chain(chain);
-        let label = target.subscription.to_string();
-        ws.subscribe(target.subscription.clone());
         let mut stdout = io::stdout();
-        stream_subscription_events(
-            &label,
+        if bounds.max_items == Some(0) {
+            emit_subscribed_line(&mut stdout, &target.label(), projection)?;
+            return Ok(StreamEnd::Finished);
+        }
+        stream_target(
+            &target,
+            ws::websocket_for_chain(chain),
             bounds,
-            |message| target.matches(message),
-            &mut ws,
             &mut stdout,
             projection,
             announce_loss,
@@ -504,6 +652,56 @@ pub async fn stream_subscription(
         Ok(StreamEnd::Finished)
     })
     .await
+}
+
+/// Subscribe `target` on `socket` and stream its matching messages to `output`.
+///
+/// Every subscription of the target is sent on the one connection. Production
+/// passes the Hyperliquid socket; a test can point it at a local server.
+pub async fn stream_target<W>(
+    target: &SubscribeTarget,
+    mut socket: WebSocket,
+    bounds: StreamBounds,
+    output: &mut W,
+    projection: &JsonRenderOptions,
+    announce_loss: bool,
+) -> Result<(), anyhow::Error>
+where
+    W: Write + ?Sized,
+{
+    for subscription in target.subscriptions() {
+        socket.subscribe(subscription.clone());
+    }
+    stream_subscription_events(
+        &target.label(),
+        bounds,
+        |message| target.matches(message),
+        &mut socket,
+        output,
+        projection,
+        announce_loss,
+    )
+    .await
+}
+
+/// The `subscribed` line that opens every stream. A zero event bound prints it
+/// and stops before any connection is made.
+fn emit_subscribed_line<W>(
+    output: &mut W,
+    subscription_label: &str,
+    projection: &JsonRenderOptions,
+) -> Result<(), anyhow::Error>
+where
+    W: Write + ?Sized,
+{
+    emit_json_line(
+        output,
+        &serde_json::json!({
+            "type": "subscribed",
+            "subscription": subscription_label,
+        }),
+        projection,
+    )
 }
 
 /// Stream pre-built WebSocket events to a writer as subscription NDJSON.
@@ -530,14 +728,7 @@ where
     F: Fn(&Incoming) -> bool,
     W: Write + ?Sized,
 {
-    emit_json_line(
-        output,
-        &serde_json::json!({
-            "type": "subscribed",
-            "subscription": subscription_label,
-        }),
-        projection,
-    )?;
+    emit_subscribed_line(output, subscription_label, projection)?;
 
     if bounds.max_items == Some(0) {
         return Ok(());

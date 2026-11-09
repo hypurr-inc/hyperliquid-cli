@@ -11,6 +11,7 @@ use hyperliquid_cli::command_spec::{
 use hyperliquid_cli::errors::CliError;
 use hyperliquid_cli::input_hardening::{validate_input_path, validate_resource_id};
 use hyperliquid_cli::invocation::{Invocation, InvocationFlags};
+use hyperliquid_cli::signing::ensure_supports_expires_after;
 use hyperliquid_cli::stream::require_bound;
 
 use crate::cli_shell::{Redactions, Selected};
@@ -22,6 +23,9 @@ pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyho
     validate_global_inputs(inv.flags())?;
     check_args(spec, &selected.matches)?;
     selected.bound.validate()?;
+    if inv.flags().expires_after.is_some() {
+        ensure_supports_expires_after(spec.signs)?;
+    }
     if mode.machine_context()
         && let Some(bound) = spec.stream
     {

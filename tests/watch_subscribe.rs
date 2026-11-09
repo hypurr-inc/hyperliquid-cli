@@ -3,6 +3,7 @@ mod support;
 use futures::stream;
 use hyperliquid_cli::output::JsonRenderOptions;
 use hyperliquid_cli::stream::{StreamBounds, SubscribeTarget, stream_subscription_events};
+use hyperliquid_cli::ws::BookAggregationArgs;
 use hypersdk::Address;
 use hypersdk::hypercore::{
     BookLevel, Candle, Fill, FillDirection, Incoming, L2Book, NonUserCancel, OrderStatus,
@@ -294,7 +295,7 @@ async fn fake_subscribe_stream_applies_select_to_subscription_lines() {
     stream_subscription_events(
         "allMids(None)",
         bounds(Some(0), None),
-        matcher(SubscribeTarget::all_mids()),
+        matcher(SubscribeTarget::all_mids(None)),
         &mut events,
         &mut output_bytes,
         &options,
@@ -322,7 +323,7 @@ async fn fake_subscribe_stream_limits_nested_all_mids_payload() {
     stream_subscription_events(
         "allMids(None)",
         bounds(Some(1), None),
-        matcher(SubscribeTarget::all_mids()),
+        matcher(SubscribeTarget::all_mids(None)),
         &mut events,
         &mut output_bytes,
         &options,
@@ -591,7 +592,7 @@ async fn fake_subscribe_stream_max_zero_emits_only_subscribed_envelope() {
     stream_subscription_events(
         "allMids(None)",
         bounds(Some(0), None),
-        matcher(SubscribeTarget::all_mids()),
+        matcher(SubscribeTarget::all_mids(None)),
         &mut events,
         &mut output,
         &JsonRenderOptions::default(),
@@ -669,7 +670,7 @@ fn subscription_event_matchers_cover_all_subscribe_wiring() {
         ),
         (
             "orderbook",
-            SubscribeTarget::orderbook("BTC".to_string()),
+            SubscribeTarget::orderbook("BTC".to_string(), BookAggregationArgs::default()),
             orderbook_message(),
         ),
         (
@@ -677,7 +678,11 @@ fn subscription_event_matchers_cover_all_subscribe_wiring() {
             SubscribeTarget::candles("BTC".to_string(), "1m".to_string()),
             candle_message(),
         ),
-        ("all_mids", SubscribeTarget::all_mids(), all_mids_message()),
+        (
+            "all_mids",
+            SubscribeTarget::all_mids(None),
+            all_mids_message(),
+        ),
         (
             "order_updates",
             SubscribeTarget::order_updates(Address::ZERO),

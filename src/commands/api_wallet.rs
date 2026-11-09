@@ -50,8 +50,11 @@ impl Operation {
         self == Self::Create
     }
 
-    fn note(self) -> &'static str {
+    fn note(self, prepared: &PreparedAgentApproval) -> &'static str {
         match self {
+            Self::Revoke if prepared.display_name.is_none() => {
+                "Unnamed API wallet replaced with a throwaway agent whose key was discarded; no private key was retained. The throwaway stays registered, with no expiry, until the next unnamed approval replaces it."
+            }
             Self::Revoke => {
                 "Named API wallet replaced with a short-lived throwaway agent; no private key was retained."
             }
@@ -114,8 +117,12 @@ pub struct ApproveArgs {
 #[derive(Args, Debug, Clone)]
 pub struct RevokeArgs {
     /// Named API wallet to revoke by replacing it with a short-lived throwaway agent.
-    #[arg(long, required = true)]
-    pub name: String,
+    #[arg(long, conflicts_with = "unnamed", required_unless_present = "unnamed")]
+    pub name: Option<String>,
+
+    /// Revoke the unnamed API wallet by replacing it with a throwaway agent whose key is discarded.
+    #[arg(long)]
+    pub unnamed: bool,
 }
 
 #[derive(Clone)]
@@ -339,7 +346,21 @@ fn prepare_revoke_replacement(
     now: u64,
 ) -> Result<PreparedAgentApproval, CliError> {
     let throwaway = PrivateKeySigner::random();
-    let name = validated_agent_name(Some(args.name.as_str()), "--name")?.ok_or_else(|| {
+    // Hyperliquid deregisters the unnamed API wallet when a new unnamed one is
+    // approved, and a named one when a wallet with the same name is approved.
+    // Only a named agent can carry an expiry, so the unnamed throwaway cannot
+    // be made to lapse.
+    let Some(name) = args.name.as_deref() else {
+        return Ok(PreparedAgentApproval {
+            agent_address: throwaway.address(),
+            generated_private_key: None,
+            display_name: None,
+            action_agent_name: None,
+            expires_at: None,
+            generated: true,
+        });
+    };
+    let name = validated_agent_name(Some(name), "--name")?.ok_or_else(|| {
         CliError::Configuration("--name is required for api-wallet revoke".to_string())
     })?;
     let expires_at = now
@@ -391,6 +412,7 @@ async fn approve_prepared(
     )
     .await?;
 
+    let note = operation.note(&prepared).to_string();
     let private_key = prepared.generated_private_key;
     print_action_output(
         inv,
@@ -404,7 +426,7 @@ async fn approve_prepared(
             expires_at: prepared.expires_at,
             generated: prepared.generated,
             private_key,
-            note: operation.note().to_string(),
+            note,
             approval_action: approval_value,
         },
     );
@@ -673,7 +695,7 @@ impl CliCommand for ApiWalletList {
     async fn run(inv: &Invocation, args: &ApiWalletListArgs) -> Result<(), anyhow::Error> {
         let master_address = match args.account.as_deref() {
             Some(account) => inv.resolve_account(account)?,
-            None => inv.resolve_signer()?.query_address(),
+            None => inv.resolve_signer_account().await?,
         };
         list(inv, master_address).await
     }
@@ -687,17 +709,23 @@ impl CliCommand for ApiWalletRevoke {
     const SPEC: CommandSpec = CommandSpec::signed(
         &["api-wallet", "revoke"],
         "wallet",
-        "Revoke an API wallet by replacing it with a short-lived throwaway agent",
-        "Revoke a named API wallet by replacing it with a short-lived throwaway agent.",
+        "Revoke an API wallet by replacing it with a throwaway agent",
+        "Revoke a named API wallet by replacing it with a short-lived throwaway agent, or the unnamed API wallet (--unnamed) by replacing it with a throwaway agent whose key is discarded.",
     )
     .signs(Signs::Digest)
     .master_only("approveAgent")
-    .args(&[arg("name")
-        .describe("Named API wallet to revoke.")
-        .resource_id("API wallet name")]);
+    .one_of_required(&[&["name"], &["unnamed"]])
+    .args(&[
+        arg("name")
+            .describe("Named API wallet to revoke.")
+            .resource_id("API wallet name"),
+        arg("unnamed")
+            .kind(InputKind::Boolean)
+            .describe("Revoke the unnamed API wallet."),
+    ]);
 
     fn validate(args: &RevokeArgs) -> Result<(), CliError> {
-        validated_agent_name(Some(args.name.as_str()), "--name").map(|_| ())
+        validated_agent_name(args.name.as_deref(), "--name").map(|_| ())
     }
 
     async fn run(inv: &Invocation, args: &RevokeArgs) -> Result<(), anyhow::Error> {

@@ -1,0 +1,25 @@
+{
+ "spec": {
+  "outcome": 200,
+  "name": "Netherlands",
+  "description": "This outcome resolves to Yes if Netherlands is officially declared the 2026 FIFA World Cup champion.",
+  "sideSpecs": [
+   {
+    "name": "Yes"
+   },
+   {
+    "name": "No"
+   }
+  ],
+  "quoteToken": "USDC"
+ },
+ "settleFraction": "0.0",
+ "details": "Netherlands was eliminated from the 2026 FIFA World Cup and can no longer win the tournament.",
+ "question": {
+  "question": {
+   "settled": 32
+  },
+  "name": "2026 World Cup Champion",
+  "description": "Each associated outcome corresponds to a team confirmed to be participating in t"
+ }
+}

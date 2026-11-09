@@ -157,46 +157,69 @@ async fn mock_scientific_vault_server() -> MockServer {
     server
 }
 
+/// The exchange's stats dataset, which is where the vault list comes from:
+/// `/info` `vaultSummaries` answers `[]` on the live exchange.
 async fn mock_vault_summaries_server() -> MockServer {
     let server = MockServer::start().await;
     mount_override_healthcheck(&server).await;
 
+    Mock::given(method("GET"))
+        .and(path("/stats-data/Mainnet/vaults"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "apr": 0.12,
+                "pnls": [["day", ["0.0"]]],
+                "summary": {
+                    "name": "Alpha Carry",
+                    "vaultAddress": "0x0000000000000000000000000000000000000011",
+                    "leader": "0x00000000000000000000000000000000000000aa",
+                    "tvl": "1000.5",
+                    "isClosed": false,
+                    "relationship": {"type": "normal"},
+                    "createTimeMillis": 1700000000000_i64
+                }
+            },
+            {
+                "apr": 0.05,
+                "pnls": [],
+                "summary": {
+                    "name": "Beta Yield",
+                    "vaultAddress": "0x0000000000000000000000000000000000000022",
+                    "leader": "0x00000000000000000000000000000000000000bb",
+                    "tvl": "2500",
+                    "isClosed": false,
+                    "relationship": {"type": "parent", "data": {"childAddresses": []}},
+                    "createTimeMillis": 1710000000000_i64
+                }
+            },
+            {
+                "apr": 0.25,
+                "pnls": [],
+                "summary": {
+                    "name": "Gamma Hedge",
+                    "vaultAddress": "0x0000000000000000000000000000000000000033",
+                    "leader": "0x00000000000000000000000000000000000000cc",
+                    "tvl": "10",
+                    "isClosed": false,
+                    "relationship": {"type": "child"},
+                    "createTimeMillis": 1720000000000_i64
+                }
+            }
+        ])))
+        .mount(&server)
+        .await;
+
     Mock::given(method("POST"))
         .and(path("/info"))
         .and(body_partial_json(serde_json::json!({
-            "type": "vaultSummaries"
+            "type": "userVaultEquities",
+            "user": VALID_ADDRESS
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
             {
-                "name": "Alpha Carry",
                 "vaultAddress": "0x0000000000000000000000000000000000000011",
-                "leader": "0x00000000000000000000000000000000000000aa",
-                "tvl": "1000.5",
-                "apr": "0.12",
-                "userDeposit": "42.5",
-                "isClosed": false,
-                "relationship": {"type": "normal"},
-                "createTimeMillis": 1700000000000_i64
-            },
-            {
-                "name": "Beta Yield",
-                "vaultAddress": "0x0000000000000000000000000000000000000022",
-                "leader": "0x00000000000000000000000000000000000000bb",
-                "tvl": "2500",
-                "apr": "0.05",
-                "isClosed": false,
-                "relationship": {"type": "parent", "data": {"childAddresses": []}},
-                "createTimeMillis": 1710000000000_i64
-            },
-            {
-                "name": "Gamma Hedge",
-                "vaultAddress": "0x0000000000000000000000000000000000000033",
-                "leader": "0x00000000000000000000000000000000000000cc",
-                "tvl": "10",
-                "apr": "0.25",
-                "isClosed": false,
-                "relationship": {"type": "child"},
-                "createTimeMillis": 1720000000000_i64
+                "equity": "42.5",
+                "lockedUntilTimestamp": null
             }
         ])))
         .mount(&server)

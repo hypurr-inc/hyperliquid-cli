@@ -32,6 +32,8 @@ pub(super) struct PreparedOrder {
     pub(super) builder: Option<OrderBuilderFee>,
     /// The margin mode the account must already be set to for this market.
     pub(super) margin_mode: Option<MarginModeArg>,
+    /// The order write priority rate, in 1/100,000,000 of notional.
+    pub(super) priority_rate: Option<u32>,
 }
 
 impl PreparedOrder {

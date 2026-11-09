@@ -68,7 +68,7 @@ pub struct VaultListArgs {
     #[arg(long, value_enum, default_value = "all")]
     pub kind: VaultKindArg,
 
-    /// Optional user address for user-specific deposit context
+    /// Show this user's deposit in each vault they hold
     #[arg(long)]
     pub user: Option<String>,
 
@@ -87,7 +87,7 @@ pub struct VaultSearchArgs {
     /// Search query matched against vault name, leader, or address
     pub query: String,
 
-    /// Optional user address for user-specific deposit context
+    /// Show this user's deposit in each vault they hold
     #[arg(long)]
     pub user: Option<String>,
 
@@ -192,7 +192,15 @@ struct VaultDetailsRow {
     leader_fraction: Decimal,
     #[serde(with = "rust_decimal::serde::str")]
     leader_commission: Decimal,
-    followers: usize,
+    /// How many followers the response listed. The API lists at most 100, so
+    /// for a larger vault this is not its follower count.
+    followers_returned: usize,
+    /// The list reached the API's cap: the vault may have more followers.
+    followers_truncated: bool,
+    /// The requested `--user`'s stake: `null` when they hold none, absent
+    /// without `--user`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    follower_state: Option<Option<FollowerStateRow>>,
     allow_deposits: bool,
     is_closed: bool,
     #[serde(with = "rust_decimal::serde::str")]
@@ -200,6 +208,26 @@ struct VaultDetailsRow {
     #[serde(with = "rust_decimal::serde::str")]
     max_withdrawable: Decimal,
     portfolio_periods: Vec<String>,
+}
+
+/// `vaultDetails` lists at most this many followers (observed on the live
+/// exchange for a vault with thousands).
+const FOLLOWERS_LIST_CAP: usize = 100;
+
+/// One user's stake in a vault.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
+struct FollowerStateRow {
+    #[serde(with = "rust_decimal::serde::str")]
+    vault_equity: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pnl: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    all_time_pnl: Decimal,
+    days_following: u64,
+    vault_entry_time: u64,
+    #[serde(default)]
+    lockup_until: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -243,7 +271,7 @@ impl Row for VaultDetailsRow {
         "APR",
         "Strategy",
         "Leader",
-        "Followers",
+        "Followers Returned",
         "Allow Deposits",
     ];
 
@@ -255,7 +283,11 @@ impl Row for VaultDetailsRow {
             self.apr.to_string(),
             self.description.clone(),
             self.leader.clone(),
-            self.followers.to_string(),
+            if self.followers_truncated {
+                format!("{}+", self.followers_returned)
+            } else {
+                self.followers_returned.to_string()
+            },
             self.allow_deposits.to_string(),
         ]
     }
@@ -329,9 +361,13 @@ impl Row for VaultTransferConfirmation {
     }
 }
 
-async fn get(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
-    let vault = parse_address(address)?;
-    let row = raw_vault_details_row(inv.remote()?.api(), vault).await?;
+async fn get(inv: &Invocation, args: &VaultGetArgs) -> Result<(), anyhow::Error> {
+    let vault = parse_address(&args.address)?;
+    let user = match args.user.as_deref() {
+        Some(selector) => Some(inv.resolve_user(Some(selector)).await?),
+        None => None,
+    };
+    let row = raw_vault_details_row(inv.remote()?.api(), vault, user).await?;
     inv.print(&One::new(row));
     Ok(())
 }
@@ -476,32 +512,68 @@ async fn run_transfer(
 async fn raw_vault_details_row(
     api: &ApiClient,
     vault: Address,
+    user: Option<Address>,
 ) -> Result<VaultDetailsRow, CliError> {
     // The exchange answers `null` for an address that is not a vault.
     let details = api
         .info::<Option<RawVaultDetails>>(
-            &InfoRequest::new("vaultDetails").address("vaultAddress", vault),
+            &InfoRequest::new("vaultDetails")
+                .address("vaultAddress", vault)
+                .address_if("user", user),
             "fetching vault details",
         )
         .await?
         .ok_or_else(|| CliError::Unsupported(format!("vault details not found for {vault}")))?;
-    details.into_row(vault)
+    details.into_row(vault, user.is_some())
 }
 
+/// Every vault the exchange lists, from its public stats dataset.
+///
+/// `/info` `vaultSummaries` answers `[]` on both networks, so the list comes
+/// from the public stats dataset the exchange's own vault page reads. With a
+/// `user`, each vault row carries that user's deposit, read from their vault
+/// equities.
 async fn vault_summary_rows(
     api: &ApiClient,
     user: Option<Address>,
 ) -> Result<Vec<VaultSummaryRow>, CliError> {
-    let summaries: Vec<RawVaultSummary> = api
-        .info(
-            &InfoRequest::new("vaultSummaries").address_if("user", user),
-            "fetching vault summaries",
-        )
-        .await?;
-    summaries
+    let vaults: Vec<StatsVault> = api.stats("vaults", "loading the vault list").await?;
+    let deposits = match user {
+        Some(user) => user_vault_deposits(api, user).await?,
+        None => Vec::new(),
+    };
+    vaults
         .into_iter()
-        .map(RawVaultSummary::into_row)
+        .map(|vault| {
+            let deposit = deposits
+                .iter()
+                .find(|(address, _)| address.eq_ignore_ascii_case(&vault.summary.vault_address))
+                .map(|(_, equity)| *equity);
+            vault.into_row(deposit)
+        })
         .collect()
+}
+
+/// `(vault address, equity)` of each vault `user` has money in.
+async fn user_vault_deposits(
+    api: &ApiClient,
+    user: Address,
+) -> Result<Vec<(String, Decimal)>, CliError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Equity {
+        vault_address: String,
+        equity: Value,
+    }
+
+    api.info::<Vec<Equity>>(
+        &InfoRequest::user("userVaultEquities", user),
+        "loading the user's vault equities",
+    )
+    .await?
+    .into_iter()
+    .map(|entry| Ok((entry.vault_address, decimal_field(&entry.equity, "equity")?)))
+    .collect()
 }
 
 fn parse_optional_user(raw: Option<&str>) -> Result<Option<Address>, CliError> {
@@ -530,8 +602,6 @@ struct RawVaultSummary {
     relationship: Value,
     #[serde(default)]
     create_time_millis: Option<i64>,
-    #[serde(default, alias = "userDeposit", alias = "yourDeposit")]
-    user_deposit: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -555,10 +625,29 @@ struct RawVaultDetails {
     is_closed: bool,
     max_distributable: Value,
     max_withdrawable: Value,
+    #[serde(default)]
+    follower_state: Option<FollowerStateRow>,
+}
+
+/// One entry of the stats dataset: the summary and, beside it, the APR.
+#[derive(Debug, Deserialize)]
+struct StatsVault {
+    #[serde(default)]
+    apr: Value,
+    summary: RawVaultSummary,
+}
+
+impl StatsVault {
+    fn into_row(mut self, user_deposit: Option<Decimal>) -> Result<VaultSummaryRow, CliError> {
+        if self.summary.apr.is_null() {
+            self.summary.apr = self.apr;
+        }
+        self.summary.into_row(user_deposit)
+    }
 }
 
 impl RawVaultSummary {
-    fn into_row(self) -> Result<VaultSummaryRow, CliError> {
+    fn into_row(self, user_deposit: Option<Decimal>) -> Result<VaultSummaryRow, CliError> {
         let kind = self
             .relationship
             .get("type")
@@ -573,12 +662,7 @@ impl RawVaultSummary {
             tvl: decimal_field(&self.tvl, "tvl")?,
             age_days: self.create_time_millis.map(age_days_from_millis),
             kind,
-            user_deposit: self
-                .user_deposit
-                .as_ref()
-                .map(|deposit| optional_decimal_field(deposit, "userDeposit"))
-                .transpose()?
-                .flatten(),
+            user_deposit,
         })
     }
 }
@@ -623,9 +707,14 @@ fn age_days_from_millis(create_time_millis: i64) -> i64 {
 }
 
 impl RawVaultDetails {
-    fn into_row(self, requested_vault: Address) -> Result<VaultDetailsRow, CliError> {
+    fn into_row(
+        self,
+        requested_vault: Address,
+        user_requested: bool,
+    ) -> Result<VaultDetailsRow, CliError> {
         let max_distributable = decimal_field(&self.max_distributable, "maxDistributable")?;
         let (portfolio_periods, tvl) = raw_portfolio_summary(&self.portfolio)?;
+        let followers_returned = self.followers.as_array().map_or(0, Vec::len);
         Ok(VaultDetailsRow {
             name: self.name,
             vault_address: self
@@ -637,7 +726,9 @@ impl RawVaultDetails {
             apr: decimal_field(&self.apr, "apr")?,
             leader_fraction: decimal_field(&self.leader_fraction, "leaderFraction")?,
             leader_commission: decimal_field(&self.leader_commission, "leaderCommission")?,
-            followers: self.followers.as_array().map_or(0, Vec::len),
+            followers_returned,
+            followers_truncated: followers_returned >= FOLLOWERS_LIST_CAP,
+            follower_state: user_requested.then_some(self.follower_state),
             allow_deposits: self.allow_deposits,
             is_closed: self.is_closed,
             max_distributable,
@@ -715,6 +806,16 @@ pub struct VaultAddressArgs {
     pub address: String,
 }
 
+#[derive(Args, Debug, Clone)]
+pub struct VaultGetArgs {
+    /// Vault address
+    pub address: String,
+
+    /// Also show this user's stake in the vault
+    #[arg(long)]
+    pub user: Option<String>,
+}
+
 pub struct VaultList;
 
 impl CliCommand for VaultList {
@@ -724,12 +825,12 @@ impl CliCommand for VaultList {
         &["vault", "list"],
         "vault",
         "List vault summaries",
-        "List vault summaries with filtering, sorting, and limits.",
+        "List vaults from the exchange's public stats dataset (stats-data.hyperliquid.xyz; /info vaultSummaries answers nothing on either network), with filtering, sorting, and limits.",
     )
     .cli_aliases(&["ls"])
     .args(&[
         arg("kind").describe("Vault relationship kind filter. protocol maps to normal protocol vaults; user maps to child/parent user vaults."),
-        arg("user").describe("Optional user address for user-specific deposit context when available."),
+        arg("user").describe("Optional user address; adds that user's deposit to each vault they hold."),
         arg("limit"),
         arg("sort"),
     ]);
@@ -748,12 +849,12 @@ impl CliCommand for VaultSearch {
         &["vault", "search"],
         "vault",
         "Search vault summaries by name, leader, or address",
-        "Search vault summaries by name, leader, or address.",
+        "Search vaults by name, leader, or address in the exchange's public stats dataset (stats-data.hyperliquid.xyz).",
     )
     .args(&[
         arg("query").describe("Search query."),
         arg("user")
-            .describe("Optional user address for user-specific deposit context when available."),
+            .describe("Optional user address; adds that user's deposit to each vault they hold."),
         arg("limit"),
         arg("sort"),
     ]);
@@ -766,20 +867,25 @@ impl CliCommand for VaultSearch {
 pub struct VaultGet;
 
 impl CliCommand for VaultGet {
-    type Args = VaultAddressArgs;
+    type Args = VaultGetArgs;
 
     const SPEC: CommandSpec = CommandSpec::read(
         &["vault", "get"],
         "vault",
         "Get vault details",
-        "Show vault details.",
+        "Show vault details. followers_returned counts the followers the API listed (at most 100; followers_truncated is true when the API returned that limit, so the list may be incomplete); user adds that user's stake as follower_state.",
     )
-    .args(&[arg("address")
-        .kind(InputKind::ProtocolObjectAddress)
-        .resource_id("vault address")]);
+    .args(&[
+        arg("address")
+            .kind(InputKind::ProtocolObjectAddress)
+            .resource_id("vault address"),
+        arg("user")
+            .kind(InputKind::PublicUserSelector)
+            .describe("Optional user address; adds follower_state with that user's stake."),
+    ]);
 
-    async fn run(inv: &Invocation, args: &VaultAddressArgs) -> Result<(), anyhow::Error> {
-        get(inv, &args.address).await
+    async fn run(inv: &Invocation, args: &VaultGetArgs) -> Result<(), anyhow::Error> {
+        get(inv, args).await
     }
 }
 

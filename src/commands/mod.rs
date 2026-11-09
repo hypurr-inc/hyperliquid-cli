@@ -7,17 +7,21 @@ pub mod borrowlend;
 pub mod builder;
 pub(crate) mod confirm;
 pub mod feedback;
+pub mod invalidate_nonce;
 pub(crate) mod issue_report;
 pub mod mcp;
 pub mod meta;
 pub mod orderbook;
 pub mod orders;
+pub mod outcome_actions;
 pub mod outcomes;
+pub(crate) mod paging;
 pub mod perps;
 pub mod positions;
 pub mod prio;
 pub mod referral;
 pub mod report_incident;
+pub mod reserve_weight;
 pub mod rows;
 pub mod schema;
 pub mod selector;
@@ -46,12 +50,25 @@ pub fn entries() -> &'static [Entry] {
         vec![
             Entry::of::<perps::PerpsList>(),
             Entry::of::<perps::PerpsGet>(),
+            Entry::of::<perps::PerpsFundingHistory>(),
+            Entry::of::<perps::PerpsFundingPredicted>(),
+            Entry::of::<perps::PerpsAtOiCap>(),
+            Entry::of::<perps::PerpsDexs>(),
+            Entry::of::<perps::PerpsDexLimits>(),
             Entry::of::<spot::SpotList>(),
             Entry::of::<spot::SpotGet>(),
+            Entry::of::<spot::SpotToken>(),
             Entry::of::<asset::AssetDecode>(),
             Entry::of::<asset::AssetSearch>(),
             Entry::of::<outcomes::OutcomesList>(),
             Entry::of::<outcomes::OutcomesGet>(),
+            Entry::of::<outcomes::OutcomesQuestions>(),
+            Entry::of::<outcomes::OutcomesSettled>(),
+            Entry::of::<outcomes::OutcomesTemplates>(),
+            Entry::of::<outcome_actions::OutcomesSplit>(),
+            Entry::of::<outcome_actions::OutcomesMerge>(),
+            Entry::of::<outcome_actions::OutcomesMergeQuestion>(),
+            Entry::of::<outcome_actions::OutcomesNegate>(),
             Entry::of::<orderbook::Book>(),
             Entry::of::<orderbook::Mids>(),
             Entry::of::<orderbook::Candles>(),
@@ -71,6 +88,7 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<orders::cli::OrdersCancel>(),
             Entry::of::<orders::cli::OrdersCancelAll>(),
             Entry::of::<orders::cli::OrdersModify>(),
+            Entry::of::<orders::cli::OrdersBatchModify>(),
             Entry::of::<orders::cli::OrdersTwapCreate>(),
             Entry::of::<orders::cli::OrdersTwapCancel>(),
             Entry::of::<orders::cli::OrdersScheduleCancel>(),
@@ -83,6 +101,7 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<positions::PositionsList>(),
             Entry::of::<positions::PositionsUpdateLeverage>(),
             Entry::of::<positions::PositionsUpdateMargin>(),
+            Entry::of::<positions::PositionsTopUpMargin>(),
             Entry::of::<account::AccountFills>(),
             Entry::of::<account::AccountFees>(),
             Entry::of::<account::AccountRateLimit>(),
@@ -94,8 +113,14 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<account::AccountFunding>(),
             Entry::of::<account::AccountTwapHistory>(),
             Entry::of::<account::AccountTwapFills>(),
+            Entry::of::<account::AccountRole>(),
+            Entry::of::<account::AccountMultisigSigners>(),
+            Entry::of::<account::AccountAssetData>(),
             Entry::of::<account::AccountAbstraction>(),
             Entry::of::<account::AccountAbstractionSet>(),
+            Entry::of::<invalidate_nonce::AccountInvalidateNonce>(),
+            Entry::of::<reserve_weight::AccountReserveWeight>(),
+            Entry::of::<account::AccountEvmBigBlocks>(),
             Entry::of::<wallet::AccountAdd>(),
             Entry::of::<wallet::AccountLs>(),
             Entry::of::<wallet::AccountSetDefault>(),
@@ -148,6 +173,8 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<borrowlend::BorrowlendUser>(),
             Entry::of::<borrowlend::BorrowlendSupply>(),
             Entry::of::<borrowlend::BorrowlendWithdraw>(),
+            Entry::of::<borrowlend::BorrowlendRepay>(),
+            Entry::of::<borrowlend::BorrowlendBorrow>(),
             Entry::of::<prio::PrioStatus>(),
             Entry::of::<prio::PrioBid>(),
             Entry::of::<transfers::TransferSpotToPerp>(),
@@ -162,6 +189,17 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<subscribe::SubscribeAllMids>(),
             Entry::of::<subscribe::SubscribeOrderUpdates>(),
             Entry::of::<subscribe::SubscribeFills>(),
+            Entry::of::<subscribe::SubscribeBbo>(),
+            Entry::of::<subscribe::SubscribeActiveAssetCtx>(),
+            Entry::of::<subscribe::SubscribeActiveAssetData>(),
+            Entry::of::<subscribe::SubscribeUserEvents>(),
+            Entry::of::<subscribe::SubscribeUserFundings>(),
+            Entry::of::<subscribe::SubscribeNotifications>(),
+            Entry::of::<subscribe::SubscribeTwapStates>(),
+            Entry::of::<subscribe::SubscribeTwapSliceFills>(),
+            Entry::of::<subscribe::SubscribeClearinghouseState>(),
+            Entry::of::<subscribe::SubscribeOpenOrders>(),
+            Entry::of::<subscribe::SubscribeSpotState>(),
             Entry::of::<watch_risk::WatchRisk>(),
             Entry::of::<schema::Schema>(),
             Entry::of::<setup::Setup>(),

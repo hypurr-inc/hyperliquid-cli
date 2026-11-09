@@ -3,14 +3,19 @@ use chrono::DateTime;
 use clap::{Args, ValueEnum};
 use hypersdk::Address;
 use hypersdk::Decimal;
-use hypersdk::hypercore::{ClearinghouseState, Fill, SubAccount, UserVaultEquity};
-use serde::Serialize;
+use hypersdk::hypercore::types::Action;
+use hypersdk::hypercore::{
+    AbstractionMode, AssetPosition, ClearinghouseState, SubAccount, UserRole, UserVaultEquity,
+};
+use serde::{Deserialize, Serialize};
 
-use crate::assets::canonical_dex;
+use crate::assets::{AssetResolver, canonical_dex};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
 use crate::commands::abstraction::{AccountMode, fetch_abstraction};
+use crate::commands::actions;
 use crate::commands::confirm;
-use crate::commands::orders::OrderListOutput;
+use crate::commands::orders;
+use crate::commands::paging::{self, Endpoint};
 use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
 use crate::commands::rows::{ListRow, One, Row, Rows, or_missing, style_column};
 use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
@@ -51,6 +56,27 @@ pub struct FillsArgs {
     /// Combine partial fills from the same crossing order where supported by the API.
     #[arg(long, requires = "start")]
     pub aggregate_by_time: bool,
+    /// Keep reading until the window is exhausted, instead of stopping at the API's 2000-fill page.
+    #[arg(long, requires = "start")]
+    pub all: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct OrdersArgs {
+    #[command(flatten)]
+    pub user: OptionalAddressArgs,
+    /// Perp dex name (HIP-3). Defaults to the first dex.
+    #[arg(long)]
+    pub dex: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AssetDataArgs {
+    #[command(flatten)]
+    pub user: OptionalAddressArgs,
+    /// Perpetual coin, for example BTC or xyz:XYZ100.
+    #[arg(long)]
+    pub coin: String,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -63,6 +89,9 @@ pub struct TimeRangeArgs {
     /// End time as RFC3339 or epoch milliseconds.
     #[arg(long, value_parser = parse_time_millis)]
     pub end: Option<u64>,
+    /// Keep reading until the window is exhausted, instead of stopping at the API's page limit.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -95,6 +124,10 @@ pub struct SetAbstractionArgs {
     #[arg(long, value_enum)]
     pub mode: AbstractionModeArg,
 
+    /// Subaccount of the signer to set the mode for: subaccount address, stored account alias, or stored account id. Defaults to the signer's own account
+    #[arg(long)]
+    pub user: Option<String>,
+
     /// Confirm live execution without prompting
     #[arg(long, short = 'y')]
     pub yes: bool,
@@ -121,6 +154,14 @@ impl AbstractionModeArg {
             Self::Disabled => "disabled",
             Self::UnifiedAccount => "unified-account",
             Self::PortfolioMargin => "portfolio-margin",
+        }
+    }
+
+    fn sdk_mode(self) -> AbstractionMode {
+        match self {
+            Self::Disabled => AbstractionMode::Standard,
+            Self::UnifiedAccount => AbstractionMode::UnifiedAccount,
+            Self::PortfolioMargin => AbstractionMode::PortfolioMargin,
         }
     }
 }
@@ -191,33 +232,108 @@ pub(crate) async fn subaccounts(inv: &Invocation, user: Address) -> Result<(), a
     Ok(())
 }
 
+/// Whose abstraction a change targets, and how the signer signs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AbstractionPlan {
+    user: Address,
+    /// An API wallet cannot sign `userSetAbstraction`; it signs
+    /// `agentSetAbstraction`, which only ever applies to its master account.
+    agent_signed: bool,
+}
+
+fn abstraction_plan(
+    signer: &SelectedSigner,
+    requested: Option<Address>,
+) -> Result<AbstractionPlan, CliError> {
+    if signer.is_stored_agent() {
+        let master = signer.query_address();
+        if let Some(requested) = requested
+            && requested != master
+        {
+            return Err(CliError::Unsupported(format!(
+                "an API wallet can only set the abstraction of its own master account ({master}), not {requested}; use the master wallet for a subaccount"
+            )));
+        }
+        return Ok(AbstractionPlan {
+            user: master,
+            agent_signed: true,
+        });
+    }
+    Ok(AbstractionPlan {
+        user: requested.unwrap_or_else(|| signer.address()),
+        agent_signed: false,
+    })
+}
+
+/// `userSetAbstraction` may name the signer or one of its subaccounts. Refuse
+/// any other address before the exchange does.
+async fn ensure_signer_owns(
+    api: &crate::http_api::ApiClient,
+    signer: Address,
+    user: Address,
+) -> Result<(), CliError> {
+    if user == signer {
+        return Ok(());
+    }
+    match api
+        .info::<UserRole>(
+            &InfoRequest::user("userRole", user),
+            "loading the role of the target account",
+        )
+        .await?
+    {
+        UserRole::SubAccount { master } if master == signer => Ok(()),
+        _ => Err(CliError::Unsupported(format!(
+            "{user} is not a subaccount of the signer {signer}; --user must name the signer's own account or one of its subaccounts"
+        ))),
+    }
+}
+
 fn abstraction_set_dry_run_value(
     chain: hypersdk::hypercore::Chain,
-    signer: Option<Address>,
+    plan: Option<AbstractionPlan>,
     mode: AbstractionModeArg,
 ) -> serde_json::Value {
-    let user = signer.map(|address| address.to_string());
-    serde_json::json!({
-        "mode": mode.cli_value(),
-        "protocol_mode": mode.protocol_value(),
-        "network": chain.to_string(),
-        "user": user,
-        "action": {
+    let user = plan.map(|plan| plan.user.to_string());
+    let agent_signed = plan.is_some_and(|plan| plan.agent_signed);
+    let action = if agent_signed {
+        serde_json::json!({
+            "type": "agentSetAbstraction",
+            "abstraction": mode.sdk_mode().agent_code(),
+        })
+    } else {
+        serde_json::json!({
             "type": UserSetAbstraction::ACTION_TYPE,
             "hyperliquidChain": chain.to_string(),
             "signatureChainId": chain.arbitrum_id().to_string(),
             "user": user,
             "abstraction": mode.protocol_value(),
-        }
-    })
+        })
+    };
+    let mut preview = serde_json::json!({
+        "mode": mode.cli_value(),
+        "protocol_mode": mode.protocol_value(),
+        "network": chain.to_string(),
+        "user": user,
+        "action": action,
+    });
+    if agent_signed {
+        preview["agent_signed"] = true.into();
+    }
+    preview
 }
 
 async fn set_abstraction(
     inv: &Invocation,
     signer: &SelectedSigner,
+    plan: AbstractionPlan,
     args: &SetAbstractionArgs,
 ) -> Result<(), anyhow::Error> {
-    let user = signer.address();
+    let user = plan.user;
+    let remote = inv.remote()?;
+    if !plan.agent_signed {
+        ensure_signer_owns(remote.api(), signer.address(), user).await?;
+    }
     let question = format!(
         "Set account abstraction for {user} to {}?",
         args.mode.cli_value()
@@ -229,22 +345,33 @@ async fn set_abstraction(
         &question,
         "account abstraction update aborted",
     )?;
-    let remote = inv.remote()?;
     let protocol_mode = args.mode.protocol_value();
-    user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| {
-        UserSetAbstraction {
-            hyperliquidChain: hyperliquid_chain,
-            user,
-            abstraction: protocol_mode.to_string(),
-            nonce,
-        }
-    })
-    .await?;
+    if plan.agent_signed {
+        actions::send_l1_action(
+            remote.api(),
+            signer,
+            Action::AgentSetAbstraction {
+                abstraction: args.mode.sdk_mode(),
+            },
+            actions::nonce_now(),
+        )
+        .await?;
+    } else {
+        user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| {
+            UserSetAbstraction {
+                hyperliquidChain: hyperliquid_chain,
+                user,
+                abstraction: protocol_mode.to_string(),
+                nonce,
+            }
+        })
+        .await?;
+    }
 
     inv.print(&One::new(AbstractionSetRow {
         status: "submitted".to_string(),
         action: "set-abstraction".to_string(),
-        signer: user.to_string(),
+        signer: signer.address().to_string(),
         user: user.to_string(),
         mode: args.mode.cli_value().to_string(),
         protocol_mode: protocol_mode.to_string(),
@@ -253,7 +380,10 @@ async fn set_abstraction(
     Ok(())
 }
 
-fn validate_optional_time_range(start: Option<u64>, end: Option<u64>) -> Result<(), CliError> {
+pub(crate) fn validate_optional_time_range(
+    start: Option<u64>,
+    end: Option<u64>,
+) -> Result<(), CliError> {
     if let (Some(start), Some(end)) = (start, end)
         && end < start
     {
@@ -279,6 +409,33 @@ async fn print_info_value(
     Ok(())
 }
 
+/// Print a time-windowed history as the raw rows the API sent (keys
+/// snake_cased), saying on stderr when the page was cut off at the API's cap.
+async fn print_window(
+    inv: &Invocation,
+    endpoint: Endpoint,
+    args: &TimeRangeArgs,
+    request: impl Fn(u64) -> InfoRequest,
+    context: &'static str,
+    empty_message: &'static str,
+) -> Result<(), anyhow::Error> {
+    let window = paging::read_window(
+        inv.remote()?.api(),
+        endpoint,
+        args.start,
+        args.all,
+        request,
+        context,
+    )
+    .await?;
+    paging::announce_truncation(inv, endpoint, &window, args.all);
+    inv.print(&JsonValueOutput::new(
+        serde_json::Value::Array(window.rows),
+        empty_message,
+    ));
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FillRow {
     pub coin: String,
@@ -298,16 +455,84 @@ pub struct FillRow {
     pub liquidity: String,
     pub trade_id: u64,
     pub cloid: Option<String>,
+    pub hash: String,
+    /// Only fills that paid a builder fee carry one.
+    #[serde(
+        with = "rust_decimal::serde::str_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub builder_fee: Option<Decimal>,
+    /// Only liquidation fills carry one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liquidation: Option<FillLiquidation>,
+    /// Only TWAP slice fills carry one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub twap_id: Option<u64>,
 }
 
-impl From<Fill> for FillRow {
-    fn from(fill: Fill) -> Self {
+/// The liquidation a fill took part in, as the API reports it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
+pub struct FillLiquidation {
+    pub liquidated_user: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub mark_px: Decimal,
+    pub method: String,
+}
+
+/// A fill as `userFills` and `userFillsByTime` send it. `dir` stays a string:
+/// the SDK's closed `FillDirection` would fail every fill listing the day the
+/// exchange adds a direction.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawFill {
+    coin: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    px: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    sz: Decimal,
+    side: FillSide,
+    time: u64,
+    dir: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    closed_pnl: Decimal,
+    hash: String,
+    oid: u64,
+    crossed: bool,
+    #[serde(with = "rust_decimal::serde::str")]
+    fee: Decimal,
+    tid: u64,
+    #[serde(default)]
+    cloid: Option<String>,
+    fee_token: String,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    builder_fee: Option<Decimal>,
+    #[serde(default)]
+    liquidation: Option<FillLiquidation>,
+    #[serde(default)]
+    twap_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum FillSide {
+    #[serde(rename = "B")]
+    Bid,
+    #[serde(rename = "A")]
+    Ask,
+}
+
+impl From<RawFill> for FillRow {
+    fn from(fill: RawFill) -> Self {
         Self {
             coin: fill.coin,
-            side: fill.side.to_string(),
+            side: match fill.side {
+                FillSide::Bid => "Bid",
+                FillSide::Ask => "Ask",
+            }
+            .to_string(),
             price: fill.px,
             size: fill.sz,
-            direction: fill.dir.to_string(),
+            direction: fill.dir,
             closed_pnl: fill.closed_pnl,
             fee: fill.fee,
             fee_token: fill.fee_token,
@@ -315,9 +540,38 @@ impl From<Fill> for FillRow {
             time: fill.time,
             liquidity: if fill.crossed { "taker" } else { "maker" }.to_string(),
             trade_id: fill.tid,
-            cloid: fill.cloid.map(|cloid| cloid.to_string()),
+            cloid: fill.cloid,
+            hash: fill.hash,
+            builder_fee: fill.builder_fee,
+            liquidation: fill.liquidation,
+            twap_id: fill.twap_id,
         }
     }
+}
+
+/// Decode fill rows, naming spot pairs as the markets list them (`@107` is
+/// `HYPE/USDC`). The metadata is read only when a spot coin needs it.
+async fn fill_rows(
+    inv: &Invocation,
+    raw: Vec<serde_json::Value>,
+) -> Result<Vec<FillRow>, anyhow::Error> {
+    let mut rows = raw
+        .into_iter()
+        .map(|fill| {
+            serde_json::from_value::<RawFill>(fill)
+                .map(FillRow::from)
+                .map_err(|err| {
+                    CliError::Internal(anyhow::anyhow!("decode failed while reading fills: {err}"))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if rows.iter().any(|row| row.coin.starts_with('@')) {
+        let resolver: AssetResolver = inv.asset_resolver().await?;
+        for row in &mut rows {
+            row.coin = resolver.display_coin(&row.coin);
+        }
+    }
+    Ok(rows)
 }
 
 pub type FillsOutput = Rows<FillRow>;
@@ -435,10 +689,35 @@ pub struct PositionRow {
     #[serde(with = "rust_decimal::serde::str_option")]
     pub liquidation_price: Option<Decimal>,
     pub leverage: String,
+    /// Unrealized PnL over the margin put into the position, as a fraction.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub return_on_equity: Decimal,
+    /// The market's maximum leverage, not this position's.
+    pub max_leverage: u32,
+    pub cum_funding: CumFundingRow,
 }
 
-impl From<positions::PositionRow> for PositionRow {
-    fn from(row: positions::PositionRow) -> Self {
+/// A position's cumulative funding over the three horizons the API reports.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CumFundingRow {
+    #[serde(with = "rust_decimal::serde::str")]
+    pub all_time: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub since_open: Decimal,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub since_change: Decimal,
+}
+
+impl From<AssetPosition> for PositionRow {
+    fn from(asset: AssetPosition) -> Self {
+        let position = &asset.position;
+        let (return_on_equity, max_leverage) = (position.return_on_equity, position.max_leverage);
+        let cum_funding = CumFundingRow {
+            all_time: position.cum_funding.all_time,
+            since_open: position.cum_funding.since_open,
+            since_change: position.cum_funding.since_change,
+        };
+        let row = positions::PositionRow::from(asset);
         Self {
             coin: row.coin,
             side: row.side.to_string(),
@@ -448,6 +727,9 @@ impl From<positions::PositionRow> for PositionRow {
             unrealized_pnl: row.unrealized_pnl,
             liquidation_price: row.liquidation_price,
             leverage: format!("{}x {}", row.leverage.value, row.leverage.kind),
+            return_on_equity,
+            max_leverage,
+            cum_funding,
         }
     }
 }
@@ -519,7 +801,6 @@ impl PortfolioOutput {
         let positions = state
             .asset_positions
             .into_iter()
-            .map(positions::PositionRow::from)
             .map(PositionRow::from)
             .collect::<Vec<_>>();
         let vault_equities = vault_equities
@@ -732,33 +1013,45 @@ impl CliCommand for AccountFills {
         arg("aggregate_by_time")
             .kind(InputKind::Boolean)
             .describe("Ask the API to aggregate fills by time where supported."),
+        arg("all").kind(InputKind::Boolean).describe(
+            "Page through the whole window (requires start). Without it one page is returned and a notice on stderr names the start that continues.",
+        ),
     ]);
 
     async fn run(inv: &Invocation, args: &FillsArgs) -> Result<(), anyhow::Error> {
-        let user = args.user.resolve(inv)?;
+        let user = args.user.resolve(inv).await?;
         let api = inv.remote()?.api();
         validate_optional_time_range(args.start, args.end)?;
-        let fills = match args.start {
-            Some(start) => {
-                let request = InfoRequest::user("userFillsByTime", user)
-                    .time_range(Some(start), args.end)
-                    .field_if("aggregateByTime", args.aggregate_by_time.then_some(true));
-                api.info::<Vec<Fill>>(&request, "loading user fills by time")
-                    .await?
-                    .into_iter()
-                    .map(FillRow::from)
-                    .collect()
-            }
-            None => api
-                .sdk()
-                .user_fills(user)
-                .await
-                .map_err(from_sdk)?
-                .into_iter()
-                .map(FillRow::from)
-                .collect(),
+        let (endpoint, window) = match args.start {
+            Some(start) => (
+                paging::USER_FILLS_BY_TIME,
+                paging::read_window(
+                    api,
+                    paging::USER_FILLS_BY_TIME,
+                    start,
+                    args.all,
+                    |from| {
+                        InfoRequest::user("userFillsByTime", user)
+                            .time_range(Some(from), args.end)
+                            .field_if("aggregateByTime", args.aggregate_by_time.then_some(true))
+                    },
+                    "loading user fills by time",
+                )
+                .await?,
+            ),
+            None => (
+                paging::USER_FILLS_RECENT,
+                paging::read_recent(
+                    api,
+                    paging::USER_FILLS_RECENT,
+                    &InfoRequest::user("userFills", user),
+                    "loading user fills",
+                )
+                .await?,
+            ),
         };
-        inv.print(&FillsOutput::new(fills));
+        paging::announce_truncation(inv, endpoint, &window, args.all);
+        inv.print(&FillsOutput::new(fill_rows(inv, window.rows).await?));
         Ok(())
     }
 }
@@ -777,7 +1070,7 @@ impl CliCommand for AccountFees {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        let user = args.resolve(inv)?;
+        let user = args.resolve(inv).await?;
         print_info_value(
             inv,
             InfoRequest::user("userFees", user),
@@ -802,7 +1095,7 @@ impl CliCommand for AccountRateLimit {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        let user = args.resolve(inv)?;
+        let user = args.resolve(inv).await?;
         print_info_value(
             inv,
             InfoRequest::user("userRateLimit", user),
@@ -816,26 +1109,25 @@ impl CliCommand for AccountRateLimit {
 pub struct AccountOrders;
 
 impl CliCommand for AccountOrders {
-    type Args = OptionalAddressArgs;
+    type Args = OrdersArgs;
 
     const SPEC: CommandSpec = CommandSpec::read(
         &["account", "orders"],
         "account",
         "List open orders for an address or wallet",
-        "Query public open orders for an address or wallet.",
+        "Query public open orders for an address or wallet. Pass dex for a HIP-3 dex's orders; the default dex's orders do not include them.",
     )
-    .args(&[USER_SELECTOR.schema_required()]);
+    .args(&[
+        USER_SELECTOR.schema_required(),
+        arg("dex").describe("Perp dex name (HIP-3). Defaults to the first dex."),
+    ]);
 
-    async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        let user = args.resolve(inv)?;
-        let orders = inv
-            .remote()?
-            .api()
-            .sdk()
-            .open_orders(user, None)
-            .await
-            .map_err(from_sdk)?;
-        inv.print(&OrderListOutput::new(orders, "No orders."));
+    async fn run(inv: &Invocation, args: &OrdersArgs) -> Result<(), anyhow::Error> {
+        let user = args.user.resolve(inv).await?;
+        let api = inv.remote()?.api();
+        let dex = canonical_dex(api.sdk(), args.dex.as_deref()).await?;
+        let resolver = inv.asset_resolver().await?;
+        inv.print(&orders::open_orders_output(api, &resolver, user, dex.as_deref()).await?);
         Ok(())
     }
 }
@@ -857,7 +1149,7 @@ impl CliCommand for AccountPortfolio {
     ]);
 
     async fn run(inv: &Invocation, args: &PortfolioArgs) -> Result<(), anyhow::Error> {
-        let user = args.user.resolve(inv)?;
+        let user = args.user.resolve(inv).await?;
         let api = inv.remote()?.api();
         let client = api.sdk();
         let dex = canonical_dex(client, args.dex.as_deref()).await?;
@@ -905,7 +1197,7 @@ impl CliCommand for AccountSubaccounts {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        subaccounts(inv, args.resolve(inv)?).await
+        subaccounts(inv, args.resolve(inv).await?).await
     }
 }
 
@@ -923,7 +1215,7 @@ impl CliCommand for AccountPortfolioHistory {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        let user = args.resolve(inv)?;
+        let user = args.resolve(inv).await?;
         print_info_value(
             inv,
             InfoRequest::user("portfolio", user),
@@ -953,15 +1245,22 @@ impl CliCommand for AccountLedger {
         arg("end")
             .schema_string()
             .describe("RFC3339 or epoch-millisecond end time."),
+        arg("all").kind(InputKind::Boolean).describe(
+            "Page through the whole window. Without it one page is returned and a notice on stderr names the start that continues.",
+        ),
     ]);
 
     async fn run(inv: &Invocation, args: &TimeRangeArgs) -> Result<(), anyhow::Error> {
-        let user = args.user.resolve(inv)?;
+        let user = args.user.resolve(inv).await?;
         validate_optional_time_range(Some(args.start), args.end)?;
-        print_info_value(
+        print_window(
             inv,
-            InfoRequest::user("userNonFundingLedgerUpdates", user)
-                .time_range(Some(args.start), args.end),
+            paging::USER_LEDGER,
+            args,
+            |from| {
+                InfoRequest::user("userNonFundingLedgerUpdates", user)
+                    .time_range(Some(from), args.end)
+            },
             "userNonFundingLedgerUpdates",
             "No ledger updates.",
         )
@@ -988,16 +1287,105 @@ impl CliCommand for AccountFunding {
         arg("end")
             .schema_string()
             .describe("RFC3339 or epoch-millisecond end time."),
+        arg("all").kind(InputKind::Boolean).describe(
+            "Page through the whole window. Without it one page is returned and a notice on stderr names the start that continues.",
+        ),
     ]);
 
     async fn run(inv: &Invocation, args: &TimeRangeArgs) -> Result<(), anyhow::Error> {
-        let user = args.user.resolve(inv)?;
+        let user = args.user.resolve(inv).await?;
         validate_optional_time_range(Some(args.start), args.end)?;
-        print_info_value(
+        print_window(
             inv,
-            InfoRequest::user("userFunding", user).time_range(Some(args.start), args.end),
+            paging::USER_FUNDING,
+            args,
+            |from| InfoRequest::user("userFunding", user).time_range(Some(from), args.end),
             "userFunding",
             "No funding history.",
+        )
+        .await
+    }
+}
+
+pub struct AccountRole;
+
+impl CliCommand for AccountRole {
+    type Args = OptionalAddressArgs;
+
+    const SPEC: CommandSpec = CommandSpec::read(
+        &["account", "role"],
+        "account",
+        "Show an address's role: user, agent, vault, subaccount or missing",
+        "Query an address's protocol role. A subaccount names its master and an agent its owner.",
+    )
+    .args(&[USER_SELECTOR.schema_required()]);
+
+    async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
+        print_info_value(
+            inv,
+            InfoRequest::user("userRole", args.resolve(inv).await?),
+            "userRole",
+            "No role.",
+        )
+        .await
+    }
+}
+
+pub struct AccountMultisigSigners;
+
+impl CliCommand for AccountMultisigSigners {
+    type Args = OptionalAddressArgs;
+
+    const SPEC: CommandSpec = CommandSpec::read(
+        &["account", "multisig-signers"],
+        "account",
+        "Show the authorized signers of a multi-sig account",
+        "Query the authorized signers and signature threshold of a multi-sig account. The exchange answers nothing for an address that is not multi-sig.",
+    )
+    .args(&[USER_SELECTOR.schema_required()]);
+
+    async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
+        print_info_value(
+            inv,
+            InfoRequest::user("userToMultiSigSigners", args.resolve(inv).await?),
+            "userToMultiSigSigners",
+            "Not a multi-sig account.",
+        )
+        .await
+    }
+}
+
+pub struct AccountAssetData;
+
+impl CliCommand for AccountAssetData {
+    type Args = AssetDataArgs;
+
+    const SPEC: CommandSpec = CommandSpec::read(
+        &["account", "asset-data"],
+        "account",
+        "Show an account's leverage and trade capacity on one perpetual",
+        "Query an account's active asset data for a perpetual: leverage, maximum trade sizes and size available to trade (buy side first, sell side second) and the mark price. Works with no open position.",
+    )
+    .args(&[
+        USER_SELECTOR.schema_required(),
+        arg("coin")
+            .kind(InputKind::MarketSymbol)
+            .describe("Perpetual coin, for example BTC or xyz:XYZ100.")
+            .resource_id("coin"),
+    ]);
+
+    async fn run(inv: &Invocation, args: &AssetDataArgs) -> Result<(), anyhow::Error> {
+        let user = args.user.resolve(inv).await?;
+        let resolver = inv.asset_resolver().await?;
+        let perp = resolver
+            .resolve_perp_or_fetch(inv.remote()?.api().sdk(), &args.coin)
+            .await
+            .map_err(CliError::from)?;
+        print_info_value(
+            inv,
+            InfoRequest::user("activeAssetData", user).field("coin", perp.display_name()),
+            "activeAssetData",
+            "No asset data.",
         )
         .await
     }
@@ -1017,7 +1405,7 @@ impl CliCommand for AccountTwapHistory {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        let user = args.resolve(inv)?;
+        let user = args.resolve(inv).await?;
         print_info_value(
             inv,
             InfoRequest::user("twapHistory", user),
@@ -1053,7 +1441,7 @@ impl CliCommand for AccountTwapFills {
     ]);
 
     async fn run(inv: &Invocation, args: &TwapFillsArgs) -> Result<(), anyhow::Error> {
-        let user = args.user.resolve(inv)?;
+        let user = args.user.resolve(inv).await?;
         validate_optional_time_range(args.start, args.end)?;
         match args.start {
             Some(start) => {
@@ -1095,7 +1483,7 @@ impl CliCommand for AccountAbstraction {
     .args(&[USER_SELECTOR]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        let user = args.resolve(inv)?;
+        let user = args.resolve(inv).await?;
         let row = fetch_abstraction(inv.remote()?.api(), user).await?;
         inv.print(&One::new(row));
         Ok(())
@@ -1110,38 +1498,197 @@ impl CliCommand for AccountAbstractionSet {
     const SPEC: CommandSpec = CommandSpec::signed(
         &["account", "abstraction", "set"],
         "account",
-        "Set abstraction mode for the selected signer",
-        "Set account abstraction for the signer (userSetAbstraction). `disabled` is Standard: separate perp and spot balances. Cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode; unified-account and portfolio-margin accounts are limited to 50k actions per day. Use --dry-run to preview; confirm or pass -y for live submit.",
+        "Set abstraction mode for the selected signer or one of its subaccounts",
+        "Set account abstraction for the signer or one of its subaccounts (userSetAbstraction); an API wallet sets its master account's mode with agentSetAbstraction. `disabled` is Standard: separate perp and spot balances. Cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode; unified-account and portfolio-margin accounts are limited to 50k actions per day. Use --dry-run to preview; confirm or pass -y for live submit.",
     )
-    .long_about("Set account abstraction for the signer (userSetAbstraction).\n\
+    .long_about("Set account abstraction for the signer or one of its subaccounts (userSetAbstraction).\n\
 \n\
 `disabled` is Standard: separate perp and spot balances. `unified-account` keeps one balance per asset for spot and every perp dex; `portfolio-margin` margins eligible assets together.\n\
 \n\
 Cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode. Unified-account and portfolio-margin accounts are limited to 50k actions per day.\n\
 \n\
+--user names a subaccount of the signer. An API wallet signs agentSetAbstraction instead, which changes its master account's mode only; --user may not name another account.\n\
+\n\
 Use --dry-run to preview; confirm or pass -y for live submit.")
     .signs(Signs::user_signed::<UserSetAbstraction>())
-    .master_only("userSetAbstraction")
     .risk(Risk::AccountState)
     .prompt()
     .args(&[
         arg("mode").describe("Target abstraction mode."),
+        arg("user").kind(InputKind::ActingAccountSelector).describe("Subaccount of the signer to set the mode for: subaccount address, wallet name, or wallet id. Defaults to the signer's own account.").resource_id("subaccount selector"),
         arg("yes").kind(InputKind::Boolean).describe("Skip confirmation prompt for live execution."),
     ]);
 
     async fn run(inv: &Invocation, args: &SetAbstractionArgs) -> Result<(), anyhow::Error> {
+        let requested = args
+            .user
+            .as_deref()
+            .map(|selector| inv.resolve_account(selector))
+            .transpose()?;
         let resolved = inv.resolve_signer();
         if inv.dry_run() {
+            let plan = match resolved {
+                Ok(signer) => Some(abstraction_plan(&signer, requested)?),
+                Err(_) => requested.map(|user| AbstractionPlan {
+                    user,
+                    agent_signed: false,
+                }),
+            };
             return print_dry_run(
                 inv,
                 "set_abstraction",
-                abstraction_set_dry_run_value(
-                    inv.remote()?.chain(),
-                    resolved.ok().map(|signer| signer.address()),
-                    args.mode,
-                ),
+                abstraction_set_dry_run_value(inv.remote()?.chain(), plan, args.mode),
             );
         }
-        set_abstraction(inv, &resolved?, args).await
+        let signer = resolved?;
+        let plan = abstraction_plan(&signer, requested)?;
+        set_abstraction(inv, &signer, plan, args).await
+    }
+}
+
+/// Arguments for `account evm-big-blocks`.
+#[derive(Args, Debug, Clone)]
+pub struct EvmBigBlocksArgs {
+    /// Send the account's HyperEVM transactions to big blocks
+    #[arg(long, conflicts_with = "disable", required_unless_present = "disable")]
+    pub enable: bool,
+
+    /// Send the account's HyperEVM transactions back to small blocks
+    #[arg(long)]
+    pub disable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EvmBigBlocksRow {
+    status: String,
+    action: String,
+    signer: String,
+    acting_as: String,
+    using_big_blocks: bool,
+    network: String,
+}
+
+impl Row for EvmBigBlocksRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Status",
+        "Action",
+        "Signer",
+        "Acting As",
+        "Big Blocks",
+        "Network",
+    ];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.status.clone(),
+            self.action.clone(),
+            self.signer.clone(),
+            self.acting_as.clone(),
+            self.using_big_blocks.to_string(),
+            self.network.clone(),
+        ]
+    }
+}
+
+pub struct AccountEvmBigBlocks;
+
+impl CliCommand for AccountEvmBigBlocks {
+    type Args = EvmBigBlocksArgs;
+
+    const SPEC: CommandSpec = CommandSpec::signed(
+        &["account", "evm-big-blocks"],
+        "account",
+        "Direct the account's HyperEVM transactions to big or small blocks",
+        "Set the HyperCore user flag that routes the account's HyperEVM transactions to big blocks (--enable) or small blocks (--disable) (evmUserModify). Big blocks are for large contract deployments; the flag stays set until it is unset again. The account must already exist on HyperCore.",
+    )
+    .risk(Risk::AccountState)
+    .one_of_required(&[&["enable"], &["disable"]])
+    .args(&[
+        arg("enable")
+            .kind(InputKind::Boolean)
+            .describe("Route HyperEVM transactions to big blocks."),
+        arg("disable")
+            .kind(InputKind::Boolean)
+            .describe("Route HyperEVM transactions back to small blocks."),
+    ]);
+
+    async fn run(inv: &Invocation, args: &EvmBigBlocksArgs) -> Result<(), anyhow::Error> {
+        let using_big_blocks = args.enable;
+        if inv.dry_run() {
+            return print_dry_run(
+                inv,
+                "set_evm_big_blocks",
+                serde_json::json!({
+                    "using_big_blocks": using_big_blocks,
+                    "network": inv.remote()?.chain().to_string(),
+                    "action": {"type": "evmUserModify", "usingBigBlocks": using_big_blocks},
+                }),
+            );
+        }
+        let signer = inv.resolve_signer()?;
+        let remote = inv.remote()?;
+        actions::send_l1_action(
+            remote.api(),
+            &signer,
+            Action::EvmUserModify { using_big_blocks },
+            actions::nonce_now(),
+        )
+        .await?;
+        inv.print(&One::new(EvmBigBlocksRow {
+            status: "submitted".to_string(),
+            action: "evm-big-blocks".to_string(),
+            signer: signer.address().to_string(),
+            acting_as: signer.query_address().to_string(),
+            using_big_blocks,
+            network: remote.chain().to_string(),
+        }));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hypersdk::hypercore::PrivateKeySigner;
+
+    use super::*;
+
+    #[test]
+    fn an_api_wallet_sets_its_masters_mode_and_no_other_accounts() {
+        let master = Address::repeat_byte(1);
+        let agent =
+            SelectedSigner::stored_account(PrivateKeySigner::random(), "bot".to_string(), master);
+
+        assert_eq!(
+            abstraction_plan(&agent, None).unwrap(),
+            AbstractionPlan {
+                user: master,
+                agent_signed: true
+            }
+        );
+        assert!(abstraction_plan(&agent, Some(master)).unwrap().agent_signed);
+        let err = abstraction_plan(&agent, Some(Address::repeat_byte(2))).unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+    }
+
+    #[test]
+    fn any_other_signer_sets_its_own_or_a_named_account_with_the_user_signed_action() {
+        let key = PrivateKeySigner::random();
+        let signer = SelectedSigner::private_key(key.clone());
+        let subaccount = Address::repeat_byte(2);
+
+        assert_eq!(
+            abstraction_plan(&signer, None).unwrap(),
+            AbstractionPlan {
+                user: key.address(),
+                agent_signed: false
+            }
+        );
+        assert_eq!(
+            abstraction_plan(&signer, Some(subaccount)).unwrap(),
+            AbstractionPlan {
+                user: subaccount,
+                agent_signed: false
+            }
+        );
     }
 }

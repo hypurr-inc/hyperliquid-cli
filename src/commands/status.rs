@@ -46,6 +46,10 @@ impl TableData for StatusOutput {
     }
 }
 
+/// `rate_limit_status` is a constant, not a read. The request budget the API
+/// reports is per account: `account rate-limit`.
+pub const RATE_LIMIT_NOTE: &str = "no rate-limit response observed; 429 responses map to exit code 11 and should be retried with backoff; run `hyperliquid account rate-limit [ADDRESS]` for an account's request budget";
+
 pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let client = remote.api().sdk();
@@ -62,9 +66,7 @@ pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
         perps_count: perps.len(),
         mids_count: mids.len(),
         rate_limit_status: "ok".to_string(),
-        rate_limit_note:
-            "no rate-limit response observed; 429 responses map to exit code 11 and should be retried with backoff"
-                .to_string(),
+        rate_limit_note: RATE_LIMIT_NOTE.to_string(),
     });
     Ok(())
 }

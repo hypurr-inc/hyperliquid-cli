@@ -61,6 +61,7 @@ pub struct DryRunEnvelope {
     payload: Option<serde_json::Value>,
     signing: Option<DryRunSigning>,
     network: Option<Network>,
+    expires_after: Option<u64>,
 }
 
 impl DryRunEnvelope {
@@ -78,6 +79,7 @@ impl DryRunEnvelope {
             payload: None,
             signing: None,
             network: None,
+            expires_after: None,
         }
     }
 
@@ -97,6 +99,13 @@ impl DryRunEnvelope {
     #[must_use]
     pub fn with_network(mut self, network: Option<Network>) -> Self {
         self.network = network;
+        self
+    }
+
+    /// The `expiresAfter` timestamp (milliseconds) the action would carry.
+    #[must_use]
+    pub fn with_expires_after(mut self, expires_after: Option<u64>) -> Self {
+        self.expires_after = expires_after;
         self
     }
 
@@ -131,6 +140,12 @@ impl DryRunEnvelope {
             object.insert(
                 "vault_address".to_string(),
                 serde_json::json!(signing.vault_address),
+            );
+        }
+        if let Some(expires_after) = self.expires_after {
+            object.insert(
+                "expires_after".to_string(),
+                serde_json::json!(expires_after),
             );
         }
         if let Some(network) = self.network {
@@ -197,6 +212,9 @@ impl TableData for DryRunEnvelope {
                 rows.push(vec!["Warning".to_string(), reason.clone()]);
             }
         }
+        if let Some(expires_after) = self.expires_after {
+            rows.push(vec!["Expires after".to_string(), expires_after.to_string()]);
+        }
         if let Some(network) = self.network {
             rows.push(vec!["Network".to_string(), network.to_string()]);
         }
@@ -234,6 +252,20 @@ mod tests {
                 "network": "mainnet"
             })
         );
+    }
+
+    #[test]
+    fn an_expiry_is_shown_in_json_and_in_the_human_rows_only_when_set() {
+        let without = sample_envelope();
+        assert!(without.to_json_value().get("expires_after").is_none());
+        assert!(!without.rows().iter().any(|row| row[0] == "Expires after"));
+
+        let with = sample_envelope().with_expires_after(Some(1_700_000_030_000));
+        assert_eq!(with.to_json_value()["expires_after"], 1_700_000_030_000_u64);
+        assert!(with.rows().contains(&vec![
+            "Expires after".to_string(),
+            "1700000030000".to_string()
+        ]));
     }
 
     #[test]

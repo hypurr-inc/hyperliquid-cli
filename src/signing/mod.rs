@@ -11,12 +11,14 @@
 //! late answer are one rule. Every signature a remote provider returns is
 //! checked, once, against the payload's own digest and the selected address.
 
+pub(crate) mod nonce;
 pub(crate) mod signature;
 
 use alloy::dyn_abi::TypedData;
 use alloy::primitives::B256;
 use alloy::signers::SignerSync;
 use alloy::sol_types::SolStruct;
+use chrono::{DateTime, Utc};
 use hypersdk::Address;
 use hypersdk::hypercore::signing::agent_signing_hash;
 use hypersdk::hypercore::types::{Action, ActionRequest, Signature};
@@ -49,6 +51,28 @@ impl Signs<'static> {
     #[must_use]
     pub const fn user_signed<T: SolStruct>() -> Self {
         Self::UserSigned(T::NAME)
+    }
+}
+
+/// The refusal for `expiresAfter` on a user-signed action: its EIP-712 document
+/// has no such field, and the exchange rejects the request field beside it
+/// (<https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/exchange-endpoint#expires-after>).
+pub(crate) fn expires_after_refusal() -> CliError {
+    CliError::Unsupported(
+        "--expires-after applies to L1 actions only (orders, cancels, modifies, leverage, margin, TWAP, vault, subaccount and similar); user-signed actions such as transfers, withdrawals, staking deposits and delegations, API wallet and builder approvals and abstraction changes do not support expiresAfter"
+            .to_string(),
+    )
+}
+
+/// Whether a command that signs `signs` can carry `--expires-after`.
+pub fn ensure_supports_expires_after(signs: Option<Signs<'_>>) -> Result<(), CliError> {
+    match signs {
+        Some(Signs::L1Action) => Ok(()),
+        Some(Signs::UserSigned(_) | Signs::Digest) => Err(expires_after_refusal()),
+        None => Err(CliError::Unsupported(
+            "--expires-after applies to commands that sign an L1 action; this command signs nothing"
+                .to_string(),
+        )),
     }
 }
 
@@ -293,25 +317,41 @@ impl SelectedSigner {
         Ok(signature)
     }
 
+    /// Sign `action` and build its request body. `expires_after` is a
+    /// millisecond timestamp. An L1 action hashes it, so the signature covers
+    /// it; a user-signed action signs a document with no such field, and the
+    /// exchange refuses the field there, so that is an error here too.
     pub fn sign_l1_action_sync(
         &self,
         action: Action,
         nonce: u64,
         vault_address: Option<Address>,
+        expires_after: Option<u64>,
         chain: Chain,
     ) -> Result<serde_json::Value, CliError> {
+        let expiry = expires_after
+            .map(|ms| {
+                i64::try_from(ms)
+                    .ok()
+                    .and_then(DateTime::<Utc>::from_timestamp_millis)
+                    .ok_or_else(|| {
+                        CliError::Internal(anyhow::anyhow!("expiry {ms} is not a valid timestamp"))
+                    })
+            })
+            .transpose()?;
         let prehash = action
-            .prehash(nonce, vault_address, None, chain)
+            .prehash(nonce, vault_address, expiry, chain)
             .map_err(|err| CliError::Internal(anyhow::anyhow!("failed to hash action: {err}")))?;
         // An action signed as an L1 action hashes to the `Agent` wrapper of its
         // msgpack hash; any other action is signed over its own typed data.
-        let payload = match action.hash(nonce, vault_address, None) {
+        let payload = match action.hash(nonce, vault_address, expires_after) {
             Ok(connection_id) if agent_signing_hash(chain, connection_id) == prehash => {
                 Payload::Agent {
                     chain,
                     connection_id,
                 }
             }
+            _ if expires_after.is_some() => return Err(expires_after_refusal()),
             _ => Payload::Digest(prehash),
         };
         let signature = self.sign(&payload)?;
@@ -320,7 +360,7 @@ impl SelectedSigner {
             nonce,
             signature,
             vault_address,
-            expires_after: None,
+            expires_after,
         };
         serde_json::to_value(request).map_err(|err| {
             CliError::Internal(anyhow::anyhow!("failed to encode signed action: {err}"))
@@ -444,24 +484,98 @@ mod tests {
             .parse()
             .unwrap();
         for chain in [Chain::Mainnet, Chain::Testnet] {
-            for (action, vault_address) in [
-                (Action::ScheduleCancel(ScheduleCancel { time: None }), None),
+            for (action, vault_address, expires_after) in [
+                (
+                    Action::ScheduleCancel(ScheduleCancel { time: None }),
+                    None,
+                    None,
+                ),
                 (
                     Action::ScheduleCancel(ScheduleCancel { time: Some(9) }),
                     Some(vault),
+                    None,
                 ),
-                (approve_agent(chain), None),
+                (approve_agent(chain), None, None),
+                (
+                    Action::ScheduleCancel(ScheduleCancel { time: None }),
+                    None,
+                    Some(1_700_000_030_123_u64),
+                ),
+                (
+                    Action::ScheduleCancel(ScheduleCancel { time: Some(9) }),
+                    Some(vault),
+                    Some(1_700_000_030_123),
+                ),
             ] {
                 let nonce = 1_700_000_000_123_u64;
                 let expected = action
                     .clone()
-                    .sign_sync(&key(), nonce, vault_address, None, chain)
+                    .sign_sync(
+                        &key(),
+                        nonce,
+                        vault_address,
+                        expires_after
+                            .and_then(|ms| DateTime::<Utc>::from_timestamp_millis(ms as i64)),
+                        chain,
+                    )
                     .unwrap();
                 let signed = signer
-                    .sign_l1_action_sync(action, nonce, vault_address, chain)
+                    .sign_l1_action_sync(action, nonce, vault_address, expires_after, chain)
                     .unwrap();
                 assert_eq!(signed, serde_json::to_value(expected).unwrap(), "{chain:?}");
+                assert_eq!(signed["expiresAfter"], serde_json::json!(expires_after));
             }
+        }
+    }
+
+    #[test]
+    fn an_expiry_changes_what_an_l1_action_signs() {
+        let signer = SelectedSigner::private_key(key());
+        let action = || Action::ScheduleCancel(ScheduleCancel { time: None });
+        let sign = |expires_after| {
+            signer
+                .sign_l1_action_sync(
+                    action(),
+                    1_700_000_000_123,
+                    None,
+                    expires_after,
+                    Chain::Testnet,
+                )
+                .unwrap()["signature"]
+                .clone()
+        };
+        assert_ne!(sign(None), sign(Some(1_700_000_030_123)));
+        assert_ne!(sign(Some(1_700_000_030_123)), sign(Some(1_700_000_030_124)));
+    }
+
+    #[test]
+    fn a_user_signed_action_cannot_carry_an_expiry() {
+        let signer = SelectedSigner::private_key(key());
+        for chain in [Chain::Mainnet, Chain::Testnet] {
+            let err = signer
+                .sign_l1_action_sync(
+                    approve_agent(chain),
+                    1_700_000_000_123,
+                    None,
+                    Some(1_700_000_030_123),
+                    chain,
+                )
+                .unwrap_err();
+            assert_eq!(err.exit_code(), 13, "{err}");
+            assert!(err.to_string().contains("L1 actions only"), "{err}");
+        }
+    }
+
+    #[test]
+    fn only_commands_that_sign_an_l1_action_accept_an_expiry() {
+        assert!(ensure_supports_expires_after(Some(Signs::L1Action)).is_ok());
+        for signs in [
+            Some(Signs::Digest),
+            Some(Signs::UserSigned("Withdraw")),
+            None,
+        ] {
+            let err = ensure_supports_expires_after(signs).unwrap_err();
+            assert_eq!(err.exit_code(), 13, "{signs:?}");
         }
     }
 
@@ -503,7 +617,7 @@ mod tests {
             assert_eq!(err.exit_code(), 13, "withdraw on {chain:?}: {err}");
 
             let err = signer
-                .sign_l1_action_sync(approve_agent(chain), 1_700_000_000_123, None, chain)
+                .sign_l1_action_sync(approve_agent(chain), 1_700_000_000_123, None, None, chain)
                 .unwrap_err();
             assert_eq!(err.exit_code(), 13, "approveAgent on {chain:?}: {err}");
         }
@@ -518,6 +632,7 @@ mod tests {
             .sign_l1_action_sync(
                 Action::ScheduleCancel(ScheduleCancel { time: None }),
                 1_700_000_000_123,
+                None,
                 None,
                 Chain::Mainnet,
             )
@@ -641,11 +756,12 @@ mod tests {
                     Action::ScheduleCancel(ScheduleCancel { time: None }),
                     1,
                     None,
+                    None,
                     chain,
                 )
                 .map(|_| ()),
             signer
-                .sign_l1_action_sync(approve_agent(chain), 1, None, chain)
+                .sign_l1_action_sync(approve_agent(chain), 1, None, None, chain)
                 .map(|_| ()),
             block_on(signer.sign_l1_connection_id(chain, B256::repeat_byte(3))).map(|_| ()),
         ];
