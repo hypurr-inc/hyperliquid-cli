@@ -521,6 +521,7 @@ JSON errors are one document on stdout with `error`, `category`, `exit_code`, an
 - `confirmation_required` (exit 13): `next` holds a runnable `--dry-run` preview and, when the command supports it, the same command with `--yes` marked `"when": "Only after a human approves"`. Never run a `next` command whose `when` condition you can't confirm.
 - Reads retry automatically on connect errors, timeouts, 5xx, and 429. Mutations are never retried.
 - `data.suggestion` is a hint for a human, never a command to run.
+- Exchange refusals with a documented message carry their own `reason` and `data.hint` saying what to change: `order_below_minimum_value`, `reduce_only_violation`, `post_only_would_cross`, `ioc_no_match`, `bad_price`, `price_out_of_band`, `zero_size`, `open_interest_cap`, `invalid_trigger_price`, `no_market_liquidity` (exit 13) and `signer_not_registered` (exit 10: the signature recovered to an address that is no user or approved API wallet; check `api-wallet list`). The address-based rate limit exits 11 with `retry_after: 10` and a `data.hint`; it is lifted by trading volume or `reserveRequestWeight`, not by waiting out a window. Every reason is listed in `.claude/error-catalog.json`.
 
 ## Reporting Back to Users
 

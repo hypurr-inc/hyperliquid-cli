@@ -53,13 +53,12 @@ impl Serialize for Rejected {
     }
 }
 
-/// The error for a rejected status. A rate limit or a refusal of the
-/// credentials keeps its own exit code (11, 10); any other rejection reads as
-/// `lead` followed by the exchange's text and exits 13.
+/// The error for a rejected status. Every class [`Rejection::into_error`]
+/// names keeps its own error and exit code (a rate limit 11, rejected
+/// credentials 10, a recognised refusal 13 with its own reason); any other
+/// rejection reads as `lead` followed by the exchange's text and exits 13.
 pub(crate) fn rejection_error(lead: impl fmt::Display, rejected: &Rejected) -> CliError {
-    rejected
-        .classify()
-        .into_error_with(|remote| CliError::unsupported_with_remote(lead, &remote))
+    rejected.classify().into_error_after(lead)
 }
 
 /// [`rejection_error`] for text read straight from a response. `action`
@@ -71,27 +70,62 @@ pub(crate) fn status_error(action: &str, text: &str) -> CliError {
     )
 }
 
-/// The error for a batch where the exchange rejected every leg. A rate limit or
-/// a refusal of the credentials on any leg decides the exit code.
+/// The error for a batch where the exchange rejected every leg. Legs with the
+/// same text are one entry (a pre-validation failure rejects the whole batch
+/// with one message, repeated per leg), so one distinct text reads like a
+/// single rejection. A rate limit or a refusal of the credentials on any leg
+/// decides the exit code; otherwise the legs are listed with their numbers,
+/// and the error carries a refusal's reason when every entry is that same
+/// refusal.
 pub(crate) fn rejected_all(action: &str, failures: &[Rejected]) -> CliError {
-    if let [one] = failures {
-        return status_error(action, &one.0);
+    let mut distinct: Vec<(&Rejected, Vec<usize>)> = Vec::new();
+    for (index, failure) in failures.iter().enumerate() {
+        match distinct.iter_mut().find(|(seen, _)| *seen == failure) {
+            Some((_, legs)) => legs.push(index + 1),
+            None => distinct.push((failure, vec![index + 1])),
+        }
     }
-    let decisive = failures
+    if let [(only, _)] = distinct.as_slice() {
+        return status_error(action, only.raw());
+    }
+    let decisive = distinct
         .iter()
-        .find_map(|failure| match failure.classify() {
+        .find_map(|(failure, _)| match failure.classify() {
             Rejection::RateLimited => Some(CliError::rate_limited()),
+            Rejection::AddressRateLimited(remote) => Some(CliError::AddressRateLimited(remote)),
             Rejection::AuthRejected(remote) => Some(CliError::AuthRejected(remote)),
-            Rejection::UserState(_) | Rejection::Other(_) => None,
+            Rejection::SignerNotRegistered(remote) => Some(CliError::SignerNotRegistered(remote)),
+            Rejection::Refused(..) | Rejection::UserState(_) | Rejection::Other(_) => None,
         });
     decisive.unwrap_or_else(|| {
-        let lines = failures
+        let lines = distinct
             .iter()
-            .enumerate()
-            .map(|(index, failure)| format!("  {}. {failure}", index + 1))
+            .map(|(failure, legs)| {
+                let legs = legs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("  {legs}. {failure}")
+            })
             .collect::<Vec<_>>()
             .join("\n");
-        CliError::Unsupported(format!("Couldn't {action}. Exchange said:\n{lines}"))
+        let text = format!("Couldn't {action}. Exchange said:\n{lines}");
+        let mut refusals = distinct
+            .iter()
+            .map(|(failure, _)| match failure.classify() {
+                Rejection::Refused(refusal, _) => Some(refusal),
+                _ => None,
+            });
+        match refusals.next().flatten() {
+            Some(first) if refusals.all(|refusal| refusal == Some(first)) => {
+                CliError::ExchangeRefused {
+                    refusal: first,
+                    text,
+                }
+            }
+            _ => CliError::Unsupported(text),
+        }
     })
 }
 
@@ -498,5 +532,89 @@ mod tests {
         assert!(err.to_string().contains("1. [untrusted remote data] first"));
         let limited = [Rejected::new("first"), Rejected::new("rate limit exceeded")];
         assert_eq!(rejected_all("place orders", &limited).exit_code(), 11);
+    }
+
+    #[test]
+    fn a_whole_batch_rejection_repeated_per_leg_reads_as_one_rejection() {
+        let text = "Order must have minimum value of $10.";
+        let legs = [
+            Rejected::new(text),
+            Rejected::new(text),
+            Rejected::new(text),
+        ];
+        let err = rejected_all("place orders", &legs);
+
+        assert_eq!(
+            err.to_string(),
+            "Unsupported input: Couldn't place orders. Exchange said: [untrusted remote data] Order must have minimum value of $10."
+        );
+        assert_eq!(err.reason(), "order_below_minimum_value");
+        assert_eq!(err.exit_code(), 13);
+    }
+
+    #[test]
+    fn legs_that_differ_keep_their_numbers_and_equal_legs_share_a_line() {
+        let legs = [
+            Rejected::new("Order has invalid size."),
+            Rejected::new("Order has zero size."),
+            Rejected::new("Order has invalid size."),
+        ];
+        let err = rejected_all("place orders", &legs);
+
+        assert_eq!(
+            err.to_string(),
+            "Unsupported input: Couldn't place orders. Exchange said:\n  1, 3. [untrusted remote data] Order has invalid size.\n  2. [untrusted remote data] Order has zero size."
+        );
+        assert_eq!(err.reason(), "unsupported_input");
+    }
+
+    #[test]
+    fn legs_refused_for_the_same_reason_with_different_text_keep_that_reason() {
+        let legs = [
+            Rejected::new("Post only order would have immediately matched, bbo was 50000@50001."),
+            Rejected::new("Post only order would have immediately matched, bbo was 3000@3001."),
+        ];
+        let err = rejected_all("place orders", &legs);
+
+        assert_eq!(err.reason(), "post_only_would_cross");
+        assert_eq!(err.exit_code(), 13);
+        assert!(err.hint().is_some());
+        let text = err.to_string();
+        assert!(
+            text.contains("\n  1. [untrusted remote data] Post only"),
+            "{text}"
+        );
+        assert!(
+            text.contains("\n  2. [untrusted remote data] Post only"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn legs_refused_for_different_reasons_are_listed_as_plain_unsupported_input() {
+        let legs = [
+            Rejected::new("Order has zero size."),
+            Rejected::new("Invalid TP/SL price."),
+        ];
+        let err = rejected_all("place orders", &legs);
+        assert_eq!(err.reason(), "unsupported_input");
+        assert!(err.hint().is_none());
+    }
+
+    #[test]
+    fn a_batch_credential_or_address_limit_on_any_leg_decides_the_error() {
+        let signer = "L1 error: User or API Wallet 0x1111111111111111111111111111111111111111 does not exist.";
+        let legs = [Rejected::new("first"), Rejected::new(signer)];
+        let err = rejected_all("place orders", &legs);
+        assert_eq!(err.exit_code(), 10);
+        assert_eq!(err.reason(), "signer_not_registered");
+
+        let legs = [
+            Rejected::new("first"),
+            Rejected::new("Too many cumulative requests sent (2 > 1)"),
+        ];
+        let err = rejected_all("place orders", &legs);
+        assert_eq!(err.exit_code(), 11);
+        assert!(err.hint().unwrap().contains("reserveRequestWeight"));
     }
 }
