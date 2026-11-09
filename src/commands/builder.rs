@@ -8,13 +8,13 @@ use crate::builder_fee::{MaxFeeRate, max_builder_fee, percent_from_tenths_bps};
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, YES_FOR_LIVE_EXECUTION, arg,
 };
-use crate::commands::builder_approval::{self, ApproveBuilderFee};
-use crate::commands::rows::{ListRow, One, Row, Rows};
-use crate::commands::support::print_dry_run;
-use crate::commands::user_signed::UserSigned;
+use crate::commands::common::rows::{ListRow, One, Row, Rows};
+use crate::commands::common::support::print_dry_run;
 use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
+use crate::exchange::builder_approval::{self, ApproveBuilderFee};
+use crate::exchange::user_signed::UserSigned;
 use crate::invocation::Invocation;
 use crate::signing::{SelectedSigner, Signs};
 use crate::wire::{AddressRole, InfoRequest, address};

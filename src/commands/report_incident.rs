@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::issue_report::{IssueReport, environment_lines};
+use super::common::issue_report::{IssueReport, environment_lines};
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
 use crate::invocation::Invocation;
 use crate::report::LastError;

@@ -7,9 +7,9 @@ use serde_json::json;
 
 use super::args::BPS_DENOMINATOR;
 use super::prepared::PreparedOrder;
-use crate::commands::abstraction::fetch_abstraction;
-use crate::commands::transfers::{self, AssetMove, AssetVenue};
+use crate::account_mode::fetch_abstraction;
 use crate::errors::from_sdk;
+use crate::exchange::send_asset::{self, AssetMove, AssetVenue};
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::signing::SelectedSigner;
@@ -132,7 +132,7 @@ pub(super) async fn execute_hip3_margin_transfers(
     plans: &[Hip3MarginPlan],
 ) -> Result<(), anyhow::Error> {
     for plan in plans {
-        transfers::send_asset(
+        send_asset::send_asset(
             inv,
             signer,
             AssetMove {

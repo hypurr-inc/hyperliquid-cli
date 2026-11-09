@@ -17,7 +17,7 @@ use crate::command_spec::{
     CliCommand, CommandSpec, DryRunPolicy, GroupSpec, InputKind, Lifecycle, NoArgs, OwsSupport,
     Risk, YES, YES_ARG, YES_FLAG, YES_FOR_AUTOMATION, arg,
 };
-use crate::commands::support::print_dry_run;
+use crate::commands::common::support::print_dry_run;
 use crate::config::{BankrLogin, Config};
 use crate::consent::{self, ConsentBlock, Tone};
 use crate::env;

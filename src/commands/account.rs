@@ -1,23 +1,23 @@
-use chrono::DateTime;
 use clap::Args;
-use hypersdk::Address;
 use hypersdk::Decimal;
-use hypersdk::hypercore::{AssetPosition, ClearinghouseState, SubAccount, UserVaultEquity};
+use hypersdk::hypercore::{AssetPosition, ClearinghouseState, UserVaultEquity};
 use serde::{Deserialize, Serialize};
 
+use crate::account_mode::{AccountMode, fetch_abstraction};
 use crate::assets::{AssetResolver, canonical_dex};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::commands::abstraction::{AccountMode, fetch_abstraction};
-use crate::commands::orders;
-use crate::commands::paging::{self, Endpoint};
-use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
-use crate::commands::rows::{ListRow, One, Row, Rows, or_missing, style_column};
-use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
-use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
+use crate::commands::common::order_list::open_orders_output;
+use crate::commands::common::paging::{self, Endpoint};
+use crate::commands::common::position::{self, pretty_pnl};
+use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing, style_column};
+use crate::commands::common::selector::{OptionalAddressArgs, USER_SELECTOR};
+use crate::commands::common::subaccount_list;
+use crate::commands::common::time_range::{parse_time_millis, validate_optional_time_range};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
 use crate::output::{JsonValueOutput, TableData};
+use crate::spot_balances::{RawSpotBalance, user_spot_balances_raw};
 use crate::wire::InfoRequest;
 
 #[derive(Args, Debug, Clone)]
@@ -93,59 +93,6 @@ pub struct PortfolioArgs {
     /// Perp dex name (HIP-3). Defaults to the first dex.
     #[arg(long)]
     pub dex: Option<String>,
-}
-
-pub fn parse_time_millis(raw: &str) -> Result<u64, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("time value cannot be empty".to_string());
-    }
-
-    if trimmed.chars().all(|ch| ch.is_ascii_digit()) {
-        return trimmed
-            .parse::<u64>()
-            .map_err(|err| format!("invalid epoch millisecond timestamp: {err}"));
-    }
-
-    let parsed = DateTime::parse_from_rfc3339(trimmed)
-        .map_err(|err| format!("invalid RFC3339 or epoch millisecond timestamp: {err}"))?;
-    let millis = parsed.timestamp_millis();
-    if millis < 0 {
-        return Err("time must be at or after the Unix epoch".to_string());
-    }
-    Ok(millis as u64)
-}
-
-pub(crate) async fn subaccounts(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    // The exchange answers `null` for an account without subaccounts.
-    let subaccounts: Vec<SubaccountRow> = inv
-        .remote()?
-        .api()
-        .info::<Option<Vec<SubAccount>>>(
-            &InfoRequest::user("subAccounts", user),
-            "loading subaccounts",
-        )
-        .await?
-        .unwrap_or_default()
-        .into_iter()
-        .map(SubaccountRow::from)
-        .collect();
-    inv.print(&Rows::new(subaccounts));
-    Ok(())
-}
-
-pub(crate) fn validate_optional_time_range(
-    start: Option<u64>,
-    end: Option<u64>,
-) -> Result<(), CliError> {
-    if let (Some(start), Some(end)) = (start, end)
-        && end < start
-    {
-        return Err(CliError::Configuration(
-            "--end must be greater than or equal to --start".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 /// A fills request over `start..end`, which the API aggregates by time on request.
@@ -375,9 +322,7 @@ impl Row for FillRow {
 
     fn pretty_cells(&self) -> Vec<String> {
         let mut cells = self.cells();
-        style_column::<Self>(&mut cells, "Closed PnL", |_| {
-            format_pretty_pnl(self.closed_pnl)
-        });
+        style_column::<Self>(&mut cells, "Closed PnL", |_| pretty_pnl(self.closed_pnl));
         cells
     }
 }
@@ -483,7 +428,7 @@ impl From<AssetPosition> for PositionRow {
             since_open: position.cum_funding.since_open,
             since_change: position.cum_funding.since_change,
         };
-        let row = positions::PositionRow::from(asset);
+        let row = position::PositionRow::from(asset);
         Self {
             coin: row.coin,
             side: row.side.to_string(),
@@ -666,7 +611,7 @@ impl TableData for PortfolioOutput {
     }
 
     fn pretty_rows(&self) -> Vec<Vec<String>> {
-        let mut rows = self.table_rows(format_pretty_pnl);
+        let mut rows = self.table_rows(pretty_pnl);
         if self.summary.perp_state_is_partial {
             rows.insert(
                 3,
@@ -690,61 +635,6 @@ impl TableData for PortfolioOutput {
             "vault_equities": self.vault_equities,
         })
     }
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct SubaccountRow {
-    pub name: String,
-    pub address: String,
-    pub master: String,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub account_value: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub withdrawable: Decimal,
-    pub positions_count: usize,
-    pub spot_balances_count: usize,
-}
-
-impl From<SubAccount> for SubaccountRow {
-    fn from(subaccount: SubAccount) -> Self {
-        Self {
-            name: subaccount.name,
-            address: subaccount.sub_account_user.to_string(),
-            master: subaccount.master.to_string(),
-            account_value: subaccount.clearinghouse_state.margin_summary.account_value,
-            withdrawable: subaccount.clearinghouse_state.withdrawable,
-            positions_count: subaccount.clearinghouse_state.asset_positions.len(),
-            spot_balances_count: subaccount.spot_state.balances.len(),
-        }
-    }
-}
-
-impl Row for SubaccountRow {
-    const HEADERS: &'static [&'static str] = &[
-        "Name",
-        "Address",
-        "Master",
-        "Account Value",
-        "Withdrawable",
-        "Positions",
-        "Spot Balances",
-    ];
-
-    fn cells(&self) -> Vec<String> {
-        vec![
-            self.name.clone(),
-            self.address.clone(),
-            self.master.clone(),
-            self.account_value.to_string(),
-            self.withdrawable.to_string(),
-            self.positions_count.to_string(),
-            self.spot_balances_count.to_string(),
-        ]
-    }
-}
-
-impl ListRow for SubaccountRow {
-    const EMPTY: &'static str = "No subaccounts.";
 }
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["account"], "Read account data and manage OWS wallets")
@@ -894,7 +784,7 @@ impl CliCommand for AccountOrders {
         let api = inv.remote()?.api();
         let dex = canonical_dex(api, args.dex.as_deref()).await?;
         let resolver = inv.asset_resolver().await?;
-        inv.print(&orders::open_orders_output(api, &resolver, user, dex.as_deref()).await?);
+        inv.print(&open_orders_output(api, &resolver, user, dex.as_deref()).await?);
         Ok(())
     }
 }
@@ -964,7 +854,7 @@ impl CliCommand for AccountSubaccounts {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        subaccounts(inv, args.resolve(inv).await?).await
+        subaccount_list::subaccounts(inv, args.resolve(inv).await?).await
     }
 }
 
@@ -1239,6 +1129,26 @@ impl CliCommand for AccountTwapFills {
     }
 }
 
+/// `account abstraction`: the mode `userAbstraction` reports for `user`.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct AbstractionRow {
+    pub user: String,
+    pub raw_mode: String,
+    pub normalized_mode: AccountMode,
+}
+
+impl Row for AbstractionRow {
+    const HEADERS: &'static [&'static str] = &["User", "Mode", "Raw Mode"];
+
+    fn cells(&self) -> Vec<String> {
+        vec![
+            self.user.clone(),
+            self.normalized_mode.as_str().to_string(),
+            self.raw_mode.clone(),
+        ]
+    }
+}
+
 pub struct AccountAbstraction;
 
 impl CliCommand for AccountAbstraction {
@@ -1254,8 +1164,12 @@ impl CliCommand for AccountAbstraction {
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
         let user = args.resolve(inv).await?;
-        let row = fetch_abstraction(inv.remote()?.api(), user).await?;
-        inv.print(&One::new(row));
+        let abstraction = fetch_abstraction(inv.remote()?.api(), user).await?;
+        inv.print(&One::new(AbstractionRow {
+            user: user.to_string(),
+            raw_mode: abstraction.raw_mode,
+            normalized_mode: abstraction.normalized_mode,
+        }));
         Ok(())
     }
 }

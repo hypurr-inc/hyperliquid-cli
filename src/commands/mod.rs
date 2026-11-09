@@ -1,43 +1,43 @@
-pub mod abstraction;
+//! The commands: one module per command domain, each implementing
+//! [`CliCommand`](crate::command_spec::CliCommand) for its types and registered
+//! in [`entries`].
+//!
+//! Layer rule: a command module never imports another command module, and no
+//! module outside `commands` imports `commands` but the registry that builds
+//! itself from [`entries`]. What two commands share lives in [`common`]
+//! (presentation and reads), [`crate::exchange`] (sending actions) or a domain
+//! module below `commands`; `tests/architecture.rs` enforces this.
+
 pub mod account;
 pub mod account_settings;
-pub(crate) mod actions;
 pub mod api_wallet;
 pub mod asset;
 pub mod borrowlend;
 pub mod builder;
-pub(crate) mod builder_approval;
+pub mod common;
 pub mod feedback;
-pub(crate) mod funds;
 pub mod invalidate_nonce;
-pub(crate) mod issue_report;
 pub mod mcp;
 pub mod meta;
 pub mod orderbook;
 pub mod orders;
 pub mod outcome_actions;
 pub mod outcomes;
-pub(crate) mod paging;
 pub mod perps;
 pub mod positions;
 pub mod prio;
 pub mod referral;
 pub mod report_incident;
 pub mod reserve_weight;
-pub mod rows;
 pub mod schema;
-pub mod selector;
 pub mod setup;
 pub mod spot;
-pub(crate) mod spot_balances;
 pub mod staking;
 pub mod status;
 pub mod subaccounts;
 pub mod subscribe;
-pub(crate) mod support;
 pub mod transfers;
 pub mod update;
-mod user_signed;
 pub mod vaults;
 pub mod wallet;
 pub mod watch_risk;

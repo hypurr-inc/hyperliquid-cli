@@ -5,7 +5,7 @@ use crate::assets::{self, canonical_dex};
 use crate::command_spec::{
     ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, Lifecycle, OwsSupport, Risk, arg,
 };
-use crate::commands::orderbook::{
+use crate::commands::common::market_input::{
     parse_candle_interval, resolve_market_coin, resolve_perp_coin_or_fetch,
 };
 use crate::errors::CliError;

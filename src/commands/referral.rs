@@ -5,12 +5,12 @@ use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, NoArgs, OwsSupport, Risk, arg};
-use crate::commands::actions;
-use crate::commands::rows::{One, Row, or_missing};
-use crate::commands::support::print_dry_run;
+use crate::commands::common::rows::{One, Row, or_missing};
+use crate::commands::common::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::env;
 use crate::errors::CliError;
+use crate::exchange::actions;
 use crate::invocation::Invocation;
 use crate::referral_code::{validate_referral_code, validate_referrer_code};
 use crate::signing::SelectedSigner;
@@ -412,7 +412,7 @@ mod tests {
     fn missing_status_values_show_the_shared_missing_cell() {
         let cells = status_of(serde_json::json!({})).unwrap().cells();
 
-        assert_eq!(cells[1], crate::commands::rows::MISSING);
+        assert_eq!(cells[1], crate::commands::common::rows::MISSING);
     }
 
     #[test]

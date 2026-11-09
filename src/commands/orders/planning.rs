@@ -34,6 +34,7 @@ use crate::assets::{
     qualify_dex_asset,
 };
 use crate::builder_fee::{self, BuilderFee};
+use crate::commands::common::position::find_position;
 use crate::errors::{CliError, from_sdk};
 use crate::http_api::ApiClient;
 use crate::margin::{MarginModeArg, MarginPlan};
@@ -700,26 +701,6 @@ fn position_tpsl_triggers(
     Ok((take_profit, stop_loss))
 }
 
-pub(super) async fn fetch_position(
-    client: &ApiClient,
-    user: Address,
-    perp: &PerpAsset,
-) -> Result<Option<AssetPosition>, CliError> {
-    Ok(client
-        .sdk()
-        .clearinghouse_state(user, perp.dex.clone())
-        .await
-        .map_err(from_sdk)?
-        .asset_positions
-        .into_iter()
-        .find(|position| {
-            position
-                .position
-                .coin
-                .eq_ignore_ascii_case(&perp.display_name())
-        }))
-}
-
 fn position_close_side_and_size(
     position: &AssetPosition,
 ) -> Result<(OrderSide, Decimal), CliError> {
@@ -746,12 +727,15 @@ pub(super) async fn prepare_position_tpsl_batch(
         ClosingSize::Fixed { side, size } => {
             let entry =
                 if trigger_specs_need_entry(spec.take_profit.as_ref(), spec.stop_loss.as_ref()) {
-                    let position = fetch_position(client, user, perp).await?.ok_or_else(|| {
-                        CliError::Unsupported(format!(
-                            "percent and entry TP/SL require an open {} position",
-                            perp.name
-                        ))
-                    })?;
+                    let position =
+                        find_position(client, user, perp, true)
+                            .await?
+                            .ok_or_else(|| {
+                                CliError::Unsupported(format!(
+                                    "percent and entry TP/SL require an open {} position",
+                                    perp.name
+                                ))
+                            })?;
                     position.position.entry_px
                 } else {
                     None
@@ -759,7 +743,7 @@ pub(super) async fn prepare_position_tpsl_batch(
             (side, size, entry)
         }
         ClosingSize::CurrentPosition => {
-            let position = fetch_position(client, user, perp).await?.ok_or_else(|| {
+            let position = find_position(client, user, perp, true).await?.ok_or_else(|| {
                 CliError::Configuration(format!(
                     "orders tpsl requires an open {} position or both --side and --size for a fixed-size TP/SL",
                     perp.name

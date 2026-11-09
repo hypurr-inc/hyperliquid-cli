@@ -4,11 +4,11 @@ use hypersdk::hypercore::types::{Action, GossipPriorityBid};
 use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
-use crate::commands::actions::send_l1_action;
-use crate::commands::rows::{ListRow, MISSING, Row, Rows};
-use crate::commands::support::print_dry_run;
+use crate::commands::common::rows::{ListRow, MISSING, Row, Rows};
+use crate::commands::common::support::print_dry_run;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
+use crate::exchange::actions::send_l1_action;
 use crate::exchange_reply;
 use crate::invocation::Invocation;
 use crate::quantity::{self, Scale};

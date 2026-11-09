@@ -10,10 +10,10 @@ use serde::Serialize;
 
 use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, Risk, arg};
-use crate::commands::actions::send_default_l1_action_with_nonce;
-use crate::commands::rows::{One, Row};
-use crate::commands::support::print_dry_run;
+use crate::commands::common::rows::{One, Row};
+use crate::commands::common::support::print_dry_run;
 use crate::errors::CliError;
+use crate::exchange::actions::send_default_l1_action_with_nonce;
 use crate::invocation::Invocation;
 use crate::signing::nonce::{WINDOW_FUTURE_MS, WINDOW_PAST_MS, window_phrase};
 

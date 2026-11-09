@@ -7,7 +7,7 @@ use crate::assets::{
     spot_price_tick,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
-use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
+use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;

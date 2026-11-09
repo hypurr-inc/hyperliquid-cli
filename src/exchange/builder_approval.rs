@@ -6,8 +6,8 @@ use hypersdk::Address;
 use serde::Serialize;
 
 use crate::builder_fee::MaxFeeRate;
-use crate::commands::user_signed::{self, UserSigned};
 use crate::errors::CliError;
+use crate::exchange::user_signed::{self, UserSigned};
 use crate::http_api::ApiClient;
 use crate::signing::SelectedSigner;
 
