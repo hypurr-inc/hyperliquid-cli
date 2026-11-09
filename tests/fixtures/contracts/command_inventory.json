@@ -434,7 +434,7 @@
         "user": "identifier"
       },
       "mutability": "read_only",
-      "output_contract": "json_value",
+      "output_contract": "bounded_ndjson_stream",
       "raw_payload": "unsupported",
       "risk": "none",
       "transport": [

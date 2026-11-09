@@ -1,68 +1,66 @@
 mod contract_support;
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use hyperliquid_cli::command_registry::CommandRegistry;
 use hyperliquid_cli::command_spec::{
-    ConfirmationPolicy, DryRunPolicy, Lifecycle, OutputContract, RawPayloadPolicy, Risk,
+    ConfirmationPolicy, DryRunPolicy, InputKind, Lifecycle, OutputContract, RawPayloadPolicy, Risk,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
 use contract_support::{command_path, schema_all};
 
 #[test]
-fn registry_inventory_matches_schema_contracts() {
+fn the_schema_is_the_registry_serialized() {
     let registry = CommandRegistry::get();
     let schemas = schema_all();
-    let schemas_by_path = schemas
-        .iter()
-        .map(|schema| (command_path(schema), schema))
-        .collect::<BTreeMap<_, _>>();
-    let registry_paths = registry
-        .commands()
-        .iter()
-        .map(|command| command.command_key())
-        .collect::<BTreeSet<_>>();
-    let schema_paths = schemas_by_path.keys().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(schemas.len(), registry.commands().len());
 
-    assert_eq!(registry_paths, schema_paths);
+    for (command, schema) in registry.commands().iter().zip(&schemas) {
+        let key = command.command_key();
+        assert_eq!(command_path(schema), key, "schema order is registry order");
 
-    for command in registry.commands() {
-        let command_key = command.command_key();
-        let schema = schemas_by_path
-            .get(&command_key)
-            .unwrap_or_else(|| panic!("missing schema for {command_key}"));
-        let command_value = serde_json::to_value(command).unwrap();
-
-        for field in [
-            "command",
-            "command_path",
-            "aliases",
-            "group",
-            "description",
-            "auth_required",
-            "dangerous",
-            "lifecycle",
-            "risk",
-            "dry_run",
-            "raw_payload",
-            "confirmation",
-        ] {
-            assert_eq!(
-                command_value[field], schema[field],
-                "registry/schema drift for {command_key} field {field}"
-            );
+        let entry = serde_json::to_value(command).unwrap();
+        let entry = entry.as_object().unwrap();
+        for (field, value) in entry {
+            assert_eq!(&schema[field], value, "{key}: field {field}");
         }
         assert_eq!(
-            command_value["ows_signer"], schema["json_schema"]["x-hyperliquid"]["ows_signer"],
-            "registry/schema drift for {command_key} field ows_signer"
+            schema.as_object().unwrap().len(),
+            entry.len() + 1,
+            "{key}: the schema carries only the contract's fields plus json_schema"
         );
-        assert_one_of_required_matches_schema(
-            &command_key,
-            &command_value["one_of_required"],
-            &schema["json_schema"]["oneOf"],
+
+        let policy = serde_json::to_value(&command.policy).unwrap();
+        assert_eq!(
+            schema["json_schema"]["x-hyperliquid"], policy,
+            "{key}: x-hyperliquid is the contract's policy"
         );
-        assert_inputs_match_schema(&command_key, &command_value["inputs"], &schema["args"]);
+        for field in policy.as_object().unwrap().keys() {
+            assert_eq!(
+                schema["json_schema"]["x-hyperliquid"][field], schema[field],
+                "{key}: policy field {field} is reported once"
+            );
+        }
+
+        let one_of = command
+            .spec
+            .one_of_required
+            .iter()
+            .map(|required| json!({ "required": required }))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            schema["json_schema"]["oneOf"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default(),
+            one_of,
+            "{key}: oneOf"
+        );
+
+        let properties = schema["json_schema"]["properties"].as_object().unwrap();
+        assert_eq!(properties.len(), command.inputs.len(), "{key}: properties");
+        for input in &command.inputs {
+            assert!(properties.contains_key(&input.id), "{key}: {}", input.id);
+        }
     }
 }
 
@@ -183,8 +181,8 @@ fn registry_explicitly_classifies_critical_command_classes() {
         .find(|input| input.id == "subaccount")
         .unwrap();
     assert_eq!(
-        subaccount_input.kind.as_ref().map(|kind| kind.as_str()),
-        Some("acting_account_selector")
+        subaccount_input.kind,
+        Some(InputKind::ActingAccountSelector)
     );
 
     let builder_approve = registry.find_path(&["builder", "approve"]).unwrap();
@@ -193,10 +191,7 @@ fn registry_explicitly_classifies_critical_command_classes() {
         .iter()
         .find(|input| input.id == "builder")
         .unwrap();
-    assert_eq!(
-        builder_input.kind.as_ref().map(|kind| kind.as_str()),
-        Some("protocol_object_address")
-    );
+    assert_eq!(builder_input.kind, Some(InputKind::ProtocolObjectAddress));
 }
 
 #[test]
@@ -235,73 +230,4 @@ fn authenticated_reads_do_not_inherit_mutating_preview_policy() {
             "{path:?}"
         );
     }
-}
-
-fn assert_inputs_match_schema(command_key: &str, inputs: &Value, args: &Value) {
-    let inputs = inputs
-        .as_array()
-        .unwrap_or_else(|| panic!("registry inputs missing for {command_key}"));
-    let args = args
-        .as_array()
-        .unwrap_or_else(|| panic!("schema args missing for {command_key}"));
-    let args_by_id = args
-        .iter()
-        .map(|arg| {
-            (
-                arg["id"]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("schema arg missing id for {command_key}")),
-                arg,
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    assert_eq!(
-        inputs.len(),
-        args.len(),
-        "registry/schema input count drift for {command_key}"
-    );
-
-    for input in inputs {
-        let input_id = input["id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("registry input missing id for {command_key}"));
-        let arg = args_by_id.get(input_id).unwrap_or_else(|| {
-            panic!("registry input {input_id} missing from schema for {command_key}")
-        });
-        for field in [
-            "long",
-            "positional_index",
-            "arg_type",
-            "required",
-            "multiple",
-            "enum_values",
-            "description",
-            "default",
-        ] {
-            assert_eq!(
-                input[field], arg[field],
-                "registry/schema input drift for {command_key} arg {input_id} field {field}"
-            );
-        }
-        assert_eq!(
-            input["kind"], arg["input_kind"],
-            "registry/schema input_kind drift for {command_key} arg {input_id}"
-        );
-    }
-}
-
-fn assert_one_of_required_matches_schema(command_key: &str, registry: &Value, schema: &Value) {
-    let expected = registry
-        .as_array()
-        .unwrap_or_else(|| panic!("registry one_of_required missing for {command_key}"))
-        .iter()
-        .map(|required| json!({ "required": required }))
-        .collect::<Vec<_>>();
-    let actual = schema.as_array().cloned().unwrap_or_default();
-
-    assert_eq!(
-        actual, expected,
-        "registry/schema oneOf drift for {command_key}"
-    );
 }

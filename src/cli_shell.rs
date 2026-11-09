@@ -11,8 +11,9 @@ use std::sync::OnceLock;
 
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches};
-use hyperliquid_cli::command_registry::{CommandContract, CommandRegistry};
-use hyperliquid_cli::command_spec::{ConfirmationPolicy, DryRunPolicy, Entry, Lifecycle, Risk};
+use hyperliquid_cli::command_spec::{
+    CommandSpec, ConfirmationPolicy, DryRunPolicy, Entry, Risk, YES_ARG,
+};
 use hyperliquid_cli::commands;
 use hyperliquid_cli::errors;
 use hyperliquid_cli::output;
@@ -24,15 +25,6 @@ const REPORT_URL: &str = "https://github.com/hypurr-inc/hyperliquid-cli/issues/n
 
 pub(super) static PANIC_COMMAND: OnceLock<String> = OnceLock::new();
 
-/// What the command line said about `--yes` for the matched command.
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Confirmation {
-    /// The command has a `--yes` option.
-    pub supported: bool,
-    /// `--yes` was passed.
-    pub given: bool,
-}
-
 /// The command the line selected, with its args parsed.
 pub(super) struct Selected {
     pub(super) entry: &'static Entry,
@@ -43,11 +35,10 @@ pub(super) struct Selected {
 
 pub(super) struct ParsedCli {
     pub(super) cli: Cli,
-    pub(super) registry_path: Option<Vec<String>>,
+    /// `None` when the line names no command (help is shown).
     pub(super) selected: Option<Selected>,
-    /// `--format` was given on the command line (not env or a default).
-    pub(super) explicit_format: bool,
-    pub(super) confirmation: Confirmation,
+    /// `--json` or `--format` as typed on the command line; env and defaults are not.
+    pub(super) requested_format: Option<output::OutputFormat>,
 }
 
 pub(super) fn try_parse_cli_from<I, T>(args: I) -> Result<ParsedCli, clap::Error>
@@ -57,12 +48,9 @@ where
 {
     let mut command = build_command();
     let matches = command.try_get_matches_from_mut(args)?;
-    let registry_path = command_registry_path_from_matches(&matches);
-    let explicit_format = matches.value_source("format") == Some(ValueSource::CommandLine)
-        || matches.get_one::<bool>("json").copied().unwrap_or(false);
-    let confirmation = confirmation_from_matches(&matches);
+    let requested_format = requested_format(&matches);
     let cli = Cli::from_arg_matches(&matches)?;
-    let selected = match registry_path.as_deref() {
+    let selected = match command_path_from_matches(&matches) {
         Some(path) => {
             let entry = commands::entries()
                 .iter()
@@ -84,10 +72,8 @@ where
     };
     Ok(ParsedCli {
         cli,
-        registry_path,
         selected,
-        explicit_format,
-        confirmation,
+        requested_format,
     })
 }
 
@@ -99,7 +85,7 @@ fn leaf_matches(matches: &ArgMatches) -> &ArgMatches {
     leaf
 }
 
-fn command_registry_path_from_matches(matches: &ArgMatches) -> Option<Vec<String>> {
+fn command_path_from_matches(matches: &ArgMatches) -> Option<Vec<String>> {
     let mut path = Vec::new();
     let mut current = matches;
     while let Some((name, subcommand)) = current.subcommand() {
@@ -109,26 +95,17 @@ fn command_registry_path_from_matches(matches: &ArgMatches) -> Option<Vec<String
     (!path.is_empty()).then_some(path)
 }
 
-/// Read `--yes` from the matched command itself, so the answer can't drift
-/// from the options the command actually defines.
-fn confirmation_from_matches(matches: &ArgMatches) -> Confirmation {
-    match leaf_matches(matches).try_get_one::<bool>("yes") {
-        Ok(Some(given)) => Confirmation {
-            supported: true,
-            given: *given,
-        },
-        _ => Confirmation::default(),
-    }
-}
-
 // ── Command tree ────────────────────────────────────────────────────────
 
 /// The clap command tree: the global options, `-v`, and the registered commands
-/// with help text filled from the command registry and notes on every command
+/// with help text filled from each command's spec and notes on every command
 /// that changes state.
 fn build_command() -> clap::Command {
-    let registry = CommandRegistry::get();
-    let mut command = Cli::command()
+    let mut tree = commands::command_tree().clone();
+    for entry in commands::entries() {
+        tree = decorate_at(tree, entry.spec.path, entry.spec);
+    }
+    Cli::command()
         .arg(
             clap::Arg::new("help")
                 .short('h')
@@ -147,51 +124,35 @@ fn build_command() -> clap::Command {
                 .action(clap::ArgAction::Version)
                 .help("Print version")
                 .help_heading(GLOBAL_OPTIONS),
-        );
-    for sub in commands::command_tree().get_subcommands() {
-        let path = vec![sub.get_name().to_string()];
-        command = command.subcommand(decorate_command(sub.clone(), &path, registry));
-    }
-    command
+        )
+        .subcommands(tree.get_subcommands().cloned())
 }
 
-/// Fill missing option help from the registry and append registry-derived notes
-/// to commands that change state.
-fn decorate_command(
-    mut command: clap::Command,
-    path: &[String],
-    registry: &CommandRegistry,
-) -> clap::Command {
-    let children: Vec<String> = command
-        .get_subcommands()
-        .map(|sub| sub.get_name().to_string())
-        .collect();
-    for child in children {
-        let mut child_path = path.to_vec();
-        child_path.push(child.clone());
-        command =
-            command.mut_subcommand(&child, |sub| decorate_command(sub, &child_path, registry));
+/// Decorate the command at `path` below `command`.
+fn decorate_at(command: clap::Command, path: &[&str], spec: &CommandSpec) -> clap::Command {
+    match path.split_first() {
+        Some((first, rest)) => command.mut_subcommand(*first, |sub| decorate_at(sub, rest, spec)),
+        None => decorate_command(command, spec),
     }
+}
 
-    let path_refs: Vec<&str> = path.iter().map(String::as_str).collect();
-    let Some(contract) = registry.find_path(&path_refs) else {
-        return command;
-    };
-
+/// Fill missing option help from the spec's descriptions and append the spec's
+/// notes when the command changes state.
+fn decorate_command(mut command: clap::Command, spec: &CommandSpec) -> clap::Command {
     let undocumented: Vec<String> = command
         .get_arguments()
         .filter(|arg| arg.get_help().is_none() && arg.get_long_help().is_none())
         .map(|arg| arg.get_id().to_string())
         .collect();
     for id in undocumented {
-        if let Some(description) = contract.arg_description(&id) {
+        if let Some(description) = spec.arg(&id).and_then(|arg| arg.description) {
             let help = description.trim_end_matches('.').to_string();
             command = command.mut_arg(&id, |arg| arg.help(help));
         }
     }
 
-    let has_yes = command.get_arguments().any(|arg| arg.get_id() == "yes");
-    if let Some(notes) = command_notes(contract, has_yes) {
+    let has_yes = command.get_arguments().any(|arg| arg.get_id() == YES_ARG);
+    if let Some(notes) = command_notes(spec, has_yes) {
         let combined = match command.get_after_long_help() {
             Some(existing) => format!("{existing}\n\n{notes}"),
             None => notes,
@@ -201,21 +162,13 @@ fn decorate_command(
     command
 }
 
-/// Whether a command changes state, locally or on the exchange.
-fn command_changes_state(contract: &CommandContract) -> bool {
-    matches!(
-        contract.lifecycle,
-        Lifecycle::LiveMutating | Lifecycle::InteractiveLocal
-    ) || matches!(contract.risk, Risk::LocalSecret | Risk::LocalState)
-}
-
 /// `Notes:` block for commands that change state: risk, dry-run support, and
 /// how confirmation behaves.
-fn command_notes(contract: &CommandContract, has_yes: bool) -> Option<String> {
-    if !command_changes_state(contract) {
+fn command_notes(spec: &CommandSpec, has_yes: bool) -> Option<String> {
+    if !spec.changes_state() {
         return None;
     }
-    let risk = match contract.risk {
+    let risk = match spec.risk {
         Risk::FundsMovement => "moves funds or changes live exchange state",
         Risk::AccountState => "changes account settings on the exchange",
         Risk::LocalSecret => "reads or writes secret key material on this machine",
@@ -223,22 +176,22 @@ fn command_notes(contract: &CommandContract, has_yes: bool) -> Option<String> {
         Risk::None => "changes live exchange state",
     };
     let mut lines = vec!["Notes:".to_string(), format!("  Risk: {risk}.")];
-    lines.push(match contract.dry_run {
+    lines.push(match spec.dry_run {
         DryRunPolicy::Optional => {
             "  Dry-run: supported. Add --dry-run to preview without side effects.".to_string()
         }
         DryRunPolicy::NotSupported => "  Dry-run: not supported.".to_string(),
     });
-    lines.push(match (contract.confirmation, has_yes) {
-        (ConfirmationPolicy::Prompt, true) => "  Confirmation: asks before it runs. Pass --yes to answer the prompt. Runs that can't prompt (JSON output, HYPERLIQUID_AGENT, CI, --non-interactive) fail without --yes. Use --yes there only after a human approves.".to_string(),
+    lines.push(match (spec.confirmation, has_yes) {
+        (ConfirmationPolicy::Prompt, true) => format!("  Confirmation: asks before it runs. Pass --{YES_ARG} to answer the prompt. Runs that can't prompt (JSON output, HYPERLIQUID_AGENT, CI, --non-interactive) fail without --{YES_ARG}. Use --{YES_ARG} there only after a human approves."),
         (ConfirmationPolicy::Prompt, false) => "  Confirmation: asks before it runs. Runs that can't prompt (JSON output, HYPERLIQUID_AGENT, CI, --non-interactive) fail instead.".to_string(),
         (ConfirmationPolicy::None, _) => {
             "  Confirmation: none. It runs as soon as you invoke it.".to_string()
         }
     });
-    if contract.spec.testnet_unprompted {
+    if spec.testnet_unprompted {
         lines.push(
-            "  Testnet: with --testnet this command doesn't prompt and runs as soon as you invoke it."
+            "  Testnet: on testnet (--testnet or HYPERLIQUID_NETWORK=testnet) this command doesn't prompt and runs as soon as you invoke it."
                 .to_string(),
         );
     }
@@ -372,29 +325,12 @@ fn offending_arg_indexes(err: &clap::Error, args: &[OsString]) -> Option<Vec<usi
     Some(indexes)
 }
 
-/// Output format for a failed parse: an explicit `--format` wins, then
-/// `HYPERLIQUID_FORMAT`, then JSON for agents and non-terminal stdout.
+/// Output format for a failed parse. It cannot report an unreadable
+/// `HYPERLIQUID_FORMAT` in the format that variable names, so it reports JSON.
 fn error_format(matches: Option<&ArgMatches>) -> output::OutputFormat {
-    if let Some(matches) = matches {
-        if matches.get_one::<bool>("json").copied().unwrap_or(false) {
-            return output::OutputFormat::Json;
-        }
-        if matches.value_source("format") == Some(ValueSource::CommandLine)
-            && let Some(format) = matches.get_one::<output::OutputFormat>("format")
-        {
-            return *format;
-        }
-    }
-    match env_output_format() {
-        Some(Ok(format)) => return format,
-        Some(Err(_)) => return output::OutputFormat::Json,
-        None => {}
-    }
-    if output::terminal::agent_env() || !output::terminal::stdout_is_terminal() {
-        output::OutputFormat::Json
-    } else {
-        output::OutputFormat::Pretty
-    }
+    let requested = matches.and_then(requested_format);
+    let env = output::terminal::OutputEnv::probe(requested.is_some());
+    resolve_output_format(requested, &env).unwrap_or(output::OutputFormat::Json)
 }
 
 /// Keep only clap's best suggestion. clap lists the closest match last.
@@ -453,7 +389,7 @@ pub(super) fn exit_for_clap_error(err: clap::Error, raw_args: &[OsString]) -> ! 
     }));
     let path = lenient
         .as_ref()
-        .and_then(command_registry_path_from_matches)
+        .and_then(command_path_from_matches)
         .unwrap_or_default();
     match err.kind() {
         ErrorKind::DisplayHelp => exit_after_stdout(&styled_text(
@@ -546,14 +482,28 @@ fn env_output_format() -> Option<Result<output::OutputFormat, errors::CliError>>
     Some(parse_env_output_format(&raw))
 }
 
-/// An explicit `--format` wins over everything. Otherwise `HYPERLIQUID_FORMAT`,
-/// then JSON for agents and non-terminal stdout, then the option's default.
+/// `--json` or `--format` as typed on the command line. `--json` wins; a
+/// default or an environment variable is not a request. Reads a partial parse
+/// too, so a failed parse resolves its format like a successful one.
+pub(super) fn requested_format(matches: &ArgMatches) -> Option<output::OutputFormat> {
+    if matches.get_one::<bool>("json").copied().unwrap_or(false) {
+        return Some(output::OutputFormat::Json);
+    }
+    if matches.value_source("format") == Some(ValueSource::CommandLine) {
+        return matches.get_one::<output::OutputFormat>("format").copied();
+    }
+    None
+}
+
+/// The one precedence rule for the output format: what the command line
+/// requested, then `HYPERLIQUID_FORMAT`, then JSON for agents and non-terminal
+/// stdout, then the default. An unreadable `HYPERLIQUID_FORMAT` is the only error.
 pub(super) fn resolve_output_format(
+    requested: Option<output::OutputFormat>,
     env: &output::terminal::OutputEnv,
-    cli_format: output::OutputFormat,
 ) -> Result<output::OutputFormat, errors::CliError> {
-    if env.explicit_format {
-        return Ok(cli_format);
+    if let Some(format) = requested {
+        return Ok(format);
     }
     if let Some(format) = env_output_format() {
         return format;
@@ -561,7 +511,7 @@ pub(super) fn resolve_output_format(
     if env.agent || !env.stdout_tty {
         return Ok(output::OutputFormat::Json);
     }
-    Ok(cli_format)
+    Ok(output::OutputFormat::default())
 }
 
 fn parse_env_output_format(raw: &str) -> Result<output::OutputFormat, errors::CliError> {
@@ -578,6 +528,7 @@ fn parse_env_output_format(raw: &str) -> Result<output::OutputFormat, errors::Cl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyperliquid_cli::command_registry::CommandRegistry;
 
     /// Split an example line into words, honoring single and double quotes.
     fn split_command_line(line: &str) -> Vec<String> {
@@ -670,15 +621,16 @@ mod tests {
 
     #[test]
     fn every_state_changing_command_documents_its_risk() {
-        let registry = CommandRegistry::get();
         let root = build_command();
         let mut checked = 0;
         visit_commands(&root, &mut Vec::new(), &mut |command, path| {
-            let refs: Vec<&str> = path.iter().map(String::as_str).collect();
-            let Some(contract) = registry.find_path(&refs) else {
+            let Some(entry) = commands::entries()
+                .iter()
+                .find(|entry| entry.spec.path.iter().eq(path.iter()))
+            else {
                 return;
             };
-            if !command_changes_state(contract) {
+            if !entry.spec.changes_state() {
                 return;
             }
             checked += 1;
@@ -704,10 +656,25 @@ mod tests {
         let create = find_command(&root, &["orders".to_string(), "create".to_string()]);
         let help = create.get_after_long_help().unwrap().to_string();
         assert!(
-            help.contains("with --testnet this command doesn't prompt"),
+            help.contains(
+                "on testnet (--testnet or HYPERLIQUID_NETWORK=testnet) this command doesn't prompt"
+            ),
             "{help}"
         );
         assert!(help.contains("Pass --yes"), "{help}");
+    }
+
+    #[test]
+    fn commands_that_only_print_or_serve_carry_no_state_notes() {
+        let root = build_command();
+        for path in [["feedback"], ["mcp"], ["report-incident"]] {
+            let command = find_command(&root, &path.map(str::to_string));
+            let help = command
+                .get_after_long_help()
+                .map(|help| help.to_string())
+                .unwrap_or_default();
+            assert!(!help.contains("Risk:"), "{path:?}: {help}");
+        }
     }
 
     #[test]
@@ -728,33 +695,41 @@ mod tests {
     }
 
     #[test]
-    fn explicit_format_is_read_from_parsed_matches() {
-        for (argv, explicit, format) in [
+    fn requested_format_is_read_from_parsed_matches() {
+        for (argv, requested) in [
             (
                 &["hyperliquid", "-fjson", "status"][..],
-                true,
-                output::OutputFormat::Json,
+                Some(output::OutputFormat::Json),
             ),
             (
                 &["hyperliquid", "-ftable", "status"][..],
-                true,
-                output::OutputFormat::Table,
+                Some(output::OutputFormat::Table),
             ),
             (
                 &["hyperliquid", "status", "--format=pretty"][..],
-                true,
-                output::OutputFormat::Pretty,
+                Some(output::OutputFormat::Pretty),
             ),
             (
-                &["hyperliquid", "status"][..],
-                false,
-                output::OutputFormat::Pretty,
+                &["hyperliquid", "--json", "--format=table", "status"][..],
+                Some(output::OutputFormat::Json),
             ),
+            (&["hyperliquid", "status"][..], None),
         ] {
             let parsed = try_parse_cli_from(argv.iter().copied()).unwrap();
-            assert_eq!(parsed.explicit_format, explicit, "{argv:?}");
-            assert_eq!(parsed.cli.format, format, "{argv:?}");
+            assert_eq!(parsed.requested_format, requested, "{argv:?}");
         }
+    }
+
+    #[test]
+    fn requested_format_wins_over_the_environment_facts() {
+        let piped_agent = output::terminal::OutputEnv {
+            agent: true,
+            ..output::terminal::OutputEnv::default()
+        };
+        assert_eq!(
+            resolve_output_format(Some(output::OutputFormat::Table), &piped_agent).unwrap(),
+            output::OutputFormat::Table
+        );
     }
 
     #[test]
@@ -775,7 +750,7 @@ mod tests {
         let args = ["hyperliquid", "orders", "crete"].map(OsString::from);
         let lenient = lenient_matches(&args).unwrap();
         assert_eq!(
-            command_registry_path_from_matches(&lenient),
+            command_path_from_matches(&lenient),
             Some(vec!["orders".to_string()])
         );
     }
@@ -864,23 +839,6 @@ mod tests {
             try_parse_cli_from(argv.iter().copied())
                 .unwrap_or_else(|err| panic!("{argv:?} should parse: {err}"));
         }
-    }
-
-    #[test]
-    fn confirmation_comes_from_the_matched_command() {
-        let parse = |argv: &[&str]| {
-            try_parse_cli_from(argv.iter().copied())
-                .unwrap()
-                .confirmation
-        };
-        let with_yes = parse(&["hyperliquid", "wallet", "export", "main", "--yes"]);
-        assert!(with_yes.supported && with_yes.given);
-        let without = parse(&["hyperliquid", "wallet", "export", "main"]);
-        assert!(without.supported && !without.given);
-        let none = parse(&["hyperliquid", "wallet", "show"]);
-        assert!(!none.supported && !none.given);
-        let setup = parse(&["hyperliquid", "setup", "--yes"]);
-        assert!(setup.supported && setup.given);
     }
 
     #[test]
