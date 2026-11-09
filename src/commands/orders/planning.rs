@@ -37,6 +37,7 @@ use crate::commands::common::position::find_position;
 use crate::errors::{CliError, from_sdk};
 use crate::http_api::ApiClient;
 use crate::margin::{MarginModeArg, MarginPlan};
+use crate::quantity::require_positive;
 use crate::settings::Settings;
 
 pub(super) struct TwapCreatePlan {
@@ -1392,15 +1393,6 @@ fn infer_close_side_from_tpsl_prices(
         (Some(tp), Some(sl)) if tp < sl => Some(OrderSide::Buy),
         _ => None,
     }
-}
-
-fn require_positive(value: Decimal, flag: &'static str) -> Result<(), CliError> {
-    if value <= Decimal::ZERO {
-        return Err(CliError::Configuration(format!(
-            "{flag} must be greater than zero"
-        )));
-    }
-    Ok(())
 }
 
 /// The retracement the user asked for. Exactly one option must be set.

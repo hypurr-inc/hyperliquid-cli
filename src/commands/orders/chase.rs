@@ -10,6 +10,7 @@ use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
+use crate::quantity::not_positive;
 use crate::settings::Settings;
 
 use super::args::{BPS_DENOMINATOR, ChaseArgs, DEFAULT_TRACKING_TIMEOUT, OrderSide, TifArg};
@@ -227,7 +228,8 @@ pub(super) fn chase_timeout(inv: &Invocation, args: &ChaseArgs) -> Result<Durati
 fn validate_chase_args(args: &ChaseArgs) -> Result<(), CliError> {
     if args.size <= Decimal::ZERO {
         return Err(CliError::Configuration(format!(
-            "orders chase --size must be greater than zero.\n  {}",
+            "{}.\n  {}",
+            not_positive("orders chase --size"),
             dry_run_example()
         )));
     }

@@ -2,10 +2,10 @@
 //! planning prepared; planning, validation and rendering live in the modules
 //! below and never import it.
 
-use chrono::Utc;
 use hypersdk::hypercore::types::{Action, OrderResponseStatus, ScheduleCancel};
 
 use crate::assets::{AssetResolver, PerpAsset};
+use crate::clock;
 use crate::commands::common::rows::Rows;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
@@ -417,7 +417,7 @@ async fn schedule_cancel(
 ) -> Result<(), anyhow::Error> {
     context.consent(&Consent::ScheduleCancel(&plan), None)?;
     // The trigger time counts from the moment of sending, not from the prompt.
-    let scheduled = plan.scheduled(Utc::now());
+    let scheduled = plan.scheduled(clock::now_utc());
     if let Some(scheduled) = &scheduled {
         let action = Action::ScheduleCancel(ScheduleCancel {
             time: Some(scheduled.at_ms()),

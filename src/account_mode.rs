@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::assets::{DexMeta, PerpDexList};
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
-use crate::spot_balances::RawSpotBalance;
+use crate::spot_balances::{RawSpotBalance, balance_of};
 use crate::wire::InfoRequest;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -194,12 +194,10 @@ pub(crate) fn unified_account_ratio(
         if maintenance <= Decimal::ZERO {
             continue;
         }
-        let held = usize::try_from(token).ok().and_then(|index| {
-            balances
-                .iter()
-                .find(|balance| balance.token == Some(index))
-                .map(|balance| balance.total)
-        });
+        let held = usize::try_from(token)
+            .ok()
+            .and_then(|index| balance_of(balances, index))
+            .map(|balance| balance.total);
         let available = held.map_or(Decimal::ZERO, |held| held - isolated);
         if available <= Decimal::ZERO {
             return Some(UnifiedRisk::Uncovered {

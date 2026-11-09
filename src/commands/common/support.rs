@@ -1,6 +1,8 @@
 use hypersdk::Address;
+use hypersdk::hypercore::types::Action;
 
 use crate::dry_run::{DryRunEnvelope, DryRunSigning};
+use crate::errors::CliError;
 use crate::invocation::Invocation;
 
 /// A signing command's preview also names the signer, once resolved here and
@@ -62,4 +64,13 @@ pub(crate) fn resolve_optional_acting_account_target(
     selector
         .map(|selector| inv.resolve_account(selector))
         .transpose()
+}
+
+/// The document an L1 `action` is sent as, for a preview that must show it
+/// exactly. A preview that spells an address in its checksummed form, as the
+/// users' own tools do, cannot take this: the wire spelling is lowercase.
+pub(crate) fn action_json(action: &Action) -> Result<serde_json::Value, CliError> {
+    serde_json::to_value(action).map_err(|err| {
+        CliError::Internal(anyhow::anyhow!("failed to encode exchange action: {err}"))
+    })
 }
