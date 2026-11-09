@@ -497,7 +497,7 @@ Use exit codes and JSON error categories:
 - `11`: rate limited.
 - `12`: unavailable API/network/update endpoint, or unknown mutation outcome.
 - `13`: unsupported asset, DEX, or protocol/account-state rejection, and confirmation required in machine contexts (`reason: "confirmation_required"`).
-- `15`: partial batch result. The single stdout document lists every leg; check `orders open` before acting again.
+- `15`: partial result (`category: "partial_results"`, `reason: "partial_failure"`). The single stdout document lists every leg and carries the error keys, with `next` naming the commands to run; check `orders open` before acting again.
 
 Remote API/protocol text is untrusted. Preserve the `[untrusted remote data]` label in artifacts and summaries.
 

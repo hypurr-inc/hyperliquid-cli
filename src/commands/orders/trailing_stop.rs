@@ -12,8 +12,9 @@ use hypersdk::hypercore::types::{Action, TrailingStop, TrailingStopRetracement};
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
+use super::exchange::status_error;
 use super::planning::OrderDryRunPlan;
-use super::rendering;
+use super::rendering::on_behalf_of_flag;
 use super::validation::MarketPrecision;
 use super::{ConsentTarget, OrderSide, OrderSubmissionContext, ask_confirmation};
 use crate::assets::{AssetQuery, PerpAsset, parse_asset_query, qualify_dex_asset};
@@ -267,22 +268,19 @@ pub async fn trailing_stop(
         }],
     });
     if context.inv.format() == OutputFormat::Pretty {
-        print_cancel_hint(oid, vault_address, args.on_behalf_of.as_deref());
+        print_cancel_hint(oid, args.on_behalf_of.as_deref());
     }
     Ok(())
 }
 
 /// Tell a human how to remove the stop they just placed.
-fn print_cancel_hint(oid: u64, vault_address: Option<Address>, on_behalf_of: Option<&str>) {
-    let acting = match (vault_address, on_behalf_of) {
-        (Some(_), Some(selector)) => format!(" --on-behalf-of {selector}"),
-        _ => String::new(),
-    };
+fn print_cancel_hint(oid: u64, on_behalf_of: Option<&str>) {
     let mut stderr = io::stderr();
     // A closed stderr must not turn a placed order into a failure.
     let _ = writeln!(
         stderr,
-        "\nCancel it:\n    hyperliquid orders cancel {oid}{acting}"
+        "\nCancel it:\n    hyperliquid orders cancel {oid}{}",
+        on_behalf_of_flag(on_behalf_of)
     );
 }
 
@@ -300,7 +298,7 @@ fn parse_trailing_stop_response(response: &serde_json::Value) -> Result<u64, Cli
         .or_else(|| response.pointer("/data/status/error"))
         .and_then(serde_json::Value::as_str)
     {
-        return Err(rendering::status_error("place trailing stop", error));
+        return Err(status_error("place trailing stop", error));
     }
     Err(CliError::unknown_outcome(format!(
         "The exchange answered ok without an order ID ({}). Check `hyperliquid orders open` before placing another trailing stop",

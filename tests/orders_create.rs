@@ -1962,11 +1962,14 @@ async fn orders_batch_create_with_one_rejected_leg_prints_every_leg_and_exits_15
         .expect("stdout must hold exactly one JSON document for a partial batch");
     assert_eq!(document["status"], "partial");
     assert_eq!(document["exit_code"], 15);
+    assert_eq!(document["category"], "partial_results");
+    assert_eq!(document["reason"], "partial_failure");
     assert_eq!(document["atomic"], false);
     assert_eq!(document["succeeded"], 1);
     assert_eq!(document["failed"], 1);
     assert_eq!(document["error"], "Placed 1 of 2 orders. 1 failed.");
-    assert_eq!(document["next_command"], "hyperliquid orders open");
+    assert_eq!(document["next"][0]["command"], "hyperliquid orders open");
+    assert!(document.get("next_command").is_none());
     let legs = document["orders"].as_array().unwrap();
     assert_eq!(legs.len(), 2);
     assert_eq!(legs[0]["status"], "resting");
@@ -2727,4 +2730,87 @@ fn buy_missing_size_or_amount_includes_example_invocation() {
         .stdout(predicate::str::contains(
             "hyperliquid --format json --dry-run buy --coin BTC --size 0.001",
         ));
+}
+
+/// The exit code and JSON stdout of a single `orders create` whose order the
+/// exchange answers with an error status carrying `error`.
+async fn create_order_rejected_with(error: &str) -> (i32, Value) {
+    let env = IsolatedHome::new();
+    let server =
+        mock_order_server_with_statuses("cross", serde_json::json!([{ "error": error }])).await;
+    let assert = env
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "--format",
+            "json",
+            "orders",
+            "create",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--price",
+            "50000",
+            "--size",
+            "0.01",
+            "--testnet",
+        ])
+        .assert();
+    let output = assert.get_output();
+    (
+        output.status.code().expect("exit code"),
+        serde_json::from_slice(&output.stdout).expect("one JSON error document"),
+    )
+}
+
+#[tokio::test]
+async fn a_rate_limit_text_in_an_order_status_exits_11() {
+    let (code, document) =
+        create_order_rejected_with("Too many requests: rate limit exceeded").await;
+    assert_eq!(code, 11);
+    assert_eq!(document["category"], "rate_limited");
+}
+
+#[tokio::test]
+async fn a_credential_text_in_an_order_status_exits_10() {
+    let (code, document) = create_order_rejected_with("Unauthorized: invalid key").await;
+    assert_eq!(code, 10);
+    assert_eq!(document["category"], "auth");
+}
+
+#[tokio::test]
+async fn any_other_order_status_error_keeps_exit_13_and_its_wording() {
+    let (code, document) = create_order_rejected_with("Order has invalid size.").await;
+    assert_eq!(code, 13);
+    assert_eq!(
+        document["error"],
+        "Unsupported input: Couldn't place order. Exchange said: [untrusted remote data] Order has invalid size."
+    );
+}
+
+#[tokio::test]
+async fn a_batch_rejected_for_rate_limits_on_every_leg_exits_11() {
+    let env = IsolatedHome::new();
+    let server = mock_batch_order_server_with_statuses(vec![
+        serde_json::json!({"error": "rate limit exceeded"}),
+        serde_json::json!({"error": "rate limit exceeded"}),
+    ])
+    .await;
+
+    env.command()
+        .env(API_OVERRIDE_ENV, server.uri())
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+        .args([
+            "--format",
+            "json",
+            "orders",
+            "batch-create",
+            "--orders-file",
+            "tests/fixtures/orders_batch_create.json",
+            "--testnet",
+        ])
+        .assert()
+        .code(11);
 }

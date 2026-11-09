@@ -8,7 +8,7 @@ use rust_decimal::RoundingStrategy;
 
 use super::planning::order_identifier;
 use super::{
-    BPS_DENOMINATOR, BatchCreateArgs, BatchCreateOrder, CreateArgs, CreateOrderType,
+    BPS_DENOMINATOR, BatchCreateArgs, BatchCreateOrder, BracketArgs, CreateArgs, CreateOrderType,
     CreateTpslGroupingArg, MAX_BATCH_ORDER_COUNT, MAX_MARKET_ORDER_SLIPPAGE_BPS,
     MIN_MARKET_ORDER_SLIPPAGE_BPS, MarginModeArg, ModifyArgs, OrderSide, ScaleArgs, TifArg,
     TpslArgs, TriggerPriceSpec, TwapCreateArgs, parse_cloid,
@@ -296,6 +296,40 @@ impl OrderSpec {
         self.margin_mode = margin_mode;
         self
     }
+
+    pub(super) fn with_builder(mut self, builder: BuilderRequest) -> Self {
+        self.builder = builder;
+        self
+    }
+
+    /// A market order priced from the mid, as placed by a bracket entry.
+    pub(crate) fn market(
+        coin: &str,
+        dex: Option<&str>,
+        side: OrderSide,
+        sizing: MarketSizing,
+        max_slippage_bps: u16,
+    ) -> Result<Self, CliError> {
+        match sizing {
+            MarketSizing::Size(size) => positive_quantity(Some(size), "size")?,
+            MarketSizing::Amount(amount) => positive_quantity(Some(amount), "amount")?,
+        }
+        validate_market_slippage(max_slippage_bps)?;
+        Ok(Self {
+            coin: coin.to_string(),
+            dex: dex.map(str::to_string),
+            side,
+            kind: OrderKind::Market {
+                sizing,
+                max_slippage_bps,
+            },
+            reduce_only: false,
+            cloid: None,
+            builder: BuilderRequest::None,
+            margin_mode: None,
+            tpsl: None,
+        })
+    }
 }
 
 fn order_kind(args: &CreateArgs) -> Result<OrderKind, CliError> {
@@ -473,36 +507,119 @@ pub fn read_validated_batch_create_orders(
     Ok(orders)
 }
 
-pub fn validate_tpsl_args(args: &TpslArgs) -> Result<(), CliError> {
-    if let Some(cloid) = args.cloid.as_deref() {
-        parse_cloid(cloid)?;
+/// How much of a position a TP/SL closes.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum ClosingSize {
+    /// The whole position the account holds when the order is placed.
+    CurrentPosition,
+    Fixed {
+        side: OrderSide,
+        size: Decimal,
+    },
+}
+
+/// Position TP/SL to place, in the terms the planner needs. `orders tpsl`
+/// builds it with [`TpslSpec::from_flags`], which is the only place its flags
+/// are validated; `orders bracket` builds it with [`TpslSpec::protecting`] for
+/// the position its entry opened.
+#[derive(Debug, Clone)]
+pub(crate) struct TpslSpec {
+    pub(super) coin: String,
+    pub(super) dex: Option<String>,
+    pub(super) take_profit: Option<TriggerPriceSpec>,
+    pub(super) stop_loss: Option<TriggerPriceSpec>,
+    pub(super) close: ClosingSize,
+    pub(super) cloid: Option<Cloid>,
+    pub(super) margin_mode: Option<MarginModeArg>,
+}
+
+impl TpslSpec {
+    /// Validate `orders tpsl` flags and turn them into the TP/SL to plan.
+    pub(crate) fn from_flags(args: &TpslArgs) -> Result<Self, CliError> {
+        let cloid = args.cloid.as_deref().map(parse_cloid).transpose()?;
+        validate_tpsl_triggers(
+            args.take_profit.as_ref(),
+            args.stop_loss.as_ref(),
+            args.size,
+        )?;
+        let close = match (args.side, args.size) {
+            (Some(side), Some(size)) => ClosingSize::Fixed { side, size },
+            (None, None) => ClosingSize::CurrentPosition,
+            (Some(_), None) => {
+                return Err(CliError::Configuration(
+                    "orders tpsl --side requires --size for fixed-size TP/SL orders".to_string(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(CliError::Configuration(
+                    "orders tpsl --size requires --side so the close direction is explicit"
+                        .to_string(),
+                ));
+            }
+        };
+        Ok(Self {
+            coin: args.coin.clone(),
+            dex: args.dex.clone(),
+            take_profit: args.take_profit.clone(),
+            stop_loss: args.stop_loss.clone(),
+            close,
+            cloid,
+            margin_mode: args.margin_mode,
+        })
     }
-    validate_trigger_price_spec(args.take_profit.as_ref(), "take-profit")?;
-    validate_trigger_price_spec(args.stop_loss.as_ref(), "stop-loss")?;
-    positive_quantity(args.size, "size")?;
-    if args.take_profit.is_none() && args.stop_loss.is_none() {
+
+    /// The TP/SL a bracket arms against the position its entry opened. `size`
+    /// is the filled size, or `None` in a dry-run preview of an `--amount`
+    /// entry, where the position size is not known yet.
+    pub(super) fn protecting(args: &BracketArgs, size: Option<Decimal>) -> Self {
+        Self {
+            coin: args.coin.clone(),
+            dex: args.dex.clone(),
+            take_profit: Some(args.take_profit.clone()),
+            stop_loss: Some(args.stop_loss.clone()),
+            close: size.map_or(ClosingSize::CurrentPosition, |size| ClosingSize::Fixed {
+                side: args.side.opposite(),
+                size,
+            }),
+            cloid: None,
+            margin_mode: None,
+        }
+    }
+
+    /// Fail before anything is placed when the triggers or the size cannot make
+    /// a valid TP/SL.
+    pub(super) fn validate(&self) -> Result<(), CliError> {
+        let size = match self.close {
+            ClosingSize::Fixed { size, .. } => Some(size),
+            ClosingSize::CurrentPosition => None,
+        };
+        validate_tpsl_triggers(self.take_profit.as_ref(), self.stop_loss.as_ref(), size)
+    }
+}
+
+fn validate_tpsl_triggers(
+    take_profit: Option<&TriggerPriceSpec>,
+    stop_loss: Option<&TriggerPriceSpec>,
+    size: Option<Decimal>,
+) -> Result<(), CliError> {
+    validate_trigger_price_spec(take_profit, "take-profit")?;
+    validate_trigger_price_spec(stop_loss, "stop-loss")?;
+    positive_quantity(size, "size")?;
+    if take_profit.is_none() && stop_loss.is_none() {
         return Err(CliError::Configuration(
             "orders tpsl requires --take-profit or --stop-loss.\n  \
              hyperliquid --format json --dry-run orders tpsl --coin ETH --take-profit +10% --stop-loss -5%"
                 .to_string(),
         ));
     }
-    if let (Some(take_profit), Some(stop_loss)) = (&args.take_profit, &args.stop_loss)
+    if let (Some(take_profit), Some(stop_loss)) = (take_profit, stop_loss)
         && take_profit == stop_loss
     {
         return Err(CliError::Configuration(
             "orders tpsl --take-profit and --stop-loss cannot be equal".to_string(),
         ));
     }
-    match (args.side, args.size) {
-        (Some(_), None) => Err(CliError::Configuration(
-            "orders tpsl --side requires --size for fixed-size TP/SL orders".to_string(),
-        )),
-        (None, Some(_)) => Err(CliError::Configuration(
-            "orders tpsl --size requires --side so the close direction is explicit".to_string(),
-        )),
-        _ => Ok(()),
-    }
+    Ok(())
 }
 
 pub fn validate_modify_args(args: &ModifyArgs) -> Result<(), CliError> {

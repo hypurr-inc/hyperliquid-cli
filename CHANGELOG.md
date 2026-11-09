@@ -20,6 +20,13 @@
 - `HYPERLIQUID_API_BASE_URL` (and its network variants) accept an IPv6 loopback host such as `http://[::1]:8080`, like the Bankr endpoint does.
 - `wallet show --account <vault wallet>` describes the wallet by name like the default wallet does. `account ls` no longer prints the always-empty Master, Agent Name and Expires At columns (JSON is unchanged).
 - `Config keys written` in wallet and setup receipts lists the keys the command changed, read from the config diff, and the root help lists every environment variable the CLI reads.
+- The exit-15 result of `orders batch-create`, `scale`, `cancel-all` and `orders bracket` now carries the standard partial-result keys: `category` is `partial_results` (was `partial_failure`, which is now the `reason`) and the commands to run are in `next` (`[{"command": "..."}]`), replacing `next_command` and `next_commands`.
+- An order, cancel, modify, TWAP, TP/SL, trailing-stop, chase or bracket status that carries a rate-limit text now exits `11`, and one that carries a credential refusal exits `10`; every other rejection keeps exit `13` and its wording.
+- `orders chase`, `orders bracket` and `orders cancel-all --coin ... --dex ...` read a HIP-3 market's own dex: a resting chase quote or bracket entry is no longer treated as filled because the default dex's open orders do not list it, and `cancel-all` finds the dex's orders.
+- `orders chase` resolves its market once, accepts perpetual markets only, and no longer reads the default builder configuration (it never sent a builder fee). `--dry-run` now fails like the live command when the market or its mid price is unavailable (exit `13`/`12`) instead of previewing a null `first_price`.
+- `orders bracket --entry limit` refuses `--amount` with a bracket-specific message (exit `2`).
+- `account orders` shows a missing TIF as a dimmed `n/a` in pretty output, like `orders open`.
+- `orders history` retries the raw order list only when the response shape does not match, not when the body is malformed JSON.
 
 ## 0.17.0 - 2026-11-09
 
