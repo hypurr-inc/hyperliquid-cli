@@ -182,7 +182,7 @@ async fn unknown_dex_fails_before_reading() {
     let server = xyz_exchange().await;
 
     IsolatedHome::new()
-        .json_command(&server)
+        .json_command_for(&server)
         .args(["mids", "--dex", "nope"])
         .assert()
         .code(13)
@@ -204,7 +204,7 @@ async fn unknown_dex_fails_before_a_watch_starts() {
             "open"
         };
         IsolatedHome::new()
-            .json_command(&server)
+            .json_command_for(&server)
             .args(["--non-interactive", "--ows-signer", USER, command, list])
             .args(["--watch", "--max-ticks", "1", "--dex", "nope"])
             .assert()
@@ -226,7 +226,7 @@ async fn positions_watch_sends_the_canonical_dex() {
         .await;
 
     // `--max-ticks` bounds the watch to its first snapshot.
-    let output = run_json(IsolatedHome::new().json_command(&server).args([
+    let output = run_json(IsolatedHome::new().json_command_for(&server).args([
         "--non-interactive",
         "--ows-signer",
         USER,

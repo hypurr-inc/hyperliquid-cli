@@ -9,7 +9,7 @@ use super::{IsolatedHome, json_stdout};
 
 impl IsolatedHome {
     /// [`Self::command_with_server`] with JSON output.
-    pub fn json_command(&self, server: &MockServer) -> Command {
+    pub fn json_command_for(&self, server: &MockServer) -> Command {
         let mut command = self.command_with_server(server);
         command.args(["--format", "json"]);
         command
@@ -19,7 +19,10 @@ impl IsolatedHome {
 /// Run `args` in a fresh home against `server` with JSON output; the caller
 /// says whether it must succeed.
 pub fn read(server: &MockServer, args: &[&str]) -> Assert {
-    IsolatedHome::new().json_command(server).args(args).assert()
+    IsolatedHome::new()
+        .json_command_for(server)
+        .args(args)
+        .assert()
 }
 
 /// [`read`], requiring success, and the JSON it printed.

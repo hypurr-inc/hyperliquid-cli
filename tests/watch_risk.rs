@@ -58,7 +58,7 @@ async fn watch_risk_json_alerts_are_whole_unless_projected() {
     let server = one_alert_exchange().await;
     let alerts = |global_args: &[&str]| -> Vec<Value> {
         let assert = IsolatedHome::new()
-            .json_command(&server)
+            .json_command_for(&server)
             .args(global_args)
             .args(one_alert_args())
             .assert()
@@ -91,7 +91,7 @@ async fn watch_risk_does_not_spend_signing_nonces() {
     let server = one_alert_exchange().await;
     let home = IsolatedHome::new();
 
-    home.json_command(&server)
+    home.json_command_for(&server)
         .args(one_alert_args())
         .assert()
         .success();
@@ -169,7 +169,7 @@ mod margin_basis {
     /// has read `ticks` snapshots.
     fn margin_alerts(server: &ExchangeFixture, ticks: &str) -> Vec<Value> {
         let assert = IsolatedHome::new()
-            .json_command(server)
+            .json_command_for(server)
             .args(["watch", "risk", "--user", USER])
             .args(["--only", "margin_usage", "--interval", "100ms"])
             .args(["--idle-timeout-ms", "1500", "--max-events", ticks])

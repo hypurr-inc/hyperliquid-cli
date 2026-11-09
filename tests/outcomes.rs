@@ -57,7 +57,7 @@ async fn orders_outcome_notation_is_trimmed_and_refuses_a_dex_with_a_specific_me
 
     let mut padded = LIMIT_BUY;
     padded[3] = " #10";
-    let preview = run_json(home.json_command(&server).arg("--dry-run").args(padded));
+    let preview = run_json(home.json_command_for(&server).arg("--dry-run").args(padded));
     assert_eq!(preview["args"]["resolved_asset"], "#10");
 
     home.command_with_server(&server)
@@ -89,7 +89,7 @@ async fn orders_outcome_dry_run_exposes_verified_encoding() {
 
     let preview = run_json(
         IsolatedHome::new()
-            .json_command(&server)
+            .json_command_for(&server)
             .arg("--dry-run")
             .args(LIMIT_BUY),
     );

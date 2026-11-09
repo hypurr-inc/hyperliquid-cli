@@ -29,7 +29,7 @@ async fn watch_mids_json_max_ticks_flag_beats_the_environment_and_bounds_the_out
     let server = ExchangeFixture::start().await;
 
     let assert = IsolatedHome::new()
-        .json_command(&server)
+        .json_command_for(&server)
         .env(WATCH_MAX_TICKS_ENV, "5")
         .args([
             "--select",
@@ -135,7 +135,7 @@ async fn other_snapshot_watches_print_one_line_per_tick() {
     let home = IsolatedHome::new();
 
     let orders = home
-        .json_command(&server)
+        .json_command_for(&server)
         .args([
             "--ows-signer",
             USER,
@@ -152,7 +152,7 @@ async fn other_snapshot_watches_print_one_line_per_tick() {
     assert_eq!(orders[0][0]["oid"], 4242);
 
     let candles = home
-        .json_command(&server)
+        .json_command_for(&server)
         .args([
             "candles",
             "BTC",
@@ -222,7 +222,7 @@ fn a_json_subscribe_needs_a_bound_from_a_flag_or_the_environment() {
 async fn watch_mids_ends_with_exit_0_when_stdout_is_closed() {
     let server = ExchangeFixture::start().await;
     let home = IsolatedHome::new();
-    let mut command = home.json_command(&server);
+    let mut command = home.json_command_for(&server);
     command.args(["mids", "--watch", "--max-ticks", "50"]);
 
     let mut child = std_command(&command)
@@ -244,7 +244,7 @@ async fn watch_mids_ends_with_exit_0_when_stdout_is_closed() {
 async fn watch_mids_sigterm_exits_143_with_complete_json_lines() {
     let server = ExchangeFixture::start().await;
     let home = IsolatedHome::new();
-    let mut command = home.json_command(&server);
+    let mut command = home.json_command_for(&server);
     command.args(["mids", "--watch", "--max-ticks", "50"]);
 
     let mut child = std_command(&command)
