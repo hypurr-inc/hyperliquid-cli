@@ -329,13 +329,27 @@ fn authenticated_reads_do_not_inherit_mutating_preview_policy() {
 }
 
 /// A suggested command resolves to a registered command, reading as many words
-/// as name one (the rest are flags and placeholders).
+/// as name one (the rest are flags and placeholders). The global options an
+/// example puts before the command (`--format json`, `--dry-run`) are not part
+/// of its name.
 fn suggested_command_exists(command: &str) -> bool {
-    let words: Vec<&str> = command
+    let mut words = command
         .strip_prefix("hyperliquid ")
         .expect("a suggested command starts with the binary name")
         .split_whitespace()
-        .collect();
+        .peekable();
+    while let Some(word) = words.peek() {
+        match *word {
+            "--format" => {
+                words.nth(1);
+            }
+            "--dry-run" | "--testnet" => {
+                words.next();
+            }
+            _ => break,
+        }
+    }
+    let words: Vec<&str> = words.collect();
     (1..=words.len())
         .rev()
         .any(|length| commands::registry().find_path(&words[..length]).is_some())
@@ -353,6 +367,14 @@ fn every_suggested_command_names_a_command_that_exists() {
         hints::TRAILING_STOP_COMMAND,
         hints::ACCOUNT_FILLS_COMMAND,
         hints::ACCOUNT_RATE_LIMIT_COMMAND,
+        hints::BRACKET_MARKET_DRY_RUN,
+        hints::BRACKET_LIMIT_DRY_RUN,
+        hints::BRACKET_LIVE,
+        hints::CHASE_DRY_RUN,
+        hints::CHASE_LIVE,
+        hints::BUY_DRY_RUN,
+        hints::TPSL_DRY_RUN,
+        hints::TRAILING_STOP_DRY_RUN,
         wallet::SETUP,
         wallet::SET_DEFAULT,
         wallet::WALLET_CREATE,

@@ -9,12 +9,14 @@ use serde::Serialize;
 
 use crate::assets::{DexArg, PerpAsset};
 use crate::cli_command::CliCommand;
-use crate::command_spec::{ArgSpec, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
+use crate::command_spec::{
+    CommandSpec, GroupSpec, InputKind, ON_BEHALF_OF_DESCRIBED, OwsSupport, Risk, arg,
+};
 use crate::commands::common::market_input::resolve_perp;
 use crate::commands::common::position::{PositionRow, find_position};
 use crate::commands::common::rows::{ListRow, Row, Rows};
 use crate::commands::common::support::{
-    print_dry_run_acting_for, resolve_optional_acting_account_target,
+    acting_account, print_dry_run_acting_for, resolve_optional_acting_account_target,
 };
 use crate::errors::CliError;
 use crate::exchange::actions;
@@ -190,13 +192,6 @@ async fn ensure_isolated_position(
     }
 }
 
-const ON_BEHALF_OF: ArgSpec = arg("on_behalf_of")
-    .kind(InputKind::ActingAccountSelector)
-    .describe(
-        "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
-    )
-    .resource_id("on-behalf-of selector");
-
 pub const GROUP: GroupSpec =
     GroupSpec::new(&["positions"], "Manage positions").aliases(&["position"]);
 
@@ -271,7 +266,7 @@ impl CliCommand for PositionsUpdateLeverage {
         arg("isolated")
             .kind(InputKind::Boolean)
             .describe("Use isolated margin mode. Required on isolated-only markets."),
-        ON_BEHALF_OF,
+        ON_BEHALF_OF_DESCRIBED,
     ]);
 
     async fn run(inv: &Invocation, args: &UpdateLeverageArgs) -> Result<(), anyhow::Error> {
@@ -323,7 +318,7 @@ impl CliCommand for PositionsUpdateLeverage {
         )
         .await?;
 
-        inv.print(&Rows::one(PositionActionConfirmation {
+        inv.print(&Rows::list_of_one(PositionActionConfirmation {
             coin,
             action: "update-leverage".to_string(),
             status: "updated".to_string(),
@@ -355,7 +350,7 @@ impl CliCommand for PositionsUpdateMargin {
         arg("amount")
             .kind(InputKind::Amount)
             .describe("Margin amount in USDC: positive adds isolated margin, negative removes it."),
-        ON_BEHALF_OF,
+        ON_BEHALF_OF_DESCRIBED,
     ]);
 
     async fn run(inv: &Invocation, args: &UpdateMarginArgs) -> Result<(), anyhow::Error> {
@@ -389,7 +384,7 @@ impl CliCommand for PositionsUpdateMargin {
             );
         }
         let resolved = inv.resolve_signer()?;
-        let account = vault_address.unwrap_or_else(|| resolved.query_address());
+        let account = acting_account(vault_address, &resolved);
         ensure_isolated_position(inv, account, &perp, args.on_behalf_of.as_deref()).await?;
         actions::send_l1_action(
             inv.remote()?.api(),
@@ -404,7 +399,7 @@ impl CliCommand for PositionsUpdateMargin {
         )
         .await?;
 
-        inv.print(&Rows::one(PositionActionConfirmation {
+        inv.print(&Rows::list_of_one(PositionActionConfirmation {
             coin,
             action: "update-margin".to_string(),
             status: "updated".to_string(),
@@ -436,7 +431,7 @@ impl CliCommand for PositionsTopUpMargin {
         arg("leverage")
             .kind(InputKind::Amount)
             .describe("Target leverage, a positive number such as 5 or 12.5."),
-        ON_BEHALF_OF,
+        ON_BEHALF_OF_DESCRIBED,
     ]);
 
     async fn run(inv: &Invocation, args: &TopUpMarginArgs) -> Result<(), anyhow::Error> {
@@ -463,7 +458,7 @@ impl CliCommand for PositionsTopUpMargin {
             );
         }
         let resolved = inv.resolve_signer()?;
-        let account = vault_address.unwrap_or_else(|| resolved.query_address());
+        let account = acting_account(vault_address, &resolved);
         ensure_isolated_position(inv, account, &perp, args.on_behalf_of.as_deref()).await?;
         let asset_id = u32::try_from(asset).map_err(|_| {
             CliError::Internal(anyhow::anyhow!("asset id {asset} exceeds the wire range"))
@@ -480,7 +475,7 @@ impl CliCommand for PositionsTopUpMargin {
         )
         .await?;
 
-        inv.print(&Rows::one(PositionActionConfirmation {
+        inv.print(&Rows::list_of_one(PositionActionConfirmation {
             coin,
             action: "top-up-margin".to_string(),
             status: "updated".to_string(),
