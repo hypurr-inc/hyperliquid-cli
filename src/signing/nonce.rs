@@ -2,8 +2,8 @@
 //! concurrent CLI processes of one machine.
 //!
 //! The exchange keeps the 100 highest nonces per signer. A new nonce must be
-//! above the smallest of them, never used before, and inside
-//! `(T - 2 days, T + 1 day)` of the block time
+//! above the smallest of them, never used before, and inside the
+//! [window](WINDOW_PAST_MS) of the block time
 //! (<https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets>).
 //! The wall clock alone repeats a nonce when two actions land in one
 //! millisecond, and goes backwards when the clock is stepped, so each nonce is
@@ -29,10 +29,30 @@ use std::time::Duration;
 use crate::private_fs::{self, FileLock, LockError};
 use crate::settings::EnvSource;
 
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// The exchange accepts a nonce within `(T - 2 days, T + 1 day)` of its block
+/// time `T`: this many milliseconds back...
+pub(crate) const WINDOW_PAST_MS: u64 = 2 * DAY_MS;
+
+/// ... and this many ahead. `account invalidate-nonce` refuses a nonce outside
+/// the window, and the mark below is held to half of it. The window in words,
+/// where a message must say it in a `const` context, is [`window_phrase!`].
+pub(crate) const WINDOW_FUTURE_MS: u64 = DAY_MS;
+
+/// The window as prose. A macro so `concat!` can splice it into the `const`
+/// text of a command's description; a test ties it to the two constants.
+macro_rules! window_phrase {
+    () => {
+        "2 days before to 1 day after"
+    };
+}
+pub(crate) use window_phrase;
+
 /// How far past the clock a recorded nonce may sit and still be believed. The
 /// exchange refuses nonces more than a day ahead, so a mark beyond this is
 /// damage (a corrupt file, a clock that was once far wrong), not history.
-pub(crate) const MAX_AHEAD_MS: u64 = 12 * 60 * 60 * 1000;
+pub(crate) const MAX_AHEAD_MS: u64 = WINDOW_FUTURE_MS / 2;
 
 /// How long to wait for another process that is allocating a nonce.
 const LOCK_WAIT: Duration = Duration::from_secs(2);
@@ -271,5 +291,18 @@ mod tests {
         let second = guard.next(NOW, Some(&path));
         assert_eq!((first.nonce, second.nonce), (NOW, NOW + 1));
         assert!(first.unrecorded.is_some(), "{first:?}");
+    }
+
+    #[test]
+    fn the_window_in_words_says_what_the_constants_say() {
+        assert_eq!(
+            window_phrase!(),
+            format!(
+                "{} days before to {} day after",
+                WINDOW_PAST_MS / DAY_MS,
+                WINDOW_FUTURE_MS / DAY_MS
+            )
+        );
+        assert_eq!(MAX_AHEAD_MS, WINDOW_FUTURE_MS / 2);
     }
 }

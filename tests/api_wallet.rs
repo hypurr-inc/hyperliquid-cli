@@ -89,6 +89,52 @@ fn api_wallet_create_dry_run_redacts_generated_private_key() {
 }
 
 #[test]
+fn api_wallet_agent_address_takes_bare_hex_and_the_zero_address_and_refuses_the_rest_as_unsupported()
+ {
+    let env = IsolatedHome::new();
+    let dry_run = |agent: &str| {
+        let mut command = env.command();
+        command.args([
+            "--format",
+            "json",
+            "--dry-run",
+            "api-wallet",
+            "approve",
+            "--agent-address",
+            agent,
+        ]);
+        command
+    };
+
+    for accepted in [
+        "0x00000000000000000000000000000000000000ab",
+        "00000000000000000000000000000000000000ab",
+        "0X00000000000000000000000000000000000000ab",
+        "0x0000000000000000000000000000000000000000",
+    ] {
+        let output = dry_run(accepted)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            json["approval_action"]["agentAddress"]
+                .as_str()
+                .unwrap()
+                .to_lowercase(),
+            format!("0x{}", &accepted[accepted.len() - 40..]).to_lowercase(),
+            "{accepted}"
+        );
+    }
+    dry_run("not-an-address")
+        .assert()
+        .code(13)
+        .stdout(predicate::str::contains("Invalid address: not-an-address"));
+}
+
+#[test]
 fn api_wallet_create_rejects_names_longer_than_protocol_limit_locally() {
     let env = IsolatedHome::new();
 

@@ -500,6 +500,75 @@ fn secret_taking_commands_warn_about_argument_exposure_in_help() {
         .stdout(predicate::str::contains("never printed"));
 }
 
+/// The warning each secret-taking command prints for an argument secret. The
+/// texts are user-facing; the commands they recommend are the real ones.
+#[test]
+fn argument_secrets_are_warned_about_with_each_commands_own_advice() {
+    const EXPOSURE: &str = "can expose it in OS process listings and shell history.";
+    let env = IsolatedHome::new();
+    let stderr_of = |mut command: assert_cmd::Command| {
+        String::from_utf8_lossy(&command.output().unwrap().stderr).into_owned()
+    };
+
+    let import = stderr_of({
+        let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
+        command.args(["wallet", "import", IMPORT_KEY]);
+        command
+    });
+    assert!(
+        import.contains(&format!(
+            "passing a private key as an argument {EXPOSURE} Prefer `hyperliquid wallet import` and paste at the hidden prompt."
+        )),
+        "{import}"
+    );
+
+    let mnemonic = stderr_of({
+        let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
+        command.args([
+            "wallet",
+            "import-mnemonic",
+            "test test test test test test test test test test test junk",
+        ]);
+        command
+    });
+    assert!(
+        mnemonic.contains(&format!(
+            "passing a mnemonic as an argument {EXPOSURE} Prefer `hyperliquid wallet import-mnemonic` and paste at the hidden prompt."
+        )),
+        "{mnemonic}"
+    );
+
+    let add = stderr_of({
+        let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
+        command.args(["account", "add", SECOND_KEY, "--alias", "second"]);
+        command
+    });
+    assert!(
+        add.contains(&format!("passing a private key as an argument {EXPOSURE}"))
+            && !add.contains("Prefer `"),
+        "{add}"
+    );
+
+    // The warning comes before the key is checked, so an unreachable Bankr
+    // endpoint still shows it.
+    let login = stderr_of({
+        let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
+        command.env("BANKR_API_URL", "http://127.0.0.1:9").args([
+            "wallet",
+            "login",
+            "--api-key",
+            "bk_test",
+        ]);
+        command
+    });
+    assert!(
+        login.contains(&format!(
+            "passing a Bankr API key as an argument {EXPOSURE} Prefer `hyperliquid wallet login` and paste the key at the hidden prompt."
+        )),
+        "{login}"
+    );
+}
+
 #[test]
 fn wallet_create_generates_and_stores_default_wallet() {
     let env = IsolatedHome::new();

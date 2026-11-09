@@ -16,6 +16,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 
 use crate::errors::CliError;
+use crate::resolvers::parse_hex_address;
 use crate::settings::{Settings, env};
 
 const ENCRYPTION_VERSION: &str = "v1";
@@ -122,7 +123,7 @@ impl LegacyAccount {
             .master_address
             .as_deref()
             .unwrap_or(self.address.as_str());
-        raw.parse::<Address>().map_err(|_| {
+        parse_hex_address(raw, false).map_err(|_| {
             CliError::Internal(anyhow::anyhow!(
                 "stored account '{}' has invalid query address {}",
                 self.alias,

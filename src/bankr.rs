@@ -26,10 +26,12 @@ use serde_json::{Value, json};
 
 use crate::config::BankrLogin;
 use crate::errors::{CliError, network_error};
+use crate::ows::hints::WALLET_LOGIN;
+use crate::resolvers::parse_hex_address;
 use crate::response_sanitization::Untrusted;
 use crate::settings::{KeySource, Settings, env, is_loopback_url};
+use crate::signing::payload::{Payload, Signs};
 use crate::signing::signature::Provider;
-use crate::signing::{Payload, Signs};
 
 /// Bankr's public API, used when no other URL is configured.
 pub const DEFAULT_API_URL: &str = "https://api.bankr.bot";
@@ -71,21 +73,20 @@ struct SignRequest<'a> {
     typed_data: &'a Value,
 }
 
-/// The user-signed actions Bankr signs, by EIP-712 struct name: a spot↔perp
-/// USDC move. Every other user-signed action (withdrawals, sends, staking,
-/// approvals, multisig) is refused before a request is sent.
-const SIGNED_USER_ACTIONS: &[&str] = &["UsdClassTransfer"];
+/// What Bankr signs: every L1 action, and the one user-signed action it can
+/// rebuild, a spot↔perp USDC move. Every other user-signed action
+/// (withdrawals, sends, staking, approvals, multisig) is refused before a
+/// request is sent. The move is named by its EIP-712 struct, which
+/// `commands/transfers.rs` defines with `sol!` (`Signs::user_signed` takes the
+/// name from that type), so it is spelled out here; the registry fixture's
+/// `bankr_signer` column for `transfer usd-class` pins the two together.
+const COVERED: &[Signs<'static>] = &[Signs::L1Action, Signs::UserSigned("UsdClassTransfer")];
 
-/// Whether Bankr signs `signs`: trading actions and the user-signed actions in
-/// [`SIGNED_USER_ACTIONS`]. A command's spec and a payload about to be signed
-/// both ask this, so they can never disagree.
+/// Whether Bankr signs `signs`. A command's spec and a payload about to be
+/// signed both ask this, so they can never disagree.
 #[must_use]
 pub fn covers(signs: Signs<'_>) -> bool {
-    match signs {
-        Signs::L1Action => true,
-        Signs::UserSigned(name) => SIGNED_USER_ACTIONS.contains(&name),
-        Signs::Digest => false,
-    }
+    COVERED.contains(&signs)
 }
 
 /// The refusal for a signature Bankr does not cover, before a request is sent.
@@ -241,7 +242,7 @@ impl BankrClient {
         me.wallets
             .iter()
             .find(|wallet| wallet.chain.eq_ignore_ascii_case("evm"))
-            .and_then(|wallet| wallet.address.parse::<Address>().ok())
+            .and_then(|wallet| parse_hex_address(&wallet.address, false).ok())
             .ok_or_else(|| {
                 CliError::Unavailable("bankr has no EVM wallet linked to this API key".to_string())
             })
@@ -289,7 +290,7 @@ impl BankrClient {
             )));
         }
         if let Some(signer) = signed.signer.as_deref()
-            && let Ok(signer) = signer.parse::<Address>()
+            && let Ok(signer) = parse_hex_address(signer, false)
             && signer != expected
         {
             return Err(Provider::BANKR
@@ -317,7 +318,11 @@ async fn read_body(response: reqwest::Response) -> Result<String, CliError> {
 }
 
 /// The typed data Hyperliquid signs for an L1 action that carries no user-signed
-/// schema: the msgpack hash wrapped in the `Agent` struct.
+/// schema: the msgpack hash wrapped in the `Agent` struct. hypersdk builds this
+/// document only inside its private `solidity` module and exposes just the
+/// digest ([`hypersdk::hypercore::signing::agent_signing_hash`]), so the JSON
+/// is written out here; a test hashes it against that digest, and every Bankr
+/// signature is verified against the same digest at signing time.
 fn agent_document(chain: Chain, connection_id: B256) -> Value {
     json!({
         "types": {
@@ -388,7 +393,7 @@ fn credential_error(status: reqwest::StatusCode, body: &str) -> CliError {
         .unwrap_or_else(|| "no reason given".to_string());
     match status.as_u16() {
         401 | 403 => CliError::InvalidAuth(format!(
-            "bankr rejected the API key ({}): {}. Set {}, or run `hyperliquid wallet login` to store a bk_... key from https://bankr.bot/api-keys.",
+            "bankr rejected the API key ({}): {}. Set {}, or run `{WALLET_LOGIN}` to store a bk_... key from https://bankr.bot/api-keys.",
             status.as_u16(),
             Untrusted::from_remote(&message),
             env::BANKR_API_KEY

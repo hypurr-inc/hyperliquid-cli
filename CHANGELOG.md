@@ -67,6 +67,9 @@
 - `orders create`, `buy`, `sell`, `scale` and `batch-create` take `--priority-rate <N>` (order write priority, `grouping: {"p": N}`, N/100,000,000 of notional, so 80000 is 8 bps, at most 100000000). It needs IOC orders, or non-reduce-only ALO orders, on non-outcome markets (otherwise exit `13`) and cannot combine with `--grouping`, `--take-profit` or `--stop-loss`; the confirmation prompt and `--dry-run` (`priority_rate`, `grouping_wire`) show it.
 - `orders create`, `buy` and `sell` take a repeatable `--sub-builder ADDRESS:SHARE` (up to 5, SHARE a percent of the builder fee such as `25%`, summing to at most 100%) with `--builder`, sent as the builder's `s` list.
 - `orders batch-modify --orders-file <PATH>` modifies several orders in one `batchModify` action, with the planning rules of `orders modify` (precision truncation, trigger prices kept, `--always-place`) per order, the `orders batch-create` file conventions and confirmation, and a per-order result with a partial-failure exit `15`.
+- `api-wallet create|approve|revoke --dry-run` no longer draws nonces: a preview used to raise the machine-wide nonce mark and write the data directory. The preview's `approval_action.nonce` is now the clock time.
+- A vault wallet whose Hyperliquid account address is malformed is an error (`ows_malformed_response`) when the default signer is chosen, as it already was in `account ls`; the default signer lookup used to skip such a wallet silently.
+- Builder, protocol (validator, staking-link user, sub-builder) and watched-account addresses accept an uppercase `0X` prefix, as `--account` and `api-wallet --agent-address` always did.
 
 ## 0.18.0 - 2026-11-09
 
