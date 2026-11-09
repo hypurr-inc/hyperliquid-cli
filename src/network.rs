@@ -1,6 +1,6 @@
 //! The Hyperliquid network a run targets.
 
-use hypersdk::hypercore::{self, Chain, HttpClient, WebSocket};
+use hypersdk::hypercore::{self, Chain};
 
 use std::net::IpAddr;
 
@@ -47,26 +47,6 @@ impl Network {
         match self {
             Self::Mainnet => Chain::Mainnet,
             Self::Testnet => Chain::Testnet,
-        }
-    }
-
-    /// An info/exchange client for this network, pointed at `api_override` when given.
-    #[must_use]
-    pub fn http_client(self, api_override: Option<reqwest::Url>) -> HttpClient {
-        let client = HttpClient::new(self.chain());
-        match api_override {
-            Some(url) => client.with_url(url),
-            None => client,
-        }
-    }
-
-    /// A WebSocket for this network's public endpoint. The API endpoint
-    /// override does not apply to WebSockets.
-    #[must_use]
-    pub fn websocket(self) -> WebSocket {
-        match self {
-            Self::Mainnet => hypercore::mainnet_ws(),
-            Self::Testnet => hypercore::testnet_ws(),
         }
     }
 

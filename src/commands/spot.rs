@@ -6,7 +6,8 @@ use crate::assets::{
     AssetMetadata, AssetResolver, SpotListing, load_spot_markets, require_spot_token,
     spot_price_tick,
 };
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, NoArgs, arg};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::http_api::ApiClient;

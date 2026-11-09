@@ -131,7 +131,7 @@ pub(super) async fn execute_hip3_margin_transfers(
 ) -> Result<(), anyhow::Error> {
     for plan in plans {
         send_asset::send_asset(
-            inv,
+            inv.remote()?.api(),
             signer,
             AssetMove {
                 to: user,

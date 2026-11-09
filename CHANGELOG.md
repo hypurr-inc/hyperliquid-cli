@@ -87,6 +87,7 @@
 - An invalid value of `HYPERLIQUID_AUTO_UPDATE` or `HYPERLIQUID_MCP_ALLOW_UNSAFE` is a configuration error (exit `2`) on every command, like `HYPERLIQUID_AGENT` and `HYPERLIQUID_NO_UPDATE_CHECK`: a typo in `HYPERLIQUID_AUTO_UPDATE` used to read as off and `HYPERLIQUID_MCP_ALLOW_UNSAFE` was checked only by `mcp`. The accepted values stay `1|true|yes|on|0|false|no|off`.
 - A rate-limited read exits `11` with reason `rate_limited` on every path, and is retried first like an `/info` read (jittered backoff, a longer wait after a 429). Reads through the `hypersdk` client (`account orders|portfolio`, `positions list`, `status`, `mids`, `candles`, orders planning, ...) were not retried, and the exchange's 429 (`null` or an nginx page as the body) was decoded as market metadata and reported as `Couldn't reach api.hyperliquid.xyz. invalid type: null, expected struct PerpTokens` (exit `12`, `network_error`). Perp, spot, dex and token metadata is now read through the same retrying `/info` client as the rest, and a reply that does not decode is never reported as unreachable ([#42](https://github.com/hypurr-inc/hyperliquid-cli/issues/42)).
 - `orders create` on a HIP-3 market, when the read of the dex balance for the margin helper fails, exits with the API's error class (`11` for a rate limit, `12` for a 5xx) instead of exit `1` with the SDK's raw text.
+- `referral status` refuses a bare API-wallet key with the master it signs for (exit `13`), like the other signer-derived reads, instead of showing the agent's own empty referral data.
 
 ## 0.18.0 - 2026-11-09
 

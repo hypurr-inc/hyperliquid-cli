@@ -4,39 +4,11 @@
 //! exchange action: the action is that body plus its `type` tag and the
 //! `signatureChainId`. A command declares the struct once and names its tag.
 
-use alloy::sol_types::SolStruct;
-use hypersdk::Address;
-use serde::Serialize;
-
 use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::http_api::ApiClient;
-use crate::invocation::Invocation;
-use crate::signing::{SelectedSigner, Signs};
-
-/// A user-signed action: an EIP-712 struct whose JSON is the action body.
-pub(crate) trait UserSigned: SolStruct + Serialize {
-    /// The exchange action's `type` tag.
-    const ACTION_TYPE: &'static str;
-}
-
-/// The agent form of an action: an API wallet cannot sign the user-signed
-/// (EIP-712) form, so the actions that have one are signed by it as L1 actions
-/// that apply to the master it acts for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AgentForm {
-    pub master: Address,
-}
-
-impl AgentForm {
-    /// The form the run's signer signs in: `Some` for a stored API wallet,
-    /// `None` for any other signer, which signs the user-signed form. The one
-    /// answer for the live action, the dry-run marker and the rule on what
-    /// the agent form may target, which each command states for itself.
-    pub(crate) fn of(inv: &Invocation) -> Option<Self> {
-        inv.agent_master().map(|master| Self { master })
-    }
-}
+use crate::signable::{Signs, UserSigned};
+use crate::signing::SelectedSigner;
 
 /// `build` receives the network name for `hyperliquidChain` and the nonce the
 /// action is signed and sent with.

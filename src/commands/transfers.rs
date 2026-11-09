@@ -4,7 +4,8 @@ use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::types::{Action, SpotSend, UsdSend};
 
 use crate::assets::{SpotTokenListing, require_spot_token};
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, YES_FOR_AUTOMATION, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, YES_FOR_AUTOMATION, arg};
 use crate::commands::common::rows::{ListRow, Row, Rows};
 use crate::commands::common::support::print_dry_run;
 use crate::consent::{self, ConsentBlock};
@@ -13,23 +14,16 @@ use crate::errors::CliError;
 use crate::exchange::actions;
 use crate::exchange::funds::{self, Pool};
 use crate::exchange::send_asset::{AssetMove, AssetVenue, ResolvedMove, from_subaccount_address};
-use crate::exchange::user_signed::{self, AgentForm, UserSigned};
+use crate::exchange::user_signed;
 use crate::invocation::Invocation;
 use crate::quantity;
-use crate::signing::{SelectedSigner, Signs};
+use crate::signable::{Signs, UsdClassTransfer, UserSigned};
+use crate::signing::SelectedSigner;
 use crate::wire::{AddressRole, address};
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
 sol! {
-    #[derive(Serialize)]
-    struct UsdClassTransfer {
-        string hyperliquidChain;
-        string amount;
-        bool toPerp;
-        uint64 nonce;
-    }
-
     #[derive(Serialize)]
     struct Withdraw {
         string hyperliquidChain;
@@ -37,10 +31,6 @@ sol! {
         string amount;
         uint64 time;
     }
-}
-
-impl UserSigned for UsdClassTransfer {
-    const ACTION_TYPE: &'static str = "usdClassTransfer";
 }
 
 impl UserSigned for Withdraw {
@@ -555,8 +545,7 @@ impl CliCommand for TransferSpotToPerp {
         "Transfer from spot to perp",
         "Transfer USDC from spot to perp.",
     )
-    .signs(Signs::user_signed::<UsdClassTransfer>())
-    .master_only("usdClassTransfer")
+    .user_signed::<UsdClassTransfer>()
     .prompt()
     .args(&[
         arg("amount")
@@ -585,8 +574,7 @@ impl CliCommand for TransferPerpToSpot {
         "Transfer from perp to spot",
         "Transfer USDC from perp to spot.",
     )
-    .signs(Signs::user_signed::<UsdClassTransfer>())
-    .master_only("usdClassTransfer")
+    .user_signed::<UsdClassTransfer>()
     .prompt()
     .args(&[
         arg("amount")
@@ -615,8 +603,7 @@ impl CliCommand for TransferSend {
         "Send USDC to an address",
         "Send USDC to another Hyperliquid address.",
     )
-    .signs(Signs::Digest)
-    .master_only("usdSend")
+    .digest_signed("usdSend")
     .prompt()
     .args(&[
         arg("to")
@@ -654,8 +641,7 @@ impl CliCommand for TransferSpotSend {
         "Send a spot token to an address",
         "Send a spot token to another Hyperliquid address.",
     )
-    .signs(Signs::Digest)
-    .master_only("spotSend")
+    .digest_signed("spotSend")
     .prompt()
     .args(&[
         arg("to")
@@ -730,7 +716,7 @@ impl CliCommand for TransferSendAsset {
 
     async fn run(inv: &Invocation, args: &SendAssetArgs) -> Result<(), anyhow::Error> {
         let remote = inv.remote()?;
-        let resolved = ResolvedMove::resolve(remote, asset_move(args)?).await?;
+        let resolved = ResolvedMove::resolve(remote.api(), asset_move(args)?).await?;
         let AssetMove {
             to,
             source,
@@ -752,14 +738,14 @@ impl CliCommand for TransferSendAsset {
                 "amount": quantity::wire_text(*amount),
                 "from_subaccount": from_subaccount,
             });
-            inv.dry_run_signer()?;
-            if resolved.mv.agent_form(AgentForm::of(inv))?.is_some() {
+            let form = inv.dry_run_signer()?.and_then(SelectedSigner::agent_form);
+            if resolved.mv.agent_form(form)?.is_some() {
                 preview["action_type"] = "agentSendAsset".into();
             }
             return print_dry_run(inv, TransferActionKind::SendAsset.would_execute(), preview);
         }
         let signer = inv.resolve_signer()?;
-        let form = resolved.mv.agent_form(AgentForm::of(inv))?;
+        let form = resolved.mv.agent_form(signer.agent_form())?;
         let preview = TransferPreview {
             network: remote.chain(),
             signer: signer.address(),
@@ -781,7 +767,7 @@ impl CliCommand for TransferSendAsset {
             ),
             "send-asset transfer aborted",
         )?;
-        resolved.send(remote, &signer, form).await?;
+        resolved.send(remote.api(), &signer, form).await?;
         TransferConfirmation::new("send-asset", *amount, token.name.clone())
             .to(&args.to)
             .print(inv);
@@ -800,8 +786,7 @@ impl CliCommand for TransferWithdraw {
         "Withdraw to Arbitrum",
         "Withdraw USDC to Arbitrum.",
     )
-    .signs(Signs::user_signed::<Withdraw>())
-    .master_only("withdraw3")
+    .user_signed::<Withdraw>()
     .prompt()
     .args(&[
         arg("to")
