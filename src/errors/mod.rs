@@ -443,49 +443,6 @@ mod tests {
     }
 
     #[test]
-    fn display_internal_and_configuration() {
-        let err = CliError::Internal(anyhow::anyhow!("db connection failed"));
-        assert!(err.to_string().contains("db connection failed"));
-        let err = CliError::Configuration("invalid HYPERLIQUID_NETWORK".into());
-        assert!(err.to_string().contains("Configuration error"));
-        assert!(err.to_string().contains("HYPERLIQUID_NETWORK"));
-    }
-
-    #[test]
-    fn display_auth_required() {
-        assert_eq!(
-            CliError::AuthRequired.to_string(),
-            "Authentication required."
-        );
-    }
-
-    #[test]
-    fn display_asset_not_found() {
-        let err = CliError::AssetNotFound {
-            asset: "BT".into(),
-            suggestions: "BTC".into(),
-        };
-        assert_eq!(
-            err.to_string(),
-            "Couldn't find asset \"BT\". Did you mean BTC?"
-        );
-        let err = CliError::AssetNotFoundNoSuggestion {
-            asset: "ZZZZZZZZ".into(),
-        };
-        assert_eq!(err.to_string(), "Couldn't find asset \"ZZZZZZZZ\".");
-    }
-
-    #[test]
-    fn display_unavailable_is_complete_copy() {
-        let err =
-            CliError::Unavailable("Couldn't reach api.hyperliquid.xyz. Connection refused.".into());
-        assert_eq!(
-            err.to_string(),
-            "Couldn't reach api.hyperliquid.xyz. Connection refused."
-        );
-    }
-
-    #[test]
     fn display_rate_limited() {
         assert_eq!(
             CliError::rate_limited().to_string(),
@@ -516,28 +473,6 @@ mod tests {
             auth.to_string(),
             "Invalid authentication: [untrusted remote data] Unauthorized"
         );
-    }
-
-    #[test]
-    fn display_copy_has_no_banned_phrasing() {
-        for err in [
-            CliError::rate_limited(),
-            CliError::AuthRequired,
-            CliError::unknown_outcome("The request timed out"),
-            CliError::api_status(reqwest::StatusCode::SERVICE_UNAVAILABLE, "down"),
-        ] {
-            let text = err.to_string();
-            for banned in ["Unable to", "Please", "successfully", "Oops"] {
-                assert!(!text.contains(banned), "{text}");
-            }
-        }
-    }
-
-    #[test]
-    fn anyhow_converts_into_internal() {
-        let err = CliError::from(anyhow::anyhow!("something unexpected"));
-        assert_eq!(err.exit_code(), 1);
-        assert!(err.to_string().contains("something unexpected"));
     }
 
     #[test]

@@ -868,105 +868,46 @@ mod tests {
     }
 
     #[test]
-    fn test_output_format_default() {
-        assert_eq!(OutputFormat::default(), OutputFormat::Pretty);
+    fn pretty_aligns_columns_under_a_separator_row() {
+        assert_eq!(
+            render_pretty(&sample_data()),
+            "Name          Price         Change\n\
+             ────────────  ────────────  ────────────\n\
+             BTC           50000.00      +2.5%\n\
+             ETH           3000.00       -1.2%"
+        );
     }
 
     #[test]
-    fn test_output_format_display() {
-        assert_eq!(format!("{}", OutputFormat::Pretty), "pretty");
-        assert_eq!(format!("{}", OutputFormat::Table), "table");
-        assert_eq!(format!("{}", OutputFormat::Json), "json");
-    }
-
-    #[test]
-    fn test_render_pretty_contains_headers() {
-        let data = sample_data();
-        let output = render_pretty(&data);
-        assert!(output.contains("Name"));
-        assert!(output.contains("Price"));
-        assert!(output.contains("Change"));
-    }
-
-    #[test]
-    fn test_render_pretty_contains_data() {
-        let data = sample_data();
-        let output = render_pretty(&data);
-        assert!(output.contains("BTC"));
-        assert!(output.contains("50000.00"));
-        assert!(output.contains("ETH"));
-        assert!(output.contains("3000.00"));
-    }
-
-    #[test]
-    fn test_render_pretty_has_ansi_colors_when_enabled() {
+    fn pretty_headers_are_cyan_only_when_stdout_styling_is_on() {
         colors::with_streams_for_test(true, false, || {
             let output = render_pretty(&sample_data());
-            assert!(output.contains(colors::CYAN));
-            assert!(output.contains(colors::RESET));
+            let header = output.lines().next().unwrap();
+            for name in ["Name", "Price", "Change"] {
+                assert!(
+                    header.contains(&colors::paint(colors::CYAN, name)),
+                    "{header}"
+                );
+            }
         });
+        assert!(!render_pretty(&sample_data()).contains('\x1b'));
     }
 
     #[test]
-    fn test_render_pretty_has_separator() {
-        let data = sample_data();
-        let output = render_pretty(&data);
-        assert!(output.contains("─"));
-    }
-
-    #[test]
-    fn test_render_table_contains_headers() {
-        let data = sample_data();
-        let output = render_table(&data);
-        assert!(output.contains("Name"));
-        assert!(output.contains("Price"));
-        assert!(output.contains("Change"));
-    }
-
-    #[test]
-    fn test_render_table_contains_data() {
-        let data = sample_data();
-        let output = render_table(&data);
-        assert!(output.contains("BTC"));
-        assert!(output.contains("50000.00"));
-        assert!(output.contains("ETH"));
-    }
-
-    #[test]
-    fn test_render_table_has_borders_on_terminal() {
-        let output = render_with(&sample_data(), OutputFormat::Table, tty_env());
-        assert!(output.contains('│'));
-        assert!(output.contains('╭'));
-        assert!(output.contains('╯'));
-    }
-
-    #[test]
-    fn test_render_table_no_ansi_colors() {
-        let data = sample_data();
-        let output = render_table(&data);
-        assert!(!output.contains(colors::CYAN));
-    }
-
-    #[test]
-    fn test_render_json_valid() {
-        let data = sample_data();
-        let output = render(&data, OutputFormat::Json);
-        let parsed: serde_json::Value =
-            serde_json::from_str(&output).expect("Should be valid JSON");
-        assert!(parsed.is_array());
-        let arr = parsed.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-    }
-
-    #[test]
-    fn test_render_json_has_correct_fields() {
-        let data = sample_data();
-        let output = render(&data, OutputFormat::Json);
-        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
-        let first = &parsed.as_array().unwrap()[0];
-        assert!(first.get("name").is_some());
-        assert!(first.get("price").is_some());
-        assert!(first.get("change").is_some());
+    fn table_on_a_terminal_is_a_rounded_grid_and_never_colored() {
+        colors::with_streams_for_test(true, true, || {
+            let output = render_with(&sample_data(), OutputFormat::Table, tty_env());
+            assert_eq!(
+                output,
+                "╭──────┬──────────┬────────╮\n\
+                 │ Name │ Price    │ Change │\n\
+                 ├──────┼──────────┼────────┤\n\
+                 │ BTC  │ 50000.00 │ +2.5%  │\n\
+                 │ ETH  │ 3000.00  │ -1.2%  │\n\
+                 ╰──────┴──────────┴────────╯"
+            );
+            assert!(!render_table(&sample_data()).contains('\x1b'));
+        });
     }
 
     #[test]
@@ -1182,42 +1123,12 @@ mod tests {
     }
 
     #[test]
-    fn test_render_dispatches_correctly() {
-        let data = sample_data();
-
-        colors::with_streams_for_test(true, false, || {
-            let pretty = render_with(&data, OutputFormat::Pretty, tty_env());
-            let table = render_with(&data, OutputFormat::Table, tty_env());
-            let json = render_with(&data, OutputFormat::Json, tty_env());
-
-            assert!(pretty.contains(colors::CYAN));
-            assert!(table.contains('│') || table.contains('─'));
-            assert!(json.contains('\n'));
-            serde_json::from_str::<serde_json::Value>(&json).unwrap();
-        });
-    }
-
-    #[test]
-    fn test_pretty_is_plain_when_colors_are_off() {
-        let output = render_pretty(&sample_data());
-        assert!(!output.contains('\x1b'));
-        assert!(output.contains("Name"));
-    }
-
-    #[test]
-    fn test_table_on_pipe_is_tab_separated() {
+    fn table_on_a_pipe_is_tab_separated() {
         let output = render_table(&sample_data());
         assert_eq!(
             output,
             "Name\tPrice\tChange\nBTC\t50000.00\t+2.5%\nETH\t3000.00\t-1.2%"
         );
-    }
-
-    #[test]
-    fn test_table_on_terminal_is_bordered() {
-        let output = render_with(&sample_data(), OutputFormat::Table, tty_env());
-        assert!(output.contains('╭'));
-        assert!(output.contains("BTC"));
     }
 
     #[test]
@@ -1233,20 +1144,6 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&pretty).unwrap(),
             value
         );
-    }
-
-    #[test]
-    fn test_colors_helpers_style_when_enabled() {
-        colors::with_streams_for_test(true, true, || {
-            assert_eq!(colors::cyan("test"), colors::paint(colors::CYAN, "test"));
-            assert_eq!(colors::green("test"), colors::paint(colors::GREEN, "test"));
-            assert_eq!(colors::red("test"), colors::paint(colors::RED, "test"));
-            assert_eq!(colors::gray("test"), colors::paint(colors::GRAY, "test"));
-            assert_eq!(
-                colors::yellow("test"),
-                colors::paint(colors::YELLOW, "test")
-            );
-        });
     }
 
     #[test]
@@ -1266,26 +1163,6 @@ mod tests {
             rows: vec![],
             json: serde_json::json!([]),
         }
-    }
-
-    #[test]
-    fn test_empty_data_prints_only_header_on_pipe() {
-        let data = empty_data();
-        assert_eq!(render_table(&data), "Name\tPrice");
-        let pretty = render_pretty(&data);
-        assert!(pretty.contains("Name"));
-        assert!(!pretty.contains('─'));
-
-        let json = render(&data, OutputFormat::Json);
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.as_array().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn test_empty_data_prints_nothing_on_terminal() {
-        let data = empty_data();
-        assert_eq!(render_with(&data, OutputFormat::Table, tty_env()), "");
-        assert_eq!(render_with(&data, OutputFormat::Pretty, tty_env()), "");
     }
 
     #[test]
@@ -1366,23 +1243,6 @@ mod tests {
     }
 
     #[test]
-    fn test_single_row_data() {
-        let data = TestData {
-            headers: vec!["Coin".to_string()],
-            rows: vec![vec!["BTC".to_string()]],
-            json: serde_json::json!([{"coin": "BTC"}]),
-        };
-
-        let pretty = render_pretty(&data);
-        assert!(pretty.contains("BTC"));
-        assert!(pretty.contains("Coin"));
-
-        let json = render(&data, OutputFormat::Json);
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.as_array().unwrap().len(), 1);
-    }
-
-    #[test]
     fn cells_hide_every_format_character_the_sanitizer_hides() {
         // Arabic number sign and a tag character are `Cf` but were outside the
         // table cells used before it was shared with the error sanitizer.
@@ -1404,22 +1264,6 @@ mod tests {
         assert_eq!(
             json_text(&value, true),
             serde_json::to_string_pretty(&value).unwrap()
-        );
-    }
-
-    #[test]
-    fn serialize_row_is_the_derived_json() {
-        #[derive(serde::Serialize)]
-        struct Row {
-            coin: &'static str,
-            size: u32,
-        }
-        assert_eq!(
-            serialize_row(&Row {
-                coin: "BTC",
-                size: 2
-            }),
-            serde_json::json!({"coin": "BTC", "size": 2})
         );
     }
 

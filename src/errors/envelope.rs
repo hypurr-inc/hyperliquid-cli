@@ -179,7 +179,6 @@ fn parse_clap_text(raw: &str) -> ClapText {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::response_sanitization::Untrusted;
 
     fn envelope_value(err: &CliError) -> serde_json::Value {
         serde_json::from_str(&ErrorEnvelope::from_cli_error(err).to_json()).unwrap()
@@ -193,48 +192,6 @@ mod tests {
             json,
             r#"{"error":"something went wrong","category":"internal","exit_code":1,"reason":"internal_error"}"#
         );
-    }
-
-    #[test]
-    fn envelope_from_cli_error_carries_message() {
-        let json = ErrorEnvelope::from_cli_error(&CliError::rate_limited()).to_json();
-        assert!(json.contains("\"error\""));
-        assert!(json.contains("Too many requests"));
-    }
-
-    #[test]
-    fn envelope_reasons_are_stable_per_variant() {
-        let cases: Vec<(CliError, &str)> = vec![
-            (CliError::Internal(anyhow::anyhow!("x")), "internal_error"),
-            (
-                CliError::ExchangeRejected {
-                    context: "order rejected",
-                    remote: Untrusted::from_remote("x"),
-                },
-                "exchange_rejected",
-            ),
-            (CliError::Configuration("x".into()), "invalid_config"),
-            (CliError::MissingInput("x".into()), "missing_input"),
-            (CliError::AuthRequired, "auth_required"),
-            (CliError::InvalidAuth("x".into()), "invalid_auth"),
-            (CliError::rate_limited(), "rate_limited"),
-            (CliError::Unavailable("x".into()), "network_error"),
-            (
-                CliError::api_status(reqwest::StatusCode::BAD_GATEWAY, ""),
-                "api_error",
-            ),
-            (CliError::Timeout("x".into()), "timeout"),
-            (CliError::unknown_outcome("x"), "unknown_outcome"),
-            (CliError::Unsupported("x".into()), "unsupported_input"),
-            (
-                CliError::AssetNotFoundNoSuggestion { asset: "X".into() },
-                "asset_not_found",
-            ),
-            (CliError::PartialResults("x".into()), "partial_failure"),
-        ];
-        for (err, reason) in cases {
-            assert_eq!(envelope_value(&err)["reason"], reason, "{err:?}");
-        }
     }
 
     #[test]

@@ -23,6 +23,9 @@ fn incident_context_excludes_remote_data_and_preserves_explicit_context() {
     let report: Value = serde_json::from_slice(&output).unwrap();
     let body = report["body"].as_str().unwrap();
     assert!(!body.contains("secret"));
+    assert!(body.contains("api / unavailable (exit 12)"), "{body}");
+    assert!(!body.contains("retryable"), "{body}");
+    assert!(!body.contains("\"data\""), "{body}");
     let context = body
         .split("```json\n")
         .nth(1)
@@ -43,6 +46,8 @@ fn incident_context_excludes_remote_data_and_preserves_explicit_context() {
             "report-incident",
             "--context",
             "explicit remote_message",
+            "--error",
+            "explicit error",
         ])
         .assert()
         .success()
@@ -50,12 +55,12 @@ fn incident_context_excludes_remote_data_and_preserves_explicit_context() {
         .stdout
         .clone();
     let report: Value = serde_json::from_slice(&output).unwrap();
+    let body = report["body"].as_str().unwrap();
     assert!(
-        report["body"]
-            .as_str()
-            .unwrap()
-            .contains("```json\nexplicit remote_message\n```")
+        body.contains("```json\nexplicit remote_message\n```"),
+        "{body}"
     );
+    assert!(body.contains("explicit error"), "{body}");
 }
 
 #[test]

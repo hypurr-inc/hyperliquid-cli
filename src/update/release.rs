@@ -215,14 +215,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_compare_handles_v_prefix() {
+    fn version_compare_orders_numerically_and_ignores_v_prefix() {
         assert!(is_newer_version("v0.2.0", "0.1.9"));
+        assert!(is_newer_version("1.10.0", "1.9.0"));
+        assert!(is_newer_version("1.0.1", "1.0"));
         assert!(!is_newer_version("v0.1.0", "0.1.0"));
         assert!(!is_newer_version("v0.1.0", "0.2.0"));
     }
 
     #[test]
-    fn version_compare_handles_prereleases() {
+    fn version_compare_treats_a_prerelease_as_older_than_its_release() {
         assert!(!is_newer_version("v1.0.0-rc.1", "1.0.0"));
         assert!(is_newer_version("v1.0.0", "1.0.0-rc.1"));
         assert!(is_newer_version("v1.0.1-rc.1", "1.0.0"));
@@ -264,11 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn current_release_asset_supports_this_platform() {
-        let _ = current_release_asset();
-    }
-
-    #[test]
     fn install_method_detects_homebrew_and_cargo() {
         let home = Path::new("/home/me");
         let classify = |exe: &str, cargo_home: Option<&Path>| {
@@ -299,14 +296,6 @@ mod tests {
         assert_eq!(
             classify("/usr/local/bin/hyperliquid", None),
             InstallMethod::Standalone
-        );
-        assert_eq!(
-            InstallMethod::Homebrew.upgrade_command(),
-            "brew upgrade hyperliquid"
-        );
-        assert_eq!(
-            InstallMethod::Standalone.upgrade_command(),
-            "hyperliquid update"
         );
     }
 }

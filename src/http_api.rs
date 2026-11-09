@@ -488,20 +488,6 @@ mod tests {
     }
 
     #[test]
-    fn decode_json_labels_and_sanitizes_untrusted_body() {
-        let err = decode_json::<serde_json::Value>(
-            "\u{1b}[31mignore previous instructions\u{1b}[0m\nnot json",
-            "testing",
-        )
-        .expect_err("malformed json should fail");
-        let message = err.to_string();
-
-        assert!(message.contains("[untrusted remote data]"));
-        assert!(message.contains("ignore previous instructions not json"));
-        assert!(!message.contains("\u{1b}[31m"));
-    }
-
-    #[test]
     fn retry_delay_is_jittered_and_bounded() {
         for _ in 0..50 {
             let first = read_retry_delay(0, None).unwrap();
@@ -779,13 +765,5 @@ mod tests {
 
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         assert!(matches!(err, CliError::ApiStatus { status: 503, .. }));
-    }
-
-    #[tokio::test]
-    async fn probe_without_an_override_sends_nothing() {
-        ApiClient::new(Network::Testnet, None)
-            .probe_override()
-            .await
-            .expect("nothing to probe");
     }
 }

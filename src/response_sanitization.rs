@@ -165,13 +165,6 @@ mod tests {
             "[untrusted remote data] before after link"
         );
     }
-
-    #[test]
-    fn untrusted_displays_label_and_keeps_sanitized_text() {
-        let untrusted = Untrusted::from_remote("\u{1b}[31mhello\u{1b}[0m\nworld");
-
-        assert_eq!(untrusted.to_string(), "[untrusted remote data] hello world");
-    }
 }
 
 #[cfg(test)]

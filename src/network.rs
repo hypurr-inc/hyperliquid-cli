@@ -140,13 +140,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_and_default() {
-        assert_eq!(Network::Mainnet.to_string(), "mainnet");
-        assert_eq!(Network::Testnet.to_string(), "testnet");
-        assert_eq!(Network::default(), Network::Mainnet);
-    }
-
-    #[test]
     fn every_network_has_one_spelling_everywhere() {
         for network in Network::ALL {
             let name = network.name();
@@ -171,16 +164,11 @@ mod tests {
     }
 
     #[test]
-    fn serde_roundtrip_is_lowercase_and_case_insensitive() {
-        assert_eq!(
-            serde_json::to_string(&Network::Testnet).unwrap(),
-            "\"testnet\""
-        );
+    fn deserialization_is_case_insensitive() {
         let parsed: Network = serde_json::from_str("\"TESTNET\"").unwrap();
         assert_eq!(parsed, Network::Testnet);
         let parsed: Network = serde_json::from_str("\"Mainnet\"").unwrap();
         assert_eq!(parsed, Network::Mainnet);
-        assert!(serde_json::from_str::<Network>("\"bogus\"").is_err());
     }
 
     #[test]

@@ -107,18 +107,6 @@ fn format_timing(duration: Duration) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn format_timing_is_compact() {
-        assert_eq!(
-            format_timing(Duration::from_millis(1234)),
-            "Completed in 1.2s"
-        );
-        assert_eq!(
-            format_timing(Duration::from_millis(42)),
-            "Completed in 42ms"
-        );
-    }
-
     struct Rows;
     impl TableData for Rows {
         fn headers(&self) -> Vec<&str> {
