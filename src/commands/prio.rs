@@ -184,7 +184,6 @@ async fn bid(
     let api = remote.api();
     let max = args.max;
     let ip = args.ip.as_str();
-    signer.ensure_can_attempt_live_signing()?;
 
     let decimals = match find_spot_token(client, "HYPE").await? {
         Some(token) => u32::try_from(token.wei_decimals).map_err(|_| {
@@ -305,7 +304,7 @@ impl CliCommand for PrioBid {
             );
         }
         let resolved = inv.resolve_signer()?;
-        bid(inv, &resolved.selected_signer(), args).await
+        bid(inv, &resolved, args).await
     }
 }
 

@@ -317,7 +317,8 @@ fn non_tty_watch_error(reason: &str) -> CliError {
     CliError::Unsupported(format!(
         "Non-TTY watch output cannot enter the alternate-screen TUI safely ({reason}). \
          For scripts/agents, pass --format json and --max-ticks <N> \
-         (or set HYPERLIQUID_WATCH_MAX_TICKS) to receive bounded NDJSON."
+         (or set {}) to receive bounded NDJSON.",
+        crate::settings::env::WATCH_MAX_TICKS
     ))
 }
 

@@ -12,10 +12,13 @@ use clap::{ArgMatches, Command, FromArgMatches};
 use serde::Serialize;
 
 use crate::assets::{AssetQuery, parse_asset_query};
+use crate::bankr::BankrTypedData;
 use crate::errors::CliError;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
 use crate::network::Network;
+use crate::settings::env;
+use crate::signing::Signs;
 
 /// The flag that answers a confirmation prompt. Every command with this arg and
 /// [`ConfirmationPolicy::Prompt`] accepts it in place of the prompt.
@@ -69,6 +72,15 @@ pub enum OwsSupport {
     ExperimentalFeatureGated,
     LocalOnly,
     NotApplicable,
+}
+
+/// Whether a signer provider can serve a command, as the schema reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignerSupport {
+    NotRequired,
+    Supported,
+    Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -170,11 +182,11 @@ impl StreamBound {
     pub const fn env(self) -> Option<StreamEnv> {
         match self {
             Self::SnapshotWatch => Some(StreamEnv {
-                name: "HYPERLIQUID_WATCH_MAX_TICKS",
+                name: env::WATCH_MAX_TICKS,
                 zero: EnvZero::Unbounded,
             }),
             Self::Subscribe => Some(StreamEnv {
-                name: "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS",
+                name: env::SUBSCRIBE_MAX_EVENTS,
                 zero: EnvZero::StopImmediately,
             }),
             Self::Polled => None,
@@ -307,6 +319,10 @@ pub struct CommandSpec {
     pub dry_run: DryRunPolicy,
     pub raw_payload: RawPayloadPolicy,
     pub confirmation: ConfirmationPolicy,
+    /// What a live run asks the selected signer to sign. `None` for a command
+    /// that signs nothing. The run checks the signer can do it before the
+    /// command starts, and the schema reports which providers can.
+    pub signs: Option<Signs>,
     pub ows_signer: OwsSupport,
     /// Mainnet asks for confirmation; `--testnet` runs without asking.
     pub testnet_unprompted: bool,
@@ -351,6 +367,7 @@ impl CommandSpec {
             dry_run: DryRunPolicy::NotSupported,
             raw_payload: RawPayloadPolicy::Unsupported,
             confirmation: ConfirmationPolicy::None,
+            signs: None,
             ows_signer: OwsSupport::NotRequired,
             testnet_unprompted: false,
             confirms_with_arg: None,
@@ -365,7 +382,8 @@ impl CommandSpec {
         }
     }
 
-    /// A signed exchange action that moves funds, with a dry-run preview.
+    /// A signed exchange action that moves funds, with a dry-run preview. It
+    /// signs an L1 action unless [`Self::signs`] says otherwise.
     #[must_use]
     pub const fn signed(
         path: &'static [&'static str],
@@ -380,8 +398,27 @@ impl CommandSpec {
         spec.risk = Risk::FundsMovement;
         spec.dry_run = DryRunPolicy::Optional;
         spec.raw_payload = RawPayloadPolicy::DryRunOnly;
+        spec.signs = Some(Signs::L1Action);
         spec.ows_signer = OwsSupport::ExperimentalFeatureGated;
         spec
+    }
+
+    /// Whether a Bankr hosted wallet can serve this command: it signs trading
+    /// actions and spot-to-perp USDC moves only.
+    #[must_use]
+    pub fn bankr_signer(&self) -> SignerSupport {
+        match self.signs {
+            Some(signs) if BankrTypedData::covers(signs) => SignerSupport::Supported,
+            Some(_) => SignerSupport::Unsupported,
+            None if self.auth_required => SignerSupport::Supported,
+            None => SignerSupport::NotRequired,
+        }
+    }
+
+    #[must_use]
+    pub const fn signs(mut self, signs: Signs) -> Self {
+        self.signs = Some(signs);
+        self
     }
 
     #[must_use]

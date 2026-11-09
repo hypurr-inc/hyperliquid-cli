@@ -73,6 +73,7 @@ env_vars! {
     NO_COLOR = "NO_COLOR" => "Disable color when set to a non-empty value.";
     FORCE_COLOR = "FORCE_COLOR" => "Force color on, or off when set to 0 or false.";
     CI = "CI" => "Treat the run as non-interactive: no prompts.";
+    TERM = "TERM" => "";
     CARGO_HOME = "CARGO_HOME" => "";
 }
 
@@ -215,14 +216,13 @@ struct ConfigCache {
     config: Option<Result<Option<Arc<Config>>, String>>,
 }
 
-/// Hygiene warnings describe the file, not a reader, so a process prints them once.
-static HYGIENE_ANNOUNCED: Once = Once::new();
-
 /// Flags, environment and config file, resolved lazily.
 pub struct Settings {
     env: EnvSource,
     source: ConfigSource,
-    announce_hygiene: bool,
+    /// Present when this run prints config hygiene warnings: they describe the
+    /// file, not a reader, so they print once.
+    hygiene: Option<Once>,
     cache: Mutex<ConfigCache>,
 }
 
@@ -314,18 +314,11 @@ impl Settings {
         Self::build(env, ConfigSource::Preloaded(config.map(Arc::new)), false)
     }
 
-    /// The same settings without hygiene warnings.
-    #[must_use]
-    pub fn quiet(mut self) -> Self {
-        self.announce_hygiene = false;
-        self
-    }
-
     fn build(env: EnvSource, source: ConfigSource, announce_hygiene: bool) -> Self {
         Self {
             env,
             source,
-            announce_hygiene,
+            hygiene: announce_hygiene.then(Once::new),
             cache: Mutex::new(ConfigCache::default()),
         }
     }
@@ -392,14 +385,13 @@ impl Settings {
     }
 
     fn note_parsed(&self, file: &ConfigFile, has_plaintext_key: bool) {
-        if !self.announce_hygiene {
-            return;
+        if let Some(announced) = &self.hygiene {
+            announced.call_once(|| {
+                for line in file.hygiene_warnings(has_plaintext_key) {
+                    eprintln!("{line}");
+                }
+            });
         }
-        HYGIENE_ANNOUNCED.call_once(|| {
-            for line in file.hygiene_warnings(has_plaintext_key) {
-                eprintln!("{line}");
-            }
-        });
     }
 
     fn file_text(&self, file: &ConfigFile) -> Result<Option<Arc<str>>, CliError> {

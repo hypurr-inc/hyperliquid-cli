@@ -116,7 +116,7 @@ pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error
     let mode = inv.mode();
     let default_network = inv.remote()?.network();
     ensure_setup_can_run(args, inv.format(), mode)?;
-    let settings = inv.remote()?.settings();
+    let settings = inv.settings();
     let store = WalletStore::new(settings);
     // A broken config is an error before any question is asked.
     settings.config()?;

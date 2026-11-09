@@ -306,3 +306,19 @@ fn experimental_ows_l1_action_fails_closed_before_submit() {
             .contains("does not have a resolved wallet for live signing")
     );
 }
+
+#[test]
+fn a_private_key_flag_with_a_keystore_is_a_usage_error() {
+    Command::cargo_bin("hyperliquid")
+        .unwrap()
+        .args([
+            "--private-key",
+            "0x0000000000000000000000000000000000000000000000000000000000000009",
+            "--keystore",
+            "/keystore.json",
+            "status",
+        ])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("cannot be used with"));
+}

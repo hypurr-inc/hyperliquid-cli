@@ -7,13 +7,12 @@
 //! config file, so they resolve on first use ([`Invocation::remote`]) and
 //! local-only commands such as `wallet list` never read them.
 
-use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use hypersdk::hypercore::Chain;
 
 use crate::assets::{AssetResolver, MetadataCache};
-use crate::auth::{ResolvedSigner, SignerSelection};
+use crate::auth::{SignerFlags, SignerSelection};
 use crate::command_spec::CommandSpec;
 use crate::dry_run::{DryRunEnvelope, DryRunRunContext};
 use crate::errors::CliError;
@@ -23,17 +22,7 @@ use crate::mode::Mode;
 use crate::network::Network;
 use crate::output::{OutputFormat, Session, TableData};
 use crate::settings::Settings;
-
-/// Signer flags exactly as parsed from the command line.
-#[derive(Debug, Clone, Default)]
-pub struct SignerFlags {
-    pub bankr: bool,
-    pub private_key: Option<String>,
-    pub keystore: Option<PathBuf>,
-    pub keystore_password: Option<String>,
-    pub account: Option<String>,
-    pub ows_signer: Option<String>,
-}
+use crate::signing::SelectedSigner;
 
 /// The parsed global flags that shape an invocation.
 #[derive(Debug, Clone, Default)]
@@ -74,11 +63,10 @@ impl InvocationFlags {
 
 /// Network facts resolved from flags, environment and config file.
 pub struct Remote {
-    settings: Settings,
     selection: SignerSelection,
     network: Network,
     api: ApiClient,
-    signer: OnceLock<ResolvedSigner>,
+    signer: OnceLock<SelectedSigner>,
 }
 
 impl std::fmt::Debug for Remote {
@@ -91,39 +79,6 @@ impl std::fmt::Debug for Remote {
 }
 
 impl Remote {
-    fn resolve(flags: &InvocationFlags, announce_retries: bool) -> Result<Self, CliError> {
-        let settings = Settings::from_process();
-        let network = settings.network(flags.testnet)?;
-        let signer = &flags.signer;
-        let selection = SignerSelection::from_flags(
-            &settings,
-            signer.private_key.as_deref(),
-            signer.keystore.clone(),
-            signer.keystore_password.clone(),
-            signer.account.clone(),
-            signer.ows_signer.clone(),
-            signer.bankr,
-        )?;
-        let api = ApiClient::from_settings(&settings, network, announce_retries)?;
-        Ok(Self {
-            settings,
-            selection,
-            network,
-            api,
-            signer: OnceLock::new(),
-        })
-    }
-
-    #[must_use]
-    pub fn settings(&self) -> &Settings {
-        &self.settings
-    }
-
-    #[must_use]
-    pub fn selection(&self) -> &SignerSelection {
-        &self.selection
-    }
-
     #[must_use]
     pub fn network(&self) -> Network {
         self.network
@@ -144,6 +99,7 @@ impl Remote {
 /// The context of one CLI run.
 #[derive(Debug)]
 pub struct Invocation {
+    settings: Settings,
     session: Session,
     mode: Mode,
     flags: InvocationFlags,
@@ -156,12 +112,14 @@ pub struct Invocation {
 impl Invocation {
     #[must_use]
     pub fn new(
+        settings: Settings,
         session: Session,
         mode: Mode,
         flags: InvocationFlags,
         command: &'static CommandSpec,
     ) -> Self {
         Self {
+            settings,
             session,
             mode,
             flags,
@@ -170,6 +128,12 @@ impl Invocation {
             metadata: MetadataCache::new(),
             remote: OnceLock::new(),
         }
+    }
+
+    /// The run's environment and config file, the one `Settings` of the process.
+    #[must_use]
+    pub fn settings(&self) -> &Settings {
+        &self.settings
     }
 
     // ── The command ─────────────────────────────────────────────────────
@@ -270,61 +234,64 @@ impl Invocation {
         if let Some(remote) = self.remote.get() {
             return Ok(remote);
         }
-        let remote = Remote::resolve(&self.flags, self.mode.person_on_stderr())?;
+        let network = self.settings.network(self.flags.testnet)?;
+        let remote = Remote {
+            selection: SignerSelection::from_flags(&self.settings, &self.flags.signer)?,
+            network,
+            api: self.api_client_for(network)?,
+            signer: OnceLock::new(),
+        };
         Ok(self.remote.get_or_init(|| remote))
     }
 
-    /// An API client for `network`, for `setup`, which may pick another network
-    /// than the run resolved.
+    /// An API client for `network` with this run's endpoint override. `setup`
+    /// may pick another network than the run resolved. A person at a terminal
+    /// is told when a read is retried.
     pub fn api_client_for(&self, network: Network) -> Result<ApiClient, CliError> {
-        ApiClient::from_settings(
-            self.remote()?.settings(),
-            network,
-            self.mode.person_on_stderr(),
-        )
+        let api = ApiClient::new(network, self.settings.api_base_url_override(network)?);
+        Ok(if self.mode.person_on_stderr() {
+            api.on_retry(|| eprintln!("Retrying automatically…"))
+        } else {
+            api
+        })
     }
 
     /// The selected signer, resolved once per run. A failed resolution is not cached.
-    pub fn resolve_signer(&self) -> Result<ResolvedSigner, anyhow::Error> {
+    ///
+    /// A live run of a command that signs ([`CommandSpec::signs`]) also asks the
+    /// signer whether it can, so an unsupported provider fails here, before any
+    /// prompt or network lookup. A dry run signs nothing and only needs the identity.
+    pub fn resolve_signer(&self) -> Result<SelectedSigner, anyhow::Error> {
         let remote = self.remote()?;
-        if let Some(signer) = remote.signer.get() {
-            return Ok(signer.clone());
+        let signer = match remote.signer.get() {
+            Some(signer) => signer,
+            None => {
+                let signer =
+                    crate::auth::resolve_signer(&remote.selection, &self.settings, &self.mode)?;
+                remote.signer.get_or_init(|| signer)
+            }
+        };
+        if !self.dry_run()
+            && let Some(signs) = self.command.signs
+        {
+            signer.ensure_can_sign(signs)?;
         }
-        let signer = crate::auth::resolve_signer(&remote.selection, &remote.settings, &self.mode)?;
-        Ok(remote.signer.get_or_init(|| signer).clone())
+        Ok(signer.clone())
     }
 
     /// The account whose data a read command queries: the explicit selector, else
     /// the selected signer's query address.
     pub fn resolve_user(&self, selector: Option<&str>) -> Result<hypersdk::Address, anyhow::Error> {
         match selector {
-            Some(selector) => self.resolve_protocol_user(selector),
+            Some(selector) => self.resolve_account(selector),
             None => Ok(self.resolve_signer()?.query_address()),
         }
     }
 
-    pub fn resolve_protocol_user(
-        &self,
-        selector: &str,
-    ) -> Result<hypersdk::Address, anyhow::Error> {
-        Ok(crate::resolvers::resolve_protocol_user_address(
-            selector,
-            self.remote()?.settings(),
-            &self.mode,
-        )?
-        .address())
-    }
-
-    pub fn resolve_acting_account(
-        &self,
-        selector: &str,
-    ) -> Result<hypersdk::Address, anyhow::Error> {
-        Ok(crate::resolvers::resolve_acting_account_address(
-            selector,
-            self.remote()?.settings(),
-            &self.mode,
-        )?
-        .address())
+    /// The address an account selector names, whether a command reads its data
+    /// or acts on its behalf: a 0x address, a vault wallet or a stored account.
+    pub fn resolve_account(&self, selector: &str) -> Result<hypersdk::Address, anyhow::Error> {
+        crate::auth::lookup_account_address(selector, &self.settings, &self.mode)
     }
 
     /// Asset metadata through the per-run cache.
@@ -371,7 +338,9 @@ mod tests {
             flags.payload_from_stdin(),
             &env,
         );
-        Invocation::new(session, mode, flags, &Probe::SPEC)
+        let settings =
+            Settings::detached(crate::settings::EnvSource::fixed::<&str, &str>([]), None);
+        Invocation::new(settings, session, mode, flags, &Probe::SPEC)
     }
 
     #[test]

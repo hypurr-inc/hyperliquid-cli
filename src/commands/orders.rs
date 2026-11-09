@@ -1435,6 +1435,7 @@ mod tests {
     use super::*;
     use crate::assets::test_support::hip3_perp;
     use crate::assets::{AssetMetadata, PerpAsset, SpotAsset};
+    use crate::settings::{EnvSource, Settings};
     use std::time::Duration;
 
     fn resolver() -> AssetResolver {
@@ -1461,7 +1462,14 @@ mod tests {
 
     async fn prepare(args: &CreateArgs) -> Result<PreparedOrder, CliError> {
         let client = HttpClient::new(Chain::Testnet);
-        prepare_order(&client, &resolver(), &OrderSpec::from_create(args)?).await
+        let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
+        prepare_order(
+            &client,
+            &resolver(),
+            &settings,
+            &OrderSpec::from_create(args)?,
+        )
+        .await
     }
 
     fn btc() -> PerpAsset {

@@ -151,7 +151,7 @@ hyperliquid wallet logout               # forget the stored key
 
 `wallet login` validates the key against `GET /wallet/me`, stores it owner-only in the config file, and records the EVM address so later runs resolve the signer offline. `BANKR_API_KEY` (shared with the Bankr CLI) and the Bankr CLI's own `~/.bankr/config.json` are also read, so an existing Bankr login works without repeating it.
 
-What Bankr signs: trading actions (orders, cancels, modifies, leverage, margin, trailing stops, TWAP, vault and subaccount actions) and spot↔perp USDC moves, as EIP-712 typed data. Anything else that needs a user-signed payload — withdrawals, spot/asset sends, staking, agent or builder approvals, multisig — fails with exit `13` before a request is sent; use a local key, keystore, or OWS wallet for those. Every returned signature is recovered locally against the selected address before it is used.
+What Bankr signs: trading actions (orders, cancels, modifies, leverage, margin, trailing stops, TWAP, vault and subaccount actions) and spot↔perp USDC moves, as EIP-712 typed data. Anything else that needs a user-signed payload — withdrawals, spot/asset sends, staking, agent or builder approvals, multisig — fails with exit `13` before a request is sent; use a local key, keystore, or OWS wallet for those. Every returned signature is recovered locally against the selected address before it is used. `hyperliquid schema` reports `bankr_signer` (`supported`, `unsupported` or `not_required`) for every command, and a command Bankr cannot sign fails as soon as the signer resolves.
 
 ### API / agent wallets
 

@@ -558,7 +558,7 @@ impl CliCommand for SubaccountCreate {
             );
         }
         let resolved = inv.resolve_signer()?;
-        create(inv, &resolved.selected_signer(), args).await
+        create(inv, &resolved, args).await
     }
 }
 
@@ -583,7 +583,7 @@ impl CliCommand for SubaccountTransfer {
 
     async fn run(inv: &Invocation, args: &TransferArgs) -> Result<(), anyhow::Error> {
         validate_transfer_args(args)?;
-        let subaccount = inv.resolve_acting_account(&args.subaccount)?;
+        let subaccount = inv.resolve_account(&args.subaccount)?;
         if inv.dry_run() {
             return print_signed_dry_run(
                 inv,
@@ -594,7 +594,7 @@ impl CliCommand for SubaccountTransfer {
             );
         }
         let resolved = inv.resolve_signer()?;
-        transfer(inv, &resolved.selected_signer(), subaccount, args).await
+        transfer(inv, &resolved, subaccount, args).await
     }
 }
 
@@ -620,7 +620,7 @@ impl CliCommand for SubaccountSpotTransfer {
 
     async fn run(inv: &Invocation, args: &SpotTransferArgs) -> Result<(), anyhow::Error> {
         validate_spot_transfer_args(args)?;
-        let subaccount = inv.resolve_acting_account(&args.subaccount)?;
+        let subaccount = inv.resolve_account(&args.subaccount)?;
         if inv.dry_run() {
             return print_signed_dry_run(
                 inv,
@@ -631,7 +631,7 @@ impl CliCommand for SubaccountSpotTransfer {
             );
         }
         let resolved = inv.resolve_signer()?;
-        spot_transfer(inv, &resolved.selected_signer(), subaccount, args).await
+        spot_transfer(inv, &resolved, subaccount, args).await
     }
 }
 

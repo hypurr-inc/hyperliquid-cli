@@ -118,7 +118,7 @@ impl CliCommand for OrdersStatus {
     ]);
 
     async fn run(inv: &Invocation, args: &StatusArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_protocol_user(&args.user)?;
+        let user = inv.resolve_account(&args.user)?;
         status(inv, user, args).await
     }
 }
@@ -193,7 +193,7 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
         let vault_address =
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
-        let submission = prepare_create_order(client, &resolver, &spec).await?;
+        let submission = prepare_create_order(client, &resolver, inv.settings(), &spec).await?;
         if inv.dry_run() {
             let plan = create_dry_run_plan(&submission, args)?;
             let command = plan.command();
@@ -233,8 +233,7 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
                 ),
             );
         }
-        let resolved_signer = inv.resolve_signer()?;
-        let signer = resolved_signer.selected_signer();
+        let signer = inv.resolve_signer()?;
         create(
             order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
             submission,
@@ -297,8 +296,7 @@ impl CliCommand for OrdersScale {
                 ),
             );
         }
-        let resolved_signer = inv.resolve_signer()?;
-        let signer = resolved_signer.selected_signer();
+        let signer = inv.resolve_signer()?;
         scale(
             order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
             prepared,
@@ -364,8 +362,7 @@ impl CliCommand for OrdersBatchCreate {
                 ),
             );
         }
-        let resolved_signer = inv.resolve_signer()?;
-        let signer = resolved_signer.selected_signer();
+        let signer = inv.resolve_signer()?;
         batch_create(
             order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
             prepared,
@@ -437,8 +434,7 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
                 ),
             );
         }
-        let resolved_signer = inv.resolve_signer()?;
-        let signer = resolved_signer.selected_signer();
+        let signer = inv.resolve_signer()?;
         tpsl(
             order_submission_context(inv, &signer, &Self::SPEC, args.yes)?,
             &perp,
@@ -511,8 +507,7 @@ hyperliquid --format json orders trailing-stop --coin ETH --side sell --size 0.5
                 ),
             );
         }
-        let resolved = inv.resolve_signer()?;
-        let signer = resolved.selected_signer();
+        let signer = inv.resolve_signer()?;
         trailing_stop(
             order_submission_context(inv, &signer, &Self::SPEC, args.yes)?,
             &plan,
@@ -572,7 +567,7 @@ impl CliCommand for OrdersCancel {
         let resolver = inv.trading_resolver().await?;
         let resolved = inv.resolve_signer()?;
         let user = vault_address.unwrap_or_else(|| resolved.query_address());
-        let signer = resolved.selected_signer();
+        let signer = resolved;
         cancel(
             order_execution_context(inv, &resolver, &signer, &Self::SPEC, false)?,
             user,
@@ -637,7 +632,7 @@ impl CliCommand for OrdersCancelAll {
         let resolver = inv.trading_resolver().await?;
         let resolved = inv.resolve_signer()?;
         let user = vault_address.unwrap_or_else(|| resolved.query_address());
-        let signer = resolved.selected_signer();
+        let signer = resolved;
         cancel_all(
             order_execution_context(inv, &resolver, &signer, &Self::SPEC, false)?,
             user,
@@ -708,7 +703,7 @@ impl CliCommand for OrdersModify {
         let resolver = inv.trading_resolver().await?;
         let resolved = inv.resolve_signer()?;
         let user = vault_address.unwrap_or_else(|| resolved.query_address());
-        let signer = resolved.selected_signer();
+        let signer = resolved;
         modify(
             order_execution_context(inv, &resolver, &signer, &Self::SPEC, false)?,
             user,
@@ -769,8 +764,7 @@ impl CliCommand for OrdersTwapCreate {
                 ),
             );
         }
-        let resolved = inv.resolve_signer()?;
-        let signer = resolved.selected_signer();
+        let signer = inv.resolve_signer()?;
         twap_create(
             order_submission_context(inv, &signer, &Self::SPEC, args.yes)?,
             plan,
@@ -833,8 +827,7 @@ impl CliCommand for OrdersTwapCancel {
                 ),
             );
         }
-        let resolved = inv.resolve_signer()?;
-        let signer = resolved.selected_signer();
+        let signer = inv.resolve_signer()?;
         twap_cancel(
             order_submission_context(inv, &signer, &Self::SPEC, false)?,
             plan,
@@ -886,8 +879,7 @@ impl CliCommand for OrdersScheduleCancel {
                 ),
             );
         }
-        let resolved = inv.resolve_signer()?;
-        let signer = resolved.selected_signer();
+        let signer = inv.resolve_signer()?;
         schedule_cancel(
             order_submission_context(inv, &signer, &Self::SPEC, args.yes)?,
             plan,
@@ -954,8 +946,7 @@ hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeou
                 dry_run_signed_details(inv, "chase", plan, signer, acting_as, vault_address_string),
             );
         }
-        let resolved_signer = inv.resolve_signer()?;
-        let signer = resolved_signer.selected_signer();
+        let signer = inv.resolve_signer()?;
         chase(
             order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
             args,
@@ -1010,7 +1001,7 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
             resolve_optional_acting_account_target(inv, args.on_behalf_of.as_deref())?;
         let vault_address_string = vault_address.map(|address| address.to_string());
         if inv.dry_run() {
-            let plan = bracket_dry_run_plan(client, &resolver, args).await?;
+            let plan = bracket_dry_run_plan(client, &resolver, inv.settings(), args).await?;
             let (signer, acting_as, vault_address_string) =
                 dry_run_vault_signing_addresses(inv, vault_address_string);
             return print_dry_run(
@@ -1026,8 +1017,7 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
                 ),
             );
         }
-        let resolved_signer = inv.resolve_signer()?;
-        let signer = resolved_signer.selected_signer();
+        let signer = inv.resolve_signer()?;
         bracket(
             order_execution_context(inv, &resolver, &signer, &Self::SPEC, args.yes)?,
             args,
@@ -1258,7 +1248,6 @@ fn order_submission_context<'a>(
     spec: &CommandSpec,
     yes: bool,
 ) -> Result<OrderSubmissionContext<'a>, CliError> {
-    signer.ensure_can_attempt_live_signing()?;
     let remote = inv.remote()?;
     Ok(OrderSubmissionContext {
         inv,

@@ -5,6 +5,8 @@
 //! provider answers once, in [`SelectedSigner::sign`], which payloads it can
 //! sign: local keys sign any digest, an OWS wallet signs any digest once a wallet
 //! resolved, and Bankr signs only the typed-data documents it can rebuild.
+//! [`Signs`] names a payload's kind before it exists, so a command's spec can
+//! state what it signs and [`SelectedSigner::ensure_can_sign`] can refuse early.
 //! Provider failures are checked by [`signature::Provider`] before a signature
 //! is returned.
 
@@ -13,6 +15,7 @@ pub(crate) mod signature;
 use alloy::dyn_abi::TypedData;
 use alloy::primitives::B256;
 use alloy::signers::SignerSync;
+use alloy::sol_types::SolStruct;
 use hypersdk::Address;
 use hypersdk::hypercore::signing::agent_signing_hash;
 use hypersdk::hypercore::types::{Action, ActionRequest, Signature};
@@ -23,6 +26,30 @@ use crate::bankr::{BankrClient, BankrSigner, BankrTypedData};
 use crate::errors::CliError;
 use crate::ows::signing::{self as ows_signing, OwsSigningConfig};
 use crate::ows::vault::Vault;
+
+/// The prefix of a user-signed action's EIP-712 primary type.
+pub(crate) const USER_SIGNED_PREFIX: &str = "HyperliquidTransaction:";
+
+/// The kind of signature a command asks for, known before anything is signed:
+/// what a [`CommandSpec`](crate::command_spec::CommandSpec) declares and what
+/// each provider answers [`SelectedSigner::ensure_can_sign`] for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signs {
+    /// An L1 action: trading, margin, vault and subaccount actions.
+    L1Action,
+    /// A user-signed action's EIP-712 document, by struct name.
+    UserSigned(&'static str),
+    /// A user-signed [`Action`] whose document hypersdk does not expose.
+    Digest,
+}
+
+impl Signs {
+    /// The user-signed action whose EIP-712 struct is `T`.
+    #[must_use]
+    pub const fn user_signed<T: SolStruct>() -> Self {
+        Self::UserSigned(T::NAME)
+    }
+}
 
 /// What one signature covers.
 pub(crate) enum Payload<'a> {
@@ -190,26 +217,16 @@ impl SelectedSigner {
         SignerDescription { alias, source }
     }
 
-    /// Guard network lookups that should fail before side effects when an OWS selector
-    /// is only an address placeholder. This is deliberately not a command allowlist:
-    /// command-level OWS status is exposed in schema/docs, while signing still
-    /// verifies the recovered address for every payload before submission.
-    pub fn ensure_can_attempt_live_signing(&self) -> Result<(), CliError> {
+    /// Whether this provider can sign `signs`, answered before any side effect.
+    /// A local key signs anything; an OWS wallet signs anything once a wallet
+    /// resolved (an address-only selector cannot); Bankr signs only what
+    /// [`BankrTypedData`] can rebuild. Signing still verifies the recovered
+    /// address of every payload before submission.
+    pub fn ensure_can_sign(&self, signs: Signs) -> Result<(), CliError> {
         match &self.backend {
-            SignerBackend::Ows(config) => config.ensure_signable(),
-            SignerBackend::Local { .. } | SignerBackend::Bankr(_) => Ok(()),
-        }
-    }
-
-    /// Fail now, before any side effect, when this provider cannot sign a
-    /// user-signed action such as `approveAgent`, a withdrawal or a send.
-    pub fn ensure_can_sign_user_actions(&self) -> Result<(), CliError> {
-        match &self.backend {
-            SignerBackend::Ows(config) => config.ensure_signable(),
-            SignerBackend::Bankr(_) => {
-                BankrTypedData::for_payload(&Payload::Digest(B256::ZERO)).map(|_| ())
-            }
             SignerBackend::Local { .. } => Ok(()),
+            SignerBackend::Ows(config) => config.ensure_signable(),
+            SignerBackend::Bankr(_) => BankrTypedData::ensure_covers(signs),
         }
     }
 
@@ -314,7 +331,7 @@ mod tests {
 
     /// The typed data a user-signed command signs, built the way the commands build it.
     fn user_signed<T: SolStruct>(message: &impl serde::Serialize, chain: Chain) -> TypedData {
-        let prefixed = format!("HyperliquidTransaction:{}", T::NAME);
+        let prefixed = format!("{USER_SIGNED_PREFIX}{}", T::NAME);
         let mut resolver = Resolver::from_struct::<T>();
         resolver.ingest_string(T::eip712_encode_type()).unwrap();
         let mut types = Eip712Types::from(&resolver);
@@ -485,29 +502,57 @@ mod tests {
     }
 
     #[test]
-    fn user_signed_capability_is_asked_of_the_provider_before_signing() {
-        assert!(
-            SelectedSigner::private_key(key())
-                .ensure_can_sign_user_actions()
-                .is_ok()
-        );
-        let err = unreachable_bankr()
-            .ensure_can_sign_user_actions()
-            .unwrap_err();
-        assert_eq!(err.exit_code(), 13);
+    fn capability_is_asked_of_the_provider_before_signing() {
+        let usd_class = Signs::user_signed::<UsdClassTransfer>();
+        let withdraw = Signs::user_signed::<Withdraw>();
         let address_only = SelectedSigner::ows_address_only(
             "0x0000000000000000000000000000000000000001".to_string(),
             "0x0000000000000000000000000000000000000001"
                 .parse()
                 .unwrap(),
         );
-        assert_eq!(
-            address_only
-                .ensure_can_sign_user_actions()
-                .unwrap_err()
-                .exit_code(),
-            13
-        );
+
+        for signs in [Signs::L1Action, usd_class, withdraw, Signs::Digest] {
+            assert!(
+                SelectedSigner::private_key(key())
+                    .ensure_can_sign(signs)
+                    .is_ok(),
+                "{signs:?}"
+            );
+            assert_eq!(
+                address_only.ensure_can_sign(signs).unwrap_err().exit_code(),
+                13,
+                "{signs:?}"
+            );
+        }
+
+        let bankr = unreachable_bankr();
+        assert!(bankr.ensure_can_sign(Signs::L1Action).is_ok());
+        assert!(bankr.ensure_can_sign(usd_class).is_ok());
+        for refused in [withdraw, Signs::Digest] {
+            assert_eq!(
+                bankr.ensure_can_sign(refused).unwrap_err().exit_code(),
+                13,
+                "{refused:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_declared_user_signed_action_is_the_document_bankr_accepts() {
+        for (signs, typed) in [
+            (
+                Signs::user_signed::<UsdClassTransfer>(),
+                usd_class_transfer(Chain::Mainnet),
+            ),
+            (Signs::user_signed::<Withdraw>(), withdraw(Chain::Mainnet)),
+        ] {
+            assert_eq!(
+                crate::bankr::BankrTypedData::covers(signs),
+                crate::bankr::BankrTypedData::for_payload(&Payload::UserSigned(&typed)).is_ok(),
+                "{signs:?}"
+            );
+        }
     }
 
     #[test]

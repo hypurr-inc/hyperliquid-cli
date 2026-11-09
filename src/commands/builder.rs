@@ -25,7 +25,7 @@ use crate::output::TableData;
 use crate::quantity::{self, Scale, ScaleError};
 use crate::resolvers::{HexAddressError, parse_exact_hex_address};
 use crate::settings::{BuilderDefaultSetting, Settings};
-use crate::signing::SelectedSigner;
+use crate::signing::{SelectedSigner, Signs};
 use crate::wire::InfoRequest;
 
 const APPROVE_REVERSIBILITY: ActionReversibility = ActionReversibility::Reversible;
@@ -339,11 +339,7 @@ pub fn parse_builder_address(raw: &str) -> Result<Address, CliError> {
 /// `default_builder_address` / `default_builder_fee_rate`, then the build-time
 /// default. Returns `Ok(None)` when nothing is configured and `Err` when a layer
 /// sets only one side or holds invalid values.
-pub fn resolve_default_builder_fee() -> Result<Option<(Address, u64)>, CliError> {
-    resolve_default_builder_fee_with(&Settings::from_process().quiet())
-}
-
-pub fn resolve_default_builder_fee_with(
+pub fn resolve_default_builder_fee(
     settings: &Settings,
 ) -> Result<Option<(Address, u64)>, CliError> {
     settings
@@ -465,7 +461,7 @@ impl CliCommand for BuilderMaxFee {
     }
 
     async fn run(inv: &Invocation, args: &MaxFeeArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_protocol_user(&args.user)?;
+        let user = inv.resolve_account(&args.user)?;
         let builder_address = parse_builder_address(&args.builder)?;
         max_fee(inv, user, builder_address).await
     }
@@ -488,7 +484,7 @@ impl CliCommand for BuilderApproved {
         .resource_id("account selector")]);
 
     async fn run(inv: &Invocation, args: &ApprovedArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_protocol_user(&args.user)?;
+        let user = inv.resolve_account(&args.user)?;
         approved(inv, user).await
     }
 }
@@ -504,6 +500,7 @@ impl CliCommand for BuilderApprove {
         "Approve or update a max builder fee for the selected signer",
         "Approve, update, or revoke a max builder fee for the selected master signer. Use 0% to revoke.",
     )
+    .signs(Signs::user_signed::<ApproveBuilderFee>())
     .prompt()
     .args(&[
         arg("builder").kind(InputKind::ProtocolObjectAddress).resource_id("builder address"),
@@ -540,14 +537,14 @@ impl CliCommand for BuilderApprove {
             );
         }
         let resolved = inv.resolve_signer()?;
-        if resolved.query_address() != resolved.address() {
+        if resolved.is_stored_agent() {
             return Err(CliError::Unsupported(
             "approveBuilderFee must be signed by the master account; select the master wallet, not a stored API wallet"
                 .to_string(),
         )
         .into());
         }
-        approve(inv, &resolved.selected_signer(), builder, args).await
+        approve(inv, &resolved, builder, args).await
     }
 }
 
@@ -584,7 +581,7 @@ mod tests {
 
     #[test]
     fn default_builder_uses_build_time_defaults_when_env_absent() {
-        let result = resolve_default_builder_fee_with(&settings(&[]));
+        let result = resolve_default_builder_fee(&settings(&[]));
         match (
             BUILD_DEFAULT_BUILDER_ADDRESS.is_empty(),
             BUILD_DEFAULT_BUILDER_FEE_RATE.is_empty(),
@@ -598,16 +595,14 @@ mod tests {
     #[test]
     fn default_builder_errs_when_only_address_set() {
         let result =
-            resolve_default_builder_fee_with(&settings(&[(env::DEFAULT_BUILDER_ADDRESS, ADDRESS)]));
+            resolve_default_builder_fee(&settings(&[(env::DEFAULT_BUILDER_ADDRESS, ADDRESS)]));
         assert!(result.unwrap_err().to_string().contains("FEE_RATE"));
     }
 
     #[test]
     fn default_builder_errs_when_only_fee_set() {
-        let result = resolve_default_builder_fee_with(&settings(&[(
-            env::DEFAULT_BUILDER_FEE_RATE,
-            "0.001%",
-        )]));
+        let result =
+            resolve_default_builder_fee(&settings(&[(env::DEFAULT_BUILDER_FEE_RATE, "0.001%")]));
         assert!(result.unwrap_err().to_string().contains("BUILDER_ADDRESS"));
     }
 
@@ -617,7 +612,7 @@ mod tests {
             (env::DEFAULT_BUILDER_ADDRESS, "not-an-address"),
             (env::DEFAULT_BUILDER_FEE_RATE, "0.001%"),
         ]);
-        let err = resolve_default_builder_fee_with(&bad_address).unwrap_err();
+        let err = resolve_default_builder_fee(&bad_address).unwrap_err();
         assert!(
             err.to_string()
                 .contains("invalid HYPERLIQUID_DEFAULT_BUILDER_ADDRESS")
@@ -627,12 +622,12 @@ mod tests {
             (env::DEFAULT_BUILDER_ADDRESS, ADDRESS),
             (env::DEFAULT_BUILDER_FEE_RATE, "not-a-percent"),
         ]);
-        assert!(resolve_default_builder_fee_with(&bad_fee).is_err());
+        assert!(resolve_default_builder_fee(&bad_fee).is_err());
     }
 
     #[test]
     fn default_builder_reads_valid_env_vars() {
-        let (address, fee) = resolve_default_builder_fee_with(&settings(&[
+        let (address, fee) = resolve_default_builder_fee(&settings(&[
             (env::DEFAULT_BUILDER_ADDRESS, ADDRESS),
             (env::DEFAULT_BUILDER_FEE_RATE, "0.001%"),
         ]))
@@ -649,7 +644,7 @@ mod tests {
             ..Config::default()
         };
         let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), Some(config));
-        let err = resolve_default_builder_fee_with(&settings).unwrap_err();
+        let err = resolve_default_builder_fee(&settings).unwrap_err();
         assert!(err.to_string().contains("default_builder_fee_rate"));
     }
 

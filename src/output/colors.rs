@@ -10,6 +10,7 @@
 use std::sync::OnceLock;
 
 use super::terminal;
+use crate::settings::{EnvSource, env as settings_env};
 
 pub const CYAN: &str = "\x1b[36m";
 pub const GREEN: &str = "\x1b[32m";
@@ -79,16 +80,20 @@ pub mod stderr {
 static STREAMS: OnceLock<(bool, bool)> = OnceLock::new();
 
 /// Resolve color once per process. Later calls are ignored.
-pub fn init(no_color_flag: bool) {
-    let _ = STREAMS.set(resolve(no_color_flag));
+pub fn init(no_color_flag: bool, env: &EnvSource) {
+    let _ = STREAMS.set(resolve(no_color_flag, env));
 }
 
-fn resolve(no_color_flag: bool) -> (bool, bool) {
-    let no_color_env = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
-    let dumb = std::env::var("TERM").is_ok_and(|term| term == "dumb");
+fn resolve(no_color_flag: bool, env: &EnvSource) -> (bool, bool) {
+    let no_color_env = env
+        .get_os(settings_env::NO_COLOR)
+        .is_some_and(|value| !value.is_empty());
+    let dumb = env
+        .get(settings_env::TERM)
+        .is_some_and(|term| term == "dumb");
     decide(
         no_color_flag || no_color_env,
-        terminal::env_flag("FORCE_COLOR"),
+        terminal::env_flag(env, settings_env::FORCE_COLOR),
         dumb,
         (
             terminal::stdout_is_terminal(),
@@ -135,7 +140,7 @@ fn streams() -> (bool, bool) {
 
 #[cfg(not(test))]
 fn streams() -> (bool, bool) {
-    *STREAMS.get_or_init(|| resolve(false))
+    *STREAMS.get_or_init(|| resolve(false, &EnvSource::Process))
 }
 
 /// Run `f` with the given `(stdout, stderr)` color decision on this thread.

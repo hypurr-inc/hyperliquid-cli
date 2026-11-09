@@ -25,31 +25,15 @@ use crate::ows::vault::{HyperliquidAccount, Vault};
 use crate::settings::{Settings, env};
 use crate::signing::SelectedSigner;
 
-#[derive(Debug, Clone)]
-pub struct ResolvedSigner {
-    selected_signer: SelectedSigner,
-}
-
-impl ResolvedSigner {
-    #[must_use]
-    pub fn new(selected_signer: SelectedSigner) -> Self {
-        Self { selected_signer }
-    }
-
-    #[must_use]
-    pub fn selected_signer(&self) -> SelectedSigner {
-        self.selected_signer.clone()
-    }
-
-    #[must_use]
-    pub fn address(&self) -> Address {
-        self.selected_signer.address()
-    }
-
-    #[must_use]
-    pub fn query_address(&self) -> Address {
-        self.selected_signer.query_address()
-    }
+/// Signer flags exactly as parsed from the command line.
+#[derive(Debug, Clone, Default)]
+pub struct SignerFlags {
+    pub bankr: bool,
+    pub private_key: Option<String>,
+    pub keystore: Option<PathBuf>,
+    pub keystore_password: Option<String>,
+    pub account: Option<String>,
+    pub ows_signer: Option<String>,
 }
 
 /// The signer inputs of one run.
@@ -70,31 +54,24 @@ impl SignerSelection {
     /// `--bankr`, `--ows-signer`, `--account` and `--keystore` name a signer
     /// explicitly, so an ambient private key (`HYPERLIQUID_PRIVATE_KEY` or the
     /// legacy config key) must not override them: the key is not even read.
-    pub fn from_flags(
-        settings: &Settings,
-        cli_private_key: Option<&str>,
-        keystore: Option<PathBuf>,
-        keystore_password: Option<String>,
-        account: Option<String>,
-        ows: Option<String>,
-        bankr: bool,
-    ) -> Result<Self, CliError> {
-        let private_key = if bankr || account.is_some() || ows.is_some() {
+    /// Clap rejects `--private-key` together with another signer flag.
+    pub fn from_flags(settings: &Settings, flags: &SignerFlags) -> Result<Self, CliError> {
+        let names_signer = flags.bankr
+            || flags.account.is_some()
+            || flags.ows_signer.is_some()
+            || flags.keystore.is_some();
+        let private_key = if names_signer {
             None
-        } else if keystore.is_some() {
-            cli_private_key
-                .filter(|key| !key.is_empty())
-                .map(str::to_string)
         } else {
-            settings.private_key(cli_private_key)?
+            settings.private_key(flags.private_key.as_deref())?
         };
         Ok(Self {
-            bankr,
-            ows,
+            bankr: flags.bankr,
+            ows: flags.ows_signer.clone(),
             private_key,
-            keystore,
-            keystore_password,
-            account,
+            keystore: flags.keystore.clone(),
+            keystore_password: flags.keystore_password.clone(),
+            account: flags.account.clone(),
         })
     }
 }
@@ -116,8 +93,8 @@ pub fn resolve_signer(
     selection: &SignerSelection,
     settings: &Settings,
     mode: &Mode,
-) -> Result<ResolvedSigner, anyhow::Error> {
-    let signer = if selection.bankr {
+) -> Result<SelectedSigner, anyhow::Error> {
+    Ok(if selection.bankr {
         resolve_bankr(settings)?
     } else if let Some(selector) = selection.ows.as_deref() {
         resolve_ows_flag(selector, settings)?
@@ -143,8 +120,7 @@ pub fn resolve_signer(
         find_account(selector, settings, mode)?.into_signer()?
     } else {
         find_default(settings, mode)?.into_signer()?
-    };
-    Ok(ResolvedSigner::new(signer))
+    })
 }
 
 /// `--bankr`: the wallet linked to the stored Bankr API key. The address comes
@@ -400,12 +376,13 @@ mod tests {
     use crate::config::Config;
     use crate::ows::vault::test_support::import_test_wallet;
     use crate::settings::EnvSource;
+    use crate::signing::Signs;
     use tempfile::TempDir;
 
     fn resolve(
         selection: &SignerSelection,
         settings: &Settings,
-    ) -> Result<ResolvedSigner, anyhow::Error> {
+    ) -> Result<SelectedSigner, anyhow::Error> {
         resolve_signer(selection, settings, &Mode::default())
     }
 
@@ -452,18 +429,13 @@ mod tests {
 
         assert_eq!(resolved.address().to_string(), RAW_OWS_ADDRESS);
         assert_eq!(resolved.query_address(), resolved.address());
-        let description = resolved.selected_signer().describe();
+        let description = resolved.describe();
         assert_eq!(description.alias, None);
         assert_eq!(
             description.source,
             format!("OWS signer ({RAW_OWS_ADDRESS})")
         );
-        assert!(
-            resolved
-                .selected_signer()
-                .ensure_can_attempt_live_signing()
-                .is_err()
-        );
+        assert!(resolved.ensure_can_sign(Signs::L1Action).is_err());
     }
 
     #[test]
@@ -481,12 +453,7 @@ mod tests {
             &settings,
         )
         .unwrap();
-        assert!(
-            by_flag
-                .selected_signer()
-                .ensure_can_attempt_live_signing()
-                .is_err()
-        );
+        assert!(by_flag.ensure_can_sign(Signs::L1Action).is_err());
 
         let by_account = resolve(
             &SignerSelection {
@@ -496,14 +463,9 @@ mod tests {
             &settings,
         )
         .unwrap();
-        assert!(
-            by_account
-                .selected_signer()
-                .ensure_can_attempt_live_signing()
-                .is_ok()
-        );
+        assert!(by_account.ensure_can_sign(Signs::L1Action).is_ok());
         assert_eq!(by_account.address(), account.address);
-        let description = by_account.selected_signer().describe();
+        let description = by_account.describe();
         assert_eq!(description.alias.as_deref(), Some("main"));
         assert_eq!(description.source, "OWS wallet (main)");
     }
@@ -521,10 +483,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            resolved.selected_signer().describe().alias.as_deref(),
-            Some("main")
-        );
+        assert_eq!(resolved.describe().alias.as_deref(), Some("main"));
     }
 
     #[test]
@@ -553,10 +512,7 @@ mod tests {
             &vault_settings(&vault, None),
         )
         .unwrap();
-        assert_eq!(
-            resolved.selected_signer().describe().source,
-            "private key/config/env"
-        );
+        assert_eq!(resolved.describe().source, "private key/config/env");
         assert_eq!(
             resolved.address(),
             parse_private_key(KEY).unwrap().address()
@@ -587,7 +543,7 @@ mod tests {
         let first = import_test_wallet(vault.path(), "first");
 
         let only = resolve(&selection(), &vault_settings(&vault, None)).unwrap();
-        let name = |signer: &ResolvedSigner| signer.selected_signer().describe().alias;
+        let name = |signer: &SelectedSigner| signer.describe().alias;
         assert_eq!(name(&only).as_deref(), Some("first"));
 
         import_test_wallet(vault.path(), "second");
@@ -602,48 +558,52 @@ mod tests {
         assert!(err.to_string().contains("holds 2 wallets"));
     }
 
-    fn flags(
-        settings: &Settings,
-        cli_key: Option<&str>,
-        keystore: Option<&str>,
-        account: Option<&str>,
-    ) -> SignerSelection {
-        SignerSelection::from_flags(
-            settings,
-            cli_key,
-            keystore.map(PathBuf::from),
-            None,
-            account.map(str::to_string),
-            None,
-            false,
-        )
-        .unwrap()
+    fn selected(settings: &Settings, flags: SignerFlags) -> SignerSelection {
+        SignerSelection::from_flags(settings, &flags).unwrap()
     }
 
     #[test]
     fn selection_ignores_ambient_key_when_a_signer_is_named() {
         let ambient = Settings::detached(EnvSource::fixed([(env::PRIVATE_KEY, KEY)]), None);
+        let named = SignerFlags {
+            account: Some("main".to_string()),
+            ..SignerFlags::default()
+        };
 
-        assert_eq!(flags(&ambient, None, None, Some("main")).private_key, None);
+        assert_eq!(selected(&ambient, named).private_key, None);
         assert_eq!(
-            flags(&ambient, None, None, None).private_key.as_deref(),
+            selected(&ambient, SignerFlags::default())
+                .private_key
+                .as_deref(),
             Some(KEY)
         );
         let bare = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
-        assert_eq!(flags(&bare, None, None, None).private_key, None);
+        assert_eq!(selected(&bare, SignerFlags::default()).private_key, None);
     }
 
     #[test]
     fn an_explicit_keystore_is_not_overridden_by_an_ambient_key() {
         let ambient = Settings::detached(EnvSource::fixed([(env::PRIVATE_KEY, KEY)]), None);
 
-        let selection = flags(&ambient, None, Some("/keystore.json"), None);
+        let selection = selected(
+            &ambient,
+            SignerFlags {
+                keystore: Some(PathBuf::from("/keystore.json")),
+                ..SignerFlags::default()
+            },
+        );
         assert_eq!(selection.private_key, None);
         assert_eq!(selection.keystore, Some(PathBuf::from("/keystore.json")));
+    }
 
-        // A key given on the command line is as explicit as the keystore.
-        let both = flags(&ambient, Some(KEY), Some("/keystore.json"), None);
-        assert_eq!(both.private_key.as_deref(), Some(KEY));
+    #[test]
+    fn a_private_key_flag_is_the_selected_key() {
+        let bare = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
+        let flag = SignerFlags {
+            private_key: Some(KEY.to_string()),
+            ..SignerFlags::default()
+        };
+        assert_eq!(selected(&bare, flag).private_key.as_deref(), Some(KEY));
     }
 
     /// A vault holding two wallets named `main`, which `ows-lib` itself refuses
@@ -687,5 +647,17 @@ mod tests {
         };
         let default = resolve(&selection(), &vault_settings(&_vault, Some(config))).unwrap_err();
         assert!(ambiguous(&default), "default: {default}");
+    }
+
+    #[test]
+    fn literal_addresses_resolve_without_touching_the_vault() {
+        let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
+        let address = "0x0000000000000000000000000000000000000001";
+        let user =
+            lookup_account_address(&format!(" {address} "), &settings, &Mode::default()).unwrap();
+        assert_eq!(user.to_string().to_lowercase(), address);
+
+        let err = lookup_account_address("0xnothex", &settings, &Mode::default()).unwrap_err();
+        assert!(err.to_string().contains("Invalid address"));
     }
 }

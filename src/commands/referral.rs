@@ -12,7 +12,7 @@ use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::output::TableData;
-use crate::settings::Settings;
+use crate::settings::{Settings, env};
 use crate::wire::InfoRequest;
 
 /// The referral code setup and wallet creation offer. Skips the config file and
@@ -220,8 +220,7 @@ async fn run_code_action(
             ),
         );
     }
-    let resolved = inv.resolve_signer()?;
-    let signer = resolved.selected_signer();
+    let signer = inv.resolve_signer()?;
     let remote = inv.remote()?;
     actions::send_raw_l1_json_action(
         remote.api(),
@@ -381,14 +380,14 @@ impl CliCommand for ReferralSet {
                 // `HYPERLIQUID_DEFAULT_REFERRAL_CODE`, the config file
                 // `default_referral_code`, the build-time default, then `TESTNET`
                 // on testnet. On mainnet nothing is assumed.
-                let remote = inv.remote()?;
-                remote
-                    .settings()
-                    .default_referral_code(remote.network().is_testnet())?
+                inv.settings()
+                    .default_referral_code(inv.remote()?.network().is_testnet())?
                     .ok_or_else(|| {
                         CliError::Unsupported(
-                            "referral code is required; pass CODE explicitly, set HYPERLIQUID_DEFAULT_REFERRAL_CODE, or use --testnet"
-                                .to_string(),
+                            format!(
+                                "referral code is required; pass CODE explicitly, set {}, or use --testnet",
+                                env::DEFAULT_REFERRAL_CODE
+                            ),
                         )
                     })?
             }

@@ -12,8 +12,8 @@ use serde::Serialize;
 
 use crate::command_spec::{
     ArgSpec, CommandSpec, ConfirmationPolicy, DryRunPolicy, GroupSpec, InputKind, Lifecycle,
-    Mutability, OutputContract, OwsSupport, RawPayloadPolicy, Risk, StreamBound, Transport,
-    YES_ARG,
+    Mutability, OutputContract, OwsSupport, RawPayloadPolicy, Risk, SignerSupport, StreamBound,
+    Transport, YES_ARG,
 };
 use crate::commands;
 
@@ -237,6 +237,7 @@ pub struct Policy {
     pub confirmation: ConfirmationPolicy,
     pub confirmation_bypass: ConfirmationBypass,
     pub ows_signer: OwsSupport,
+    pub bankr_signer: SignerSupport,
     pub transport: Vec<Transport>,
     pub output_contract: OutputContract,
     pub stream_bounds: Option<StreamBoundsSchema>,
@@ -358,6 +359,7 @@ impl CommandContract {
                     arg: confirmation_bypass_arg,
                 },
                 ows_signer: spec.ows_signer,
+                bankr_signer: spec.bankr_signer(),
                 transport: vec![spec.transport()],
                 output_contract: output_contract(spec),
                 stream_bounds: spec.stream.map(StreamBoundsSchema::from),

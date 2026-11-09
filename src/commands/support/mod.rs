@@ -262,6 +262,6 @@ pub(crate) fn resolve_optional_acting_account_target(
     selector: Option<&str>,
 ) -> Result<Option<Address>, anyhow::Error> {
     selector
-        .map(|selector| inv.resolve_acting_account(selector))
+        .map(|selector| inv.resolve_account(selector))
         .transpose()
 }

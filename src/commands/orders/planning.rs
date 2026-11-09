@@ -35,6 +35,7 @@ use crate::assets::{
 };
 use crate::commands::builder;
 use crate::errors::{CliError, from_sdk};
+use crate::settings::Settings;
 
 pub(super) struct OrderDryRunPlan {
     command: &'static str,
@@ -279,6 +280,7 @@ async fn market_mid_price(
 /// both sides of perpetual orders: an explicit request on a spot buy is
 /// rejected, and the configured default is skipped for it.
 fn order_builder_fee(
+    settings: &Settings,
     request: &BuilderRequest,
     market: &Market,
     side: OrderSide,
@@ -299,7 +301,7 @@ fn order_builder_fee(
             if spot_buy {
                 return Ok(None);
             }
-            match builder::resolve_default_builder_fee()? {
+            match builder::resolve_default_builder_fee(settings)? {
                 Some(default) => default,
                 None => return Ok(None),
             }
@@ -322,20 +324,22 @@ fn order_builder_fee(
 pub(super) async fn prepare_order(
     client: &HttpClient,
     resolver: &AssetResolver,
+    settings: &Settings,
     spec: &OrderSpec,
 ) -> Result<PreparedOrder, CliError> {
     let market = resolve_tradable_asset(client, resolver, spec).await?;
-    prepare_order_in(client, &market, spec).await
+    validate_order_for_market(spec, &market)?;
+    let builder = order_builder_fee(settings, &spec.builder, &market, spec.side)?;
+    prepare_order_in(client, &market, spec, builder).await
 }
 
-/// Plan one order on an already resolved market.
+/// Plan one order, already validated for `market`, with its builder fee.
 async fn prepare_order_in(
     client: &HttpClient,
     market: &Market,
     spec: &OrderSpec,
+    builder: Option<OrderBuilderFee>,
 ) -> Result<PreparedOrder, CliError> {
-    validate_order_for_market(spec, market)?;
-    let builder = order_builder_fee(&spec.builder, market, spec.side)?;
     let Venue {
         coin,
         index,
@@ -450,9 +454,10 @@ async fn prepare_order_in(
 pub(super) async fn prepare_create_order(
     client: &HttpClient,
     resolver: &AssetResolver,
+    settings: &Settings,
     spec: &OrderSpec,
 ) -> Result<CreateOrderSubmission, CliError> {
-    let parent = prepare_order(client, resolver, spec).await?;
+    let parent = prepare_order(client, resolver, settings, spec).await?;
     match &spec.tpsl {
         Some(tpsl) => {
             let batch = prepare_normal_tpsl_batch(&parent, tpsl)?;
@@ -469,9 +474,10 @@ pub(super) async fn prepare_create_order(
 pub(super) async fn prepare_create_order_plan(
     client: &HttpClient,
     resolver: &AssetResolver,
+    settings: &Settings,
     args: &CreateArgs,
 ) -> Result<CreateOrderSubmission, CliError> {
-    prepare_create_order(client, resolver, &OrderSpec::from_create(args)?).await
+    prepare_create_order(client, resolver, settings, &OrderSpec::from_create(args)?).await
 }
 
 pub(super) async fn prepare_scale_batch(
@@ -559,7 +565,8 @@ async fn prepare_order_batch(
             let market = resolve_tradable_asset(client, resolver, spec).await?;
             markets.insert(key.clone(), market);
         }
-        let order = prepare_order_in(client, &markets[&key], spec).await?;
+        validate_order_for_market(spec, &markets[&key])?;
+        let order = prepare_order_in(client, &markets[&key], spec, None).await?;
         legs.push(PreparedOrderLeg { leg_index, order });
     }
     let batch = BatchOrder {

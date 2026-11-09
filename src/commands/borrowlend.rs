@@ -772,8 +772,7 @@ async fn borrowlend_action(
         );
     }
 
-    let resolved = inv.resolve_signer()?;
-    let signer = resolved.selected_signer();
+    let signer = inv.resolve_signer()?;
     action(inv, &signer, operation, args, token).await
 }
 

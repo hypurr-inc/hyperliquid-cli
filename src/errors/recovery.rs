@@ -1,6 +1,7 @@
 //! Commands to run after an error.
 
 use super::CliError;
+use crate::settings::env;
 
 /// A recovery command in the `next` list of an error envelope. `when` states
 /// the condition for running it, such as human approval.
@@ -41,10 +42,11 @@ impl CliError {
                     NextCommand::new("hyperliquid setup"),
                     NextCommand::new("hyperliquid wallet login"),
                 ],
-                note: Some(
-                    "Or set HYPERLIQUID_PRIVATE_KEY, or BANKR_API_KEY with --bankr, for this run."
-                        .into(),
-                ),
+                note: Some(format!(
+                    "Or set {}, or {} with --bankr, for this run.",
+                    env::PRIVATE_KEY,
+                    env::BANKR_API_KEY
+                )),
             }),
             Self::UnknownOutcome(_) => Some(Recovery {
                 instruction: "Check open orders and recent fills:".into(),

@@ -24,7 +24,6 @@ use crate::errors::{
 };
 use crate::network::Network;
 use crate::response_sanitization::Untrusted;
-use crate::settings::Settings;
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -114,7 +113,7 @@ pub struct ApiClient {
     sdk: HttpClient,
     http: OnceLock<Result<reqwest::Client, String>>,
     timeout: Duration,
-    announce_retries: bool,
+    on_retry: Option<fn()>,
 }
 
 impl std::fmt::Debug for ApiClient {
@@ -128,13 +127,8 @@ impl std::fmt::Debug for ApiClient {
 
 impl ApiClient {
     /// A client for `network`, pointed at `api_override` when given.
-    /// `announce_retries` lets a person at a terminal see that a read is being retried.
     #[must_use]
-    pub fn new(
-        network: Network,
-        api_override: Option<reqwest::Url>,
-        announce_retries: bool,
-    ) -> Self {
+    pub fn new(network: Network, api_override: Option<reqwest::Url>) -> Self {
         let has_override = api_override.is_some();
         let (base_url, label) = match &api_override {
             Some(url) => (url.clone(), url.to_string()),
@@ -148,21 +142,16 @@ impl ApiClient {
             sdk: network.http_client(api_override),
             http: OnceLock::new(),
             timeout: DEFAULT_API_TIMEOUT,
-            announce_retries,
+            on_retry: None,
         }
     }
 
-    /// A client for `network` with the endpoint override from `settings`.
-    pub fn from_settings(
-        settings: &Settings,
-        network: Network,
-        announce_retries: bool,
-    ) -> Result<Self, CliError> {
-        Ok(Self::new(
-            network,
-            settings.api_base_url_override(network)?,
-            announce_retries,
-        ))
+    /// Call `observer` once when a read is first retried, so a caller can tell
+    /// a person the wait is deliberate.
+    #[must_use]
+    pub fn on_retry(mut self, observer: fn()) -> Self {
+        self.on_retry = Some(observer);
+        self
     }
 
     #[cfg(test)]
@@ -344,8 +333,8 @@ impl ApiClient {
             }
             if !announced {
                 announced = true;
-                if self.announce_retries {
-                    eprintln!("Retrying automatically…");
+                if let Some(observer) = self.on_retry {
+                    observer();
                 }
             }
             tokio::time::sleep(delay).await;
@@ -458,15 +447,12 @@ fn decode_json<T: DeserializeOwned>(body: &str, context: &'static str) -> Result
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn client_for(uri: &str) -> ApiClient {
-        ApiClient::new(
-            Network::Mainnet,
-            Some(reqwest::Url::parse(uri).unwrap()),
-            false,
-        )
+        ApiClient::new(Network::Mainnet, Some(reqwest::Url::parse(uri).unwrap()))
     }
 
     fn reply(status: StatusCode, body: &str) -> Reply {
@@ -604,6 +590,27 @@ mod tests {
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
         assert_eq!(err.exit_code(), 12);
         assert!(matches!(err, CliError::ApiStatus { status: 503, .. }));
+    }
+
+    #[tokio::test]
+    async fn the_retry_observer_hears_of_a_retrying_read_once() {
+        static NOTICES: AtomicUsize = AtomicUsize::new(0);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/info"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let _ = client_for(&server.uri())
+            .on_retry(|| {
+                NOTICES.fetch_add(1, Ordering::SeqCst);
+            })
+            .info::<serde_json::Value>(&json!({}), "testing")
+            .await;
+
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        assert_eq!(NOTICES.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -801,7 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn probe_without_an_override_sends_nothing() {
-        ApiClient::new(Network::Testnet, None, false)
+        ApiClient::new(Network::Testnet, None)
             .probe_override()
             .await
             .expect("nothing to probe");

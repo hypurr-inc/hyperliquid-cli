@@ -68,12 +68,13 @@ pub fn validate_bracket_args(args: &BracketArgs) -> Result<(), CliError> {
 pub async fn bracket_dry_run_plan(
     client: &hypersdk::hypercore::HttpClient,
     resolver: &crate::assets::AssetResolver,
+    settings: &crate::settings::Settings,
     args: &BracketArgs,
 ) -> Result<serde_json::Value, CliError> {
     validate_bracket_args(args)?;
     let entry_args = entry_create_args(args, None);
     let entry = create_dry_run_preview(
-        &prepare_create_order_plan(client, resolver, &entry_args).await?,
+        &prepare_create_order_plan(client, resolver, settings, &entry_args).await?,
         &entry_args,
     )?;
     let perp = resolve_perp(client, resolver, args.dex.as_deref(), &args.coin).await?;
@@ -149,9 +150,13 @@ pub async fn bracket(
     let started = Instant::now();
     let cloid = super::generated_cloid(1)?;
     let entry_args = entry_create_args(args, Some(cloid));
-    let plan =
-        prepare_create_order_plan(context.submission.api.sdk(), context.resolver, &entry_args)
-            .await?;
+    let plan = prepare_create_order_plan(
+        context.submission.api.sdk(),
+        context.resolver,
+        context.submission.inv.settings(),
+        &entry_args,
+    )
+    .await?;
     let prepared = match plan {
         CreateOrderSubmission::Single(prepared) => prepared,
         CreateOrderSubmission::NormalTpsl(_) => {

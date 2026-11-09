@@ -15,11 +15,13 @@
 - The watch view refreshes only on its timer, a socket message, or `r`; other keys no longer trigger a refresh.
 - Bankr now refuses every user-signed action it does not cover (withdrawals, spot/asset sends, staking, builder approvals, `setAbstraction`) with exit `13` before a request is sent, on the typed-data path as well as the L1 path; only trading actions and spot-to-perp USDC moves reach Bankr, as documented.
 - A signature whose recovery byte names no public key is refused as `<provider>_malformed_response` (exit `10`) instead of panicking, for Bankr and OWS alike.
-- `--keystore` is no longer overridden by an ambient `HYPERLIQUID_PRIVATE_KEY` or a legacy config key; a private key given on the command line still wins.
+- `--keystore` is no longer overridden by an ambient `HYPERLIQUID_PRIVATE_KEY` or a legacy config key, and `--private-key` together with `--keystore` is a usage error (exit `2`) instead of silently dropping the keystore.
 - Account selectors fail with the vault's own error when the vault can't be read or a name is ambiguous, for data lookups (`--user`, `--account`) as for signing, instead of reporting the account as not found. An address selector now matches a pre-vault stored account in any letter case, as it does a vault wallet.
 - `HYPERLIQUID_API_BASE_URL` (and its network variants) accept an IPv6 loopback host such as `http://[::1]:8080`, like the Bankr endpoint does.
 - `wallet show --account <vault wallet>` describes the wallet by name like the default wallet does. `account ls` no longer prints the always-empty Master, Agent Name and Expires At columns (JSON is unchanged).
 - `Config keys written` in wallet and setup receipts lists the keys the command changed, read from the config diff, and the root help lists every environment variable the CLI reads.
+- A live run refuses a signer that cannot sign the command before any prompt or network lookup, with the same exit `13` error as before: Bankr and address-only `--ows-signer` for user-signed commands (`transfer send|spot-send|send-asset|withdraw`, `staking`, `builder approve`, `account abstraction set`, `api-wallet create|approve|revoke`), and an address-only `--ows-signer` for every signing command, not only orders and `prio bid`. `--dry-run` still previews with any signer.
+- `hyperliquid schema` and the registry report `bankr_signer` (`supported`, `unsupported`, `not_required`) in each command's `x-hyperliquid` policy, so Bankr support is readable without running the command.
 
 ## 0.17.0 - 2026-11-09
 

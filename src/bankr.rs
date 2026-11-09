@@ -31,8 +31,8 @@ use crate::config::BankrLogin;
 use crate::errors::{CliError, network_error};
 use crate::response_sanitization::Untrusted;
 use crate::settings::{EnvSource, Settings, env, is_loopback_url};
-use crate::signing::Payload;
 use crate::signing::signature::Provider;
+use crate::signing::{Payload, Signs, USER_SIGNED_PREFIX};
 
 /// Bankr's public API, used when no other URL is configured.
 pub const DEFAULT_API_URL: &str = "https://api.bankr.bot";
@@ -169,12 +169,32 @@ impl BankrTypedData {
     }
 }
 
-/// The user-signed actions Bankr signs, by EIP-712 primary type: a spot↔perp
+/// The user-signed actions Bankr signs, by EIP-712 struct name: a spot↔perp
 /// USDC move. Every other user-signed action (withdrawals, sends, staking,
 /// approvals, multisig) is refused before a request is sent.
-const SIGNED_USER_ACTIONS: &[&str] = &["HyperliquidTransaction:UsdClassTransfer"];
+const SIGNED_USER_ACTIONS: &[&str] = &["UsdClassTransfer"];
 
 impl BankrTypedData {
+    /// Whether Bankr signs `signs`: trading actions and the user-signed actions
+    /// in [`SIGNED_USER_ACTIONS`].
+    #[must_use]
+    pub fn covers(signs: Signs) -> bool {
+        match signs {
+            Signs::L1Action => true,
+            Signs::UserSigned(name) => SIGNED_USER_ACTIONS.contains(&name),
+            Signs::Digest => false,
+        }
+    }
+
+    /// The refusal for a signature Bankr does not cover, before a request is sent.
+    pub fn ensure_covers(signs: Signs) -> Result<(), CliError> {
+        if Self::covers(signs) {
+            Ok(())
+        } else {
+            Err(not_covered())
+        }
+    }
+
     /// The document Bankr is asked to sign for `payload`, or the refusal for a
     /// payload it does not cover.
     pub(crate) fn for_payload(payload: &Payload<'_>) -> Result<Self, CliError> {
@@ -184,16 +204,23 @@ impl BankrTypedData {
                 connection_id,
             } => Ok(agent_typed_data(*chain, *connection_id)),
             Payload::UserSigned(typed_data)
-                if SIGNED_USER_ACTIONS.contains(&typed_data.primary_type.as_str()) =>
+                if typed_data
+                    .primary_type
+                    .strip_prefix(USER_SIGNED_PREFIX)
+                    .is_some_and(|name| SIGNED_USER_ACTIONS.contains(&name)) =>
             {
                 Self::from_typed(typed_data)
             }
-            Payload::UserSigned(_) | Payload::Digest(_) => Err(CliError::Unsupported(
-                "Bankr signs trading actions (orders, cancels, modifies, leverage, margin, trailing stops, TWAP, vault and subaccount actions) and spot-to-perp USDC moves; this action needs a user-signed payload Bankr does not cover, so use a local key or an OWS wallet for it"
-                    .to_string(),
-            )),
+            Payload::UserSigned(_) | Payload::Digest(_) => Err(not_covered()),
         }
     }
+}
+
+fn not_covered() -> CliError {
+    CliError::Unsupported(
+        "Bankr signs trading actions (orders, cancels, modifies, leverage, margin, trailing stops, TWAP, vault and subaccount actions) and spot-to-perp USDC moves; this action needs a user-signed payload Bankr does not cover, so use a local key or an OWS wallet for it"
+            .to_string(),
+    )
 }
 
 /// A Bankr hosted wallet: the key stays with Bankr and every signature is an

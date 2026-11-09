@@ -16,7 +16,7 @@ use crate::errors::from_sdk;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
 use crate::output::{OutputFormat, TableData};
-use crate::signing::SelectedSigner;
+use crate::signing::{SelectedSigner, Signs};
 
 const MAX_AGENT_EXPIRATION_MS: u64 = 180 * 24 * 60 * 60 * 1000;
 const REVOKE_REPLACEMENT_EXPIRATION_MS: u64 = 60 * 1000;
@@ -605,6 +605,7 @@ impl CliCommand for ApiWalletCreate {
         "Generate or approve an API wallet",
         "Generate or approve a Hyperliquid API/agent wallet. When the CLI generates a local agent keypair, it prints the private key exactly once before approval.",
     )
+    .signs(Signs::Digest)
     .long_about("Generate or approve an API wallet.\n\
 \n\
 By default this command generates a new local API wallet keypair, signs an approveAgent action for that address with the selected master account, and prints the generated private key exactly once unless command is running in dry-run.")
@@ -636,6 +637,7 @@ impl CliCommand for ApiWalletApprove {
         "Approve an existing or generated API wallet address",
         "Approve an existing or generated API/agent wallet address for the selected master account.",
     )
+    .signs(Signs::Digest)
     .args(&[
         arg("name").describe("Optional API wallet name."),
         arg("expires_in").kind(InputKind::Duration).describe("Expiration duration such as 30d, 12h, or 1w. Requires name."),
@@ -675,7 +677,7 @@ impl CliCommand for ApiWalletList {
 
     async fn run(inv: &Invocation, args: &ApiWalletListArgs) -> Result<(), anyhow::Error> {
         let master_address = match args.account.as_deref() {
-            Some(account) => inv.resolve_protocol_user(account)?,
+            Some(account) => inv.resolve_account(account)?,
             None => inv.resolve_signer()?.query_address(),
         };
         list(inv, master_address).await
@@ -693,6 +695,7 @@ impl CliCommand for ApiWalletRevoke {
         "Revoke an API wallet by replacing it with a short-lived throwaway agent",
         "Revoke a named API wallet by replacing it with a short-lived throwaway agent.",
     )
+    .signs(Signs::Digest)
     .args(&[arg("name")
         .describe("Named API wallet to revoke.")
         .resource_id("API wallet name")]);
@@ -713,7 +716,7 @@ fn api_wallet_approval_signer(inv: &Invocation) -> Result<Option<SelectedSigner>
     if inv.dry_run() {
         return Ok(None);
     }
-    let signer = inv.resolve_signer()?.selected_signer();
+    let signer = inv.resolve_signer()?;
     if signer.is_stored_agent() {
         return Err(CliError::Unsupported(
             "approveAgent must be signed by the master account; select the master wallet, not a stored API wallet"
@@ -721,7 +724,6 @@ fn api_wallet_approval_signer(inv: &Invocation) -> Result<Option<SelectedSigner>
         )
         .into());
     }
-    signer.ensure_can_sign_user_actions()?;
     Ok(Some(signer))
 }
 

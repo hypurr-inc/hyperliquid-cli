@@ -27,7 +27,7 @@ use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::mode::Mode;
 use crate::output::{JsonValueOutput, TableData};
-use crate::signing::SelectedSigner;
+use crate::signing::{SelectedSigner, Signs};
 use crate::wire::InfoRequest;
 
 sol! {
@@ -1348,6 +1348,7 @@ impl CliCommand for AccountAbstractionSet {
         "Set abstraction mode for the selected signer",
         "Set account abstraction for the signer (userSetAbstraction). Use --dry-run to preview; confirm or pass -y for live submit.",
     )
+    .signs(Signs::user_signed::<UserSetAbstraction>())
     .risk(Risk::AccountState)
     .prompt()
     .args(&[
@@ -1374,14 +1375,14 @@ impl CliCommand for AccountAbstractionSet {
             );
         }
         let resolved = inv.resolve_signer()?;
-        if resolved.query_address() != resolved.address() {
+        if resolved.is_stored_agent() {
             return Err(CliError::Unsupported(
                 "userSetAbstraction must be signed by the master account; select the master wallet, not a stored API wallet"
                     .to_string(),
             )
             .into());
         }
-        set_abstraction(inv, &resolved.selected_signer(), args).await
+        set_abstraction(inv, &resolved, args).await
     }
 }
 

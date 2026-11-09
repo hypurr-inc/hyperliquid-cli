@@ -13,6 +13,7 @@ use crate::command_registry::{ArgType, CommandContract, CommandRegistry};
 use crate::command_spec::YES_ARG;
 use crate::commands::schema::schema_query;
 use crate::output::TableData;
+use crate::settings::{EnvSource, env};
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -43,12 +44,12 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
-pub fn run_stdio_server() -> Result<(), anyhow::Error> {
-    let allow_unsafe = crate::output::terminal::env_flag(crate::settings::env::MCP_ALLOW_UNSAFE)
+pub fn run_stdio_server(source: &EnvSource) -> Result<(), anyhow::Error> {
+    let allow_unsafe = crate::output::terminal::env_flag(source, env::MCP_ALLOW_UNSAFE)
         == crate::output::terminal::EnvFlag::On;
     let exe = std::env::current_exe()?;
-    let deadline = std::env::var(crate::settings::env::MCP_TIMEOUT_MS)
-        .ok()
+    let deadline = source
+        .get(env::MCP_TIMEOUT_MS)
         .and_then(|s| s.parse::<u64>().ok())
         .filter(|n| *n > 0)
         .map(std::time::Duration::from_millis)

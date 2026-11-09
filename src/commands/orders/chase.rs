@@ -282,6 +282,7 @@ async fn place_chase_quote(
     let plan = prepare_create_order_plan(
         context.submission.api.sdk(),
         context.resolver,
+        context.submission.inv.settings(),
         &chase_create_args(args, size, price, cloid),
     )
     .await?;

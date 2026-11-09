@@ -7,6 +7,8 @@
 
 use std::io::IsTerminal;
 
+use crate::settings::{EnvSource, env as settings_env};
+
 #[derive(Clone, Copy)]
 enum Stream {
     Stdin,
@@ -108,22 +110,8 @@ pub fn parse_flag(raw: &str) -> EnvFlag {
 }
 
 #[must_use]
-pub fn env_flag(name: &str) -> EnvFlag {
-    std::env::var(name).map_or(EnvFlag::Unset, |raw| parse_flag(&raw))
-}
-
-/// `HYPERLIQUID_AGENT` is set to a true value. An invalid value counts as off;
-/// startup validation rejects it before any command runs.
-#[must_use]
-pub fn agent_env() -> bool {
-    env_flag("HYPERLIQUID_AGENT") == EnvFlag::On
-}
-
-/// The process runs under CI: `CI` is set to anything but an explicit off
-/// value (see [`EnvFlag::on_unless_off`]).
-#[must_use]
-pub fn ci_env() -> bool {
-    env_flag("CI").on_unless_off()
+pub fn env_flag(env: &EnvSource, name: &str) -> EnvFlag {
+    env.get(name).map_or(EnvFlag::Unset, |raw| parse_flag(&raw))
 }
 
 /// Terminal and environment facts about this run, probed once at startup and
@@ -140,12 +128,15 @@ pub struct OutputEnv {
 
 impl OutputEnv {
     #[must_use]
-    pub fn probe(explicit_format: bool) -> Self {
+    pub fn probe(explicit_format: bool, env: &EnvSource) -> Self {
         Self {
             stdout_tty: stdout_is_terminal(),
             stderr_tty: stderr_is_terminal(),
-            agent: agent_env(),
-            ci: ci_env(),
+            // An invalid `HYPERLIQUID_AGENT` counts as off here;
+            // [`crate::mode::validate_env`] rejects it.
+            agent: env_flag(env, settings_env::AGENT) == EnvFlag::On,
+            // `CI` is set to anything but an explicit off value.
+            ci: env_flag(env, settings_env::CI).on_unless_off(),
             explicit_format,
         }
     }

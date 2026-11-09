@@ -27,10 +27,9 @@ pub fn config_file(env: &EnvSource) -> Option<PathBuf> {
 }
 
 /// Cached release info for the update notice. Lives beside the config file.
-/// Read before any run's settings exist, so it follows the process environment.
 #[must_use]
-pub fn version_cache_file() -> Option<PathBuf> {
-    config_dir(&EnvSource::Process).map(|dir| dir.join("version.json"))
+pub fn version_cache_file(env: &EnvSource) -> Option<PathBuf> {
+    config_dir(env).map(|dir| dir.join("version.json"))
 }
 
 /// File where the most recent error envelope is recorded for `report-incident`.

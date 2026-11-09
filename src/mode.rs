@@ -9,10 +9,7 @@
 
 use crate::errors::CliError;
 use crate::output::terminal::{EnvFlag, OutputEnv, env_flag};
-use crate::settings::env;
-
-/// `HYPERLIQUID_AGENT`; `output::terminal` reads the same name.
-const AGENT_ENV: &str = "HYPERLIQUID_AGENT";
+use crate::settings::{EnvSource, env};
 
 /// What decides whether this invocation may prompt, resolved once in `main`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -70,9 +67,9 @@ impl Mode {
         } else if self.machine_format {
             Some("JSON output")
         } else if self.agent {
-            Some(AGENT_ENV)
+            Some(env::AGENT)
         } else if self.ci {
-            Some("CI")
+            Some(env::CI)
         } else {
             None
         }
@@ -114,8 +111,8 @@ impl Mode {
 /// Unset or empty means `None`. Any value outside `1|true|yes|on|0|false|no|off`
 /// (case-insensitive) is a configuration error naming the variable, so a typo
 /// never silently falls back to the default.
-pub fn env_bool(name: &str) -> Result<Option<bool>, CliError> {
-    flag_value(name, env_flag(name))
+fn env_bool(env: &EnvSource, name: &str) -> Result<Option<bool>, CliError> {
+    flag_value(name, env_flag(env, name))
 }
 
 fn flag_value(name: &str, flag: EnvFlag) -> Result<Option<bool>, CliError> {
@@ -130,9 +127,9 @@ fn flag_value(name: &str, flag: EnvFlag) -> Result<Option<bool>, CliError> {
 }
 
 /// Validate every boolean `HYPERLIQUID_*` mode variable once at startup.
-pub fn validate_env() -> Result<(), CliError> {
-    env_bool(AGENT_ENV)?;
-    env_bool(env::NO_UPDATE_CHECK)?;
+pub fn validate_env(source: &EnvSource) -> Result<(), CliError> {
+    env_bool(source, env::AGENT)?;
+    env_bool(source, env::NO_UPDATE_CHECK)?;
     Ok(())
 }
 
@@ -196,7 +193,7 @@ mod tests {
             ..Mode::default()
         };
         assert!(!ci.can_prompt());
-        assert_eq!(ci.prompt_blocker(), Some("CI"));
+        assert_eq!(ci.prompt_blocker(), Some(env::CI));
     }
 
     fn terminal() -> Mode {

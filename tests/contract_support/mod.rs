@@ -141,6 +141,7 @@ pub fn registry_fixtures() -> Vec<(&'static str, Value)> {
                 "raw_payload": command.raw_payload,
                 "confirmation": command.confirmation,
                 "ows_signer": command.ows_signer,
+                "bankr_signer": command.bankr_signer,
             })
         })
         .collect::<Vec<_>>();

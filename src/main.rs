@@ -2,12 +2,14 @@ use clap::Parser;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use hyperliquid_cli::auth::SignerFlags;
 use hyperliquid_cli::command_spec::CliCommand;
 use hyperliquid_cli::commands::update::Update;
 use hyperliquid_cli::errors;
-use hyperliquid_cli::invocation::{Invocation, InvocationFlags, SignerFlags};
+use hyperliquid_cli::invocation::{Invocation, InvocationFlags};
 use hyperliquid_cli::mode::Mode;
 use hyperliquid_cli::output;
+use hyperliquid_cli::settings::Settings;
 
 #[cfg(test)]
 mod cli_contract_tests;
@@ -16,7 +18,7 @@ mod cli_shell;
 
 use cli_shell::{
     PANIC_COMMAND, ParsedCli, exit_for_clap_error, install_panic_hook, print_help_to_stdout,
-    resolve_output_format, try_parse_cli_from,
+    startup, try_parse_cli_from,
 };
 
 const GLOBAL_OPTIONS: &str = "Global Options";
@@ -68,7 +70,7 @@ struct Cli {
     private_key: Option<String>,
 
     /// Foundry-compatible keystore file to decrypt for signing
-    #[arg(long, global = true, help_heading = GLOBAL_OPTIONS)]
+    #[arg(long, global = true, help_heading = GLOBAL_OPTIONS, conflicts_with = "private_key")]
     keystore: Option<PathBuf>,
 
     /// Password for --keystore. Prefer HYPERLIQUID_KEYSTORE_PASSWORD: command-line options appear in process lists
@@ -156,15 +158,16 @@ fn error_output(format: output::OutputFormat) -> errors::ErrorOutput {
 async fn main() {
     install_panic_hook();
     let raw_args: Vec<OsString> = std::env::args_os().collect();
+    let settings = Settings::from_process();
     let ParsedCli {
         cli,
         selected,
         requested_format,
     } = match try_parse_cli_from(&raw_args) {
         Ok(parsed) => parsed,
-        Err(err) => exit_for_clap_error(err, &raw_args),
+        Err(err) => exit_for_clap_error(err, &raw_args, settings.env()),
     };
-    output::colors::init(cli.no_color);
+    output::colors::init(cli.no_color, settings.env());
     if let Some(selected) = &selected {
         let path: Vec<String> = selected
             .entry
@@ -176,15 +179,10 @@ async fn main() {
         let _ = PANIC_COMMAND.set(path.join(" "));
         errors::set_command_path(&path);
     }
-    let env = output::terminal::OutputEnv::probe(requested_format.is_some());
-    // Nothing can report an unreadable HYPERLIQUID_FORMAT in that format.
-    let format = match resolve_output_format(requested_format, &env) {
-        Ok(format) => format,
-        Err(err) => errors::exit_with_error(err, errors::ErrorOutput::Json),
+    let (env, format) = match startup(requested_format, settings.env()) {
+        Ok(started) => started,
+        Err((err, format)) => errors::exit_with_error(err, error_output(format)),
     };
-    if let Err(err) = hyperliquid_cli::mode::validate_env() {
-        errors::exit_with_error(err, error_output(format));
-    }
     let session = output::Session::new(
         format,
         output::JsonRenderOptions::from_cli(
@@ -222,11 +220,12 @@ async fn main() {
     let update_check_handle = hyperliquid_cli::update::maybe_start_update_check(
         &mode,
         no_update_check || is_update_command,
+        settings.env(),
     );
 
     let result = match selected {
         Some(selected) => {
-            let inv = Invocation::new(session, mode, flags, selected.entry.spec);
+            let inv = Invocation::new(settings, session, mode, flags, selected.entry.spec);
             cli_runtime::run(selected, inv).await
         }
         None => print_help_to_stdout(&[]),

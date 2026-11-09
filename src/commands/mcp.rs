@@ -19,7 +19,7 @@ impl CliCommand for Mcp {
     .dry_run(DryRunPolicy::NotSupported)
     .local();
 
-    async fn run(_inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
-        crate::mcp::run_stdio_server()
+    async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
+        crate::mcp::run_stdio_server(inv.settings().env())
     }
 }

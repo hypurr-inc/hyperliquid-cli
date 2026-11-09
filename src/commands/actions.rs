@@ -12,9 +12,7 @@ use serde::Serialize;
 use crate::errors::{self, CliError};
 use crate::http_api::ApiClient;
 use crate::response_sanitization::Untrusted;
-use crate::signing::SelectedSigner;
-
-const HYPERLIQUID_EIP_PREFIX: &str = "HyperliquidTransaction:";
+use crate::signing::{SelectedSigner, USER_SIGNED_PREFIX};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,12 +148,12 @@ fn typed_data<T: SolStruct>(message: &impl Serialize, chain: Chain) -> TypedData
 
     let mut types = Eip712Types::from(&resolver);
     let primary_type = types.remove(T::NAME).expect("missing primary EIP-712 type");
-    types.insert(format!("{HYPERLIQUID_EIP_PREFIX}{}", T::NAME), primary_type);
+    types.insert(format!("{USER_SIGNED_PREFIX}{}", T::NAME), primary_type);
 
     TypedData {
         domain: chain.domain(),
         resolver: Resolver::from(types),
-        primary_type: format!("{HYPERLIQUID_EIP_PREFIX}{}", T::NAME),
+        primary_type: format!("{USER_SIGNED_PREFIX}{}", T::NAME),
         message: serde_json::to_value(message).expect("serialize typed-data message"),
     }
 }

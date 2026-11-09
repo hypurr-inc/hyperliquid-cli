@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use super::release::{InstallMethod, ReleaseClient, is_newer_version, normalize_version};
 use crate::mode::Mode;
 use crate::output::terminal;
-use crate::settings::env;
+use crate::settings::{EnvSource, env};
 
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(20 * 60 * 60);
 const NOTICE_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -32,6 +32,8 @@ struct VersionCache {
 pub struct UpdateCheck {
     cache_path: Option<PathBuf>,
     refresh: Option<tokio::task::JoinHandle<()>>,
+    /// `HYPERLIQUID_AUTO_UPDATE` was on when the check started.
+    auto_update: bool,
 }
 
 impl UpdateCheck {
@@ -39,6 +41,7 @@ impl UpdateCheck {
         Self {
             cache_path: None,
             refresh: None,
+            auto_update: false,
         }
     }
 }
@@ -55,11 +58,13 @@ struct Suppression {
 }
 
 impl Suppression {
-    fn current(mode: &Mode, disabled: bool) -> Self {
+    fn current(mode: &Mode, disabled: bool, source: &EnvSource) -> Self {
         Self {
             disabled,
-            no_update_check_env: terminal::env_flag(env::NO_UPDATE_CHECK) == terminal::EnvFlag::On,
-            no_update_notifier: std::env::var_os(env::NO_UPDATE_NOTIFIER)
+            no_update_check_env: terminal::env_flag(source, env::NO_UPDATE_CHECK)
+                == terminal::EnvFlag::On,
+            no_update_notifier: source
+                .get_os(env::NO_UPDATE_NOTIFIER)
                 .is_some_and(|value| !value.is_empty()),
             person_at_terminal: mode.person_at_terminal(),
         }
@@ -75,11 +80,13 @@ impl Suppression {
 /// `NO_UPDATE_NOTIFIER`, and non-terminal runs. When the cached release info
 /// is stale it spawns a detached background refresh. Nothing is printed here:
 /// pass the handle to [`flush_update_check`] after the command's result.
-pub fn maybe_start_update_check(mode: &Mode, disabled: bool) -> UpdateCheck {
-    start_update_check(
-        Suppression::current(mode, disabled),
-        crate::paths::version_cache_file(),
-    )
+pub fn maybe_start_update_check(mode: &Mode, disabled: bool, source: &EnvSource) -> UpdateCheck {
+    let mut check = start_update_check(
+        Suppression::current(mode, disabled, source),
+        crate::paths::version_cache_file(source),
+    );
+    check.auto_update = terminal::env_flag(source, env::AUTO_UPDATE) == terminal::EnvFlag::On;
+    check
 }
 
 fn start_update_check(suppression: Suppression, cache_path: Option<PathBuf>) -> UpdateCheck {
@@ -93,6 +100,7 @@ fn start_update_check(suppression: Suppression, cache_path: Option<PathBuf>) -> 
     UpdateCheck {
         cache_path: Some(cache_path),
         refresh,
+        auto_update: false,
     }
 }
 
@@ -110,7 +118,7 @@ async fn settle_refresh(check: &mut UpdateCheck) {
 pub async fn flush_update_check(mut check: UpdateCheck) {
     settle_refresh(&mut check).await;
     if let Some(cache_path) = check.cache_path.as_deref() {
-        if terminal::env_flag(env::AUTO_UPDATE) == terminal::EnvFlag::On {
+        if check.auto_update {
             maybe_auto_update(cache_path).await;
         } else {
             notify_if_due(cache_path);
@@ -322,7 +330,10 @@ mod tests {
             stderr_tty: true,
             ..Mode::default()
         };
-        assert!(Suppression::current(&terminal, false).person_at_terminal);
+        assert!(
+            Suppression::current(&terminal, false, &EnvSource::fixed::<&str, &str>([]))
+                .person_at_terminal
+        );
         for mode in [
             Mode {
                 machine_format: true,
@@ -345,7 +356,10 @@ mod tests {
                 ..terminal
             },
         ] {
-            assert!(!Suppression::current(&mode, false).person_at_terminal);
+            assert!(
+                !Suppression::current(&mode, false, &EnvSource::fixed::<&str, &str>([]))
+                    .person_at_terminal
+            );
         }
     }
 

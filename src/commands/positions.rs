@@ -415,7 +415,7 @@ impl CliCommand for PositionsUpdateLeverage {
         let resolved = inv.resolve_signer()?;
         actions::send_l1_action(
             inv.remote()?.api(),
-            &resolved.selected_signer(),
+            &resolved,
             Action::UpdateLeverage(UpdateLeverage {
                 asset,
                 is_cross,
@@ -490,7 +490,7 @@ impl CliCommand for PositionsUpdateMargin {
         let resolved = inv.resolve_signer()?;
         actions::send_l1_action(
             inv.remote()?.api(),
-            &resolved.selected_signer(),
+            &resolved,
             Action::UpdateIsolatedMargin(UpdateIsolatedMargin {
                 asset,
                 is_buy: true,

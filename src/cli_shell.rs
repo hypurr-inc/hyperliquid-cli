@@ -17,10 +17,10 @@ use hyperliquid_cli::command_spec::{
 use hyperliquid_cli::commands;
 use hyperliquid_cli::errors;
 use hyperliquid_cli::output;
+use hyperliquid_cli::settings::{EnvSource, env};
 
 use crate::{Cli, GLOBAL_OPTIONS};
 
-const ENV_FORMAT: &str = "HYPERLIQUID_FORMAT";
 const REPORT_URL: &str = "https://github.com/hypurr-inc/hyperliquid-cli/issues/new";
 
 pub(super) static PANIC_COMMAND: OnceLock<String> = OnceLock::new();
@@ -183,17 +183,17 @@ fn command_notes(spec: &CommandSpec, has_yes: bool) -> Option<String> {
         DryRunPolicy::NotSupported => "  Dry-run: not supported.".to_string(),
     });
     lines.push(match (spec.confirmation, has_yes) {
-        (ConfirmationPolicy::Prompt, true) => format!("  Confirmation: asks before it runs. Pass --{YES_ARG} to answer the prompt. Runs that can't prompt (JSON output, HYPERLIQUID_AGENT, CI, --non-interactive) fail without --{YES_ARG}. Use --{YES_ARG} there only after a human approves."),
-        (ConfirmationPolicy::Prompt, false) => "  Confirmation: asks before it runs. Runs that can't prompt (JSON output, HYPERLIQUID_AGENT, CI, --non-interactive) fail instead.".to_string(),
+        (ConfirmationPolicy::Prompt, true) => format!("  Confirmation: asks before it runs. Pass --{YES_ARG} to answer the prompt. Runs that can't prompt (JSON output, {}, {}, --non-interactive) fail without --{YES_ARG}. Use --{YES_ARG} there only after a human approves.", env::AGENT, env::CI),
+        (ConfirmationPolicy::Prompt, false) => format!("  Confirmation: asks before it runs. Runs that can't prompt (JSON output, {}, {}, --non-interactive) fail instead.", env::AGENT, env::CI),
         (ConfirmationPolicy::None, _) => {
             "  Confirmation: none. It runs as soon as you invoke it.".to_string()
         }
     });
     if spec.testnet_unprompted {
-        lines.push(
-            "  Testnet: on testnet (--testnet or HYPERLIQUID_NETWORK=testnet) this command doesn't prompt and runs as soon as you invoke it."
-                .to_string(),
-        );
+        lines.push(format!(
+            "  Testnet: on testnet (--testnet or {}=testnet) this command doesn't prompt and runs as soon as you invoke it.",
+            env::NETWORK
+        ));
     }
     Some(lines.join("\n"))
 }
@@ -327,10 +327,10 @@ fn offending_arg_indexes(err: &clap::Error, args: &[OsString]) -> Option<Vec<usi
 
 /// Output format for a failed parse. It cannot report an unreadable
 /// `HYPERLIQUID_FORMAT` in the format that variable names, so it reports JSON.
-fn error_format(matches: Option<&ArgMatches>) -> output::OutputFormat {
+fn error_format(matches: Option<&ArgMatches>, source: &EnvSource) -> output::OutputFormat {
     let requested = matches.and_then(requested_format);
-    let env = output::terminal::OutputEnv::probe(requested.is_some());
-    resolve_output_format(requested, &env).unwrap_or(output::OutputFormat::Json)
+    let probed = output::terminal::OutputEnv::probe(requested.is_some(), source);
+    resolve_output_format(requested, &probed, source).unwrap_or(output::OutputFormat::Json)
 }
 
 /// Keep only clap's best suggestion. clap lists the closest match last.
@@ -374,19 +374,26 @@ fn usage_error_text(mut err: clap::Error, path: &[String], color: bool) -> Strin
 
 /// Print what clap reported and exit. Help and version are successes on
 /// stdout; everything else is a usage error (exit 2).
-pub(super) fn exit_for_clap_error(err: clap::Error, raw_args: &[OsString]) -> ! {
+pub(super) fn exit_for_clap_error(
+    err: clap::Error,
+    raw_args: &[OsString],
+    source: &EnvSource,
+) -> ! {
     use clap::error::ErrorKind;
 
     let lenient = lenient_matches(raw_args);
     // A partial parse may not have applied flag defaults, so read the flag fallibly.
-    output::colors::init(lenient.as_ref().is_some_and(|matches| {
-        matches
-            .try_get_one::<bool>("no_color")
-            .ok()
-            .flatten()
-            .copied()
-            .unwrap_or(false)
-    }));
+    output::colors::init(
+        lenient.as_ref().is_some_and(|matches| {
+            matches
+                .try_get_one::<bool>("no_color")
+                .ok()
+                .flatten()
+                .copied()
+                .unwrap_or(false)
+        }),
+        source,
+    );
     let path = lenient
         .as_ref()
         .and_then(command_path_from_matches)
@@ -401,7 +408,7 @@ pub(super) fn exit_for_clap_error(err: clap::Error, raw_args: &[OsString]) -> ! 
         }
         ErrorKind::DisplayVersion => {
             let version = env!("CARGO_PKG_VERSION");
-            let text = if error_format(lenient.as_ref()) == output::OutputFormat::Json {
+            let text = if error_format(lenient.as_ref(), source) == output::OutputFormat::Json {
                 format!("{}\n", serde_json::json!({ "version": version }))
             } else {
                 format!("hyperliquid {version}\n")
@@ -410,7 +417,7 @@ pub(super) fn exit_for_clap_error(err: clap::Error, raw_args: &[OsString]) -> ! 
         }
         _ => {
             let exit_code = err.exit_code();
-            if error_format(lenient.as_ref()) == output::OutputFormat::Json {
+            if error_format(lenient.as_ref(), source) == output::OutputFormat::Json {
                 let text = usage_error_text(err, &path, false);
                 exit_after_stdout_with_code(
                     &format!(
@@ -474,8 +481,8 @@ pub(super) fn install_panic_hook() {
 // ── Output format resolution ────────────────────────────────────────────
 
 /// `HYPERLIQUID_FORMAT`, when set to a non-empty value.
-fn env_output_format() -> Option<Result<output::OutputFormat, errors::CliError>> {
-    let raw = std::env::var(ENV_FORMAT).ok()?;
+fn env_output_format(source: &EnvSource) -> Option<Result<output::OutputFormat, errors::CliError>> {
+    let raw = source.get(env::FORMAT)?;
     if raw.trim().is_empty() {
         return None;
     }
@@ -498,20 +505,41 @@ pub(super) fn requested_format(matches: &ArgMatches) -> Option<output::OutputFor
 /// The one precedence rule for the output format: what the command line
 /// requested, then `HYPERLIQUID_FORMAT`, then JSON for agents and non-terminal
 /// stdout, then the default. An unreadable `HYPERLIQUID_FORMAT` is the only error.
-pub(super) fn resolve_output_format(
+fn resolve_output_format(
     requested: Option<output::OutputFormat>,
-    env: &output::terminal::OutputEnv,
+    probed: &output::terminal::OutputEnv,
+    source: &EnvSource,
 ) -> Result<output::OutputFormat, errors::CliError> {
     if let Some(format) = requested {
         return Ok(format);
     }
-    if let Some(format) = env_output_format() {
+    if let Some(format) = env_output_format(source) {
         return format;
     }
-    if env.agent || !env.stdout_tty {
+    if probed.agent || !probed.stdout_tty {
         return Ok(output::OutputFormat::Json);
     }
     Ok(output::OutputFormat::default())
+}
+
+/// What the environment decides before any command runs, and the one order it
+/// is read in: the output format first, because it names the format every later
+/// error is reported in, then the strict boolean variables, which are reported
+/// in that format. An unreadable `HYPERLIQUID_FORMAT` cannot be reported in the
+/// format it names, so it is reported as JSON. The error comes with the format
+/// to report it in.
+pub(super) fn startup(
+    requested: Option<output::OutputFormat>,
+    source: &EnvSource,
+) -> Result<
+    (output::terminal::OutputEnv, output::OutputFormat),
+    (errors::CliError, output::OutputFormat),
+> {
+    let probed = output::terminal::OutputEnv::probe(requested.is_some(), source);
+    let format = resolve_output_format(requested, &probed, source)
+        .map_err(|err| (err, output::OutputFormat::Json))?;
+    hyperliquid_cli::mode::validate_env(source).map_err(|err| (err, format))?;
+    Ok((probed, format))
 }
 
 fn parse_env_output_format(raw: &str) -> Result<output::OutputFormat, errors::CliError> {
@@ -520,7 +548,8 @@ fn parse_env_output_format(raw: &str) -> Result<output::OutputFormat, errors::Cl
         "table" => Ok(output::OutputFormat::Table),
         "json" => Ok(output::OutputFormat::Json),
         other => Err(errors::CliError::Configuration(format!(
-            "{ENV_FORMAT} must be one of pretty, table, or json; got '{other}'"
+            "{} must be one of pretty, table, or json; got '{other}'",
+            env::FORMAT
         ))),
     }
 }
@@ -727,22 +756,67 @@ mod tests {
             ..output::terminal::OutputEnv::default()
         };
         assert_eq!(
-            resolve_output_format(Some(output::OutputFormat::Table), &piped_agent).unwrap(),
+            resolve_output_format(
+                Some(output::OutputFormat::Table),
+                &piped_agent,
+                &EnvSource::fixed([(env::FORMAT, "json")])
+            )
+            .unwrap(),
             output::OutputFormat::Table
         );
     }
 
     #[test]
+    fn startup_reports_an_unreadable_format_variable_as_json() {
+        let source = EnvSource::fixed([(env::FORMAT, "yaml"), (env::AGENT, "banana")]);
+        let (err, format) = startup(None, &source).unwrap_err();
+        assert!(err.to_string().contains(env::FORMAT), "{err}");
+        assert_eq!(format, output::OutputFormat::Json);
+    }
+
+    #[test]
+    fn startup_reports_an_unreadable_mode_variable_in_the_resolved_format() {
+        for name in [env::AGENT, env::NO_UPDATE_CHECK] {
+            let source = EnvSource::fixed([(name, "banana")]);
+            let (err, format) = startup(Some(output::OutputFormat::Table), &source).unwrap_err();
+            assert!(err.to_string().contains(name), "{err}");
+            assert_eq!(format, output::OutputFormat::Table);
+        }
+    }
+
+    #[test]
+    fn startup_resolves_the_format_from_the_environment_after_the_command_line() {
+        let source = EnvSource::fixed([(env::FORMAT, "table")]);
+        let (_, format) = startup(None, &source).unwrap();
+        assert_eq!(format, output::OutputFormat::Table);
+        let (_, format) = startup(Some(output::OutputFormat::Pretty), &source).unwrap();
+        assert_eq!(format, output::OutputFormat::Pretty);
+    }
+
+    #[test]
     fn failed_parse_still_reads_explicit_format() {
+        let source = &EnvSource::fixed::<&str, &str>([]);
         let args = |items: &[&str]| items.iter().map(OsString::from).collect::<Vec<_>>();
         let lenient = lenient_matches(&args(&["hyperliquid", "--format=pretty", "--bogus"]));
-        assert_eq!(error_format(lenient.as_ref()), output::OutputFormat::Pretty);
+        assert_eq!(
+            error_format(lenient.as_ref(), source),
+            output::OutputFormat::Pretty
+        );
         let lenient = lenient_matches(&args(&["hyperliquid", "-f=table", "--bogus"]));
-        assert_eq!(error_format(lenient.as_ref()), output::OutputFormat::Table);
+        assert_eq!(
+            error_format(lenient.as_ref(), source),
+            output::OutputFormat::Table
+        );
         let lenient = lenient_matches(&args(&["hyperliquid", "-fjson", "--bogus"]));
-        assert_eq!(error_format(lenient.as_ref()), output::OutputFormat::Json);
+        assert_eq!(
+            error_format(lenient.as_ref(), source),
+            output::OutputFormat::Json
+        );
         let lenient = lenient_matches(&args(&["hyperliquid", "--format=json", "--bogus"]));
-        assert_eq!(error_format(lenient.as_ref()), output::OutputFormat::Json);
+        assert_eq!(
+            error_format(lenient.as_ref(), source),
+            output::OutputFormat::Json
+        );
     }
 
     #[test]

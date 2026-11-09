@@ -20,7 +20,7 @@ use crate::mode::Mode;
 use crate::output::{self, JsonValueOutput, TableData};
 use crate::quantity::{self, Scale};
 use crate::resolvers::{HexAddressError, parse_exact_hex_address};
-use crate::signing::SelectedSigner;
+use crate::signing::{SelectedSigner, Signs};
 use crate::wire::InfoRequest;
 
 const ASSET: &str = "HYPE";
@@ -975,8 +975,7 @@ async fn run_delegation(
             delegate_dry_run_value(inv.remote()?.chain(), args, action_kind),
         );
     }
-    let resolved = inv.resolve_signer()?;
-    let signer = resolved.selected_signer();
+    let signer = inv.resolve_signer()?;
     delegate(
         inv,
         &signer,
@@ -1003,8 +1002,7 @@ async fn run_amount(
             amount_dry_run_value(inv.remote()?.chain(), args, action_kind),
         );
     }
-    let resolved = inv.resolve_signer()?;
-    let signer = resolved.selected_signer();
+    let signer = inv.resolve_signer()?;
     match action_kind {
         StakingActionKind::Deposit => deposit(inv, &signer, args).await,
         _ => withdraw(inv, &signer, args).await,
@@ -1022,6 +1020,7 @@ impl CliCommand for StakingDelegate {
         "Delegate stake to a validator",
         "Delegate HYPE to a validator.",
     )
+    .signs(Signs::user_signed::<TokenDelegate>())
     .args(&[
         arg("validator")
             .kind(InputKind::ProtocolObjectAddress)
@@ -1048,6 +1047,7 @@ impl CliCommand for StakingUndelegate {
         "Undelegate stake from a validator",
         "Undelegate HYPE from a validator.",
     )
+    .signs(Signs::user_signed::<TokenDelegate>())
     .args(&[
         arg("validator")
             .kind(InputKind::ProtocolObjectAddress)
@@ -1074,6 +1074,7 @@ impl CliCommand for StakingDeposit {
         "Deposit to staking",
         "Deposit HYPE to staking.",
     )
+    .signs(Signs::user_signed::<CDeposit>())
     .args(&[arg("amount")
         .kind(InputKind::Amount)
         .describe("HYPE amount.")]);
@@ -1094,6 +1095,7 @@ impl CliCommand for StakingWithdraw {
         "Withdraw from staking",
         "Queue HYPE withdrawal from staking.",
     )
+    .signs(Signs::user_signed::<CWithdraw>())
     .args(&[arg("amount")
         .kind(InputKind::Amount)
         .describe("HYPE amount.")]);
@@ -1126,8 +1128,7 @@ impl CliCommand for StakingClaimRewards {
                 claim_rewards_dry_run_value(inv.remote()?.chain()),
             );
         }
-        let resolved = inv.resolve_signer()?;
-        let signer = resolved.selected_signer();
+        let signer = inv.resolve_signer()?;
         claim_rewards(inv, &signer).await
     }
 }
@@ -1143,6 +1144,7 @@ impl CliCommand for StakingLinkInitiate {
         "Initiate staking-link from the trading account, targeting the staking user",
         "Initiate staking-link fee discount attribution from the trading account, targeting the staking user. This is control-affecting; use --dry-run first.",
     )
+    .signs(Signs::user_signed::<LinkStakingUser>())
     .prompt()
     .args(&[
         arg("user").kind(InputKind::ProtocolObjectAddress).describe("Protocol user address for the staking account to link.").resource_id("staking-link user address"),
@@ -1165,6 +1167,7 @@ impl CliCommand for StakingLinkFinalize {
         "Finalize staking-link from the staking account, targeting the trading user",
         "Finalize staking-link fee discount attribution from the staking account, targeting the trading user. Finalization may be permanent; use --dry-run first.",
     )
+    .signs(Signs::user_signed::<LinkStakingUser>())
     .prompt()
     .args(&[
         arg("user").kind(InputKind::ProtocolObjectAddress).describe("Protocol user address for the trading account to link.").resource_id("staking-link user address"),
@@ -1192,8 +1195,7 @@ async fn staking_link(
             link_dry_run_value(inv.remote()?.chain(), user, is_finalize),
         );
     }
-    let resolved = inv.resolve_signer()?;
-    let signer = resolved.selected_signer();
+    let signer = inv.resolve_signer()?;
     link_staking_user(inv, &signer, user, args, is_finalize).await
 }
 

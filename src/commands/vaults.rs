@@ -484,8 +484,7 @@ async fn run_transfer(
             transfer_dry_run_value(inv.remote()?.chain(), args, action_kind, vault, usd),
         );
     }
-    let resolved = inv.resolve_signer()?;
-    let signer = resolved.selected_signer();
+    let signer = inv.resolve_signer()?;
     let remote = inv.remote()?;
     actions::send_l1_action(
         remote.api(),

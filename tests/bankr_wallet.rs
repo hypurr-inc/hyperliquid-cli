@@ -436,3 +436,69 @@ async fn api_wallet_approval_under_bankr_is_refused_before_any_signing_request()
     bankr.verify().await;
     exchange.verify().await;
 }
+
+/// The signer is asked what the command signs as soon as it resolves, so a
+/// user-signed action Bankr does not cover fails before the exchange, Bankr's
+/// signing endpoint or any lookup is touched.
+#[tokio::test]
+async fn bankr_is_asked_what_a_command_signs_before_the_command_starts() {
+    const ADDRESS: &str = "0x0000000000000000000000000000000000000001";
+    let env = IsolatedHome::new();
+    let bankr = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wallet/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
+        .mount(&bankr)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/wallet/sign"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&bankr)
+        .await;
+    let exchange = mock_all_mids_server().await;
+
+    for args in [
+        vec![
+            "transfer", "withdraw", "--to", ADDRESS, "--amount", "1", "--yes",
+        ],
+        vec![
+            "transfer", "send", "--to", ADDRESS, "--amount", "1", "--yes",
+        ],
+        vec![
+            "staking",
+            "delegate",
+            "--validator",
+            ADDRESS,
+            "--amount",
+            "1",
+        ],
+        vec![
+            "builder",
+            "approve",
+            "--builder",
+            ADDRESS,
+            "--max-fee-rate",
+            "0.001%",
+            "--yes",
+        ],
+    ] {
+        env.command_with_server(&exchange)
+            .env("BANKR_API_KEY", BANKR_KEY)
+            .env("BANKR_API_URL", bankr.uri())
+            .args(["--bankr", "--non-interactive", "--format", "json"])
+            .args(&args)
+            .assert()
+            .code(13)
+            .stdout(predicate::str::contains("Bankr signs trading actions"));
+    }
+
+    bankr.verify().await;
+    // Only the endpoint probe every run starts with reached the API: no
+    // lookup, no confirmation read, no exchange post.
+    let requests = exchange.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 4, "{requests:?}");
+    assert!(requests.iter().all(|request| {
+        request.url.path() == "/info" && request.body.ends_with(br#""allMids"}"#)
+    }));
+}

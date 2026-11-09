@@ -55,11 +55,6 @@ impl<'a> WalletStore<'a> {
     }
 
     #[must_use]
-    pub fn settings(&self) -> &'a Settings {
-        self.settings
-    }
-
-    #[must_use]
     pub fn vault(&self) -> &Vault {
         &self.vault
     }

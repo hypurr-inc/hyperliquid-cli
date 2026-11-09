@@ -206,15 +206,15 @@ impl Receipt {
     }
 }
 
-pub(super) fn print_receipt(inv: &Invocation, settings: &Settings, receipt: Receipt) {
+pub(super) fn print_receipt(inv: &Invocation, receipt: Receipt) {
     let info = WalletReceipt {
         message: receipt.message,
         address: receipt.address,
         alias: receipt.alias,
         source: receipt.source,
         is_default: receipt.is_default,
-        config_path: config_path(settings),
-        vault_path: Vault::from_settings(settings).display_path(),
+        config_path: config_path(inv.settings()),
+        vault_path: Vault::from_settings(inv.settings()).display_path(),
         config_keys_written: receipt.config_keys_written,
     };
     inv.print_untimed(&info);
@@ -310,13 +310,13 @@ impl TableData for BankrStatusOutput {
     }
 }
 
-pub(super) fn print_bankr_receipt(inv: &Invocation, settings: &Settings, receipt: BankrReceipt) {
+pub(super) fn print_bankr_receipt(inv: &Invocation, receipt: BankrReceipt) {
     inv.print_untimed(&BankrStatusOutput {
         status: receipt.status.to_string(),
         message: receipt.message,
         address: receipt.address,
         api_url: receipt.api_url,
-        config_path: config_path(settings),
+        config_path: config_path(inv.settings()),
         config_keys_written: receipt.config_keys_written,
     });
 }

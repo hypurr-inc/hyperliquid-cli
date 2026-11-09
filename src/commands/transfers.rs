@@ -21,7 +21,7 @@ use crate::invocation::{Invocation, Remote};
 use crate::mode::Mode;
 use crate::output::TableData;
 use crate::quantity;
-use crate::signing::SelectedSigner;
+use crate::signing::{SelectedSigner, Signs};
 use crate::wire::config_address;
 use hypersdk::hypercore::HttpClient;
 use hypersdk::{Address, Decimal};
@@ -574,9 +574,8 @@ async fn run_class_transfer(
             serde_json::json!({"amount": args.amount.to_string()}),
         );
     }
-    let resolved = inv.resolve_signer()?;
-    let signer = resolved.selected_signer();
-    class_transfer(inv, &signer, resolved.query_address(), args, kind).await
+    let signer = inv.resolve_signer()?;
+    class_transfer(inv, &signer, signer.query_address(), args, kind).await
 }
 
 #[derive(Debug)]
@@ -740,6 +739,7 @@ impl CliCommand for TransferSpotToPerp {
         "Transfer from spot to perp",
         "Transfer USDC from spot to perp.",
     )
+    .signs(Signs::user_signed::<UsdClassTransfer>())
     .prompt()
     .args(&[
         arg("amount")
@@ -766,6 +766,7 @@ impl CliCommand for TransferPerpToSpot {
         "Transfer from perp to spot",
         "Transfer USDC from perp to spot.",
     )
+    .signs(Signs::user_signed::<UsdClassTransfer>())
     .prompt()
     .args(&[
         arg("amount")
@@ -792,6 +793,7 @@ impl CliCommand for TransferSend {
         "Send USDC to an address",
         "Send USDC to another Hyperliquid address.",
     )
+    .signs(Signs::Digest)
     .prompt()
     .args(&[
         arg("to")
@@ -819,14 +821,7 @@ impl CliCommand for TransferSend {
             );
         }
         let resolved = inv.resolve_signer()?;
-        send(
-            inv,
-            &resolved.selected_signer(),
-            resolved.query_address(),
-            destination,
-            args,
-        )
-        .await
+        send(inv, &resolved, resolved.query_address(), destination, args).await
     }
 }
 
@@ -841,6 +836,7 @@ impl CliCommand for TransferSpotSend {
         "Send a spot token to an address",
         "Send a spot token to another Hyperliquid address.",
     )
+    .signs(Signs::Digest)
     .prompt()
     .args(&[
         arg("to")
@@ -879,7 +875,7 @@ impl CliCommand for TransferSpotSend {
             );
         }
         let resolved = inv.resolve_signer()?;
-        spot_send(inv, &resolved.selected_signer(), destination, token, args).await
+        spot_send(inv, &resolved, destination, token, args).await
     }
 }
 
@@ -894,6 +890,7 @@ impl CliCommand for TransferSendAsset {
         "Send an asset between spot, perp, or DEX contexts",
         "Send an asset between accounts, spot, perp, or DEX contexts.",
     )
+    .signs(Signs::Digest)
     .prompt()
     .args(&[
         arg("to")
@@ -946,15 +943,8 @@ impl CliCommand for TransferSendAsset {
             );
         }
         let resolved = inv.resolve_signer()?;
-        let token_name = submit_send_asset(
-            inv.mode(),
-            remote,
-            &resolved.selected_signer(),
-            args,
-            route,
-            token,
-        )
-        .await?;
+        let token_name =
+            submit_send_asset(inv.mode(), remote, &resolved, args, route, token).await?;
         print_transfer(
             inv,
             "send-asset",
@@ -977,6 +967,7 @@ impl CliCommand for TransferWithdraw {
         "Withdraw to Arbitrum",
         "Withdraw USDC to Arbitrum.",
     )
+    .signs(Signs::user_signed::<Withdraw>())
     .prompt()
     .args(&[
         arg("to")
@@ -1003,14 +994,7 @@ impl CliCommand for TransferWithdraw {
             );
         }
         let resolved = inv.resolve_signer()?;
-        withdraw(
-            inv,
-            &resolved.selected_signer(),
-            resolved.query_address(),
-            destination,
-            args,
-        )
-        .await
+        withdraw(inv, &resolved, resolved.query_address(), destination, args).await
     }
 }
 
