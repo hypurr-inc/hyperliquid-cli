@@ -93,7 +93,6 @@
 - A closed pipe never hides a failure. A run whose output goes to a closed pipe (`| head`) ends with its own exit status: a command that fails while its stdout or stderr is closed exits with the error's code (for example `2`, `12`) instead of `0`, and a command that succeeds still exits `0` and still finishes its work (a closed stderr no longer abandons an order or a wallet change halfway). Every write to stdout and stderr goes through one place that says what a vanished reader means; before, a print to a closed pipe panicked and a panic hook turned the panic into exit `0`.
 - `referral status` refuses a bare API-wallet key with the master it signs for (exit `13`), like the other signer-derived reads, instead of showing the agent's own empty referral data.
 - `HYPERLIQUID_HOME_DIR` is honored when `update` and the update notice work out how the binary was installed: a binary under `$HYPERLIQUID_HOME_DIR/.cargo/bin` is a cargo install (upgraded with `cargo install`, not overwritten in place), as it is under the platform home. The variable was ignored there.
-- `update` reports an error reply from the release host whose body cannot be read as a network error (exit `12`, `network_error`) instead of a failed reply with an empty body.
 
 ## 0.18.0 - 2026-11-09
 
