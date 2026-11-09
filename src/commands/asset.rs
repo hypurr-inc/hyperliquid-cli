@@ -19,7 +19,7 @@ use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::{TableData, json_cell, serialize_row, warn};
-use crate::stream_bounds::parse_positive_usize;
+use crate::quantity::parse_positive_usize;
 
 #[derive(Args, Debug, Clone)]
 pub struct AssetDecodeArgs {

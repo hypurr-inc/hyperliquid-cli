@@ -157,6 +157,19 @@ impl StakingActionKind {
     fn note(self) -> Option<&'static str> {
         (self == Self::Withdraw).then_some(WITHDRAWAL_NOTE)
     }
+
+    /// Whether a link kind is the finalize step. Asked of the link kinds only.
+    fn is_finalize(self) -> bool {
+        self == Self::LinkFinalize
+    }
+
+    fn link_phase(self) -> &'static str {
+        if self.is_finalize() {
+            "finalize"
+        } else {
+            "initiate"
+        }
+    }
 }
 
 /// Responses are camelCase; the CLI's own JSON is snake_case.
@@ -509,13 +522,13 @@ async fn claim_rewards(inv: &Invocation, signer: &SelectedSigner) -> Result<(), 
     Ok(())
 }
 
-fn link_dry_run_value(chain: Chain, user: Address, is_finalize: bool) -> serde_json::Value {
+fn link_dry_run_value(chain: Chain, user: Address, kind: StakingActionKind) -> serde_json::Value {
     serde_json::json!({
-        "phase": link_phase(is_finalize),
+        "phase": kind.link_phase(),
         "user": user.to_string(),
-        "is_finalize": is_finalize,
+        "is_finalize": kind.is_finalize(),
         "network": chain.to_string(),
-        "reversibility": action_kind_for_link(is_finalize).reversibility(),
+        "reversibility": kind.reversibility(),
         "warning": STAKING_LINK_WARNING,
         "verified_shape": {
             "source": "@nktkas/hyperliquid v0.31.0 linkStakingUser",
@@ -527,7 +540,7 @@ fn link_dry_run_value(chain: Chain, user: Address, is_finalize: bool) -> serde_j
             "signatureChainId": chain.arbitrum_id().to_string(),
             "hyperliquidChain": chain.to_string(),
             "user": user.to_string(),
-            "isFinalize": is_finalize,
+            "isFinalize": kind.is_finalize(),
             "nonce": "current_timestamp_ms"
         }
     })
@@ -578,12 +591,9 @@ async fn link_staking_user(
     signer: &SelectedSigner,
     user: Address,
     args: &LinkArgs,
-    is_finalize: bool,
+    kind: StakingActionKind,
 ) -> Result<(), anyhow::Error> {
-    let question = format!(
-        "Submit staking link {} for user {user}?",
-        link_phase(is_finalize)
-    );
+    let question = format!("Submit staking link {} for user {user}?", kind.link_phase());
     consent::approve(
         inv,
         args.yes,
@@ -598,7 +608,7 @@ async fn link_staking_user(
         LinkStakingUser {
             hyperliquidChain: hyperliquid_chain,
             user,
-            isFinalize: is_finalize,
+            isFinalize: kind.is_finalize(),
             nonce,
         }
     })
@@ -607,31 +617,16 @@ async fn link_staking_user(
     inv.print(&One::new(LinkStakingRow {
         status: "submitted".to_string(),
         action: "staking-link".to_string(),
-        phase: link_phase(is_finalize).to_string(),
+        phase: kind.link_phase().to_string(),
         acting_as: signer.query_address().to_string(),
         signer: signer.address().to_string(),
         user: user.to_string(),
-        is_finalize,
+        is_finalize: kind.is_finalize(),
         network: remote.chain().to_string(),
-        reversibility: action_kind_for_link(is_finalize)
-            .reversibility()
-            .as_str()
-            .to_string(),
+        reversibility: kind.reversibility().as_str().to_string(),
         warning: STAKING_LINK_WARNING.to_string(),
     }));
     Ok(())
-}
-
-fn link_phase(is_finalize: bool) -> &'static str {
-    if is_finalize { "finalize" } else { "initiate" }
-}
-
-fn action_kind_for_link(is_finalize: bool) -> StakingActionKind {
-    if is_finalize {
-        StakingActionKind::LinkFinalize
-    } else {
-        StakingActionKind::LinkInitiate
-    }
 }
 
 fn print_action_confirmation(
@@ -1016,7 +1011,7 @@ impl CliCommand for StakingLinkInitiate {
     ]);
 
     async fn run(inv: &Invocation, args: &LinkArgs) -> Result<(), anyhow::Error> {
-        staking_link(inv, args, false).await
+        staking_link(inv, args, StakingActionKind::LinkInitiate).await
     }
 }
 
@@ -1039,26 +1034,25 @@ impl CliCommand for StakingLinkFinalize {
     ]);
 
     async fn run(inv: &Invocation, args: &LinkArgs) -> Result<(), anyhow::Error> {
-        staking_link(inv, args, true).await
+        staking_link(inv, args, StakingActionKind::LinkFinalize).await
     }
 }
 
 async fn staking_link(
     inv: &Invocation,
     args: &LinkArgs,
-    is_finalize: bool,
+    kind: StakingActionKind,
 ) -> Result<(), anyhow::Error> {
     let user = address(&args.user, AddressRole::Protocol("staking-link user"))?;
     if inv.dry_run() {
-        let action_kind = action_kind_for_link(is_finalize);
         return print_dry_run(
             inv,
-            action_kind.would_execute(),
-            link_dry_run_value(inv.remote()?.chain(), user, is_finalize),
+            kind.would_execute(),
+            link_dry_run_value(inv.remote()?.chain(), user, kind),
         );
     }
     let signer = inv.resolve_signer()?;
-    link_staking_user(inv, &signer, user, args, is_finalize).await
+    link_staking_user(inv, &signer, user, args, kind).await
 }
 
 #[cfg(test)]

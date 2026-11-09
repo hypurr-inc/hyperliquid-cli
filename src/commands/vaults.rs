@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::cli_command::CliCommand;
 use crate::clock;
 use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::common::direction::TransferDirection;
 use crate::commands::common::position::PositionRow;
 use crate::commands::common::rows::{One, Row, or_missing};
 use crate::commands::common::support::print_dry_run;
@@ -25,31 +26,11 @@ use crate::wire_decimal;
 
 const TRANSFER_REVERSIBILITY: ActionReversibility = ActionReversibility::PartiallyReversible;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VaultTransferActionKind {
-    Deposit,
-    Withdraw,
-}
-
-impl VaultTransferActionKind {
-    fn is_deposit(self) -> bool {
-        matches!(self, Self::Deposit)
-    }
-
-    fn action_name(self) -> &'static str {
-        if self.is_deposit() {
-            "deposit"
-        } else {
-            "withdraw"
-        }
-    }
-
-    fn would_execute(self) -> &'static str {
-        if self.is_deposit() {
-            "deposit_usdc_to_vault"
-        } else {
-            "withdraw_usdc_from_vault"
-        }
+fn would_execute(direction: TransferDirection) -> &'static str {
+    if direction.is_deposit() {
+        "deposit_usdc_to_vault"
+    } else {
+        "withdraw_usdc_from_vault"
     }
 }
 
@@ -462,23 +443,23 @@ async fn positions(inv: &Invocation, address: &str) -> Result<(), anyhow::Error>
 fn transfer_dry_run_value(
     chain: Chain,
     args: &VaultTransferArgs,
-    action_kind: VaultTransferActionKind,
+    direction: TransferDirection,
     vault: Address,
     usd: u64,
 ) -> serde_json::Value {
     serde_json::json!({
-        "action": action_kind.action_name(),
+        "action": direction.as_str(),
         "network": chain.to_string(),
         "vault": vault.to_string(),
         "amount": args.amount.to_string(),
         "asset": "USDC",
-        "is_deposit": action_kind.is_deposit(),
+        "is_deposit": direction.is_deposit(),
         "usd": usd,
         "reversibility": TRANSFER_REVERSIBILITY,
         "verified_shape": {
             "type": "vaultTransfer",
             "vaultAddress": vault.to_string(),
-            "isDeposit": action_kind.is_deposit(),
+            "isDeposit": direction.is_deposit(),
             "usd": usd
         }
     })
@@ -486,9 +467,9 @@ fn transfer_dry_run_value(
 
 fn validate_list_args(args: &VaultListArgs) -> Result<Option<Address>, CliError> {
     if args.limit == 0 {
-        return Err(CliError::Configuration(
-            "vault list --limit must be greater than zero".to_string(),
-        ));
+        return Err(CliError::Configuration(quantity::not_positive(
+            "vault list --limit",
+        )));
     }
     parse_optional_user(args.user.as_deref())
 }
@@ -500,9 +481,9 @@ fn validate_search_args(args: &VaultSearchArgs) -> Result<Option<Address>, CliEr
         ));
     }
     if args.limit == 0 {
-        return Err(CliError::Configuration(
-            "vault search --limit must be greater than zero".to_string(),
-        ));
+        return Err(CliError::Configuration(quantity::not_positive(
+            "vault search --limit",
+        )));
     }
     parse_optional_user(args.user.as_deref())
 }
@@ -510,15 +491,15 @@ fn validate_search_args(args: &VaultSearchArgs) -> Result<Option<Address>, CliEr
 async fn run_transfer(
     inv: &Invocation,
     args: &VaultTransferArgs,
-    action_kind: VaultTransferActionKind,
+    direction: TransferDirection,
 ) -> Result<(), anyhow::Error> {
     let vault = parse_address(&args.vault)?;
     let usd: u64 = quantity::usdc_units(args.amount)?;
     if inv.dry_run() {
         return print_dry_run(
             inv,
-            action_kind.would_execute(),
-            transfer_dry_run_value(inv.remote()?.chain(), args, action_kind, vault, usd),
+            would_execute(direction),
+            transfer_dry_run_value(inv.remote()?.chain(), args, direction, vault, usd),
         );
     }
     let signer = inv.resolve_signer()?;
@@ -528,14 +509,14 @@ async fn run_transfer(
         &signer,
         Action::VaultTransfer(VaultTransfer {
             vault_address: vault,
-            is_deposit: action_kind.is_deposit(),
+            is_deposit: direction.is_deposit(),
             usd,
         }),
     )
     .await?;
 
     inv.print(&One::new(VaultTransferConfirmation {
-        action: action_kind.action_name().to_string(),
+        action: direction.as_str().to_string(),
         status: "submitted".to_string(),
         network: remote.chain().to_string(),
         signer: signer.address().to_string(),
@@ -744,7 +725,7 @@ fn optional_decimal_field(value: &Value, field: &'static str) -> Result<Option<D
 
 fn age_days_from_millis(create_time_millis: i64) -> i64 {
     let now = i64::try_from(clock::now_ms()).unwrap_or(i64::MAX);
-    ((now - create_time_millis).max(0)) / 86_400_000
+    ((now - create_time_millis).max(0)) / i64::try_from(clock::DAY.ms(1)).unwrap_or(i64::MAX)
 }
 
 impl RawVaultDetails {
@@ -961,7 +942,7 @@ impl CliCommand for VaultDeposit {
     ]);
 
     async fn run(inv: &Invocation, args: &VaultTransferArgs) -> Result<(), anyhow::Error> {
-        run_transfer(inv, args, VaultTransferActionKind::Deposit).await
+        run_transfer(inv, args, TransferDirection::Deposit).await
     }
 }
 
@@ -986,7 +967,7 @@ impl CliCommand for VaultWithdraw {
     ]);
 
     async fn run(inv: &Invocation, args: &VaultTransferArgs) -> Result<(), anyhow::Error> {
-        run_transfer(inv, args, VaultTransferActionKind::Withdraw).await
+        run_transfer(inv, args, TransferDirection::Withdraw).await
     }
 }
 

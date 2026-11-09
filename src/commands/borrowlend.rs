@@ -506,7 +506,7 @@ fn decimal_to_wei(amount: Decimal, decimals: i64) -> Result<u64, CliError> {
             CliError::Unsupported("borrow/lend amount is too large".to_string())
         }
         ScaleError::Negative | ScaleError::NotPositive => {
-            CliError::Unsupported("borrow/lend amount must be greater than zero".to_string())
+            CliError::Unsupported(quantity::not_positive("borrow/lend amount"))
         }
     })
 }

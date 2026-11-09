@@ -41,6 +41,11 @@ pub(crate) async fn user_spot_balances_raw(
     Ok(state.balances)
 }
 
+/// The entry for spot token `token`, when the account holds one.
+pub(crate) fn balance_of(balances: &[RawSpotBalance], token: usize) -> Option<&RawSpotBalance> {
+    balances.iter().find(|balance| balance.token == Some(token))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

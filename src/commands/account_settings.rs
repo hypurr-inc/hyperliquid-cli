@@ -12,7 +12,7 @@ use crate::account_mode::AccountMode;
 use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, InputKind, Risk, YES_FOR_LIVE_EXECUTION, arg};
 use crate::commands::common::rows::{One, Row};
-use crate::commands::common::support::print_dry_run;
+use crate::commands::common::support::{action_json, print_dry_run};
 use crate::consent::{self, ConsentBlock};
 use crate::errors::CliError;
 use crate::exchange::actions;
@@ -165,14 +165,13 @@ fn abstraction_set_dry_run_value(
     chain: Chain,
     plan: Option<AbstractionPlan>,
     mode: AbstractionModeArg,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, CliError> {
     let user = plan.map(|plan| plan.user.to_string());
     let agent_signed = plan.is_some_and(|plan| plan.agent_signed);
     let action = if agent_signed {
-        serde_json::json!({
-            "type": "agentSetAbstraction",
-            "abstraction": mode.sdk_mode().agent_code(),
-        })
+        action_json(&Action::AgentSetAbstraction {
+            abstraction: mode.sdk_mode(),
+        })?
     } else {
         serde_json::json!({
             "type": UserSetAbstraction::ACTION_TYPE,
@@ -192,7 +191,7 @@ fn abstraction_set_dry_run_value(
     if agent_signed {
         preview["agent_signed"] = true.into();
     }
-    preview
+    Ok(preview)
 }
 
 async fn set_abstraction(
@@ -301,7 +300,7 @@ Use --dry-run to preview; confirm or pass -y for live submit.")
             return print_dry_run(
                 inv,
                 "set_abstraction",
-                abstraction_set_dry_run_value(inv.remote()?.chain(), plan, args.mode),
+                abstraction_set_dry_run_value(inv.remote()?.chain(), plan, args.mode)?,
             );
         }
         let signer = inv.resolve_signer()?;
@@ -378,6 +377,7 @@ impl CliCommand for AccountEvmBigBlocks {
 
     async fn run(inv: &Invocation, args: &EvmBigBlocksArgs) -> Result<(), anyhow::Error> {
         let using_big_blocks = args.enable;
+        let action = Action::EvmUserModify { using_big_blocks };
         if inv.dry_run() {
             return print_dry_run(
                 inv,
@@ -385,18 +385,13 @@ impl CliCommand for AccountEvmBigBlocks {
                 serde_json::json!({
                     "using_big_blocks": using_big_blocks,
                     "network": inv.remote()?.chain().to_string(),
-                    "action": {"type": "evmUserModify", "usingBigBlocks": using_big_blocks},
+                    "action": action_json(&action)?,
                 }),
             );
         }
         let signer = inv.resolve_signer()?;
         let remote = inv.remote()?;
-        actions::send_default_l1_action(
-            remote.api(),
-            &signer,
-            Action::EvmUserModify { using_big_blocks },
-        )
-        .await?;
+        actions::send_default_l1_action(remote.api(), &signer, action).await?;
         inv.print(&One::new(EvmBigBlocksRow {
             status: "submitted".to_string(),
             action: "evm-big-blocks".to_string(),

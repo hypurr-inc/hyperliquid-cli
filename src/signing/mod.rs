@@ -64,7 +64,7 @@ enum SignerBackend {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignerDescription {
+pub(crate) struct SignerDescription {
     pub alias: Option<String>,
     pub source: String,
 }
@@ -170,7 +170,7 @@ impl SelectedSigner {
     }
 
     #[must_use]
-    pub fn describe(&self) -> SignerDescription {
+    pub(crate) fn describe(&self) -> SignerDescription {
         let (alias, source) = match &self.backend {
             SignerBackend::Local { origin, .. } => match origin {
                 LocalOrigin::PrivateKey => (None, "private key/config/env".to_string()),
