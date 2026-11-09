@@ -3,8 +3,9 @@ use hypersdk::hypercore::HttpClient;
 use hypersdk::hypercore::types::BasicOrder;
 use serde::{Deserialize, Serialize};
 
+use super::args::StatusArgs;
+use super::cloid::parse_lookup_cloid;
 use super::rendering::OrderListOutput;
-use super::{StatusArgs, parse_lookup_cloid};
 use crate::assets::AssetResolver;
 use crate::errors::{CliError, from_sdk};
 use crate::http_api::ApiClient;

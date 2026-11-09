@@ -7,28 +7,27 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use hypersdk::hypercore::types::{
-    Action, AssetPosition, BasicOrder, BatchCancel, BatchCancelCloid, BatchModify, BatchOrder,
-    Cancel, CancelByCloid, Modify, OrderGrouping, OrderRequest, OrderTypePlacement, Side,
-    TimeInForce, TpSl,
+    AssetPosition, BatchOrder, OrderGrouping, OrderRequest, OrderTypePlacement, TimeInForce, TpSl,
 };
 use hypersdk::hypercore::{Cloid, HttpClient};
 use hypersdk::{Address, Decimal};
 
-use super::exchange::{TwapExchangeAction, TwapOrderAction};
-use super::rendering::ModifyConfirmation;
+use super::args::{
+    BatchCreateArgs, BatchCreateOrder, CreateArgs, CreateOrderType, MarginModeArg, OrderSide,
+    ScaleArgs, ScheduleCancelArgs, TifArg, TpslGroupingArg, TriggerPriceSpec, TwapCancelArgs,
+    TwapCreateArgs,
+};
+use super::cloid::{cloid_from_wire, parse_cloid, wire_cloid};
+use super::exchange::{OrderBuilderFee, TwapExchangeAction, TwapOrderAction};
+use super::prepared::{
+    CreateOrderSubmission, NormalTpslOrder, PreparedOrder, PreparedOrderBatch, PreparedTpslBatch,
+    PreparedTpslLeg, QuoteAmount, TpslLegKind,
+};
 use super::validation::{
     AttachedTpsl, BuilderRequest, ClosingSize, MarketPrecision, MarketSizing, OrderKind, OrderSpec,
-    TpslSpec, validate_order_for_market, validate_twap_create_args,
+    ScaleLadder, TpslSpec, validate_order_for_market, validate_twap_create_args,
 };
-use super::{
-    BatchCreateArgs, BatchCreateOrder, CancelAllArgs, CancelArgs, CreateArgs, CreateOrderType,
-    MarginModeArg, ModifyArgs, OrderBuilderFee, OrderIdentifier, OrderSide, PreparedOrder,
-    PreparedOrderBatch, PreparedOrderLeg, PreparedTpslBatch, PreparedTpslLeg, ScaleArgs,
-    ScheduleCancelArgs, TifArg, TpslGroupingArg, TpslLegKind, TriggerPriceSpec, TwapCancelArgs,
-    TwapCreateArgs, cloid_from_wire, filter_orders_by_coin, lookup_order, order_type_placement,
-    parse_cloid, parse_lookup_cloid, resolve_cancel_all_coin_filter, wire_cloid,
-};
-use crate::assets::asset_id::{parse_spot_coin_key, spot_asset_index, spot_coin_key};
+use crate::assets::asset_id::spot_coin_key;
 use crate::assets::{
     AssetQuery, AssetResolver, Market, OutcomeAsset, PerpAsset, parse_asset_query,
     qualify_dex_asset,
@@ -65,44 +64,6 @@ impl OrderDryRunPlan {
     #[must_use]
     pub(super) fn into_args(self) -> serde_json::Value {
         self.args
-    }
-}
-
-pub(super) struct CancelOrderPlan {
-    pub(super) action: Action,
-    pub(super) coin: String,
-    pub(super) order_id: Option<u64>,
-    pub(super) cloid: Option<String>,
-}
-
-pub(super) struct CancelAllOrdersPlan {
-    pub(super) action: Option<Action>,
-    pub(super) cancelled_orders: usize,
-    pub(super) summary_coin: String,
-}
-
-pub(super) struct ModifyOrderPlan {
-    pub(super) action: Action,
-    pub(super) confirmation: ModifyConfirmation,
-}
-
-pub(super) enum CreateOrderSubmission {
-    Single(PreparedOrder),
-    NormalTpsl(NormalTpslOrder),
-}
-
-pub(super) struct NormalTpslOrder {
-    pub(super) parent: PreparedOrder,
-    pub(super) batch: PreparedTpslBatch,
-}
-
-impl CreateOrderSubmission {
-    /// The entry order, which sizes the HIP-3 margin helper and names the market.
-    pub(super) fn parent(&self) -> &PreparedOrder {
-        match self {
-            Self::Single(prepared) => prepared,
-            Self::NormalTpsl(order) => &order.parent,
-        }
     }
 }
 
@@ -324,7 +285,7 @@ fn order_builder_fee(
             }
         }
     };
-    if matches!(market, Market::Perp(_)) && fee > 100 {
+    if matches!(market, Market::Perp(_)) && fee > OrderBuilderFee::PERP_MAX_TENTHS_BPS {
         return Err(CliError::Unsupported(
             "perp order builder fee rate cannot exceed 0.1%".to_string(),
         ));
@@ -451,6 +412,7 @@ async fn plan_order(
             ..
         }
     );
+    let amount = amount.map(|value| QuoteAmount { value, unit: quote });
     Ok(PreparedOrder {
         request: OrderRequest {
             asset: index,
@@ -462,14 +424,12 @@ async fn plan_order(
             cloid: wire_cloid(spec.cloid),
         },
         market: market.clone(),
-        precision,
         coin,
         side: spec.side,
         order_type: spec.kind.order_type(),
         tif,
         trigger_price,
         amount,
-        amount_unit: quote,
         warning,
         builder,
         margin_mode: spec.margin_mode,
@@ -498,20 +458,21 @@ pub(super) async fn prepare_create_order(
 pub(super) async fn prepare_scale_batch(
     client: &HttpClient,
     resolver: &AssetResolver,
+    settings: &Settings,
     args: &ScaleArgs,
+    ladder: &ScaleLadder,
 ) -> Result<PreparedOrderBatch, CliError> {
-    let prices = scale_prices(args.start_price, args.end_price, args.order_count)?;
-    let sizes = scale_sizes(args.total_size, args.order_count)?;
-    let specs = prices
+    let leg_size = ladder.leg_size()?;
+    let specs = ladder
+        .prices()
         .into_iter()
-        .zip(sizes)
-        .map(|(price, size)| {
+        .map(|price| {
             OrderSpec::limit_leg(
                 &args.coin,
                 args.dex.as_deref(),
                 args.side,
                 price,
-                size,
+                leg_size,
                 args.tif,
             )
             .map(|spec| {
@@ -520,10 +481,10 @@ pub(super) async fn prepare_scale_batch(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let prepared = prepare_order_batch(client, resolver, specs).await?;
+    let prepared = prepare_order_batch(client, resolver, settings, specs).await?;
 
-    let placed_size: Decimal = prepared.legs.iter().map(|leg| leg.order.size()).sum();
-    if placed_size != args.total_size {
+    let placed_size: Decimal = prepared.legs.iter().map(PreparedOrder::size).sum();
+    if placed_size != ladder.total_size() {
         return Err(CliError::Configuration(
             "orders scale total size cannot be evenly distributed across requested orders at the market's lot size"
                 .to_string(),
@@ -532,11 +493,11 @@ pub(super) async fn prepare_scale_batch(
     if prepared
         .legs
         .windows(2)
-        .any(|pair| pair[0].order.price() == pair[1].order.price())
+        .any(|pair| pair[0].price() == pair[1].price())
     {
         return Err(CliError::Configuration(format!(
             "orders scale prices collapse onto the same tick for {}; use fewer --orders or a wider price range",
-            prepared.legs[0].order.coin
+            prepared.legs[0].coin
         )));
     }
     Ok(prepared)
@@ -545,6 +506,7 @@ pub(super) async fn prepare_scale_batch(
 pub(super) async fn prepare_batch_create_orders(
     client: &HttpClient,
     resolver: &AssetResolver,
+    settings: &Settings,
     orders: Vec<BatchCreateOrder>,
 ) -> Result<PreparedOrderBatch, CliError> {
     let specs = orders
@@ -563,79 +525,32 @@ pub(super) async fn prepare_batch_create_orders(
             .with_cloid(cloid))
         })
         .collect::<Result<Vec<_>, CliError>>()?;
-    prepare_order_batch(client, resolver, specs).await
+    prepare_order_batch(client, resolver, settings, specs).await
 }
 
 async fn prepare_order_batch(
     client: &HttpClient,
     resolver: &AssetResolver,
+    settings: &Settings,
     specs: Vec<OrderSpec>,
 ) -> Result<PreparedOrderBatch, CliError> {
     let mut markets: HashMap<(String, Option<String>), Market> = HashMap::new();
     let mut legs = Vec::with_capacity(specs.len());
-    for (leg_index, spec) in specs.iter().enumerate() {
+    for spec in &specs {
         let key = (spec.coin.clone(), spec.dex.clone());
         if !markets.contains_key(&key) {
             let market =
                 resolve_tradable_asset(client, resolver, &spec.coin, spec.dex.as_deref()).await?;
             markets.insert(key.clone(), market);
         }
-        validate_order_for_market(spec, &markets[&key])?;
-        let order = plan_order(client, &markets[&key], spec, None).await?;
-        legs.push(PreparedOrderLeg { leg_index, order });
+        legs.push(prepare_order_in(client, &markets[&key], settings, spec).await?);
     }
     let batch = BatchOrder {
-        orders: legs.iter().map(|leg| leg.order.request.clone()).collect(),
+        orders: legs.iter().map(|leg| leg.request.clone()).collect(),
         grouping: OrderGrouping::Na,
         builder: None,
     };
     Ok(PreparedOrderBatch { batch, legs })
-}
-
-fn scale_prices(
-    start_price: Decimal,
-    end_price: Decimal,
-    order_count: usize,
-) -> Result<Vec<Decimal>, CliError> {
-    if order_count == 0 {
-        return Err(CliError::Configuration(
-            "orders scale requires --orders greater than zero".to_string(),
-        ));
-    }
-    if order_count == 1 {
-        return Ok(vec![start_price]);
-    }
-    let steps = Decimal::from(order_count - 1);
-    let step = (end_price - start_price) / steps;
-    Ok((0..order_count)
-        .map(|index| start_price + step * Decimal::from(index))
-        .collect())
-}
-
-pub(super) fn scale_sizes(
-    total_size: Decimal,
-    order_count: usize,
-) -> Result<Vec<Decimal>, CliError> {
-    if order_count == 0 {
-        return Err(CliError::Configuration(
-            "orders scale requires --orders greater than zero".to_string(),
-        ));
-    }
-    let count = Decimal::from(order_count);
-    let per_leg = total_size / count;
-    if per_leg <= Decimal::ZERO {
-        return Err(CliError::Configuration(
-            "orders scale total size is too small to distribute across requested orders"
-                .to_string(),
-        ));
-    }
-    if per_leg * count != total_size {
-        return Err(CliError::Configuration(
-            "orders scale total size cannot be evenly distributed across requested orders"
-                .to_string(),
-        ));
-    }
-    Ok(vec![per_leg; order_count])
 }
 
 pub(super) fn prepare_normal_tpsl_batch(
@@ -643,7 +558,7 @@ pub(super) fn prepare_normal_tpsl_batch(
     tpsl: &AttachedTpsl,
 ) -> Result<PreparedTpslBatch, CliError> {
     let close_side = parent.side.opposite();
-    let truncate = |price: Decimal| parent.precision.price(price, &parent.coin);
+    let truncate = |price: Decimal| MarketPrecision::of(&parent.market).price(price, &parent.coin);
     let take_profit = tpsl.take_profit.map(truncate).transpose()?;
     let stop_loss = tpsl.stop_loss.map(truncate).transpose()?;
     validate_tpsl_price_ordering(close_side, take_profit, stop_loss, "orders create")?;
@@ -762,7 +677,7 @@ fn truncate_triggers(
     take_profit: Option<Decimal>,
     stop_loss: Option<Decimal>,
 ) -> Result<(Option<Decimal>, Option<Decimal>), CliError> {
-    let precision = MarketPrecision::perp(perp.sz_decimals);
+    let precision = MarketPrecision::of_perp(perp);
     let coin = perp.display_name();
     let truncate = |price: Decimal| precision.price(price, &coin);
     Ok((
@@ -791,7 +706,7 @@ fn position_tpsl_triggers(
     Ok((take_profit, stop_loss))
 }
 
-async fn fetch_position(
+pub(super) async fn fetch_position(
     client: &HttpClient,
     user: Address,
     perp: &PerpAsset,
@@ -854,7 +769,7 @@ pub(super) async fn prepare_position_tpsl_batch(
             (side, size, position.position.entry_px)
         }
     };
-    let size = MarketPrecision::perp(perp.sz_decimals).size(size, &perp.display_name())?;
+    let size = MarketPrecision::of_perp(perp).size(size, &perp.display_name())?;
     let (take_profit, stop_loss) = position_tpsl_triggers(perp, spec, close_side, entry)?;
     Ok(position_tpsl_batch(
         perp,
@@ -942,236 +857,13 @@ pub(super) fn validate_tpsl_price_ordering(
     }
 }
 
-pub(super) fn order_identifier(
-    order_id: Option<u64>,
-    cloid: Option<&str>,
-    command: &str,
-    parse: fn(&str) -> Result<Cloid, CliError>,
-) -> Result<OrderIdentifier, CliError> {
-    if let Some(order_id) = order_id {
-        return Ok(OrderIdentifier::Oid(order_id));
-    }
-    let raw = cloid.ok_or_else(|| {
-        CliError::Configuration(format!("orders {command} requires ORDER_ID or --cloid"))
-    })?;
-    Ok(OrderIdentifier::Cloid {
-        raw: raw.to_string(),
-        parsed: parse(raw)?,
-    })
-}
-
-pub(super) async fn prepare_cancel_order_plan(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    user: Address,
-    args: &CancelArgs,
-) -> Result<CancelOrderPlan, CliError> {
-    let identifier = cancel_identifier(args)?;
-    let order = lookup_order(client, user, &identifier).await?;
-    let asset = order_asset(client, resolver, &order).await?.index;
-
-    let action = match &identifier {
-        OrderIdentifier::Oid(oid) => Action::Cancel(BatchCancel {
-            cancels: vec![Cancel { asset, oid: *oid }],
-            fast: false,
-        }),
-        OrderIdentifier::Cloid { parsed, .. } => Action::CancelByCloid(BatchCancelCloid {
-            cancels: vec![CancelByCloid {
-                asset: asset.try_into().map_err(|_| {
-                    CliError::Internal(anyhow::anyhow!(
-                        "asset index {asset} does not fit CLOID cancel request"
-                    ))
-                })?,
-                cloid: *parsed,
-            }],
-            fast: false,
-        }),
-    };
-
-    Ok(CancelOrderPlan {
-        action,
-        coin: resolver.display_coin(&order.coin),
-        order_id: args.order_id,
-        cloid: args.cloid.clone(),
-    })
-}
-
-/// A cancel looks the order up leniently: a short or unprefixed CLOID is padded.
-fn cancel_identifier(args: &CancelArgs) -> Result<OrderIdentifier, CliError> {
-    order_identifier(
-        args.order_id,
-        args.cloid.as_deref(),
-        "cancel",
-        parse_lookup_cloid,
-    )
-}
-
-/// The protocol asset an existing order trades, and how its prices and sizes are
-/// constrained when the market is known.
-struct OrderAsset {
-    index: usize,
-    precision: Option<MarketPrecision>,
-}
-
-impl OrderAsset {
-    fn price(&self, price: Decimal, coin: &str) -> Result<Decimal, CliError> {
-        self.precision
-            .map_or(Ok(price), |precision| precision.price(price, coin))
-    }
-
-    fn size(&self, size: Decimal, coin: &str) -> Result<Decimal, CliError> {
-        self.precision
-            .map_or(Ok(size), |precision| precision.size(size, coin))
-    }
-}
-
-async fn order_asset(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    order: &BasicOrder,
-) -> Result<OrderAsset, CliError> {
-    if let Some(internal_id) = parse_spot_coin_key(&order.coin) {
-        return Ok(
-            match resolver.spot_by_protocol_asset_id(spot_asset_index(internal_id)) {
-                Some(spot) => OrderAsset {
-                    index: spot.index,
-                    precision: Some(MarketPrecision::spot(spot.base_sz_decimals)),
-                },
-                None => OrderAsset {
-                    index: internal_id,
-                    precision: None,
-                },
-            },
-        );
-    }
-
-    let market = resolver.resolve_or_fetch(client, &order.coin).await?;
-    Ok(OrderAsset {
-        index: market.asset_index()?,
-        precision: Some(MarketPrecision::of(&market)),
-    })
-}
-
-pub(super) async fn prepare_modify_order_plan(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    user: Address,
-    args: &ModifyArgs,
-) -> Result<ModifyOrderPlan, CliError> {
-    let identifier = order_identifier(args.order_id, args.cloid.as_deref(), "modify", parse_cloid)?;
-    let order = lookup_order(client, user, &identifier).await?;
-    let asset = order_asset(client, resolver, &order).await?;
-    let coin = resolver.display_coin(&order.coin);
-    let new_price = args
-        .price
-        .map(|price| asset.price(price, &coin))
-        .transpose()?;
-    let new_trigger = args
-        .trigger_price
-        .map(|price| asset.price(price, &coin))
-        .transpose()?;
-    let new_size = args.size.map(|size| asset.size(size, &coin)).transpose()?;
-    let price = new_price.unwrap_or(order.limit_px);
-    let size = new_size.unwrap_or(order.sz);
-    let order_type = order_type_placement(&order, new_trigger, new_price)?;
-    // The exchange rejects an action hashed with `a: false` unless the
-    // replacement is a non-trigger ALO or a non-executable GTC order, so fail
-    // here rather than after the cancel succeeds.
-    if !args.always_place {
-        let needs_always_place = match &order_type {
-            OrderTypePlacement::Trigger { .. } => true,
-            OrderTypePlacement::Limit { tif } => {
-                matches!(tif, TimeInForce::Ioc | TimeInForce::FrontendMarket)
-            }
-        };
-        if needs_always_place {
-            return Err(CliError::Configuration(
-                "orders modify without --always-place can only place an ALO or non-executable GTC replacement; add --always-place to modify trigger orders or place an IOC replacement"
-                    .to_string(),
-            ));
-        }
-    }
-    let replacement = OrderRequest {
-        asset: asset.index,
-        is_buy: matches!(order.side, Side::Bid),
-        limit_px: price,
-        sz: size,
-        reduce_only: order.reduce_only,
-        order_type,
-        cloid: wire_cloid(order.cloid),
-    };
-    Ok(ModifyOrderPlan {
-        action: Action::BatchModify(BatchModify {
-            modifies: vec![Modify {
-                oid: identifier.to_status_identifier(),
-                order: replacement,
-            }],
-            always_place: args.always_place,
-        }),
-        confirmation: ModifyConfirmation {
-            coin,
-            status: "modified".to_string(),
-            order_id: Some(order.oid),
-            cloid: args
-                .cloid
-                .clone()
-                .or_else(|| order.cloid.map(|cloid| format!("{cloid:#x}"))),
-            price: price.to_string(),
-            size: size.to_string(),
-        },
-    })
-}
-
-pub(super) async fn prepare_cancel_all_orders_plan(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    user: Address,
-    args: &CancelAllArgs,
-) -> Result<CancelAllOrdersPlan, CliError> {
-    let coin_filter =
-        resolve_cancel_all_coin_filter(resolver, args.coin.as_deref(), args.dex.as_deref())?;
-    let open_orders = client
-        .open_orders(
-            user,
-            coin_filter.as_ref().and_then(|filter| filter.dex.clone()),
-        )
-        .await
-        .map_err(from_sdk)?;
-    let orders = filter_orders_by_coin(
-        open_orders,
-        coin_filter.as_ref().map(|filter| filter.coin.as_str()),
-    );
-
-    let action = if orders.is_empty() {
-        None
-    } else {
-        let mut cancels = Vec::with_capacity(orders.len());
-        for order in &orders {
-            cancels.push(Cancel {
-                asset: order_asset(client, resolver, order).await?.index,
-                oid: order.oid,
-            });
-        }
-        Some(Action::Cancel(BatchCancel {
-            cancels,
-            fast: false,
-        }))
-    };
-
-    Ok(CancelAllOrdersPlan {
-        action,
-        cancelled_orders: orders.len(),
-        summary_coin: args.coin.clone().unwrap_or_else(|| "ALL".to_string()),
-    })
-}
-
 pub(super) fn prepare_twap_create_plan(
     perp: &PerpAsset,
     args: &TwapCreateArgs,
 ) -> Result<TwapCreatePlan, CliError> {
     let minutes = validate_twap_create_args(args)?;
     let coin = perp.display_name();
-    let size = MarketPrecision::perp(perp.sz_decimals).size(args.size, &coin)?;
+    let size = MarketPrecision::of_perp(perp).size(args.size, &coin)?;
     Ok(TwapCreatePlan {
         action: TwapExchangeAction::TwapOrder {
             twap: TwapOrderAction {
@@ -1328,51 +1020,6 @@ pub(super) fn schedule_cancel_dry_run_plan(
     OrderDryRunPlan::new("schedule_dead_mans_switch", preview).acting_for(&args.on_behalf_of)
 }
 
-pub(super) fn modify_dry_run_plan(args: &ModifyArgs) -> OrderDryRunPlan {
-    OrderDryRunPlan::new(
-        "modify_order",
-        serde_json::json!({
-            "order_id": args.order_id,
-            "cloid": args.cloid,
-            "on_behalf_of": args.on_behalf_of,
-            "price": args.price.map(|value| value.to_string()),
-            "trigger_price": args.trigger_price.map(|value| value.to_string()),
-            "size": args.size.map(|value| value.to_string()),
-            "always_place": args.always_place,
-        }),
-    )
-}
-
-pub(super) fn cancel_dry_run_plan(args: &CancelArgs) -> Result<OrderDryRunPlan, CliError> {
-    let identifier = cancel_identifier(args)?;
-    Ok(OrderDryRunPlan::new(
-        "cancel_order",
-        serde_json::json!({
-            "order_id": args.order_id,
-            "cloid": args.cloid,
-            "on_behalf_of": args.on_behalf_of,
-            "identifier": identifier.display(),
-        }),
-    ))
-}
-
-pub(super) fn cancel_all_dry_run_plan(
-    resolver: &AssetResolver,
-    args: &CancelAllArgs,
-) -> Result<OrderDryRunPlan, CliError> {
-    let coin_filter =
-        resolve_cancel_all_coin_filter(resolver, args.coin.as_deref(), args.dex.as_deref())?;
-    Ok(OrderDryRunPlan::new(
-        "cancel_open_orders",
-        serde_json::json!({
-            "coin": args.coin,
-            "dex": args.dex,
-            "on_behalf_of": args.on_behalf_of,
-            "resolved_coin_filter": coin_filter.map(|filter| filter.coin),
-        }),
-    ))
-}
-
 fn prepared_order_dry_run_args(
     prepared: &PreparedOrder,
     args: &CreateArgs,
@@ -1402,8 +1049,8 @@ fn prepared_order_dry_run_args(
         "is_market": is_market,
         "tpsl": tpsl,
         "size": prepared.request.sz.to_string(),
-        "amount": prepared.amount.map(|value| value.to_string()),
-        "amount_unit": prepared.amount.as_ref().map(|_| prepared.amount_unit.clone()),
+        "amount": prepared.amount.as_ref().map(|amount| amount.value.to_string()),
+        "amount_unit": prepared.amount.as_ref().map(|amount| amount.unit.clone()),
         "tif": prepared.tif.map(|tif| tif.to_string()),
         "reduce_only": prepared.request.reduce_only,
         "cloid": args.cloid.clone(),
@@ -1442,8 +1089,8 @@ fn order_batch_dry_run_args(prepared: &PreparedOrderBatch) -> serde_json::Value 
     let legs = prepared
         .legs
         .iter()
-        .map(|leg| {
-            let order = &leg.order;
+        .enumerate()
+        .map(|(leg_index, order)| {
             let (is_market, trigger_px, tpsl) = match &order.request.order_type {
                 OrderTypePlacement::Trigger {
                     is_market,
@@ -1457,7 +1104,7 @@ fn order_batch_dry_run_args(prepared: &PreparedOrderBatch) -> serde_json::Value 
                 OrderTypePlacement::Limit { .. } => (None, None, None),
             };
             serde_json::json!({
-                "leg_index": leg.leg_index,
+                "leg_index": leg_index,
                 "coin": order.coin,
                 "side": order.side.to_string(),
                 "type": order.order_type.to_string(),
@@ -1469,8 +1116,8 @@ fn order_batch_dry_run_args(prepared: &PreparedOrderBatch) -> serde_json::Value 
                 "tpsl": tpsl,
                 "price": order.price().to_string(),
                 "size": order.size().to_string(),
-                "amount": order.amount.map(|value| value.to_string()),
-                "amount_unit": order.amount.as_ref().map(|_| order.amount_unit.clone()),
+                "amount": order.amount.as_ref().map(|amount| amount.value.to_string()),
+                "amount_unit": order.amount.as_ref().map(|amount| amount.unit.clone()),
                 "tif": order.tif.map(|tif| tif.to_string()),
                 "reduce_only": order.request.reduce_only,
                 "cloid": cloid_from_wire(order.request.cloid).map(|cloid| cloid.to_string()),
@@ -1531,8 +1178,7 @@ pub(super) fn tpsl_dry_run_plan(
             // Percent and entry triggers need the position's entry price, which
             // a dry run does not read: it previews no legs for them.
             if !needs_entry {
-                let size =
-                    MarketPrecision::perp(perp.sz_decimals).size(size, &perp.display_name())?;
+                let size = MarketPrecision::of_perp(perp).size(size, &perp.display_name())?;
                 let (take_profit, stop_loss) = position_tpsl_triggers(perp, spec, side, None)?;
                 let batch =
                     position_tpsl_batch(perp, side, size, take_profit, stop_loss, spec.cloid);
@@ -1720,3 +1366,6 @@ fn infer_close_side_from_tpsl_prices(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests;

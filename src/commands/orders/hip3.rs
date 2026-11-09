@@ -1,6 +1,12 @@
+//! The helper transfer that funds a HIP-3 dex before an order draws on it.
+
+use std::collections::BTreeMap;
+
 use hypersdk::{Address, Decimal};
 use serde_json::json;
 
+use super::prepared::PreparedOrder;
+use super::validation::BPS_DENOMINATOR;
 use crate::commands::account::fetch_abstraction;
 use crate::commands::transfers::{self, SendAssetArgs};
 use crate::http_api::ApiClient;
@@ -8,12 +14,16 @@ use crate::invocation::Remote;
 use crate::mode::Mode;
 use crate::signing::SelectedSigner;
 
+/// The leverage an order is assumed to run at when sizing its margin.
 const DEFAULT_HIP3_LEVERAGE: i64 = 10;
+/// The margin kept above the estimate, in basis points of it (120%).
 const MARGIN_BUFFER_BPS: i64 = 12_000;
 
 #[derive(Debug, Clone)]
 pub struct Hip3MarginPlan {
     pub dest_dex: String,
+    /// The dex's collateral token, which is what the transfer moves.
+    pub token: String,
     pub amount: Decimal,
 }
 
@@ -23,23 +33,32 @@ impl Hip3MarginPlan {
             "action": "send_asset",
             "source": "perp",
             "dest": format!("dex:{}", self.dest_dex),
-            "token": "USDC",
+            "token": self.token,
             "amount": self.amount.normalize().to_string(),
         })
     }
 }
 
-pub async fn plan_hip3_margin_transfer(
+/// The transfers that top up each HIP-3 dex `orders` trade on, one per dex
+/// that needs one. Orders on the default dex or on a unified account need none.
+pub async fn plan_hip3_margin_transfers(
     api: &ApiClient,
     user: Address,
-    dex: Option<&str>,
-    notional: Decimal,
-) -> Result<Option<Hip3MarginPlan>, anyhow::Error> {
-    let Some(dest_dex) = dex.filter(|dex| !dex.is_empty()) else {
-        return Ok(None);
-    };
-    if notional <= Decimal::ZERO {
-        return Ok(None);
+    orders: &[&PreparedOrder],
+) -> Result<Vec<Hip3MarginPlan>, anyhow::Error> {
+    let mut by_dex: BTreeMap<&str, (&str, Decimal)> = BTreeMap::new();
+    for order in orders {
+        if let Some(perp) = order.perp()
+            && let Some(dex) = perp.dex.as_deref().filter(|dex| !dex.is_empty())
+        {
+            by_dex
+                .entry(dex)
+                .or_insert((perp.collateral.as_str(), Decimal::ZERO))
+                .1 += order.notional();
+        }
+    }
+    if by_dex.is_empty() {
+        return Ok(Vec::new());
     }
 
     let abstraction = fetch_abstraction(api, user).await?;
@@ -47,13 +66,26 @@ pub async fn plan_hip3_margin_transfer(
         abstraction.normalized_mode.as_str(),
         "unified-account" | "portfolio-margin"
     ) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
-    let required = (notional / Decimal::from(DEFAULT_HIP3_LEVERAGE)
-        * Decimal::from(MARGIN_BUFFER_BPS)
-        / Decimal::from(10_000))
-    .round_dp(2);
+    let mut plans = Vec::new();
+    for (dest_dex, (token, notional)) in by_dex {
+        if let Some(plan) = plan_dex_transfer(api, user, dest_dex, token, notional).await? {
+            plans.push(plan);
+        }
+    }
+    Ok(plans)
+}
+
+async fn plan_dex_transfer(
+    api: &ApiClient,
+    user: Address,
+    dest_dex: &str,
+    token: &str,
+    notional: Decimal,
+) -> Result<Option<Hip3MarginPlan>, anyhow::Error> {
+    let required = required_margin(notional);
     if required <= Decimal::ZERO {
         return Ok(None);
     }
@@ -69,31 +101,56 @@ pub async fn plan_hip3_margin_transfer(
 
     Ok(Some(Hip3MarginPlan {
         dest_dex: dest_dex.to_string(),
+        token: token.to_string(),
         amount: required - dest_available,
     }))
 }
 
-pub async fn execute_hip3_margin_transfer(
+/// The margin to hold on a dex for orders worth `notional`, to the cent.
+fn required_margin(notional: Decimal) -> Decimal {
+    (notional / Decimal::from(DEFAULT_HIP3_LEVERAGE) * Decimal::from(MARGIN_BUFFER_BPS)
+        / Decimal::from(BPS_DENOMINATOR))
+    .round_dp(2)
+}
+
+pub async fn execute_hip3_margin_transfers(
     mode: &Mode,
     remote: &Remote,
     signer: &SelectedSigner,
     user: Address,
-    plan: &Hip3MarginPlan,
+    plans: &[Hip3MarginPlan],
 ) -> Result<(), anyhow::Error> {
-    transfers::execute_send_asset(
-        mode,
-        remote,
-        signer,
-        &SendAssetArgs {
-            to: user.to_string(),
-            source: "perp".to_string(),
-            dest: format!("dex:{}", plan.dest_dex),
-            token: "USDC".to_string(),
-            amount: plan.amount,
-            from_subaccount: None,
-            yes: true,
-        },
-    )
-    .await
-    .map(drop)
+    for plan in plans {
+        transfers::execute_send_asset(
+            mode,
+            remote,
+            signer,
+            &SendAssetArgs {
+                to: user.to_string(),
+                source: "perp".to_string(),
+                dest: format!("dex:{}", plan.dest_dex),
+                token: plan.token.clone(),
+                amount: plan.amount,
+                from_subaccount: None,
+                yes: true,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_margin_is_a_tenth_of_the_notional_plus_a_fifth() {
+        assert_eq!(required_margin(Decimal::from(1_000)), Decimal::from(120));
+        assert_eq!(
+            required_margin(Decimal::new(12_345, 2)),
+            Decimal::new(1_481, 2)
+        );
+        assert_eq!(required_margin(Decimal::ZERO), Decimal::ZERO);
+    }
 }

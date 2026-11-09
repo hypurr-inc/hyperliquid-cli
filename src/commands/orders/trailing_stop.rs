@@ -8,19 +8,21 @@ use std::io::{self, Write};
 use std::str::FromStr;
 
 use clap::Args;
+use hypersdk::Decimal;
 use hypersdk::hypercore::types::{Action, TrailingStop, TrailingStopRetracement};
-use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
+use super::args::OrderSide;
+use super::consent::{ConsentKind, ConsentTarget, ask_confirmation};
+use super::context::OrderSubmissionContext;
 use super::exchange::status_error;
 use super::planning::OrderDryRunPlan;
 use super::rendering::on_behalf_of_flag;
 use super::validation::MarketPrecision;
-use super::{ConsentTarget, OrderSide, OrderSubmissionContext, ask_confirmation};
 use crate::assets::{AssetQuery, PerpAsset, parse_asset_query, qualify_dex_asset};
 use crate::commands::actions;
 use crate::errors::CliError;
-use crate::output::{OutputFormat, TableData};
+use crate::output::{self, OutputFormat, TableData};
 use crate::response_sanitization::labelled_untrusted_text;
 
 /// Arguments for `orders trailing-stop`.
@@ -195,7 +197,7 @@ pub(crate) fn prepare_trailing_stop_plan(
 ) -> Result<TrailingStopPlan, CliError> {
     let retracement = retracement_from_args(args)?;
     let coin = perp.display_name();
-    let precision = MarketPrecision::perp(perp.sz_decimals);
+    let precision = MarketPrecision::of_perp(perp);
     let size = precision.size(args.size, &coin)?;
     let activation_px = args
         .activation_price
@@ -227,22 +229,17 @@ impl TrailingStopPlan {
 pub async fn trailing_stop(
     context: OrderSubmissionContext<'_>,
     plan: &TrailingStopPlan,
-    args: &TrailingStopArgs,
-    vault_address: Option<Address>,
+    on_behalf_of: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    context.consent(
-        vault_address,
-        None,
-        "trailing stop",
-        "trailing stop placement",
-        |target| confirm_mainnet_trailing_stop(plan, target),
-    )?;
+    context.consent(ConsentKind::TrailingStop, None, |target| {
+        confirm_mainnet_trailing_stop(plan, target)
+    })?;
     let response = actions::send_l1_action_raw(
         context.api,
         context.signer,
         Action::TrailingStop(plan.action.clone()),
         actions::nonce_now(),
-        vault_address,
+        context.vault_address,
         "trailing stop rejected",
     )
     .await?;
@@ -262,7 +259,7 @@ pub async fn trailing_stop(
         }],
     });
     if context.inv.format() == OutputFormat::Pretty {
-        print_cancel_hint(oid, args.on_behalf_of.as_deref());
+        print_cancel_hint(oid, on_behalf_of);
     }
     Ok(())
 }
@@ -388,7 +385,7 @@ impl TableData for TrailingStopOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.rows).unwrap_or_else(|_| serde_json::json!([]))
+        output::serialize_row(&self.rows)
     }
 }
 

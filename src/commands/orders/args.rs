@@ -8,11 +8,17 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::types::{OrderGrouping, TimeInForce, TpSl};
 use serde::{Deserialize, Serialize};
 
-use super::validation::parse_relative_duration;
-use super::{
-    DEFAULT_MARKET_ORDER_SLIPPAGE_BPS, MAX_MARKET_ORDER_SLIPPAGE_BPS, MIN_MARKET_ORDER_SLIPPAGE_BPS,
-};
 use crate::errors::CliError;
+
+/// Default maximum time to track a resting order or ALO chase quote (5 minutes).
+pub(super) const DEFAULT_TRACKING_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// [`DEFAULT_TRACKING_TIMEOUT`] as a clap default value.
+const DEFAULT_TRACKING_TIMEOUT_TEXT: &str = "300s";
+
+pub(super) const DEFAULT_MARKET_ORDER_SLIPPAGE_BPS: u16 = 500;
+pub(super) const MIN_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1;
+pub(super) const MAX_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1_000;
 
 /// Arguments for `orders create`.
 #[derive(Args, Debug, Clone)]
@@ -658,6 +664,36 @@ pub fn parse_trigger_price_spec(raw: &str) -> Result<TriggerPriceSpec, String> {
     }
     Ok(TriggerPriceSpec::Absolute(price))
 }
+pub(crate) fn parse_relative_duration(input: &str) -> Result<Duration, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("duration cannot be empty".to_string());
+    }
+
+    let (number_part, multiplier, unit_name) = match trimmed.chars().last().unwrap() {
+        's' | 'S' => (&trimmed[..trimmed.len() - 1], 1_u64, "seconds"),
+        'm' | 'M' => (&trimmed[..trimmed.len() - 1], 60_u64, "minutes"),
+        'h' | 'H' => (&trimmed[..trimmed.len() - 1], 60 * 60, "hours"),
+        'd' | 'D' => (&trimmed[..trimmed.len() - 1], 24 * 60 * 60, "days"),
+        ch if ch.is_ascii_digit() => (trimmed, 1_u64, "seconds"),
+        _ => {
+            return Err(
+                "duration must be a positive integer with optional s/m/h/d suffix".to_string(),
+            );
+        }
+    };
+
+    let value = number_part
+        .parse::<u64>()
+        .map_err(|_| format!("duration {unit_name} must be a positive integer"))?;
+    if value == 0 {
+        return Err("duration must be greater than zero".to_string());
+    }
+    value
+        .checked_mul(multiplier)
+        .map(Duration::from_secs)
+        .ok_or_else(|| "duration is too large".to_string())
+}
 
 #[cfg(test)]
 mod trigger_price_spec_tests {
@@ -872,7 +908,7 @@ pub struct BracketArgs {
     pub take_profit: TriggerPriceSpec,
     #[arg(long, allow_hyphen_values = true, value_parser = parse_trigger_price_spec)]
     pub stop_loss: TriggerPriceSpec,
-    #[arg(long, default_value = "300s", value_parser = parse_relative_duration)]
+    #[arg(long, default_value = DEFAULT_TRACKING_TIMEOUT_TEXT, value_parser = parse_relative_duration)]
     pub entry_timeout: Duration,
     #[arg(long)]
     pub on_behalf_of: Option<String>,

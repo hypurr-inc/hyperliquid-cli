@@ -3,7 +3,7 @@
 //! Matching is by OID or cloid only, so a poll never treats some other order
 //! on the same market as the one this command placed.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use hypersdk::hypercore::types::{
     Action, BasicOrder, BatchCancel, BatchCancelCloid, Cancel, CancelByCloid,
@@ -11,24 +11,36 @@ use hypersdk::hypercore::types::{
 use hypersdk::hypercore::{Cloid, HttpClient};
 use hypersdk::{Address, Decimal};
 
-use super::{OrderSubmissionContext, parse_cloid};
+use super::context::OrderSubmissionContext;
 use crate::commands::actions;
 use crate::errors::{CliError, from_sdk};
+
+/// A protocol asset index as a cancel-by-cloid request carries it: 32 bits,
+/// where an order request carries it as a `usize`. Built before an order is
+/// placed, so an order that could not be cancelled by cloid is never placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CloidAsset(u32);
+
+impl CloidAsset {
+    pub(crate) fn new(index: usize) -> Result<Self, CliError> {
+        u32::try_from(index).map(Self).map_err(|_| {
+            CliError::Internal(anyhow::anyhow!(
+                "asset index {index} does not fit a cancel-by-cloid request"
+            ))
+        })
+    }
+
+    pub(crate) fn index(self) -> u32 {
+        self.0
+    }
+}
 
 pub(crate) struct LiveOrder {
     pub oid: Option<u64>,
     pub cloid: Cloid,
-    pub asset: u32,
+    pub asset: CloidAsset,
+    /// The size still open, as of the last read.
     pub open_size: Decimal,
-}
-
-/// Default maximum time to track a resting order or ALO chase quote (5 minutes).
-pub(crate) const DEFAULT_TRACKING_TIMEOUT: Duration = Duration::from_secs(300);
-
-/// Unique client order ID for an order a command tracks (a chase quote, a
-/// bracket entry): nonce-derived high bits plus a per-run sequence.
-pub(crate) fn generated_cloid(seq: u64) -> Result<Cloid, CliError> {
-    parse_cloid(&format!("0x{:016x}{:016x}", actions::nonce_now(), seq))
 }
 
 pub(crate) fn elapsed_ms(started: Instant) -> u64 {
@@ -38,7 +50,6 @@ pub(crate) fn elapsed_ms(started: Instant) -> u64 {
 pub(crate) async fn send_tracked_action(
     context: OrderSubmissionContext<'_>,
     action: Action,
-    vault_address: Option<Address>,
     error_label: &'static str,
 ) -> Result<serde_json::Value, CliError> {
     actions::send_l1_action_raw(
@@ -46,7 +57,7 @@ pub(crate) async fn send_tracked_action(
         context.signer,
         action,
         actions::nonce_now(),
-        vault_address,
+        context.vault_address,
         error_label,
     )
     .await
@@ -65,17 +76,33 @@ impl LiveOrder {
             .fold(Decimal::ZERO, |total, size| total + size)
     }
 
-    /// [`LiveOrder::open_size_in`] over `user`'s open orders on `dex`, the dex
-    /// that lists the order's market. Another dex's list never holds the
-    /// order, so reading it would report the order as gone.
-    pub(crate) async fn open_size_now(
-        &self,
+    /// Record that `open_now` of the order is still open and return the size
+    /// that left the book since the last read. An order that is gone left with
+    /// everything it had open: a fill is the only way a command's own resting
+    /// order disappears.
+    pub(crate) fn settle(&mut self, open_now: Decimal) -> Decimal {
+        let open_now = open_now.max(Decimal::ZERO).min(self.open_size);
+        let left = self.open_size - open_now;
+        self.open_size = open_now;
+        left
+    }
+
+    pub(crate) fn is_gone(&self) -> bool {
+        self.open_size <= Decimal::ZERO
+    }
+
+    /// Re-read the order from `user`'s open orders on `dex`, the dex that lists
+    /// the order's market (another dex's list never holds the order, so reading
+    /// it would report the order as gone), and [`settle`](Self::settle) it.
+    /// Returns the size that left the book since the last read.
+    pub(crate) async fn refresh(
+        &mut self,
         client: &HttpClient,
         user: Address,
         dex: Option<String>,
     ) -> Result<Decimal, CliError> {
         let open = client.open_orders(user, dex).await.map_err(from_sdk)?;
-        Ok(self.open_size_in(&open))
+        Ok(self.settle(self.open_size_in(&open)))
     }
 
     /// Cancel by cloid, even when an oid is known. Chase uses this so a
@@ -83,7 +110,7 @@ impl LiveOrder {
     pub(crate) fn cancel_by_cloid(&self) -> Action {
         Action::CancelByCloid(BatchCancelCloid {
             cancels: vec![CancelByCloid {
-                asset: self.asset,
+                asset: self.asset.index(),
                 cloid: self.cloid,
             }],
             fast: false,
@@ -94,7 +121,7 @@ impl LiveOrder {
         match self.oid {
             Some(oid) => Action::Cancel(BatchCancel {
                 cancels: vec![Cancel {
-                    asset: self.asset as usize,
+                    asset: self.asset.index() as usize,
                     oid,
                 }],
                 fast: false,
@@ -129,21 +156,59 @@ mod tests {
         }
     }
 
+    fn tracked(open_size: Decimal) -> LiveOrder {
+        LiveOrder {
+            oid: Some(42),
+            cloid: "0x00000000000000000000000000000001"
+                .parse::<Cloid>()
+                .unwrap(),
+            asset: CloidAsset::new(0).unwrap(),
+            open_size,
+        }
+    }
+
     #[test]
     fn open_size_matches_only_the_tracked_order() {
-        let cloid = "0x00000000000000000000000000000001"
-            .parse::<Cloid>()
-            .unwrap();
-        let tracked = LiveOrder {
-            oid: Some(42),
-            cloid,
-            asset: 0,
-            open_size: Decimal::ONE,
-        };
+        let tracked = tracked(Decimal::ONE);
         let orders = vec![
-            order(42, Some(cloid), Decimal::new(3, 1)),
+            order(42, Some(tracked.cloid), Decimal::new(3, 1)),
             order(99, None, Decimal::from(5)),
         ];
         assert_eq!(tracked.open_size_in(&orders), Decimal::new(3, 1));
+    }
+
+    #[test]
+    fn settling_reports_what_left_the_book_and_counts_a_vanished_order_as_filled() {
+        let mut order = tracked(Decimal::ONE);
+        assert_eq!(order.settle(Decimal::new(6, 1)), Decimal::new(4, 1));
+        assert_eq!(order.open_size, Decimal::new(6, 1));
+        assert!(!order.is_gone());
+
+        // Nothing changed: nothing left.
+        assert_eq!(order.settle(Decimal::new(6, 1)), Decimal::ZERO);
+
+        // Gone: the remaining 0.6 left the book too.
+        assert_eq!(order.settle(Decimal::ZERO), Decimal::new(6, 1));
+        assert!(order.is_gone());
+    }
+
+    #[test]
+    fn an_order_that_vanishes_before_any_partial_fill_left_with_its_whole_size() {
+        let mut order = tracked(Decimal::from(20));
+        assert_eq!(order.settle(Decimal::ZERO), Decimal::from(20));
+    }
+
+    #[test]
+    fn a_read_never_grows_the_open_size() {
+        let mut order = tracked(Decimal::ONE);
+        assert_eq!(order.settle(Decimal::from(2)), Decimal::ZERO);
+        assert_eq!(order.open_size, Decimal::ONE);
+    }
+
+    #[test]
+    fn an_asset_that_does_not_fit_a_cloid_cancel_is_refused_up_front() {
+        assert_eq!(CloidAsset::new(110_035).unwrap().index(), 110_035);
+        let err = CloidAsset::new(usize::try_from(u32::MAX).unwrap() + 1).unwrap_err();
+        assert!(err.to_string().contains("cancel-by-cloid"), "{err}");
     }
 }

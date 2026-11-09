@@ -10,12 +10,12 @@ use hypersdk::hypercore::types::{
     Action, BatchOrder, OrderGrouping, OrderRequest, OrderResponseStatus,
 };
 use hypersdk::{Address, Decimal};
-use serde::{Deserialize, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 
-use super::OrderBuilderFee;
 use crate::commands::actions;
 use crate::errors::{CliError, Rejection, classify_rejection};
 use crate::http_api::ApiClient;
+use crate::quantity::Scale;
 use crate::response_sanitization::labelled_untrusted_text;
 use crate::signing::SelectedSigner;
 
@@ -158,13 +158,20 @@ impl Placement {
     }
 }
 
-pub(crate) fn parse_order_statuses(
+/// The statuses of an order, cancel or modify response, in request order.
+/// `what` names the action in the error when the exchange answers something
+/// else.
+pub(crate) fn decode_statuses(
     response: serde_json::Value,
+    what: &str,
 ) -> Result<Vec<OrderResponseStatus>, CliError> {
     let body = || labelled_untrusted_text(&response.to_string());
-    if response.get("type").and_then(serde_json::Value::as_str) != Some("order") {
+    if !matches!(
+        response.get("type").and_then(serde_json::Value::as_str),
+        Some("order" | "cancel")
+    ) {
         return Err(CliError::Internal(anyhow::anyhow!(
-            "order placement response had unexpected type: {}",
+            "{what} response had unexpected type: {}",
             body()
         )));
     }
@@ -174,47 +181,16 @@ pub(crate) fn parse_order_statuses(
         .cloned()
         .ok_or_else(|| {
             CliError::Internal(anyhow::anyhow!(
-                "order placement response missing statuses: {}",
+                "{what} response missing statuses: {}",
                 body()
             ))
         })?;
     serde_json::from_value(statuses).map_err(|err| {
         CliError::Internal(anyhow::anyhow!(
-            "order placement response decode failed: {err}; body={}",
+            "{what} response decode failed: {err}; body={}",
             body()
         ))
     })
-}
-
-pub(crate) fn order_statuses_from_response(
-    response: serde_json::Value,
-    action: &'static str,
-) -> Result<Vec<OrderResponseStatus>, CliError> {
-    #[derive(Deserialize)]
-    struct StatusesResponse {
-        statuses: Vec<OrderResponseStatus>,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(tag = "type", content = "data", rename_all = "camelCase")]
-    enum TaggedResponse {
-        Cancel(StatusesResponse),
-        Order(StatusesResponse),
-    }
-
-    if let Ok(parsed) = serde_json::from_value::<StatusesResponse>(response.clone()) {
-        return Ok(parsed.statuses);
-    }
-
-    serde_json::from_value::<TaggedResponse>(response)
-        .map(|parsed| match parsed {
-            TaggedResponse::Cancel(data) | TaggedResponse::Order(data) => data.statuses,
-        })
-        .map_err(|err| {
-            CliError::Internal(anyhow::anyhow!(
-                "{action}: unexpected response shape: {err}"
-            ))
-        })
 }
 
 /// Fail on the first rejected status, with the exchange text sanitized and
@@ -222,35 +198,34 @@ pub(crate) fn order_statuses_from_response(
 pub(crate) fn ensure_action_statuses_ok(
     statuses: &[OrderResponseStatus],
     action: &str,
-) -> Result<usize, CliError> {
-    for status in statuses {
-        if let Some(err) = status.error() {
-            return Err(status_error(action, err));
-        }
+) -> Result<(), CliError> {
+    match statuses.iter().find_map(OrderResponseStatus::error) {
+        Some(err) => Err(status_error(action, err)),
+        None => Ok(()),
     }
-    Ok(statuses.len())
 }
 
 pub(crate) fn modification_result_oid(statuses: &[OrderResponseStatus]) -> Option<u64> {
     statuses.iter().find_map(OrderResponseStatus::oid)
 }
 
-pub(super) async fn place_order_batch_raw(
-    api: &ApiClient,
-    signer: &SelectedSigner,
-    batch: BatchOrder,
-    vault_address: Option<Address>,
-) -> Result<Vec<OrderResponseStatus>, CliError> {
-    let response = actions::send_l1_action_raw(
-        api,
-        signer,
-        Action::Order(batch),
-        actions::nonce_now(),
-        vault_address,
-        "order placement failed",
-    )
-    .await?;
-    parse_order_statuses(response)
+/// What Hyperliquid wants in a builder fee `{ b, f }`: the builder's address
+/// and the fee in tenths of a basis point (0.001%). This is the one place the
+/// unit is named; the percent form comes from [`OrderBuilderFee::percent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct OrderBuilderFee {
+    pub(super) b: String,
+    pub(super) f: u64,
+}
+
+impl OrderBuilderFee {
+    /// The most a perpetual order may pay a builder: 0.1%.
+    pub(super) const PERP_MAX_TENTHS_BPS: u64 = 100;
+
+    /// The fee as a percent, such as `0.01`.
+    pub(super) fn percent(&self) -> Decimal {
+        Scale::TENTHS_BPS_PER_PERCENT.amount(self.f)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -262,31 +237,47 @@ struct BuilderOrderAction {
     builder: OrderBuilderFee,
 }
 
-pub(super) async fn place_builder_order_batch_raw(
+/// Send `batch` and return one status per order. A builder fee goes in the
+/// raw action `{ type: "order", orders, grouping, builder: { b, f } }`, which
+/// the SDK's `Action::Order` cannot carry; without one the SDK action is sent.
+pub(super) async fn place_orders(
     api: &ApiClient,
     signer: &SelectedSigner,
     batch: BatchOrder,
-    builder: OrderBuilderFee,
+    builder: Option<&OrderBuilderFee>,
     vault_address: Option<Address>,
 ) -> Result<Vec<OrderResponseStatus>, CliError> {
-    // Builder fee order shape is documented by Hyperliquid's exchange endpoint:
-    // action `{ type: "order", orders, grouping, builder: { b, f } }`, where
-    // `f` is measured in tenths of a basis point.
-    let action = BuilderOrderAction {
-        action_type: "order",
-        orders: batch.orders,
-        grouping: batch.grouping,
-        builder,
+    let response = match builder {
+        Some(builder) => {
+            let action = BuilderOrderAction {
+                action_type: "order",
+                orders: batch.orders,
+                grouping: batch.grouping,
+                builder: builder.clone(),
+            };
+            actions::send_raw_l1_json_action(
+                api,
+                signer,
+                &action,
+                actions::RawL1ActionMetadata::new(actions::nonce_now())
+                    .with_vault_address(vault_address),
+                "order placement failed",
+            )
+            .await?
+        }
+        None => {
+            actions::send_l1_action_raw(
+                api,
+                signer,
+                Action::Order(batch),
+                actions::nonce_now(),
+                vault_address,
+                "order placement failed",
+            )
+            .await?
+        }
     };
-    let response = actions::send_raw_l1_json_action(
-        api,
-        signer,
-        &action,
-        actions::RawL1ActionMetadata::new(actions::nonce_now()).with_vault_address(vault_address),
-        "order placement failed",
-    )
-    .await?;
-    parse_order_statuses(response)
+    decode_statuses(response, "order placement")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -404,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn order_parser_accepts_resting_and_waiting_without_a_second_status_type() {
+    fn the_decoder_accepts_resting_and_waiting_without_a_second_status_type() {
         let response = serde_json::json!({
             "type": "order",
             "data": {
@@ -415,7 +406,7 @@ mod tests {
                 ]
             }
         });
-        let statuses = parse_order_statuses(response).unwrap();
+        let statuses = decode_statuses(response, "order placement").unwrap();
         assert!(matches!(
             statuses.as_slice(),
             [
@@ -424,22 +415,78 @@ mod tests {
                 OrderResponseStatus::WaitingForTrigger
             ]
         ));
-        assert_eq!(
-            ensure_action_statuses_ok(&statuses, "place order").unwrap(),
-            3
-        );
+        ensure_action_statuses_ok(&statuses, "place order").unwrap();
         assert_eq!(modification_result_oid(&statuses), Some(12345));
 
-        let waiting_only = parse_order_statuses(serde_json::json!({
-            "type": "order",
-            "data": { "statuses": ["waitingForTrigger", "waitingForFill"] }
-        }))
+        let waiting_only = decode_statuses(
+            serde_json::json!({
+                "type": "order",
+                "data": { "statuses": ["waitingForTrigger", "waitingForFill"] }
+            }),
+            "order placement",
+        )
         .unwrap();
-        assert_eq!(
-            ensure_action_statuses_ok(&waiting_only, "place order").unwrap(),
-            2
-        );
+        ensure_action_statuses_ok(&waiting_only, "place order").unwrap();
         assert_eq!(modification_result_oid(&waiting_only), None);
+    }
+
+    #[test]
+    fn the_decoder_reads_cancel_responses_and_names_the_action_when_the_shape_is_wrong() {
+        let cancelled = decode_statuses(
+            serde_json::json!({"type": "cancel", "data": {"statuses": ["success"]}}),
+            "cancel",
+        )
+        .unwrap();
+        assert!(matches!(
+            cancelled.as_slice(),
+            [OrderResponseStatus::Success]
+        ));
+
+        for (response, what, fragment) in [
+            (
+                serde_json::json!({"type": "default"}),
+                "cancel",
+                "cancel response had unexpected type",
+            ),
+            (
+                serde_json::json!({"type": "order"}),
+                "modify",
+                "modify response missing statuses",
+            ),
+            (
+                serde_json::json!({"type": "order", "data": {"statuses": [42]}}),
+                "cancel-all",
+                "cancel-all response decode failed",
+            ),
+        ] {
+            let err = decode_statuses(response, what).unwrap_err();
+            assert!(err.to_string().contains(fragment), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_rejected_status_fails_the_action_with_the_exchange_text() {
+        let statuses = [
+            OrderResponseStatus::Success,
+            OrderResponseStatus::Error("Order has invalid size.".to_string()),
+        ];
+        let err = ensure_action_statuses_ok(&statuses, "cancel order").unwrap_err();
+        assert!(err.to_string().contains("Couldn't cancel order"), "{err}");
+        assert!(err.to_string().contains("Order has invalid size."), "{err}");
+    }
+
+    #[test]
+    fn a_builder_fee_is_tenths_of_a_basis_point_and_reads_as_a_percent() {
+        let fee = |f| OrderBuilderFee {
+            b: "0xabc".to_string(),
+            f,
+        };
+        assert_eq!(fee(10).percent(), Decimal::new(1, 2));
+        assert_eq!(
+            fee(OrderBuilderFee::PERP_MAX_TENTHS_BPS).percent(),
+            Decimal::new(1, 1)
+        );
+        assert_eq!(fee(0).percent(), Decimal::ZERO);
     }
 
     #[test]
