@@ -210,7 +210,6 @@ impl Redactions {
     }
 }
 
-/// Invocation arguments (without the program name) minus secret options and values.
 fn replay_args(args: impl IntoIterator<Item = String>, redactions: &Redactions) -> Vec<String> {
     let mut args = args.into_iter();
     let mut kept = Vec::new();

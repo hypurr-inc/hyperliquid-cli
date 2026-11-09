@@ -14,7 +14,6 @@ use crate::settings::{EnvSource, env};
 /// What decides whether this invocation may prompt, resolved once in `main`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Mode {
-    /// `--non-interactive` was passed.
     pub non_interactive_flag: bool,
     /// The effective output format is JSON (explicit, env, agent, or non-TTY default).
     pub machine_format: bool,
@@ -22,7 +21,6 @@ pub struct Mode {
     pub stdin_is_payload: bool,
     /// `HYPERLIQUID_AGENT` is on.
     pub agent: bool,
-    /// The process runs under CI.
     pub ci: bool,
     pub stdout_tty: bool,
     pub stderr_tty: bool,
@@ -133,7 +131,6 @@ fn flag_value(name: &str, flag: EnvFlag) -> Result<Option<bool>, CliError> {
     }
 }
 
-/// Validate every boolean `HYPERLIQUID_*` mode variable once at startup.
 pub fn validate_env(source: &EnvSource) -> Result<(), CliError> {
     env_bool(source, env::AGENT)?;
     env_bool(source, env::NO_UPDATE_CHECK)?;

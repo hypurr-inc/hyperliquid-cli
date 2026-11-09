@@ -1,5 +1,3 @@
-//! `feedback`: submit user feedback or feature requests via GitHub issue.
-
 use clap::Args;
 
 use super::issue_report::{IssueReport, environment_lines};

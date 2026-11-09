@@ -1,5 +1,3 @@
-//! Command modules.
-
 pub mod account;
 pub(crate) mod actions;
 pub mod api_wallet;

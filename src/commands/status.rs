@@ -1,5 +1,3 @@
-//! API health and rate-limit status command.
-
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -48,7 +46,6 @@ impl TableData for StatusOutput {
     }
 }
 
-/// Query lightweight public endpoints and render API health/rate-limit status.
 pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let client = remote.api().sdk();

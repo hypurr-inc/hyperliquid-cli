@@ -30,7 +30,6 @@ impl ActionReversibility {
     }
 }
 
-/// The accounts a signed preview names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DryRunSigning {
     /// The signing address, or why it could not be resolved without prompting.

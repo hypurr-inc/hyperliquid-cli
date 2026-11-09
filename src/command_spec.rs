@@ -74,7 +74,6 @@ pub enum OwsSupport {
     NotApplicable,
 }
 
-/// Whether a signer provider can serve a command, as the schema reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignerSupport {
@@ -152,7 +151,6 @@ pub enum EnvZero {
     StopImmediately,
 }
 
-/// An environment variable that supplies a stream bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StreamEnv {
     pub name: &'static str,
@@ -160,7 +158,6 @@ pub struct StreamEnv {
 }
 
 impl StreamBound {
-    /// The clap arg ids that bound the stream.
     #[must_use]
     pub const fn cli_args(self) -> &'static [&'static str] {
         match self {
@@ -197,7 +194,6 @@ impl StreamBound {
 /// Rejects a malformed value before the command runs.
 #[derive(Debug, Clone, Copy)]
 pub enum Check {
-    /// `validate_resource_id` under this label.
     ResourceId(&'static str),
     /// Like `ResourceId`, but `#N` / `+N` outcome notation passes untouched.
     AssetInput(&'static str),
@@ -310,7 +306,6 @@ pub struct CommandSpec {
     pub category: &'static str,
     pub about: &'static str,
     pub long_about: Option<&'static str>,
-    /// Schema description.
     pub description: &'static str,
     pub auth_required: bool,
     pub dangerous: bool,
@@ -335,7 +330,6 @@ pub struct CommandSpec {
     /// Error text for `--dry-run` on a command that does not preview, when it is
     /// not the generic one.
     pub dry_run_refusal: Option<&'static str>,
-    /// Extra spellings of the command name.
     pub cli_aliases: &'static [&'static str],
     /// Schema `command` text when it is not the path plus positionals.
     pub schema_command: Option<&'static str>,
@@ -539,7 +533,6 @@ impl CommandSpec {
         self.args.iter().find(|arg| arg.id == id)
     }
 
-    /// What the schema reports as the command's effect.
     #[must_use]
     pub const fn mutability(&self) -> Mutability {
         match self.lifecycle {
@@ -582,7 +575,6 @@ impl CommandSpec {
         matches!(self.lifecycle, Lifecycle::ReadOnly) && matches!(self.risk, Risk::None)
     }
 
-    /// Whether the command talks to the Hyperliquid API.
     #[must_use]
     pub const fn uses_api(&self) -> bool {
         !self.local && !matches!(self.mutability(), Mutability::LocalOnly)
@@ -647,7 +639,6 @@ impl GroupSpec {
     }
 }
 
-/// A command without arguments.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct NoArgs;
 
@@ -711,7 +702,6 @@ impl Entry {
     }
 }
 
-/// Rejects malformed values of the args that carry a [`Check`].
 pub fn check_args(spec: &CommandSpec, matches: &ArgMatches) -> Result<(), CliError> {
     for arg in spec.args {
         let Some(check) = arg.check else { continue };

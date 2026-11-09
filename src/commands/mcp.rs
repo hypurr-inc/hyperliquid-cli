@@ -1,5 +1,3 @@
-//! `mcp`: run Model Context Protocol stdio server.
-
 use crate::command_spec::{CliCommand, CommandSpec, DryRunPolicy, Lifecycle, NoArgs, Risk};
 use crate::invocation::Invocation;
 

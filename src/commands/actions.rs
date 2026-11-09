@@ -1,5 +1,3 @@
-//! Shared helpers for signed Hyperliquid exchange actions.
-
 use alloy::dyn_abi::{Eip712Types, Resolver, TypedData};
 use alloy::primitives::keccak256;
 use alloy::sol_types::SolStruct;
@@ -62,7 +60,6 @@ pub(crate) fn nonce_now() -> u64 {
     Utc::now().timestamp_millis() as u64
 }
 
-/// Sign and send an L1 action supported by hypersdk's raw [`Action`] enum.
 pub(crate) async fn send_l1_action(
     api: &ApiClient,
     signer: &SelectedSigner,
@@ -86,7 +83,6 @@ pub(crate) async fn send_l1_action_raw(
     post_json_raw(api, &request, context).await
 }
 
-/// Sign a user-signed EIP-712 action with a custom primary type.
 pub(crate) fn sign_user_action<T: SolStruct>(
     signer: &SelectedSigner,
     chain: Chain,
