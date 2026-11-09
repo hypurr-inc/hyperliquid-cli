@@ -244,7 +244,6 @@ struct TransferConfirmationContext {
     reversibility: ActionReversibility,
 }
 
-
 /// The USDC amount and `--to` address of `transfer send`.
 fn validate_send_args(args: &SendArgs) -> Result<Address, CliError> {
     quantity::require_positive(args.amount, "amount")?;
@@ -623,7 +622,6 @@ fn parse_asset_target(input: &str, flag: &str) -> Result<ParsedAssetTarget, CliE
         wire,
     })
 }
-
 
 async fn ensure_spot_usdc_balance(
     api: &ApiClient,

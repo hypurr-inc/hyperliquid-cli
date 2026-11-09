@@ -348,7 +348,7 @@ Signer and acting-account flags intentionally share the same selector grammar wh
 | `orders schedule-cancel (--in <DURATION>\|--clear) [--on-behalf-of <ACCOUNT_SELECTOR>] [-y]` | Configure or clear a dead man's switch. Mainnet set and clear flows prompt unless `--yes` is supplied. |
 | `positions list [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | List open positions. `--dex` reads a HIP-3 DEX's account. |
 | `positions update-leverage --coin <COIN> --leverage <N> [--isolated]` | Update leverage. |
-| `positions update-margin --coin <COIN> --amount <AMOUNT>` | Add or remove isolated margin. |
+| `positions update-margin --coin <COIN> --amount <AMOUNT>` | Add isolated margin. |
 | `transfer spot-to-perp --amount <USDC> [-y]` | Move USDC from spot to perp. |
 | `transfer perp-to-spot --amount <USDC> [-y]` | Move USDC from perp to spot. |
 | `transfer send --to <ADDRESS> --amount <USDC> [-y]` | Send USDC to another address. |

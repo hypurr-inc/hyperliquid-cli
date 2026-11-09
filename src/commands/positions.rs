@@ -304,9 +304,9 @@ fn resolve_perp_asset(resolver: &AssetResolver, coin: &str) -> Result<(String, u
 /// Margin to add, in USDC micro-units.
 fn margin_micro_units(amount: Decimal) -> Result<i64, CliError> {
     quantity::positive(amount, Scale::USDC).map_err(|err| match err {
-        ScaleError::TooLarge => CliError::Configuration(
-            "amount is too large for Hyperliquid micro-units".to_string(),
-        ),
+        ScaleError::TooLarge => {
+            CliError::Configuration("amount is too large for Hyperliquid micro-units".to_string())
+        }
         err => err.config("amount", Scale::USDC),
     })
 }

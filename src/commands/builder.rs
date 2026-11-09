@@ -325,9 +325,7 @@ fn approve_output_row(
 
 pub fn parse_builder_address(raw: &str) -> Result<Address, CliError> {
     parse_exact_hex_address(raw, true).map_err(|err| match err {
-        HexAddressError::Format => {
-            CliError::Unsupported(format!("Invalid builder address: {raw}"))
-        }
+        HexAddressError::Format => CliError::Unsupported(format!("Invalid builder address: {raw}")),
         HexAddressError::Zero => {
             CliError::Unsupported("builder address cannot be the zero address".to_string())
         }
@@ -416,9 +414,9 @@ pub fn validate_max_fee_rate(raw: &str) -> Result<u64, CliError> {
         ));
     }
     quantity::non_negative(value, Scale::TENTHS_BPS_PER_PERCENT).map_err(|err| match err {
-        ScaleError::TooPrecise => CliError::Unsupported(
-            "builder max fee rate must be a multiple of 0.001%".to_string(),
-        ),
+        ScaleError::TooPrecise => {
+            CliError::Unsupported("builder max fee rate must be a multiple of 0.001%".to_string())
+        }
         ScaleError::Negative | ScaleError::NotPositive | ScaleError::TooLarge => {
             CliError::Unsupported("builder max fee rate is outside supported bounds".to_string())
         }
@@ -444,7 +442,6 @@ fn confirm_builder_approval(
 
 pub const GROUP: GroupSpec =
     GroupSpec::new(&["builder"], "Manage builder fee approvals").aliases(&["builders"]);
-
 
 pub struct BuilderMaxFee;
 

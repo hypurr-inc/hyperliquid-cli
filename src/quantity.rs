@@ -52,7 +52,10 @@ impl ScaleError {
             Self::Negative => format!("{name} cannot be negative"),
             Self::NotPositive => format!("{name} must be greater than zero"),
             Self::TooPrecise => {
-                format!("{name} supports at most {} decimal places", scale.decimals())
+                format!(
+                    "{name} supports at most {} decimal places",
+                    scale.decimals()
+                )
             }
             Self::TooLarge => format!("{name} is too large"),
         })
@@ -113,8 +116,14 @@ mod tests {
     fn scales_exact_amounts() {
         assert_eq!(positive::<u64>(dec("1.5"), Scale::USDC), Ok(1_500_000));
         assert_eq!(positive::<u64>(dec("0.000001"), Scale::USDC), Ok(1));
-        assert_eq!(positive::<u64>(dec("1.50000000"), Scale::USDC), Ok(1_500_000));
-        assert_eq!(positive::<i64>(dec("12"), Scale::HYPE_CORE), Ok(1_200_000_000));
+        assert_eq!(
+            positive::<u64>(dec("1.50000000"), Scale::USDC),
+            Ok(1_500_000)
+        );
+        assert_eq!(
+            positive::<i64>(dec("12"), Scale::HYPE_CORE),
+            Ok(1_200_000_000)
+        );
     }
 
     #[test]
@@ -161,7 +170,10 @@ mod tests {
     #[test]
     fn amount_reverses_scaling_without_trailing_zeros() {
         assert_eq!(Scale::HYPE_CORE.amount(150_000_000).to_string(), "1.5");
-        assert_eq!(Scale::places(18).amount(10_000_000_000_000_000).to_string(), "0.01");
+        assert_eq!(
+            Scale::places(18).amount(10_000_000_000_000_000).to_string(),
+            "0.01"
+        );
         assert_eq!(Scale::HYPE_CORE.amount(100_000_000).to_string(), "1");
     }
 
@@ -172,7 +184,9 @@ mod tests {
             .to_string();
         assert!(message.ends_with("amount supports at most 8 decimal places"));
         assert_eq!(
-            ScaleError::NotPositive.config("amount", Scale::USDC).exit_code(),
+            ScaleError::NotPositive
+                .config("amount", Scale::USDC)
+                .exit_code(),
             2
         );
     }

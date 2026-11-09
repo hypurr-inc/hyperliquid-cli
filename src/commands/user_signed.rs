@@ -31,8 +31,8 @@ pub(crate) async fn submit<T: UserSigned>(
     let nonce = actions::nonce_now();
     let message = build(chain.to_string(), nonce);
     let signature = actions::sign_user_action::<T>(signer, chain, &message)?;
-    let mut action = serde_json::to_value(&message)
-        .map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
+    let mut action =
+        serde_json::to_value(&message).map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
     if let serde_json::Value::Object(fields) = &mut action {
         fields.insert("type".to_string(), T::ACTION_TYPE.into());
         fields.insert(

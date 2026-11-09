@@ -10,8 +10,8 @@ use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
-use crate::wire::InfoRequest;
 use crate::output::format::thousands;
+use crate::wire::InfoRequest;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct MetaSpotRow {

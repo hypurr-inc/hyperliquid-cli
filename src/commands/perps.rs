@@ -9,7 +9,8 @@ use hypersdk::hypercore::PerpMarket;
 use serde::Serialize;
 
 use crate::assets::{
-    AssetQuery, find_perp_dex, load_hip3_market, parse_asset_query, qualify_dex_asset,
+    AssetQuery, find_perp_dex, load_hip3_market, normalize_dex, parse_asset_query,
+    qualify_dex_asset,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::errors::CliError;
@@ -146,9 +147,9 @@ impl TableData for PerpMarketDetailsOutput {
     }
 }
 
-pub async fn list(inv: &Invocation, args: &PerpsListArgs) -> Result<(), anyhow::Error> {
+async fn list(inv: &Invocation, args: &PerpsListArgs) -> Result<(), anyhow::Error> {
     let client = inv.remote()?.api().sdk();
-    let markets = if let Some(dex_name) = args.dex.as_deref() {
+    let markets = if let Some(dex_name) = normalize_dex(args.dex.as_deref()) {
         let dex = find_perp_dex(client, dex_name).await?;
         client.perps_from(dex).await.map_err(from_sdk)?
     } else {
@@ -160,9 +161,8 @@ pub async fn list(inv: &Invocation, args: &PerpsListArgs) -> Result<(), anyhow::
 }
 
 /// Resolve, fetch, and render one perpetual market.
-pub async fn get(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Error> {
+async fn get(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Error> {
     let client = inv.remote()?.api().sdk();
-    let resolver = inv.asset_resolver().await?;
     let query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
     let market = if let AssetQuery::Hip3 {
         dex: dex_name,
@@ -176,6 +176,7 @@ pub async fn get(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Er
                 asset: query.clone(),
             })?
     } else {
+        let resolver = inv.asset_resolver().await?;
         let resolved = resolver.resolve_perp(&query).map_err(CliError::from)?;
         client
             .perps()

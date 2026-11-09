@@ -10,7 +10,6 @@
 use clap::Args;
 use std::time::Duration;
 
-use chrono::Utc;
 use hypersdk::Decimal;
 use hypersdk::hypercore::{
     AssetContext, BookLevel, Candle, CandleInterval, Chain, FundingRate, HttpClient, Incoming,
@@ -20,8 +19,9 @@ use serde::Serialize;
 
 use crate::assets::{AssetResolver, Market};
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, StreamBound, arg};
+use crate::commands::actions;
 use crate::commands::outcomes;
-use crate::commands::support::{canonical_dex, normalize_dex};
+use crate::commands::support::canonical_dex;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
@@ -31,6 +31,8 @@ use crate::ws::{Awaited, first_matching_message};
 
 const WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 const VALID_INTERVALS: &str = "1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M";
+/// How far back `funding` looks for the latest paid funding rate.
+const FUNDING_LOOKBACK: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Parse and validate a candle interval for clap.
 pub fn parse_candle_interval(input: &str) -> Result<CandleInterval, String> {
@@ -377,26 +379,15 @@ impl TableData for MidsOutput {
 }
 
 /// Resolve and render the L2 order book for a perpetual or spot market.
-pub async fn book(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    let resolver = inv.asset_resolver().await?;
-    let snapshot = book_snapshot(remote.api().sdk(), remote.chain(), &resolver, coin).await?;
-    inv.print(&snapshot);
-    Ok(())
-}
-
-/// Fetch one L2 book snapshot without printing it.
 ///
 /// A HIP-3 `dex:TOKEN` input is looked up on its dex, so `xyz:XYZ100` works
 /// without first loading every dex into the metadata snapshot.
-pub async fn book_snapshot(
-    client: &HttpClient,
-    chain: Chain,
-    resolver: &AssetResolver,
-    coin: &str,
-) -> Result<BookSnapshot, anyhow::Error> {
-    let coin = resolve_market_coin(client, resolver, coin).await?;
-    book_snapshot_for(chain, &coin).await
+async fn book(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
+    let remote = inv.remote()?;
+    let resolver = inv.asset_resolver().await?;
+    let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
+    inv.print(&book_snapshot_for(remote.chain(), &coin).await?);
+    Ok(())
 }
 
 /// One L2 book snapshot for an already-resolved info coin.
@@ -405,8 +396,8 @@ async fn book_snapshot_for(chain: Chain, coin: &str) -> Result<BookSnapshot, any
     Ok(BookSnapshot::from(book))
 }
 
-/// Resolve and render candle history for a perpetual market.
-pub async fn candles(
+/// Resolve and render candle history for a perpetual or spot market.
+async fn candles(
     inv: &Invocation,
     coin: &str,
     interval: CandleInterval,
@@ -414,21 +405,9 @@ pub async fn candles(
 ) -> Result<(), anyhow::Error> {
     let client = inv.remote()?.api().sdk();
     let resolver = inv.asset_resolver().await?;
-    let snapshot = candles_snapshot(client, &resolver, coin, interval, limit).await?;
-    inv.print(&snapshot);
+    let coin = resolve_market_coin(client, &resolver, coin).await?;
+    inv.print(&candles_snapshot_for(client, &coin, interval, limit).await?);
     Ok(())
-}
-
-/// Fetch candle history without printing it.
-pub async fn candles_snapshot(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    coin: &str,
-    interval: CandleInterval,
-    limit: usize,
-) -> Result<CandlesOutput, anyhow::Error> {
-    let coin = resolve_perp_coin_or_fetch(client, resolver, coin).await?;
-    candles_snapshot_for(client, &coin, interval, limit).await
 }
 
 /// Candle history for an already-resolved info coin.
@@ -439,7 +418,7 @@ async fn candles_snapshot_for(
     limit: usize,
 ) -> Result<CandlesOutput, anyhow::Error> {
     let coin = coin.to_string();
-    let end_time = Utc::now().timestamp_millis() as u64;
+    let end_time = actions::nonce_now();
     let interval_ms = interval.to_duration().as_millis() as u64;
     let lookback = interval_ms.saturating_mul(limit.saturating_add(2) as u64);
     let start_time = end_time.saturating_sub(lookback);
@@ -460,23 +439,23 @@ async fn candles_snapshot_for(
     Ok(CandlesOutput::new(rows))
 }
 
-/// Resolve and render the best bid/ask spread for a perpetual market.
-pub async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
+/// Resolve and render the best bid/ask spread for a perpetual or spot market.
+async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
-    let coin = resolve_perp_coin_or_fetch(remote.api().sdk(), &resolver, coin).await?;
+    let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
     let book = fetch_l2_book(remote.chain(), &coin).await?;
     inv.print(&spread_row_from_book(&coin, &book)?);
     Ok(())
 }
 
 /// Resolve and render current plus predicted funding for a perpetual market.
-pub async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
+async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
     let coin = resolve_perp_coin_or_fetch(remote.api().sdk(), &resolver, coin).await?;
-    let end_time = Utc::now().timestamp_millis() as u64;
-    let start_time = end_time.saturating_sub(24 * 60 * 60 * 1000);
+    let end_time = actions::nonce_now();
+    let start_time = end_time.saturating_sub(FUNDING_LOOKBACK.as_millis() as u64);
 
     let latest_history = remote
         .api()
@@ -496,7 +475,7 @@ pub async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> 
     Ok(())
 }
 
-pub async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Error> {
+async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Error> {
     let selected = inv.session().json_options().selected_fields();
     let client = inv.remote()?.api().sdk();
     let dex = canonical_dex(client, dex).await?;
@@ -506,7 +485,7 @@ pub async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Err
 
 /// Fetch all mid prices without printing them. `selected` is `--select`: it
 /// switches the JSON from a name-to-mid map to rows of the named fields.
-pub async fn mids_snapshot(
+async fn mids_snapshot(
     client: &HttpClient,
     dex: Option<&str>,
     selected: Option<&[String]>,
@@ -541,7 +520,7 @@ impl FundingRow {
     }
 }
 
-pub(crate) fn spread_row_from_book(coin: &str, book: &L2Book) -> Result<SpreadRow, CliError> {
+fn spread_row_from_book(coin: &str, book: &L2Book) -> Result<SpreadRow, CliError> {
     let best_bid = book.best_bid().ok_or_else(|| {
         CliError::Unavailable("Order book did not contain any bid levels.".to_string())
     })?;
@@ -563,21 +542,13 @@ pub(crate) fn spread_row_from_book(coin: &str, book: &L2Book) -> Result<SpreadRo
     })
 }
 
-fn resolve_book_coin(resolver: &AssetResolver, coin: &str) -> Result<String, CliError> {
-    match resolver.resolve(coin)? {
+/// The info-endpoint coin a data command subscribes to or queries for `market`.
+fn market_info_coin(market: Market, input: &str) -> Result<String, CliError> {
+    match market {
         Market::Perp(perp) => Ok(perp.display_name()),
         Market::Spot(spot) => Ok(spot.info_coin()),
-        Market::Outcome(_) => Err(outcomes::unsupported_outcome_trading_error(coin)),
+        Market::Outcome(_) => Err(outcomes::unsupported_outcome_trading_error(input)),
     }
-}
-
-/// Subscription coin resolution that also looks a HIP-3 market up live.
-pub async fn resolve_subscription_coin(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    coin: &str,
-) -> Result<String, CliError> {
-    resolve_market_coin(client, resolver, coin).await
 }
 
 /// Resolve a perpetual, fetching the market when it belongs to another dex.
@@ -594,23 +565,16 @@ async fn resolve_perp_coin_or_fetch(
 }
 
 /// Resolve any market for a data command, fetching a HIP-3 market when needed.
-async fn resolve_market_coin(
+pub(crate) async fn resolve_market_coin(
     client: &HttpClient,
     resolver: &AssetResolver,
     coin: &str,
 ) -> Result<String, CliError> {
-    if let Ok(known) = resolve_book_coin(resolver, coin) {
-        return Ok(known);
-    }
-    match resolver
+    let market = resolver
         .resolve_or_fetch(client, coin)
         .await
-        .map_err(CliError::from)?
-    {
-        Market::Perp(perp) => Ok(perp.display_name()),
-        Market::Spot(spot) => Ok(spot.info_coin()),
-        Market::Outcome(_) => Err(outcomes::unsupported_outcome_trading_error(coin)),
-    }
+        .map_err(CliError::from)?;
+    market_info_coin(market, coin)
 }
 
 async fn fetch_l2_book(chain: Chain, coin: &str) -> Result<L2Book, CliError> {
@@ -762,14 +726,9 @@ impl CliCommand for Mids {
 
     async fn run(inv: &Invocation, args: &MidsArgs) -> Result<(), anyhow::Error> {
         if args.watch.watch {
-            watch_mids(
-                inv,
-                normalize_dex(args.dex.as_deref()),
-                args.watch.max_ticks,
-            )
-            .await
+            watch_mids(inv, args.dex.as_deref(), args.watch.max_ticks).await
         } else {
-            mids(inv, normalize_dex(args.dex.as_deref())).await
+            mids(inv, args.dex.as_deref()).await
         }
     }
 }
@@ -949,6 +908,10 @@ mod tests {
 
     fn dec(input: &str) -> Decimal {
         Decimal::from_str(input).unwrap()
+    }
+
+    fn resolve_book_coin(resolver: &AssetResolver, coin: &str) -> Result<String, CliError> {
+        market_info_coin(resolver.resolve(coin).map_err(CliError::from)?, coin)
     }
 
     fn fixture_resolver() -> AssetResolver {

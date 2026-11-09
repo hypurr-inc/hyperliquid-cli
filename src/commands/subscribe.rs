@@ -1,15 +1,12 @@
 //! `subscribe ...`: real-time streams.
 
 use clap::Args;
+use hypersdk::hypercore::CandleInterval;
 
-use hypersdk::hypercore::HttpClient;
-
-use crate::assets::AssetResolver;
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, Lifecycle, OwsSupport, Risk, StreamBound, arg,
 };
-use crate::commands::orderbook::parse_candle_interval;
-use crate::errors::CliError;
+use crate::commands::orderbook::{parse_candle_interval, resolve_market_coin};
 use crate::invocation::Invocation;
 use crate::stream::{StreamBoundArgs, StreamBounds, SubscribeTarget};
 
@@ -33,8 +30,8 @@ pub struct SubscribeCandlesArgs {
     #[arg(long)]
     pub asset: String,
     /// Candle interval
-    #[arg(long, default_value = "1m")]
-    pub interval: String,
+    #[arg(long, default_value = "1m", value_parser = parse_candle_interval)]
+    pub interval: CandleInterval,
     #[command(flatten)]
     pub stream: StreamBoundArgs,
 }
@@ -66,8 +63,7 @@ impl CliCommand for SubscribeTrades {
 
     async fn run(inv: &Invocation, args: &SubscribeAssetArgs) -> Result<(), anyhow::Error> {
         let resolver = inv.asset_resolver().await?;
-        let coin =
-            resolve_subscription_coin(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
+        let coin = resolve_market_coin(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
         stream(inv, SubscribeTarget::trades(coin), &args.stream).await
     }
 }
@@ -93,8 +89,7 @@ impl CliCommand for SubscribeOrderbook {
 
     async fn run(inv: &Invocation, args: &SubscribeAssetArgs) -> Result<(), anyhow::Error> {
         let resolver = inv.asset_resolver().await?;
-        let coin =
-            resolve_subscription_coin(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
+        let coin = resolve_market_coin(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
         stream(inv, SubscribeTarget::orderbook(coin), &args.stream).await
     }
 }
@@ -120,13 +115,11 @@ impl CliCommand for SubscribeCandles {
     ]);
 
     async fn run(inv: &Invocation, args: &SubscribeCandlesArgs) -> Result<(), anyhow::Error> {
-        parse_candle_interval(&args.interval).map_err(CliError::Configuration)?;
         let resolver = inv.asset_resolver().await?;
-        let coin =
-            resolve_subscription_coin(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
+        let coin = resolve_market_coin(inv.remote()?.api().sdk(), &resolver, &args.asset).await?;
         stream(
             inv,
-            SubscribeTarget::candles(coin, args.interval.clone()),
+            SubscribeTarget::candles(coin, args.interval.to_string()),
             &args.stream,
         )
         .await
@@ -208,15 +201,6 @@ impl CliCommand for SubscribeFills {
         let user = inv.resolve_signer()?.query_address();
         stream(inv, SubscribeTarget::fills(user), &args.stream).await
     }
-}
-
-/// Resolve a stream's asset, looking a HIP-3 `dex:TOKEN` up on its dex.
-async fn resolve_subscription_coin(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    asset: &str,
-) -> Result<String, CliError> {
-    crate::commands::orderbook::resolve_subscription_coin(client, resolver, asset).await
 }
 
 async fn stream(

@@ -16,5 +16,5 @@ pub use metadata::{
 pub(crate) use metadata::{
     RawPerpDex, find_perp_dex, find_spot_token, load_hip3_market, load_raw_perp_dexes,
 };
-pub use query::{AssetQuery, parse_asset_query, qualify_dex_asset};
+pub use query::{AssetQuery, normalize_dex, parse_asset_query, qualify_dex_asset};
 pub use resolver::{AssetError, AssetResolver, suggestions};

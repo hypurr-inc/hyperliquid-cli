@@ -120,7 +120,6 @@ pub enum VaultKindArg {
     User,
 }
 
-
 impl VaultKindArg {
     fn matches(self, kind: &str) -> bool {
         match self {
@@ -234,7 +233,6 @@ struct VaultSummaryRow {
 pub struct VaultSummaryOutput {
     rows: Vec<VaultSummaryRow>,
 }
-
 
 #[derive(Debug, Clone, Serialize)]
 struct VaultTransferConfirmation {
@@ -621,7 +619,6 @@ impl RawVaultSummary {
         })
     }
 }
-
 
 fn sort_vault_rows(rows: &mut [VaultSummaryRow], sort: VaultSortArg) {
     match sort {

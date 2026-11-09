@@ -11,9 +11,7 @@ use chrono::DateTime;
 use clap::{Args, ValueEnum};
 use hypersdk::Address;
 use hypersdk::Decimal;
-use hypersdk::hypercore::{
-    BasicOrder, ClearinghouseState, Fill, SubAccount, UserVaultEquity,
-};
+use hypersdk::hypercore::{BasicOrder, ClearinghouseState, Fill, SubAccount, UserVaultEquity};
 use serde::Serialize;
 
 use crate::command_spec::{ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
@@ -939,7 +937,6 @@ impl TableData for SubaccountsOutput {
         serde_json::to_value(&self.subaccounts).unwrap_or_else(|_| serde_json::json!([]))
     }
 }
-
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["account"], "Read account data and manage OWS wallets")
     .long_about("Read account data and manage OWS wallets.\n\

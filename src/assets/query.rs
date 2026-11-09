@@ -42,10 +42,17 @@ pub fn parse_asset_query(input: &str) -> AssetQuery {
     }
 }
 
+/// A `--dex` value, or `None` for the default dex: the exchange treats the empty
+/// dex name as the first perp dex, so a blank flag behaves like no flag.
+#[must_use]
+pub fn normalize_dex(dex: Option<&str>) -> Option<&str> {
+    dex.map(str::trim).filter(|dex| !dex.is_empty())
+}
+
 /// Apply a `--dex` flag to a coin: `--dex dex COIN` means `dex:COIN`.
 #[must_use]
 pub fn qualify_dex_asset(dex: Option<&str>, coin: &str) -> String {
-    match dex {
+    match normalize_dex(dex) {
         Some(dex) if !coin.contains(':') => format!("{dex}:{coin}"),
         _ => coin.to_string(),
     }
@@ -68,6 +75,8 @@ mod tests {
         assert_eq!(qualify_dex_asset(Some("xyz"), "GOLD"), "xyz:GOLD");
         assert_eq!(qualify_dex_asset(Some("xyz"), "abc:GOLD"), "abc:GOLD");
         assert_eq!(qualify_dex_asset(None, "BTC"), "BTC");
+        assert_eq!(qualify_dex_asset(Some(""), "BTC"), "BTC");
+        assert_eq!(qualify_dex_asset(Some(" xyz "), "GOLD"), "xyz:GOLD");
     }
 
     #[test]

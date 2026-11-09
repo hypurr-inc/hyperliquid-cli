@@ -193,7 +193,8 @@ async fn bid(
         None => DEFAULT_HYPE_WEI_DECIMALS,
     };
     let scale = Scale::places(decimals);
-    let max_gas = quantity::positive::<u64>(max, scale).map_err(|err| err.config("--max", scale))?;
+    let max_gas =
+        quantity::positive::<u64>(max, scale).map_err(|err| err.config("--max", scale))?;
 
     let status = client
         .gossip_priority_auction_status()
@@ -327,7 +328,10 @@ mod tests {
             quantity::non_negative::<u64>("0.01".parse::<Decimal>().unwrap(), scale),
             Ok(10_000_000_000_000_000)
         );
-        assert_eq!(scale.amount(10_000_000_000_000_001).to_string(), "0.010000000000000001");
+        assert_eq!(
+            scale.amount(10_000_000_000_000_001).to_string(),
+            "0.010000000000000001"
+        );
     }
 
     #[test]
@@ -339,8 +343,21 @@ mod tests {
         };
 
         assert!(validate_bid_args(&args("1", "203.0.113.10")).is_ok());
-        assert_eq!(validate_bid_args(&args("-1", "203.0.113.10")).unwrap_err().exit_code(), 2);
-        assert_eq!(validate_bid_args(&args("0", "203.0.113.10")).unwrap_err().exit_code(), 2);
-        assert_eq!(validate_bid_args(&args("1", "  ")).unwrap_err().exit_code(), 2);
+        assert_eq!(
+            validate_bid_args(&args("-1", "203.0.113.10"))
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        assert_eq!(
+            validate_bid_args(&args("0", "203.0.113.10"))
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        assert_eq!(
+            validate_bid_args(&args("1", "  ")).unwrap_err().exit_code(),
+            2
+        );
     }
 }

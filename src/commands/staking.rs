@@ -639,12 +639,10 @@ async fn withdraw(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let wei = validate_amount_to_wei(args.amount)?;
-    user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| {
-        CWithdraw {
-            hyperliquidChain: hyperliquid_chain,
-            wei,
-            nonce,
-        }
+    user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| CWithdraw {
+        hyperliquidChain: hyperliquid_chain,
+        wei,
+        nonce,
     })
     .await?;
     print_action_confirmation(
@@ -888,7 +886,6 @@ pub const LINK_GROUP: GroupSpec = GroupSpec::new(
     &["staking", "link"],
     "Link trading and staking accounts for fee discount attribution",
 );
-
 
 pub struct StakingSummary;
 
@@ -1232,8 +1229,8 @@ mod tests {
 
     #[test]
     fn protocol_address_requires_the_0x_prefix() {
-        let err = protocol_address("0000000000000000000000000000000000000002", "validator")
-            .unwrap_err();
+        let err =
+            protocol_address("0000000000000000000000000000000000000002", "validator").unwrap_err();
         assert_eq!(err.exit_code(), 13);
         assert!(err.to_string().contains("Invalid address"));
     }

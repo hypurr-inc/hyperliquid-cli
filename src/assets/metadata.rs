@@ -75,10 +75,7 @@ impl AssetMetadata {
         }
 
         let meta = api
-            .info::<MetaResponse>(
-                &InfoRequest::new("meta"),
-                "loading perpetual metadata",
-            )
+            .info::<MetaResponse>(&InfoRequest::new("meta"), "loading perpetual metadata")
             .await?;
         let spot_meta = load_raw_spot_meta(api).await?;
 

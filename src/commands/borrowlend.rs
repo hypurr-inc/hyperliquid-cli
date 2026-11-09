@@ -58,7 +58,6 @@ pub struct ActionArgs {
     pub max: bool,
 }
 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BorrowLendOperation {
@@ -94,7 +93,6 @@ struct RawReserveState {
     #[serde(with = "rust_decimal::serde::str")]
     total_borrowed: Decimal,
 }
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReserveOutput {
@@ -265,7 +263,6 @@ impl TableData for BorrowLendActionOutput {
     }
 }
 
-
 /// Show reserve states for all borrow/lend tokens.
 async fn rates(inv: &Invocation) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
@@ -429,9 +426,11 @@ async fn reserve_rows(api: &ApiClient) -> Result<Vec<ReserveRow>, CliError> {
 }
 
 async fn live_reserve_rows(api: &ApiClient) -> Result<Vec<ReserveRow>, BorrowLendInfoError> {
-    let reserve_states =
-        post_info::<Vec<(u32, RawReserveState)>>(api, &InfoRequest::new("allBorrowLendReserveStates"))
-            .await?;
+    let reserve_states = post_info::<Vec<(u32, RawReserveState)>>(
+        api,
+        &InfoRequest::new("allBorrowLendReserveStates"),
+    )
+    .await?;
     let token_names = token_names_by_index(api.sdk()).await?;
 
     Ok(reserve_states
@@ -510,7 +509,6 @@ async fn token_names_by_index(
         .collect())
 }
 
-
 async fn resolve_spot_token(client: &HttpClient, token: &str) -> Result<SpotToken, CliError> {
     find_spot_token(client, token)
         .await?
@@ -554,9 +552,9 @@ fn decimal_to_wei(amount: Decimal, decimals: i64) -> Result<u64, CliError> {
         ScaleError::TooLarge => {
             CliError::Unsupported("borrow/lend amount is too large".to_string())
         }
-        ScaleError::Negative | ScaleError::NotPositive => CliError::Unsupported(
-            "borrow/lend amount must be greater than zero".to_string(),
-        ),
+        ScaleError::Negative | ScaleError::NotPositive => {
+            CliError::Unsupported("borrow/lend amount must be greater than zero".to_string())
+        }
     })
 }
 
@@ -641,7 +639,6 @@ fn structured_unknown_request_error(body: &str) -> bool {
 
     status_is_error && info_request_type_is_unavailable(400, &value.to_string())
 }
-
 
 pub const GROUP: GroupSpec = GroupSpec::new(
     &["borrowlend"],
@@ -842,12 +839,8 @@ mod tests {
 
     #[test]
     fn positions_come_only_from_non_empty_token_balances() {
-        assert!(
-            UserBorrowLendPosition::from_balance(balance("+100", None, "5", "0")).is_none()
-        );
-        assert!(
-            UserBorrowLendPosition::from_balance(balance("USDC", Some(0), "0", "0")).is_none()
-        );
+        assert!(UserBorrowLendPosition::from_balance(balance("+100", None, "5", "0")).is_none());
+        assert!(UserBorrowLendPosition::from_balance(balance("USDC", Some(0), "0", "0")).is_none());
 
         let borrowed =
             UserBorrowLendPosition::from_balance(balance("USDC", Some(0), "-3", "1")).unwrap();
