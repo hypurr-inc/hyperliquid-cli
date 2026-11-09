@@ -5,18 +5,17 @@ use hypersdk::hypercore::Chain;
 use serde::Serialize;
 
 use crate::builder_fee::{MaxFeeRate, max_builder_fee, percent_from_tenths_bps};
-use crate::command_spec::{
-    CliCommand, CommandSpec, GroupSpec, InputKind, YES_FOR_LIVE_EXECUTION, arg,
-};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, YES_FOR_LIVE_EXECUTION, arg};
 use crate::commands::common::rows::{ListRow, One, Row, Rows};
 use crate::commands::common::support::print_dry_run;
 use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::exchange::builder_approval::{self, ApproveBuilderFee};
-use crate::exchange::user_signed::UserSigned;
 use crate::invocation::Invocation;
-use crate::signing::{SelectedSigner, Signs};
+use crate::signable::UserSigned;
+use crate::signing::SelectedSigner;
 use crate::wire::{AddressRole, InfoRequest, address};
 
 const APPROVE_REVERSIBILITY: ActionReversibility = ActionReversibility::Reversible;
@@ -299,8 +298,7 @@ impl CliCommand for BuilderApprove {
         "Approve or update a max builder fee for the selected signer",
         "Approve, update, or revoke a max builder fee for the selected master signer. Use 0% to revoke.",
     )
-    .signs(Signs::user_signed::<ApproveBuilderFee>())
-    .master_only("approveBuilderFee")
+    .user_signed::<ApproveBuilderFee>()
     .prompt()
     .args(&[
         arg("builder").kind(InputKind::ProtocolObjectAddress).resource_id("builder address"),

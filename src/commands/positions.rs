@@ -9,9 +9,8 @@ use serde::Serialize;
 
 use crate::assets::canonical_dex;
 use crate::assets::{AssetResolver, PerpAsset};
-use crate::command_spec::{
-    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg,
-};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{ArgSpec, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
 use crate::commands::common::position::{PositionRow, find_position};
 use crate::commands::common::rows::{ListRow, Row, Rows};
 use crate::commands::common::support::{

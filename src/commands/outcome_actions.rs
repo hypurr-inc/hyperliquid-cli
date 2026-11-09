@@ -17,7 +17,8 @@ use hypersdk::hypercore::types::api::UserOutcomeAction;
 use serde::Serialize;
 
 use crate::assets::{Names, OutcomeCatalog};
-use crate::command_spec::{ArgSpec, CliCommand, CommandSpec, InputKind, YES, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{ArgSpec, CommandSpec, InputKind, YES, arg};
 use crate::commands::common::rows::{ListRow, Row, Rows, or_missing};
 use crate::commands::common::support::print_dry_run;
 use crate::consent::{self, ConsentBlock};

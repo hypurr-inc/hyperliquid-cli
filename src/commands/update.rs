@@ -1,6 +1,7 @@
 use crate::invocation::Invocation;
 
-use crate::command_spec::{CliCommand, CommandSpec, DryRunPolicy, NoArgs, Risk};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, DryRunPolicy, NoArgs, Risk};
 
 pub struct Update;
 
