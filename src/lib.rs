@@ -37,4 +37,5 @@ pub mod update;
 pub mod wallet_store;
 pub mod watch;
 pub mod wire;
+pub mod wire_decimal;
 pub mod ws;

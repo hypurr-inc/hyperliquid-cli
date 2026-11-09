@@ -19,6 +19,7 @@ use crate::output::{self, TableData};
 use crate::quantity::{self, Scale, ScaleError};
 use crate::signing::SelectedSigner;
 use crate::wire::InfoRequest;
+use crate::wire_decimal;
 
 const LIVE_RESERVE_NOTE: &str = "Live reserve state from Hyperliquid API";
 const UNAVAILABLE_RESERVE_NOTE: &str =
@@ -57,9 +58,8 @@ pub struct ActionArgs {
     pub max: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BorrowLendOperation {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BorrowLendOperation {
     Supply,
     Withdraw,
     Repay,
@@ -94,6 +94,12 @@ impl BorrowLendOperation {
     }
 }
 
+impl Serialize for BorrowLendOperation {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RawReserveState {
@@ -116,13 +122,13 @@ pub(crate) struct RawBorrowLendUserState {
     token_to_state: Vec<(u32, RawTokenState)>,
     /// The protocol's verdict: `healthy` or a state it is not.
     pub(crate) health: String,
-    #[serde(default)]
-    health_factor: Option<JsonDecimal>,
+    #[serde(default, deserialize_with = "wire_decimal::deserialize_option")]
+    health_factor: Option<Decimal>,
 }
 
 impl RawBorrowLendUserState {
     pub(crate) fn health_factor(&self) -> Option<Decimal> {
-        self.health_factor.map(|factor| factor.0)
+        self.health_factor
     }
 }
 
@@ -145,30 +151,10 @@ struct RawTokenState {
 
 #[derive(Debug, Deserialize)]
 struct RawLegState {
-    basis: JsonDecimal,
-    value: JsonDecimal,
-}
-
-/// A decimal the API may send as a JSON string or number.
-#[derive(Debug, Clone, Copy)]
-struct JsonDecimal(Decimal);
-
-impl<'de> Deserialize<'de> for JsonDecimal {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let raw = match serde_json::Value::deserialize(deserializer)? {
-            serde_json::Value::String(text) => text,
-            serde_json::Value::Number(number) => number.to_string(),
-            other => {
-                return Err(serde::de::Error::custom(format!(
-                    "expected a decimal, found {other}"
-                )));
-            }
-        };
-        raw.parse::<Decimal>()
-            .or_else(|_| Decimal::from_scientific(&raw))
-            .map(Self)
-            .map_err(serde::de::Error::custom)
-    }
+    #[serde(with = "wire_decimal")]
+    basis: Decimal,
+    #[serde(with = "wire_decimal")]
+    value: Decimal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -240,14 +226,30 @@ impl ListRow for ReserveRow {
     const EMPTY: &'static str = "No reserve states.";
 }
 
+/// The `borrowLend` exchange action, one JSON object for sending and for the
+/// preview. Verified against the @nktkas/hyperliquid v0.31.0 exchange schema:
+/// `{ type: "borrowLend", operation, token, amount: null|string }`.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BorrowLendExchangeAction {
-    #[serde(rename = "type")]
-    action_type: &'static str,
-    operation: &'static str,
+#[serde(tag = "type", rename = "borrowLend")]
+struct BorrowLendAction {
+    operation: BorrowLendOperation,
     token: u32,
+    /// `null` for `--max`.
     amount: Option<String>,
+}
+
+impl BorrowLendAction {
+    fn new(operation: BorrowLendOperation, token: u32, args: &ActionArgs) -> Self {
+        Self {
+            operation,
+            token,
+            amount: if args.max {
+                None
+            } else {
+                args.amount.map(quantity::wire_text)
+            },
+        }
+    }
 }
 
 impl Row for BorrowLendActionRow {
@@ -326,43 +328,6 @@ impl TableData for UserBorrowLendOutput {
     }
 }
 
-async fn rates(inv: &Invocation) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    let rows = reserve_rows(remote.api()).await?;
-    inv.print(&Rows::new(rows));
-    Ok(())
-}
-
-async fn get(inv: &Invocation, token: &str) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    let token = require_spot_token(remote.api().sdk(), token).await?;
-    let row = match live_reserve_row(remote.api(), token.index, token.name.clone()).await {
-        Ok(row) => row,
-        Err(BorrowLendInfoError::EndpointUnavailable) => unavailable_reserve_row(token),
-        Err(BorrowLendInfoError::Cli(err)) => return Err(err.into()),
-    };
-
-    inv.print(&Rows::new(vec![row]));
-    Ok(())
-}
-
-async fn user(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    let api = inv.remote()?.api();
-    let state = fetch_user_state(api, user).await?;
-    let token_names = if state.token_to_state.is_empty() {
-        Default::default()
-    } else {
-        match token_names_by_index(api.sdk()).await {
-            Ok(names) => names,
-            Err(BorrowLendInfoError::Cli(err)) => return Err(err.into()),
-            Err(BorrowLendInfoError::EndpointUnavailable) => Default::default(),
-        }
-    };
-
-    inv.print(&UserBorrowLendOutput::new(user, state, &token_names));
-    Ok(())
-}
-
 /// The dry-run preview of `operation` on `token`, `wei` being its wire amount.
 fn action_preview(
     chain: hypersdk::hypercore::Chain,
@@ -370,6 +335,7 @@ fn action_preview(
     args: &ActionArgs,
     token: &SpotToken,
     wei: u64,
+    exchange_action: &BorrowLendAction,
 ) -> serde_json::Value {
     let mut preview = serde_json::Map::new();
     preview.insert("operation".into(), operation.as_str().into());
@@ -402,15 +368,7 @@ fn action_preview(
             }),
         );
     }
-    preview.insert(
-        "exchange_action".into(),
-        serde_json::json!({
-            "type": "borrowLend",
-            "operation": operation.as_str(),
-            "token": token.index,
-            "amount": borrowlend_exchange_amount(args)
-        }),
-    );
+    preview.insert("exchange_action".into(), serde_json::json!(exchange_action));
     preview.insert(
         "live_submission".into(),
         "enabled: wallet-signed /exchange borrowLend action shape verified against @nktkas/hyperliquid v0.31.0".into(),
@@ -424,22 +382,13 @@ async fn action(
     operation: BorrowLendOperation,
     args: &ActionArgs,
     token: SpotToken,
+    exchange_action: BorrowLendAction,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let amount = borrowlend_exchange_amount(args);
-
-    // Verified against @nktkas/hyperliquid v0.31.0 exchange `borrowLend` schema:
-    // { type: "borrowLend", operation: "supply"|"withdraw", token, amount: null|string }.
-    let action = BorrowLendExchangeAction {
-        action_type: "borrowLend",
-        operation: operation.as_str(),
-        token: token.index,
-        amount: amount.clone(),
-    };
     actions::send_raw_l1_json_action(
         remote.api(),
         signer,
-        &action,
+        &exchange_action,
         actions::RawL1ActionMetadata::new(actions::nonce_now()),
         "borrow/lend action failed",
     )
@@ -452,7 +401,7 @@ async fn action(
         acting_as: signer.query_address().to_string(),
         token: token.name,
         token_index: token.index,
-        amount,
+        amount: exchange_action.amount,
         max: args.max,
         network: remote.chain().to_string(),
         signer: signer.address().to_string(),
@@ -589,14 +538,6 @@ fn borrowlend_wei(args: &ActionArgs, decimals: i64) -> Result<u64, CliError> {
     decimal_to_wei(amount, decimals)
 }
 
-fn borrowlend_exchange_amount(args: &ActionArgs) -> Option<String> {
-    if args.max {
-        None
-    } else {
-        args.amount.map(|amount| amount.normalize().to_string())
-    }
-}
-
 fn decimal_to_wei(amount: Decimal, decimals: i64) -> Result<u64, CliError> {
     if decimals < 0 {
         return Err(CliError::Unsupported(
@@ -632,17 +573,17 @@ impl UserBorrowLendOutput {
         let positions = state
             .token_to_state
             .into_iter()
-            .filter(|(_, token)| !token.supply.value.0.is_zero() || !token.borrow.value.0.is_zero())
+            .filter(|(_, token)| !token.supply.value.is_zero() || !token.borrow.value.is_zero())
             .map(|(token_index, token)| UserBorrowLendPosition {
                 token: token_names
                     .get(&token_index)
                     .cloned()
                     .unwrap_or_else(|| format!("#{token_index}")),
                 token_index,
-                supplied: token.supply.value.0.normalize(),
-                borrowed: token.borrow.value.0.normalize(),
-                supply_basis: token.supply.basis.0.normalize(),
-                borrow_basis: token.borrow.basis.0.normalize(),
+                supplied: token.supply.value.normalize(),
+                borrowed: token.borrow.value.normalize(),
+                supply_basis: token.supply.basis.normalize(),
+                borrow_basis: token.borrow.basis.normalize(),
             })
             .collect();
         Self {
@@ -737,7 +678,9 @@ impl CliCommand for BorrowlendRates {
     );
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
-        rates(inv).await
+        let rows = reserve_rows(inv.remote()?.api()).await?;
+        inv.print(&Rows::new(rows));
+        Ok(())
     }
 }
 
@@ -758,7 +701,16 @@ impl CliCommand for BorrowlendGet {
         .resource_id("token")]);
 
     async fn run(inv: &Invocation, args: &BorrowlendGetArgs) -> Result<(), anyhow::Error> {
-        get(inv, &args.token).await
+        let remote = inv.remote()?;
+        let token = require_spot_token(remote.api().sdk(), &args.token).await?;
+        let row = match live_reserve_row(remote.api(), token.index, token.name.clone()).await {
+            Ok(row) => row,
+            Err(BorrowLendInfoError::EndpointUnavailable) => unavailable_reserve_row(token),
+            Err(BorrowLendInfoError::Cli(err)) => return Err(err.into()),
+        };
+
+        inv.print(&Rows::new(vec![row]));
+        Ok(())
     }
 }
 
@@ -776,7 +728,21 @@ impl CliCommand for BorrowlendUser {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        user(inv, args.resolve(inv).await?).await
+        let user = args.resolve(inv).await?;
+        let api = inv.remote()?.api();
+        let state = fetch_user_state(api, user).await?;
+        let token_names = if state.token_to_state.is_empty() {
+            Default::default()
+        } else {
+            match token_names_by_index(api.sdk()).await {
+                Ok(names) => names,
+                Err(BorrowLendInfoError::Cli(err)) => return Err(err.into()),
+                Err(BorrowLendInfoError::EndpointUnavailable) => Default::default(),
+            }
+        };
+
+        inv.print(&UserBorrowLendOutput::new(user, state, &token_names));
+        Ok(())
     }
 }
 
@@ -894,16 +860,24 @@ async fn borrowlend_action(
     let remote = inv.remote()?;
     let token = require_spot_token(remote.api().sdk(), &args.token).await?;
     let wei = borrowlend_wei(args, token.wei_decimals)?;
+    let exchange_action = BorrowLendAction::new(operation, token.index, args);
     if inv.dry_run() {
         if operation == BorrowLendOperation::Borrow
-            && let Some(signer) = inv.preview_signer()?.ok()
+            && let Some(signer) = inv.dry_run_signer()?
         {
             ensure_manual_borrow_allowed(remote.api(), signer.query_address()).await?;
         }
         return print_dry_run(
             inv,
             &format!("{}_borrowlend", operation.as_str()),
-            action_preview(remote.chain(), operation, args, &token, wei),
+            action_preview(
+                remote.chain(),
+                operation,
+                args,
+                &token,
+                wei,
+                &exchange_action,
+            ),
         );
     }
 
@@ -911,7 +885,7 @@ async fn borrowlend_action(
     if operation == BorrowLendOperation::Borrow {
         ensure_manual_borrow_allowed(remote.api(), signer.query_address()).await?;
     }
-    action(inv, &signer, operation, args, token).await
+    action(inv, &signer, operation, args, token, exchange_action).await
 }
 
 #[cfg(test)]
@@ -1049,6 +1023,36 @@ mod tests {
         assert_eq!(output.health_factor, None);
         assert_eq!(
             output.to_json_value()["health_factor"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn the_exchange_action_keeps_its_wire_shape() {
+        let action = |amount: Option<&str>, max: bool| {
+            BorrowLendAction::new(
+                BorrowLendOperation::Repay,
+                0,
+                &ActionArgs {
+                    token: "USDC".to_string(),
+                    amount: amount.map(|amount| amount.parse().unwrap()),
+                    max,
+                },
+            )
+        };
+
+        let fixed = action(Some("5.00"), false);
+        assert_eq!(
+            serde_json::to_value(&fixed).unwrap(),
+            serde_json::json!({"type": "borrowLend", "operation": "repay", "token": 0, "amount": "5"})
+        );
+        // The L1 action hash covers the msgpack of the action.
+        assert_eq!(
+            rmp_serde::to_vec_named(&fixed).unwrap(),
+            b"\x84\xa4type\xaaborrowLend\xa9operation\xa5repay\xa5token\x00\xa6amount\xa15"
+        );
+        assert_eq!(
+            serde_json::to_value(action(None, true)).unwrap()["amount"],
             serde_json::Value::Null
         );
     }

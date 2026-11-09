@@ -13,6 +13,7 @@ use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::referral_code::{validate_referral_code, validate_referrer_code};
 use crate::settings::env;
+use crate::signing::SelectedSigner;
 use crate::wire::InfoRequest;
 
 /// What `/info` `referral` answers. Every field is optional: an account with no
@@ -47,15 +48,15 @@ struct ReferredBy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ReferralStatusRow {
-    pub user: String,
-    pub referral_code: Option<String>,
-    pub referral_count: usize,
-    pub referred_by_code: Option<String>,
-    pub referred_by: Option<String>,
-    pub unclaimed_rewards: Option<String>,
-    pub claimed_rewards: Option<String>,
-    pub builder_rewards: Option<String>,
+struct ReferralStatusRow {
+    user: String,
+    referral_code: Option<String>,
+    referral_count: usize,
+    referred_by_code: Option<String>,
+    referred_by: Option<String>,
+    unclaimed_rewards: Option<String>,
+    claimed_rewards: Option<String>,
+    builder_rewards: Option<String>,
 }
 
 impl ReferralStatusRow {
@@ -155,10 +156,10 @@ enum ReferralActionKind {
 }
 
 impl ReferralActionKind {
-    fn action_type(self) -> &'static str {
+    fn action(self, code: &str) -> ReferrerAction<'_> {
         match self {
-            Self::Set => "setReferrer",
-            Self::Register => "registerReferrer",
+            Self::Set => ReferrerAction::SetReferrer { code },
+            Self::Register => ReferrerAction::RegisterReferrer { code },
         }
     }
 
@@ -191,24 +192,21 @@ impl ReferralActionKind {
     }
 }
 
+/// `setReferrer` and `registerReferrer`, which take the same code: one JSON
+/// object for sending and for the preview.
 #[derive(Debug, Serialize)]
-struct ReferrerAction<'a> {
-    #[serde(rename = "type")]
-    action_type: &'static str,
-    code: &'a str,
+#[serde(tag = "type", rename_all = "camelCase")]
+enum ReferrerAction<'a> {
+    SetReferrer { code: &'a str },
+    RegisterReferrer { code: &'a str },
 }
 
-async fn status(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    let info = inv
-        .remote()?
-        .api()
-        .info::<ReferralInfo>(
-            &InfoRequest::user("referral", user),
-            "loading referral status",
-        )
-        .await?;
-    inv.print(&One::new(ReferralStatusRow::new(user, info)));
-    Ok(())
+impl ReferrerAction<'_> {
+    fn code(&self) -> &str {
+        match self {
+            Self::SetReferrer { code } | Self::RegisterReferrer { code } => code,
+        }
+    }
 }
 
 /// `referral set` and `referral register`: preview under `--dry-run`, otherwise
@@ -219,20 +217,12 @@ async fn run_code_action(
     code: &str,
 ) -> Result<(), anyhow::Error> {
     kind.validate(code)?;
+    let action = kind.action(code);
     if inv.dry_run() {
-        let signer_context = inv.resolve_signer().ok();
         return print_dry_run(
             inv,
             kind.would_execute(),
-            referral_dry_run_value(
-                inv.remote()?.chain(),
-                signer_context.as_ref().map(|resolved| resolved.address()),
-                signer_context
-                    .as_ref()
-                    .map(|resolved| resolved.query_address()),
-                code,
-                kind,
-            ),
+            referral_dry_run_value(inv.remote()?.chain(), inv.dry_run_signer()?, &action),
         );
     }
     let signer = inv.resolve_signer()?;
@@ -240,10 +230,7 @@ async fn run_code_action(
     actions::send_raw_l1_json_action(
         remote.api(),
         &signer,
-        &ReferrerAction {
-            action_type: kind.action_type(),
-            code,
-        },
+        &action,
         actions::RawL1ActionMetadata::new(actions::nonce_now()),
         kind.submit_context(),
     )
@@ -263,20 +250,15 @@ async fn run_code_action(
 
 fn referral_dry_run_value(
     chain: Chain,
-    signer: Option<Address>,
-    query_address: Option<Address>,
-    code: &str,
-    action: ReferralActionKind,
+    signer: Option<&SelectedSigner>,
+    action: &ReferrerAction,
 ) -> serde_json::Value {
     serde_json::json!({
         "network": chain.to_string(),
-        "signer": signer.map(|address| address.to_string()),
-        "query_address": query_address.map(|address| address.to_string()),
-        "code": code,
-        "action": {
-            "type": action.action_type(),
-            "code": code,
-        },
+        "signer": signer.map(|signer| signer.address().to_string()),
+        "query_address": signer.map(|signer| signer.query_address().to_string()),
+        "code": action.code(),
+        "action": action,
         "reversibility": REVERSIBILITY,
     })
 }
@@ -369,7 +351,16 @@ impl CliCommand for ReferralStatus {
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         let user = inv.resolve_signer()?.query_address();
-        status(inv, user).await
+        let info = inv
+            .remote()?
+            .api()
+            .info::<ReferralInfo>(
+                &InfoRequest::user("referral", user),
+                "loading referral status",
+            )
+            .await?;
+        inv.print(&One::new(ReferralStatusRow::new(user, info)));
+        Ok(())
     }
 }
 
@@ -428,5 +419,27 @@ mod tests {
         let cells = status_of(serde_json::json!({})).unwrap().cells();
 
         assert_eq!(cells[1], crate::commands::rows::MISSING);
+    }
+
+    #[test]
+    fn the_referrer_actions_keep_their_wire_shape() {
+        for (kind, tag) in [
+            (ReferralActionKind::Set, "setReferrer"),
+            (ReferralActionKind::Register, "registerReferrer"),
+        ] {
+            let action = kind.action("MYCODE");
+
+            assert_eq!(
+                serde_json::to_value(&action).unwrap(),
+                serde_json::json!({"type": tag, "code": "MYCODE"})
+            );
+            let mut msgpack = vec![0x82, 0xa4];
+            msgpack.extend(b"type");
+            msgpack.push(0xa0 + tag.len() as u8);
+            msgpack.extend(tag.as_bytes());
+            msgpack.extend(b"\xa4code\xa6MYCODE");
+            assert_eq!(rmp_serde::to_vec_named(&action).unwrap(), msgpack);
+            assert_eq!(action.code(), "MYCODE");
+        }
     }
 }

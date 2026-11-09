@@ -85,7 +85,7 @@ async fn user_signed_actions_refuse_a_stored_api_wallet_before_any_request() {
     let server = server().await;
 
     // (arguments, the exchange action the refusal names, takes --yes)
-    let commands: [(&[&str], &str, bool); 10] = [
+    let commands: [(&[&str], &str, bool); 11] = [
         (
             &["transfer", "spot-to-perp", "--amount", "1"],
             "usdClassTransfer",
@@ -150,6 +150,18 @@ async fn user_signed_actions_refuse_a_stored_api_wallet_before_any_request() {
         (
             &["staking", "link", "finalize", "--user", OTHER],
             "linkStakingUser",
+            true,
+        ),
+        (
+            &[
+                "builder",
+                "approve",
+                "--builder",
+                OTHER,
+                "--max-fee-rate",
+                "0.001%",
+            ],
+            "approveBuilderFee",
             true,
         ),
     ];

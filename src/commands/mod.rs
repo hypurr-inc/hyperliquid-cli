@@ -1,12 +1,15 @@
 pub mod abstraction;
 pub mod account;
+pub mod account_settings;
 pub(crate) mod actions;
 pub mod api_wallet;
 pub mod asset;
 pub mod borrowlend;
 pub mod builder;
+pub(crate) mod builder_approval;
 pub(crate) mod confirm;
 pub mod feedback;
+pub(crate) mod funds;
 pub mod invalidate_nonce;
 pub(crate) mod issue_report;
 pub mod mcp;
@@ -117,10 +120,10 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<account::AccountMultisigSigners>(),
             Entry::of::<account::AccountAssetData>(),
             Entry::of::<account::AccountAbstraction>(),
-            Entry::of::<account::AccountAbstractionSet>(),
+            Entry::of::<account_settings::AccountAbstractionSet>(),
             Entry::of::<invalidate_nonce::AccountInvalidateNonce>(),
             Entry::of::<reserve_weight::AccountReserveWeight>(),
-            Entry::of::<account::AccountEvmBigBlocks>(),
+            Entry::of::<account_settings::AccountEvmBigBlocks>(),
             Entry::of::<wallet::AccountAdd>(),
             Entry::of::<wallet::AccountLs>(),
             Entry::of::<wallet::AccountSetDefault>(),

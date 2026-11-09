@@ -14,7 +14,7 @@ pub const MAX_REFERRER_CODE_LEN: usize = 20;
 pub fn suggested_default_referral_code(
     settings: &Settings,
     is_testnet: bool,
-) -> Result<Option<String>, anyhow::Error> {
+) -> Result<Option<String>, CliError> {
     let code = settings.suggested_default_referral_code(is_testnet);
     if let Some(code) = code.as_deref() {
         validate_referral_code(code)?;

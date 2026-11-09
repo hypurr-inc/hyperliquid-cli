@@ -143,14 +143,7 @@ async fn clear_to_send(
         warn_hip3_margin_helpers(&helpers)?;
         ask(target)
     })?;
-    execute_hip3_margin_transfers(
-        context.inv.mode(),
-        context.inv.remote()?,
-        context.signer,
-        user,
-        &helpers,
-    )
-    .await
+    execute_hip3_margin_transfers(context.inv.remote()?, context.signer, user, &helpers).await
 }
 
 fn warn_hip3_margin_helpers(helpers: &[Hip3MarginPlan]) -> Result<(), CliError> {
