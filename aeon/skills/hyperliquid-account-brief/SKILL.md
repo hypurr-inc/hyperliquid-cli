@@ -30,7 +30,7 @@ Hyperliquid is a perp and spot DEX where the account is the address: balances, p
    ```bash
    node skills/hyperliquid-account-brief/x.mjs
    ```
-   `${var}` is already exported in the environment as `SKILL_VAR`; the helper reads it itself. Run that exact line: do not prefix it with a variable assignment or `env`, and do not add a pipe or redirect. It prints to stdout. The first line is `HL_BRIEF_OK`, then the brief, then a log line starting `HL_BRIEF `.
+   `${var}` is already exported in the environment as `SKILL_VAR` on Aeon's runner and the helper reads it itself, so run that exact line: do not prefix it with a variable assignment or `env`, and do not add a pipe or redirect. On a runner that does not export `SKILL_VAR` (a local or MCP run), pass the address as the argument instead: `node skills/hyperliquid-account-brief/x.mjs 0x…`. The argument wins over any ambient `SKILL_VAR`. It prints to stdout. The first line is `HL_BRIEF_OK`, then the brief, then a log line starting `HL_BRIEF `.
    - Exit `2` (`HL_BRIEF_BAD_ADDRESS`): the variable is empty or not `0x` + 40 hex characters. Send one short notification (`./notify --severity warn`) saying the address in `var` is missing or malformed, then stop. Do not retry.
    - Exit `3` (`HL_BRIEF_READ_FAILED`): the API could not be read. Stop without notifying; the next run retries.
 
@@ -46,8 +46,9 @@ Hyperliquid is a perp and spot DEX where the account is the address: balances, p
 
 ## Reading the numbers
 
-- **Equity** is the account value the clearinghouse reports, in USDC. **Withdrawable** is what could leave the account now, so the gap between them is margin in use.
-- **Pooled accounts** (`unifiedAccount`, `portfolioMargin`) keep balances in the spot state; the brief then shows the spot USDC balance and says the perp account value is partial.
+- **Equity** is the default perp dex's account value as the clearinghouse reports it, in USDC. **Withdrawable** is what could leave the account now; the gap between them is value that cannot be withdrawn at the moment, which includes margin in use. Other dexes are listed on their own lines in their own collateral.
+- **Pooled accounts** (`unifiedAccount`, `portfolioMargin`) keep balances in the spot state. For them the brief reports the spot USDC balance and the default dex's margin used, and no equity or withdrawable figure; the log line carries `usdc_balance=`, not `equity=`.
+- **Fees** are summed per fee token. A total in USDC is only shown for fees paid in USDC; other tokens are listed separately.
 - **liq** is the liquidation price the exchange reports for that position, not a calculation of ours. Cross-margin positions can share margin, so `liq` on one line is not the whole story.
 - **uPnL** is unrealized and moves with mark price; **realized PnL** in the 24h section comes from fills, so it is final.
 - Positions are the fifteen largest by value, orders the first ten; the rest are counted. If the fills read hits the API's 2000-fill limit the brief says so.

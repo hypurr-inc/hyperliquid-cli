@@ -35,7 +35,7 @@ Hyperliquid publishes one document per venue with everything this check needs pe
    ```bash
    node skills/hyperliquid-market-monitor/x.mjs
    ```
-   `${var}` is already exported in the environment as `SKILL_VAR`; the helper reads it itself. Run that exact line: do not prefix it with a variable assignment or `env`, and do not add a pipe or redirect. It prints to stdout. The first line is the verdict, the last line is the log line.
+   `${var}` is already exported in the environment as `SKILL_VAR` on Aeon's runner and the helper reads it itself, so run that exact line: do not prefix it with a variable assignment or `env`, and do not add a pipe or redirect. On a runner that does not export `SKILL_VAR` (a local or MCP run), pass the watch string as the arguments instead: `node skills/hyperliquid-market-monitor/x.mjs BTC,ETH move=5`. Arguments win over any ambient `SKILL_VAR`. It prints to stdout. The first line is the verdict, the last line is the log line.
    - Exit `2` (`HL_WATCH_BAD_INPUT`): the variable could not be read. Send one notification naming the bad token (`./notify --severity warn`), then stop.
    - Exit `3` (`HL_READ_FAILED`): the API could not be read. Stop without notifying; the next run retries.
 
@@ -58,7 +58,7 @@ Hyperliquid publishes one document per venue with everything this check needs pe
 - **funding** is the hourly rate in percent. Hyperliquid charges it hourly; `0.01%/h` is roughly 88% a year, which is why the default threshold is that high.
 - **OI** is open interest in coin units multiplied by mid price, in USDC.
 - **24h vol** is the exchange's day notional volume, in USDC. It is context for a move: the same percent on thin volume is a different event.
-- A hit key is `COIN:move+`, `COIN:move-`, `COIN:fund+` or `COIN:fund-`. A key leaves the log line when the market drops back under the threshold, so the next crossing alerts again.
+- A hit key is `COIN:move+`, `COIN:move-`, `COIN:fund+` or `COIN:fund-`. A coin with missing or non-numeric market data is reported as `no usable market data` rather than skipped. A malformed API response exits `3` (`HL_READ_FAILED`). A key leaves the log line when the market drops back under the threshold, so the next crossing alerts again.
 
 ## Hard limits
 

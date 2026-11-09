@@ -9,7 +9,7 @@
     {
       "slug": "hyperliquid-account-brief",
       "path": "skills/hyperliquid-account-brief",
-      "description": "Daily Hyperliquid account brief for the address in var: equity, withdrawable, margin use, per-position PnL and liquidation price, open orders, and 24h realized PnL and fees. Read-only.",
+      "description": "Daily Hyperliquid account brief for the address in var: default-dex equity, withdrawable and margin use (for unified and portfolio-margin accounts the spot USDC balance and margin used instead), per-position PnL and liquidation price across dexes, open orders, and 24h realized PnL and fees by token. Read-only.",
       "category": "crypto",
       "schedule": "0 13 * * *",
       "default_enabled": false,

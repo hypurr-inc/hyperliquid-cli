@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Watch Hyperliquid perps and print only what newly crossed a threshold.
 //
-// Input (SKILL_VAR): "<coins> [move=<pct>] [funding=<pct>]"
+// Input: "<coins> [move=<pct>] [funding=<pct>]", from the arguments when given, else SKILL_VAR
 //   coins    comma-separated perps, `dex:COIN` for HIP-3 markets. Default BTC,ETH,SOL,HYPE
 //   move     absolute 24h move in percent that counts as notable. Default 5
 //   funding  absolute hourly funding rate in percent. Default 0.01 (about 88%/yr)
@@ -87,28 +87,45 @@ function previousHits() {
 const round = (value, places) => Math.round(value * 10 ** places) / 10 ** places;
 const usd = (value) => Math.round(value).toLocaleString("en-US");
 
-const watch = parseVar(process.env.SKILL_VAR ?? "");
+const watch = parseVar(process.argv.slice(2).join(" ") || (process.env.SKILL_VAR ?? ""));
 const dexes = [...new Set(watch.coins.map((coin) => (coin.includes(":") ? coin.split(":")[0] : "")))];
 const lookup = new Map();
 for (const dex of dexes) {
-  const [meta, contexts] = await info(dex ? { type: "metaAndAssetCtxs", dex } : { type: "metaAndAssetCtxs" });
+  const label = dex || "default";
+  const reply = await info(dex ? { type: "metaAndAssetCtxs", dex } : { type: "metaAndAssetCtxs" });
+  const [meta, contexts] = Array.isArray(reply) ? reply : [];
+  if (!Array.isArray(meta?.universe) || !Array.isArray(contexts) || contexts.length < meta.universe.length) {
+    fail("HL_READ_FAILED", `metaAndAssetCtxs dex=${label}: unexpected response shape`, 3);
+  }
   meta.universe.forEach((asset, index) => {
-    if (!asset.isDelisted) lookup.set(key(asset.name), contexts[index]);
+    if (asset.isDelisted) return;
+    if (!contexts[index] || typeof contexts[index] !== "object") {
+      fail("HL_READ_FAILED", `metaAndAssetCtxs dex=${label}: no context for ${asset.name}`, 3);
+    }
+    lookup.set(key(asset.name), contexts[index]);
   });
 }
 
 const hits = [];
 const unknown = [];
+const unreadable = [];
+const finite = (value) => (value === null || value === undefined || value === "" ? NaN : Number(value));
 for (const coin of watch.coins) {
   const context = lookup.get(coin);
   if (!context) {
     unknown.push(coin);
     continue;
   }
-  const mid = Number(context.midPx ?? context.markPx);
-  const previous = Number(context.prevDayPx);
-  const change = previous > 0 ? ((mid - previous) / previous) * 100 : 0;
-  const fundingPct = Number(context.funding) * 100;
+  const mid = finite(context.midPx ?? context.markPx);
+  const previous = finite(context.prevDayPx);
+  const fundingPct = finite(context.funding) * 100;
+  const openInterest = finite(context.openInterest);
+  const volume = finite(context.dayNtlVlm);
+  if (![mid, previous, fundingPct, openInterest, volume].every(Number.isFinite) || mid <= 0 || previous <= 0) {
+    unreadable.push(coin);
+    continue;
+  }
+  const change = ((mid - previous) / previous) * 100;
   const kinds = [];
   if (Math.abs(change) >= watch.move) kinds.push(`move${change > 0 ? "+" : "-"}`);
   if (Math.abs(fundingPct) >= watch.funding) kinds.push(`fund${fundingPct > 0 ? "+" : "-"}`);
@@ -116,7 +133,7 @@ for (const coin of watch.coins) {
   hits.push({
     coin,
     keys: kinds.map((kind) => `${coin}:${kind}`),
-    line: `- ${coin} ${mid} · 24h ${round(change, 2)}% · funding ${round(fundingPct, 4)}%/h · OI ${usd(Number(context.openInterest) * mid)} USDC · 24h vol ${usd(Number(context.dayNtlVlm))} USDC`,
+    line: `- ${coin} ${mid} · 24h ${round(change, 2)}% · funding ${round(fundingPct, 4)}%/h · OI ${usd(openInterest * mid)} USDC · 24h vol ${usd(volume)} USDC`,
   });
 }
 
@@ -124,10 +141,11 @@ const allKeys = hits.flatMap((hit) => hit.keys);
 const seenBefore = previousHits();
 const fresh = hits.filter((hit) => hit.keys.some((key) => !seenBefore.has(key)));
 const freshUnknown = unknown.filter((coin) => !seenBefore.has(`${coin}:unknown`));
-const logged = [...allKeys, ...unknown.map((coin) => `${coin}:unknown`)];
-const logLine = `HL_WATCH coins=${watch.coins.join(",")} hits=${logged.length ? logged.join(",") : "none"} new=${fresh.length} unknown=${unknown.length} move>=${watch.move} funding>=${watch.funding}/h`;
+const freshUnreadable = unreadable.filter((coin) => !seenBefore.has(`${coin}:unreadable`));
+const logged = [...allKeys, ...unknown.map((coin) => `${coin}:unknown`), ...unreadable.map((coin) => `${coin}:unreadable`)];
+const logLine = `HL_WATCH coins=${watch.coins.join(",")} hits=${logged.length ? logged.join(",") : "none"} new=${fresh.length} unknown=${unknown.length} unreadable=${unreadable.length} move>=${watch.move} funding>=${watch.funding}/h`;
 
-if (fresh.length === 0 && freshUnknown.length === 0) {
+if (fresh.length === 0 && freshUnknown.length === 0 && freshUnreadable.length === 0) {
   console.log(logged.length ? "HL_WATCH_REPEAT" : "HL_WATCH_QUIET");
   console.log(logLine);
   process.exit(0);
@@ -138,6 +156,7 @@ console.log("## Hyperliquid watch");
 console.log("");
 for (const hit of fresh) console.log(hit.line);
 if (freshUnknown.length) console.log(`${fresh.length ? "\n" : ""}- not listed on Hyperliquid: ${freshUnknown.join(", ")}`);
+if (freshUnreadable.length) console.log(`${fresh.length || freshUnknown.length ? "\n" : ""}- no usable market data for: ${freshUnreadable.join(", ")}`);
 console.log("");
 console.log(`Thresholds: 24h move ≥ ${watch.move}% or hourly funding ≥ ${watch.funding}%. Read-only.`);
 console.log(logLine);

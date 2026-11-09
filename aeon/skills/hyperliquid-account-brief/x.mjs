@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Compose one Hyperliquid account brief as Markdown on stdout.
 //
-// Input (SKILL_VAR): the account address, 0x + 40 hex characters. Required: Aeon
-// has no signer, so there is no account to fall back to.
+// Input: the account address, 0x + 40 hex characters, from the first argument when
+// given, else SKILL_VAR. Required: Aeon has no signer, so there is no account to
+// fall back to.
 //
 // stdout, first line:  HL_BRIEF_OK
 // stdout, last line:   HL_BRIEF account=<0x..> equity=<usdc> ...   (the log line)
@@ -20,7 +21,7 @@ function fail(code, message, exit) {
   process.exit(exit);
 }
 
-const account = (process.env.SKILL_VAR ?? "").trim();
+const account = (process.argv[2] ?? process.env.SKILL_VAR ?? "").trim();
 if (!account) fail("HL_BRIEF_BAD_ADDRESS", "no address given; set var to the 0x account to brief", 2);
 if (!ADDRESS.test(account)) fail("HL_BRIEF_BAD_ADDRESS", `expected 0x + 40 hex characters, got '${account}'`, 2);
 
@@ -76,25 +77,31 @@ const orders = perDex.flatMap(({ orders: list }) => list);
 const pooled = POOLED_MODES.has(mode);
 const usdc = spot.balances.find((balance) => balance.coin === "USDC");
 const realized = fills.reduce((sum, fill) => sum + num(fill.closedPnl), 0);
-const fees = fills.reduce((sum, fill) => sum + num(fill.fee), 0);
+const feesByToken = new Map();
+for (const fill of fills) feesByToken.set(fill.feeToken ?? "USDC", (feesByToken.get(fill.feeToken ?? "USDC") ?? 0) + num(fill.fee));
+const feeText = [...feesByToken].length === 0 ? "0.00 USDC" : [...feesByToken].map(([token, total]) => `${money(total)} ${token}`).join(" + ");
 
 const summary = defaultState.marginSummary;
 const marginUsedPct = num(summary.accountValue) > 0 ? (num(summary.totalMarginUsed) / num(summary.accountValue)) * 100 : 0;
 
+const otherDexes = perDex.slice(1).filter(({ state }) => num(state.marginSummary.accountValue) !== 0 || state.assetPositions.length > 0);
 const lines = [];
 lines.push("## Hyperliquid brief", "", `Account: ${account} · mode ${mode}`, "");
 if (pooled) {
   lines.push(
-    `**USDC balance** ${money(usdc?.total)} (hold ${money(usdc?.hold)}) · **perp margin used** ${money(summary.totalMarginUsed)} USDC`,
-    `This account pools collateral: balances live in the spot state, so the perp account value (${money(summary.accountValue)}) is only part of the picture.`,
+    `**USDC balance** ${money(usdc?.total)} (hold ${money(usdc?.hold)}) · **default-dex margin used** ${money(summary.totalMarginUsed)} USDC`,
+    "This account pools collateral: balances live in the spot state, so no equity or withdrawable figure is reported here.",
   );
 } else {
   lines.push(
-    `**Equity** ${money(summary.accountValue)} USDC · **withdrawable** ${money(defaultState.withdrawable)} USDC · **margin used** ${Math.round(marginUsedPct * 100) / 100}%`,
+    `**Default-dex equity** ${money(summary.accountValue)} USDC · **withdrawable** ${money(defaultState.withdrawable)} USDC · **margin used** ${Math.round(marginUsedPct * 100) / 100}%`,
   );
 }
+for (const { dex, state } of otherDexes) {
+  lines.push(`Dex ${dex}: account value ${money(state.marginSummary.accountValue)} (the dex's own collateral, not necessarily USDC) · margin used ${money(state.marginSummary.totalMarginUsed)} · positions ${state.assetPositions.length}`);
+}
 lines.push(
-  `Notional ${money(summary.totalNtlPos)} USDC · positions ${positions.length} · spot balances ${spot.balances.length}`,
+  `Default-dex notional ${money(summary.totalNtlPos)} USDC · positions (all dexes) ${positions.length} · spot balances ${spot.balances.length}`,
   "",
   "### Positions",
 );
@@ -120,13 +127,14 @@ const capped = fills.length >= FILLS_CAP ? ` (the API returned its ${FILLS_CAP}-
 lines.push(
   "",
   `### Last 24h (since ${new Date(since).toISOString().slice(0, 19)}Z)`,
-  `- fills ${fills.length}${capped} · realized PnL ${money(realized)} USDC · fees ${money(fees)} USDC`,
+  `- fills ${fills.length}${capped} · realized PnL ${money(realized)} USDC · fees ${feeText}`,
   "",
   "Read-only. Every number comes from the Hyperliquid API; the account is unchanged.",
 );
 
 console.log("HL_BRIEF_OK");
 console.log(lines.join("\n"));
+const valueField = pooled ? `usdc_balance=${money(usdc?.total).replace(/,/g, "")}` : `equity=${money(summary.accountValue).replace(/,/g, "")}`;
 console.log(
-  `HL_BRIEF account=${account} mode=${mode} equity=${pooled ? money(usdc?.total).replace(/,/g, "") : money(summary.accountValue).replace(/,/g, "")} positions=${positions.length} orders=${orders.length} pnl24h=${money(realized).replace(/,/g, "")}`,
+  `HL_BRIEF account=${account} mode=${mode} ${valueField} positions=${positions.length} orders=${orders.length} pnl24h=${money(realized).replace(/,/g, "")}`,
 );

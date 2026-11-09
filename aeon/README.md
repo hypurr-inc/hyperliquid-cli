@@ -20,12 +20,12 @@ bin/install-skill-pack hypurr-inc/hyperliquid-cli --path aeon
 
 | Skill | Schedule | `var` | What it does |
 | --- | --- | --- | --- |
-| `hyperliquid-account-brief` | `0 13 * * *` (disabled) | `0x…` account (required) | Equity, withdrawable, margin use, open positions with uPnL and liquidation price, open orders, 24h realized PnL and fees. Handles unified and portfolio-margin accounts and HIP-3 dexes |
+| `hyperliquid-account-brief` | `0 13 * * *` (disabled) | `0x…` account (required) | Default-dex equity, withdrawable and margin use, open positions across dexes with uPnL and liquidation price, open orders, 24h realized PnL and fees by token. For unified and portfolio-margin accounts it reports the spot USDC balance and margin used instead of equity and withdrawable |
 | `hyperliquid-market-monitor` | `0 */4 * * *` (disabled) | `BTC,ETH move=5 funding=0.01` | Watched perps by 24h move and hourly funding. Notifies only for crossings the previous run did not already report |
 
 ```yaml
 # aeon.yml
-hyperliquid-account-brief: { enabled: true, schedule: "0 13 * * *", var: "0xYourAddress" }
+hyperliquid-account-brief: { enabled: true, schedule: "0 13 * * *", var: "0xYourAddress" } # replace the placeholder with a real account: 0x followed by 40 hex characters; the skill notifies once and stops otherwise
 hyperliquid-market-monitor: { enabled: true, schedule: "0 */4 * * *", var: "BTC,ETH,SOL,HYPE move=5 funding=0.01" }
 ```
 
