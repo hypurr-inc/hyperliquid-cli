@@ -444,8 +444,8 @@ fn usage_error_text(err: clap::Error, path: &[String], color: bool) -> String {
 fn usage_error_parts(err: clap::Error, path: &[String]) -> errors::UsageParts {
     use clap::error::{ContextKind, ContextValue, ErrorKind};
 
-    let err = prepare_usage_error(err, path);
-    let usage = match err.get(ContextKind::Usage) {
+    let mut err = prepare_usage_error(err, path);
+    let usage = match err.remove(ContextKind::Usage) {
         Some(ContextValue::StyledStr(usage)) => Some(usage.to_string().trim().to_string()),
         _ => None,
     };
@@ -457,13 +457,13 @@ fn usage_error_parts(err: clap::Error, path: &[String]) -> errors::UsageParts {
     .into_iter()
     .find_map(|kind| match err.get(kind) {
         Some(ContextValue::Strings(values)) => values.first().cloned(),
+        Some(ContextValue::String(value)) => Some(value.clone()),
         _ => None,
     });
     let text = styled_text(&err.render(), false);
     let text = text.trim();
-    let message = usage
-        .as_deref()
-        .and_then(|usage| text.find(usage))
+    let message = text
+        .rfind("\n\nFor more information")
         .map_or(text, |at| &text[..at]);
     let message = message.strip_prefix("error: ").unwrap_or(message);
     errors::UsageParts {
@@ -988,6 +988,82 @@ mod tests {
             requested_format(&lenient),
             Some(output::OutputFormat::Table)
         );
+    }
+
+    /// Expected strings are what the pre-refactor binary printed for these lines.
+    #[test]
+    fn the_usage_envelope_matches_the_pre_refactor_binary_byte_for_byte() {
+        let cases: &[(&str, &[&str], &[&str], &str)] = &[
+            (
+                "unknown flag, no suggestion",
+                &["hyperliquid", "wallet", "show", "--bogus"],
+                &["wallet", "show"],
+                r##"{"error":"unexpected argument '--bogus' found","category":"usage","exit_code":2,"reason":"invalid_arguments","next":[{"command":"hyperliquid wallet show --help"}],"data":{"usage":"Usage: hyperliquid wallet show [OPTIONS]"}}"##,
+            ),
+            (
+                "invalid enum value with suggestion",
+                &[
+                    "hyperliquid",
+                    "account",
+                    "abstraction",
+                    "set",
+                    "--mode",
+                    "unified",
+                ],
+                &["account", "abstraction", "set"],
+                r##"{"error":"invalid value 'unified' for '--mode <MODE>'\n  [possible values: disabled, unified-account, portfolio-margin]\ntip: a similar value exists: 'unified-account'","category":"usage","exit_code":2,"reason":"invalid_arguments","next":[{"command":"hyperliquid account abstraction set --help"}],"data":{"suggestion":"unified-account"}}"##,
+            ),
+            (
+                "unknown flag with suggestion",
+                &[
+                    "hyperliquid",
+                    "orders",
+                    "scale",
+                    "--order-count",
+                    "1",
+                    "--coin",
+                    "BTC",
+                ],
+                &["orders", "scale"],
+                r##"{"error":"unexpected argument '--order-count' found\ntip: a similar argument exists: '--orders'","category":"usage","exit_code":2,"reason":"invalid_arguments","next":[{"command":"hyperliquid orders scale --help"}],"data":{"suggestion":"--orders","usage":"Usage: hyperliquid orders scale [OPTIONS] --coin <COIN> --side <SIDE> --start-price <START_PRICE> --end-price <END_PRICE> --total-size <TOTAL_SIZE> --orders <ORDER_COUNT>"}}"##,
+            ),
+            (
+                "unknown subcommand with suggestion",
+                &["hyperliquid", "orders", "cancl"],
+                &["orders"],
+                r##"{"error":"unrecognized subcommand 'cancl'\ntip: a similar subcommand exists: 'cancel'","category":"usage","exit_code":2,"reason":"unknown_command","next":[{"command":"hyperliquid orders --help"}],"data":{"suggestion":"cancel","usage":"Usage: hyperliquid orders [OPTIONS] <COMMAND>"}}"##,
+            ),
+            (
+                "flag on a bare group",
+                &["hyperliquid", "orders", "--bogus"],
+                &["orders"],
+                r##"{"error":"unexpected argument '--bogus' found","category":"usage","exit_code":2,"reason":"invalid_arguments","next":[{"command":"hyperliquid orders --help"}],"data":{"usage":"Usage: hyperliquid orders [OPTIONS] <COMMAND>"}}"##,
+            ),
+            (
+                "missing required argument",
+                &["hyperliquid", "perps", "get"],
+                &["perps", "get"],
+                r##"{"error":"the following required arguments were not provided:\n  <COIN>","category":"usage","exit_code":2,"reason":"invalid_arguments","next":[{"command":"hyperliquid perps get --help"}],"data":{"usage":"Usage: hyperliquid perps get [OPTIONS] <COIN>"}}"##,
+            ),
+            (
+                "too many values",
+                &["hyperliquid", "perps", "get", "BTC", "extra"],
+                &["perps", "get"],
+                r##"{"error":"unexpected argument 'extra' found","category":"usage","exit_code":2,"reason":"invalid_arguments","next":[{"command":"hyperliquid perps get --help"}],"data":{"usage":"Usage: hyperliquid perps get [OPTIONS] <COIN>"}}"##,
+            ),
+            (
+                "value validation failure",
+                &["hyperliquid", "--max-results", "0", "perps", "list"],
+                &["perps", "list"],
+                r##"{"error":"invalid value '0' for '--max-results <N>': value must be at least 1","category":"usage","exit_code":2,"reason":"invalid_arguments","next":[{"command":"hyperliquid perps list --help"}]}"##,
+            ),
+        ];
+        for (name, argv, path, expected) in cases {
+            let err = try_parse_cli_from(argv.iter().copied()).err().unwrap();
+            let path: Vec<String> = path.iter().map(|part| part.to_string()).collect();
+            let json = errors::ErrorEnvelope::usage(usage_error_parts(err, &path)).to_json();
+            assert_eq!(&json, expected, "{name}");
+        }
     }
 
     #[test]
