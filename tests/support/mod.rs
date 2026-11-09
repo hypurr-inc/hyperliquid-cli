@@ -20,8 +20,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 pub mod exchange;
 pub mod legacy_accounts_fixture;
-pub mod reads;
 pub mod orders;
+pub mod reads;
 pub mod signing;
 pub mod wire;
 

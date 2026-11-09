@@ -2,17 +2,18 @@
 //! background, and a once-a-day stderr line when a newer release exists.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use super::release::{InstallMethod, ReleaseClient, is_newer_version, normalize_version};
+use crate::clock;
 use crate::mode::Mode;
 
 use crate::env::{self, EnvSource};
 
-const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(20 * 60 * 60);
-const NOTICE_INTERVAL_SECS: i64 = 24 * 60 * 60;
+const UPDATE_CHECK_INTERVAL: Duration = clock::HOUR.of(20);
+const NOTICE_INTERVAL_SECS: i64 = clock::DAY.of(1).as_secs() as i64;
 /// Longest an automatic update may spend downloading.
 const AUTO_UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest a command waits for the background refresh before exiting.
@@ -146,8 +147,8 @@ async fn settle_refresh(check: &mut UpdateCheck) {
 }
 
 /// Finish the passive check after a successful command: wait at most
-/// ~150 ms for the background refresh, then print the update notice on stderr
-/// when a newer release is cached and none was shown in the last 24 hours.
+/// [`REFRESH_GRACE`] for the background refresh, then print the update notice on stderr
+/// when a newer release is cached and none was shown within [`NOTICE_INTERVAL_SECS`].
 pub async fn flush_update_check(mut check: UpdateCheck) {
     settle_refresh(&mut check).await;
     if let Some(cache_path) = check.cache_path.as_deref() {
@@ -303,10 +304,7 @@ fn cache_age(cache: &VersionCache) -> Duration {
 }
 
 fn now_unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+    (clock::now_ms() / clock::SECOND.ms(1)) as i64
 }
 
 #[cfg(test)]

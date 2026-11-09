@@ -1,4 +1,5 @@
-//! Decimal amounts and the integer wire units Hyperliquid exchanges them in.
+//! Decimal amounts and counts, and the integer wire units Hyperliquid
+//! exchanges amounts in.
 //!
 //! One scaling rule serves every wire format: reject a sign the caller does not
 //! accept, reject an amount finer than the scale, then fit the integer into the
@@ -49,7 +50,7 @@ impl ScaleError {
     pub(crate) fn config(self, name: &str, scale: Scale) -> CliError {
         CliError::Configuration(match self {
             Self::Negative => format!("{name} cannot be negative"),
-            Self::NotPositive => format!("{name} must be greater than zero"),
+            Self::NotPositive => not_positive(name),
             Self::TooPrecise => {
                 format!(
                     "{name} supports at most {} decimal places",
@@ -114,14 +115,29 @@ pub(crate) fn wire_text(amount: Decimal) -> String {
     amount.normalize().to_string()
 }
 
+/// The refusal of an amount that is not greater than zero: the one wording
+/// every positive-amount check reports, whatever error class it travels in.
+pub(crate) fn not_positive(name: &str) -> String {
+    format!("{name} must be greater than zero")
+}
+
 /// Reject an amount that is not greater than zero where no scaling applies.
 pub(crate) fn require_positive(amount: Decimal, name: &str) -> Result<(), CliError> {
     if amount <= Decimal::ZERO {
-        return Err(CliError::Configuration(format!(
-            "{name} must be greater than zero"
-        )));
+        return Err(CliError::Configuration(not_positive(name)));
     }
     Ok(())
+}
+
+/// A count of at least 1, as the clap value parser of an option that takes one.
+pub fn parse_positive_usize(raw: &str) -> Result<usize, String> {
+    let value = raw
+        .parse::<usize>()
+        .map_err(|err| format!("invalid positive integer: {err}"))?;
+    if value == 0 {
+        return Err("value must be at least 1".to_string());
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
