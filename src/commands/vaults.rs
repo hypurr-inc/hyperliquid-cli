@@ -15,7 +15,6 @@ use crate::commands::common::rows::{One, Row, or_missing};
 use crate::commands::common::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::exchange::actions;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
@@ -429,8 +428,7 @@ async fn positions(inv: &Invocation, address: &str) -> Result<(), anyhow::Error>
         .api()
         .sdk()
         .clearinghouse_state(vault, None)
-        .await
-        .map_err(from_sdk)?
+        .await?
         .asset_positions;
 
     inv.print(&VaultPositionsOutput {

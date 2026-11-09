@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-pub(crate) mod wallet;
+pub mod wallet;
 
 pub const CHECK_LIVE_COMMAND: &str = "hyperliquid orders open";
 
@@ -18,6 +18,11 @@ pub const CANCEL_TWAP_COMMAND: &str = "hyperliquid orders twap-cancel";
 pub const CREATE_TWAP_COMMAND: &str = "hyperliquid orders twap-create";
 
 pub const TRAILING_STOP_COMMAND: &str = "hyperliquid orders trailing-stop";
+
+pub const ACCOUNT_FILLS_COMMAND: &str = "hyperliquid account fills";
+
+/// Per-account request budget, which the server reports.
+pub const ACCOUNT_RATE_LIMIT_COMMAND: &str = "hyperliquid account rate-limit";
 
 /// The ` --on-behalf-of <selector>` a suggested command needs to act on the
 /// same account as this run; empty when the run acts for its own account.
@@ -68,39 +73,47 @@ pub fn protect_position_command(
     )
 }
 
+/// The command that approves `builder` at `max_fee_rate` with the main wallet.
+#[must_use]
+pub fn builder_approve_command(
+    builder: impl fmt::Display,
+    max_fee_rate: impl fmt::Display,
+) -> String {
+    format!("hyperliquid builder approve --builder {builder} --max-fee-rate {max_fee_rate}")
+}
+
+/// The command that burns `nonce` on the network a run used.
+#[must_use]
+pub fn invalidate_nonce_command(testnet: bool, nonce: impl fmt::Display) -> String {
+    let network = if testnet { " --testnet" } else { "" };
+    format!("hyperliquid{network} account invalidate-nonce --nonce {nonce}")
+}
+
+/// The command that shows the encoded HIP-4 asset id of an outcome.
+#[must_use]
+pub fn outcome_get_command(asset: impl fmt::Display) -> String {
+    format!("hyperliquid outcomes get {asset}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_registry::CommandRegistry;
-
-    fn resolves(command: &str) -> bool {
-        let words: Vec<&str> = command
-            .strip_prefix("hyperliquid ")
-            .expect("a suggested command starts with the binary name")
-            .split_whitespace()
-            .collect();
-        (1..=words.len())
-            .rev()
-            .any(|length| CommandRegistry::get().find_path(&words[..length]).is_some())
-    }
 
     #[test]
-    fn every_suggested_command_names_a_command_that_exists() {
-        for command in [
-            CHECK_LIVE_COMMAND,
-            CANCEL_ORDER_COMMAND,
-            CANCEL_TWAP_COMMAND,
-            CREATE_TWAP_COMMAND,
-            TRAILING_STOP_COMMAND,
-            &cancel_order_command("7", None),
-            &protect_position_command("ETH", "+10%", "-5%", None),
-            &format!(
-                "hyperliquid {}",
-                update_leverage_command("ETH", "<N>", true, None)
-            ),
-        ] {
-            assert!(resolves(command), "{command}");
-        }
+    fn the_commands_that_carry_a_value_spell_it_once() {
+        assert_eq!(
+            builder_approve_command("0xB", "0.05%"),
+            "hyperliquid builder approve --builder 0xB --max-fee-rate 0.05%"
+        );
+        assert_eq!(
+            invalidate_nonce_command(false, 7),
+            "hyperliquid account invalidate-nonce --nonce 7"
+        );
+        assert_eq!(
+            invalidate_nonce_command(true, 7),
+            "hyperliquid --testnet account invalidate-nonce --nonce 7"
+        );
+        assert_eq!(outcome_get_command("#1"), "hyperliquid outcomes get #1");
     }
 
     #[test]

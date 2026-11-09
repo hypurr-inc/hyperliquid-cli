@@ -9,7 +9,9 @@
 
 use std::time::{Duration, Instant};
 
-use super::{JsonRenderOptions, Rendered, TableData, colors, format, json_text, render_outcome};
+use super::{
+    JsonRenderOptions, Rendered, TableData, colors, format, json_text, render_outcome, sink,
+};
 use crate::mode::Mode;
 use crate::terminal::OutputFormat;
 
@@ -92,10 +94,10 @@ impl Session {
 /// Write rendered output: the answer to stdout, notices to stderr.
 fn print_rendered(rendered: &Rendered) {
     if !rendered.text.is_empty() {
-        println!("{}", rendered.text);
+        sink::out_line(&rendered.text);
     }
     for notice in &rendered.notices {
-        eprintln!("{}", notice.text());
+        notice.eprint();
     }
 }
 

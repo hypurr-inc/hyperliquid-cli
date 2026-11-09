@@ -15,7 +15,6 @@ use crate::commands::common::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::common::subaccount_list;
 use crate::commands::common::time_range::{parse_time_millis, validate_optional_time_range};
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::invocation::Invocation;
 use crate::output::{JsonValueOutput, TableData};
 use crate::spot_balances::{RawSpotBalance, user_spot_balances_raw};
@@ -805,10 +804,7 @@ impl CliCommand for AccountPortfolio {
         let client = api.sdk();
         let dex = canonical_dex(api, args.dex.as_deref()).await?;
         let account_mode = fetch_abstraction(api, user).await?.normalized_mode;
-        let state = client
-            .clearinghouse_state(user, dex.clone())
-            .await
-            .map_err(from_sdk)?;
+        let state = client.clearinghouse_state(user, dex.clone()).await?;
         // Spot balances and vault equities are account-wide, not per-dex.
         let (spot_balances, vault_equities) = if dex.is_some() {
             (Vec::new(), Vec::new())
@@ -818,10 +814,7 @@ impl CliCommand for AccountPortfolio {
                 .into_iter()
                 .map(BalanceRow::from)
                 .collect();
-            (
-                balances,
-                client.user_vault_equities(user).await.map_err(from_sdk)?,
-            )
+            (balances, client.user_vault_equities(user).await?)
         };
         inv.print(&PortfolioOutput::new(
             state,

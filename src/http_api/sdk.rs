@@ -6,7 +6,8 @@
 //! the SDK therefore goes through [`Sdk`], which retries a 429, a 5xx and a
 //! transport failure under the same [`ReadPolicy`] (backoff, budget, retry
 //! notice) as `/info` reads. When the retries run out the SDK's own error is
-//! returned, and `from_sdk` classifies it (a 429 is `rate_limited`, exit 11).
+//! classified here (a 429 is `rate_limited`, exit 11), so every read returns a
+//! [`CliError`].
 //!
 //! Two limits of the SDK show here. Its errors keep the status and body but not
 //! the headers, so a `Retry-After` cannot be honoured and a 429 waits the
@@ -24,7 +25,7 @@ use reqwest::StatusCode;
 use std::collections::HashMap;
 
 use super::{ReadPolicy, Transient, is_transient_status};
-use crate::errors::http_status_in_text;
+use crate::errors::{CliError, from_sdk, http_status_in_text};
 
 /// The SDK client for reads, handed out by [`ApiClient::sdk`](super::ApiClient::sdk).
 #[derive(Clone, Copy)]
@@ -55,13 +56,22 @@ fn transient_failure(err: &anyhow::Error) -> Option<Transient> {
     })
 }
 
+/// A reply whose JSON parsed but does not have the shape the SDK types.
+fn is_shape_mismatch(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<serde_json::Error>()
+            .is_some_and(|decode| decode.classify() == serde_json::error::Category::Data)
+    })
+}
+
 /// The SDK reads that check the reply status, with the SDK's signatures.
 macro_rules! sdk_reads {
     ($($(#[$meta:meta])* $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
         impl Sdk<'_> {
             $(
                 $(#[$meta])*
-                pub async fn $name(&self, $($arg: $ty),*) -> anyhow::Result<$ret> {
+                pub async fn $name(&self, $($arg: $ty),*) -> Result<$ret, CliError> {
                     self.read(async || self.client.$name($(Clone::clone(&$arg)),*).await).await
                 }
             )*
@@ -74,7 +84,6 @@ sdk_reads! {
     api_agents(user: Address) -> Vec<ApiAgent>;
     clearinghouse_state(user: Address, dex_name: Option<String>) -> ClearinghouseState;
     gossip_priority_auction_status() -> GossipPriorityAuctionStatus;
-    historical_orders(user: Address) -> Vec<OrderUpdate<BasicOrder>>;
     open_orders(user: Address, dex_name: Option<String>) -> Vec<BasicOrder>;
     order_status(user: Address, oid: OidOrCloid) -> Option<OrderUpdate<BasicOrder>>;
     user_fills(user: Address) -> Vec<Fill>;
@@ -92,7 +101,7 @@ impl<'a> Sdk<'a> {
         interval: CandleInterval,
         start_time: u64,
         end_time: u64,
-    ) -> anyhow::Result<Vec<Candle>> {
+    ) -> Result<Vec<Candle>, CliError> {
         let coin = coin.into();
         self.read(async || {
             self.client
@@ -107,7 +116,7 @@ impl<'a> Sdk<'a> {
         coin: impl Into<String>,
         start_time: u64,
         end_time: Option<u64>,
-    ) -> anyhow::Result<Vec<FundingRate>> {
+    ) -> Result<Vec<FundingRate>, CliError> {
         let coin = coin.into();
         self.read(async || {
             self.client
@@ -117,7 +126,31 @@ impl<'a> Sdk<'a> {
         .await
     }
 
-    async fn read<T>(&self, mut call: impl AsyncFnMut() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    /// `historicalOrders` as the SDK types it (`OrderUpdate<BasicOrder>`), or
+    /// `None` when the reply is a bare order list the SDK cannot decode (a serde
+    /// data error), which the caller reads raw instead.
+    pub async fn historical_orders(
+        &self,
+        user: Address,
+    ) -> Result<Option<Vec<OrderUpdate<BasicOrder>>>, CliError> {
+        match self
+            .read_raw(async || self.client.historical_orders(user).await)
+            .await
+        {
+            Ok(updates) => Ok(Some(updates)),
+            Err(err) if is_shape_mismatch(&err) => Ok(None),
+            Err(err) => Err(from_sdk(err)),
+        }
+    }
+
+    async fn read<T>(&self, call: impl AsyncFnMut() -> anyhow::Result<T>) -> Result<T, CliError> {
+        self.read_raw(call).await.map_err(from_sdk)
+    }
+
+    async fn read_raw<T>(
+        &self,
+        mut call: impl AsyncFnMut() -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
         self.policy
             .retrying(async || {
                 let result = call().await;
@@ -137,7 +170,6 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::errors::{CliError, from_sdk};
     use crate::http_api::ApiClient;
     use crate::network::Network;
 
@@ -206,13 +238,11 @@ mod tests {
                 .mount(&server)
                 .await;
 
-            let err = from_sdk(
-                client_for(&server.uri())
-                    .sdk()
-                    .open_orders(USER, None)
-                    .await
-                    .expect_err("every attempt is limited"),
-            );
+            let err = client_for(&server.uri())
+                .sdk()
+                .open_orders(USER, None)
+                .await
+                .expect_err("every attempt is limited");
 
             assert_eq!(err.exit_code(), 11, "{err}");
             assert!(
@@ -254,7 +284,7 @@ mod tests {
         ];
 
         for read in reads {
-            let err = from_sdk(read.expect_err("limited"));
+            let err = read.expect_err("limited");
             assert!(matches!(err, CliError::RateLimited { .. }), "{err:?}");
         }
         assert_eq!(requests(&server).await, 10 * 3);
@@ -308,19 +338,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_a_shape_mismatch_is_left_for_the_caller_to_read_raw() {
+        for (body, shape_mismatch) in [(r#"{"not":"a list"}"#, true), ("not json", false)] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/info"))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+                .mount(&server)
+                .await;
+
+            let read = client_for(&server.uri())
+                .sdk()
+                .historical_orders(USER)
+                .await;
+
+            match (shape_mismatch, read) {
+                (true, Ok(None)) => {}
+                (false, Err(_)) => {}
+                (_, other) => panic!("{body}: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn a_refused_connection_is_retried_then_reported_as_unreachable() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
         let started = std::time::Instant::now();
-        let err = from_sdk(
-            client_for(&format!("http://127.0.0.1:{port}"))
-                .sdk()
-                .open_orders(USER, None)
-                .await
-                .expect_err("refused"),
-        );
+        let err = client_for(&format!("http://127.0.0.1:{port}"))
+            .sdk()
+            .open_orders(USER, None)
+            .await
+            .expect_err("refused");
 
         assert!(matches!(err, CliError::Unavailable(_)), "{err:?}");
         assert!(started.elapsed() < Duration::from_secs(5));

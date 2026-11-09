@@ -17,7 +17,6 @@ use crate::commands::common::support::{
     print_dry_run_acting_for, resolve_optional_acting_account_target,
 };
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::exchange::actions;
 use crate::hints::update_leverage_command;
 use crate::http_api::ApiClient;
@@ -135,8 +134,7 @@ async fn list_snapshot(
     let positions = client
         .sdk()
         .clearinghouse_state(user, dex.map(str::to_string))
-        .await
-        .map_err(from_sdk)?
+        .await?
         .asset_positions;
 
     Ok(Rows::new(PositionRow::open(positions)))

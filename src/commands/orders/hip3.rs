@@ -8,7 +8,6 @@ use serde_json::json;
 use super::args::BPS_DENOMINATOR;
 use super::prepared::PreparedOrder;
 use crate::account_mode::fetch_abstraction;
-use crate::errors::from_sdk;
 use crate::exchange::send_asset::{self, AssetMove, AssetVenue};
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
@@ -102,8 +101,7 @@ async fn plan_dex_transfer(
     let dest_available = api
         .sdk()
         .clearinghouse_state(user, Some(dest_dex.to_string()))
-        .await
-        .map_err(from_sdk)?
+        .await?
         .withdrawable;
     if dest_available >= required {
         return Ok(None);

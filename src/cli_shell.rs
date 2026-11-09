@@ -6,11 +6,11 @@
 //! is presented to people and agents lives here.
 
 use std::ffi::OsString;
-use std::io::Write;
 use std::sync::OnceLock;
 
 use clap::parser::ValueSource;
-use clap::{ArgMatches, CommandFactory, FromArgMatches, ValueEnum};
+use clap::{ArgMatches, CommandFactory, FromArgMatches};
+use hyperliquid_cli::auth::SignerFlags;
 use hyperliquid_cli::cli_command::Entry;
 use hyperliquid_cli::command_spec::{
     CommandSpec, ConfirmationPolicy, DryRunPolicy, Risk, YES_ARG, YES_FLAG, supplied_secrets,
@@ -18,12 +18,11 @@ use hyperliquid_cli::command_spec::{
 use hyperliquid_cli::commands;
 use hyperliquid_cli::env::{self, EnvSource};
 use hyperliquid_cli::errors;
-use hyperliquid_cli::invocation::InvocationFlags;
 use hyperliquid_cli::mode::Mode;
-use hyperliquid_cli::output;
+use hyperliquid_cli::output::{self, sink};
 use hyperliquid_cli::terminal::{OutputFormat, Terminal};
 
-use crate::{Cli, GLOBAL_OPTIONS, SECRET_GLOBALS};
+use crate::{Cli, GLOBAL_OPTIONS};
 
 pub(super) struct Selected {
     pub(super) entry: &'static Entry,
@@ -57,7 +56,7 @@ impl Redactions {
         let mut redactions = Self::default();
         redactions.options.extend(
             root.get_arguments()
-                .filter(|arg| SECRET_GLOBALS.contains(&arg.get_id().as_str()))
+                .filter(|arg| SignerFlags::SECRET.contains(&arg.get_id().as_str()))
                 .filter_map(|arg| arg.get_long())
                 .map(|long| format!("--{long}")),
         );
@@ -264,24 +263,9 @@ fn styled_text(styled: &clap::builder::StyledStr, color: bool) -> String {
     }
 }
 
-/// Write to stdout. A closed pipe (`| head`) is a normal end, not an error.
-fn write_stdout(text: &str) -> std::io::Result<()> {
-    let mut out = std::io::stdout().lock();
-    match out.write_all(text.as_bytes()).and_then(|()| out.flush()) {
-        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-        other => other,
-    }
-}
-
 fn exit_after_stdout(text: &str) -> ! {
-    let code = match write_stdout(text) {
-        Ok(()) => 0,
-        Err(err) => {
-            let _ = writeln!(std::io::stderr(), "Failed to write to stdout: {err}");
-            1
-        }
-    };
-    std::process::exit(code)
+    sink::out(text);
+    std::process::exit(0)
 }
 
 /// The deepest command along `path` that exists.
@@ -304,7 +288,7 @@ fn help_text_for_path(path: &[String]) -> String {
 }
 
 pub(super) fn print_help_to_stdout(path: &[String]) -> Result<(), anyhow::Error> {
-    write_stdout(&help_text_for_path(path))
+    sink::try_out(&help_text_for_path(path))
         .map_err(|err| anyhow::anyhow!("failed to write help to stdout: {err}"))
 }
 
@@ -401,16 +385,14 @@ fn offending_arg_indexes(err: &clap::Error, args: &[OsString]) -> Option<Vec<usi
     Some(indexes)
 }
 
-/// Output format for a failed parse. It cannot report an unreadable
-/// `HYPERLIQUID_FORMAT` in the format that variable names, so it reports JSON.
+/// Output format for a failed parse, from the `--json` or `--format` it still
+/// showed.
 fn error_format(
     matches: Option<&ArgMatches>,
     terminal: Terminal,
     source: &EnvSource,
 ) -> OutputFormat {
-    let requested = matches.and_then(requested_format);
-    resolve_output_format(requested, &Mode::new(terminal, source), source)
-        .unwrap_or(OutputFormat::Json)
+    Mode::error_format(matches.and_then(requested_format), terminal, source)
 }
 
 /// Keep only clap's best suggestion. clap lists the closest match last.
@@ -504,20 +486,23 @@ fn usage_error_parts(err: clap::Error, path: &[String]) -> errors::UsageParts {
     }
 }
 
-/// Print what clap reported and exit. Help and version are successes on
-/// stdout; everything else is a usage error (exit 2).
-pub(super) fn exit_for_clap_error(
-    err: clap::Error,
+/// Parse the command line, or print what clap reported and exit. This is the
+/// one place the process's color decision is made: from `--no-color` as parsed,
+/// or as far as a failed parse got.
+pub(super) fn parse_command_line(
     raw_args: &[OsString],
     terminal: Terminal,
     source: &EnvSource,
-) -> ! {
-    use clap::error::ErrorKind;
-
-    let lenient = lenient_matches(raw_args);
-    // A partial parse may not have applied flag defaults, so read the flag fallibly.
-    output::colors::init(
-        lenient.as_ref().is_some_and(|matches| {
+) -> ParsedCli {
+    let parsed = try_parse_cli_from(raw_args);
+    let lenient = parsed
+        .as_ref()
+        .err()
+        .and_then(|_| lenient_matches(raw_args));
+    let no_color = match &parsed {
+        Ok(parsed) => parsed.cli.no_color,
+        // A partial parse may not have applied flag defaults, so read the flag fallibly.
+        Err(_) => lenient.as_ref().is_some_and(|matches| {
             matches
                 .try_get_one::<bool>("no_color")
                 .ok()
@@ -525,11 +510,25 @@ pub(super) fn exit_for_clap_error(
                 .copied()
                 .unwrap_or(false)
         }),
-        source,
-        terminal,
-    );
+    };
+    output::colors::init(no_color, source, terminal);
+    match parsed {
+        Ok(parsed) => parsed,
+        Err(err) => exit_for_clap_error(err, lenient.as_ref(), terminal, source),
+    }
+}
+
+/// Print what clap reported and exit. Help and version are successes on
+/// stdout; everything else is a usage error (exit 2).
+fn exit_for_clap_error(
+    err: clap::Error,
+    lenient: Option<&ArgMatches>,
+    terminal: Terminal,
+    source: &EnvSource,
+) -> ! {
+    use clap::error::ErrorKind;
+
     let path = lenient
-        .as_ref()
         .and_then(command_path_from_matches)
         .unwrap_or_default();
     match err.kind() {
@@ -542,7 +541,7 @@ pub(super) fn exit_for_clap_error(
         }
         ErrorKind::DisplayVersion => {
             let version = env!("CARGO_PKG_VERSION");
-            let text = if error_format(lenient.as_ref(), terminal, source) == OutputFormat::Json {
+            let text = if error_format(lenient, terminal, source) == OutputFormat::Json {
                 format!("{}\n", serde_json::json!({ "version": version }))
             } else {
                 format!("hyperliquid {version}\n")
@@ -551,7 +550,7 @@ pub(super) fn exit_for_clap_error(
         }
         _ => {
             let exit_code = err.exit_code();
-            if error_format(lenient.as_ref(), terminal, source) == OutputFormat::Json {
+            if error_format(lenient, terminal, source) == OutputFormat::Json {
                 exit_after_stdout_with_code(
                     &format!(
                         "{}\n",
@@ -560,22 +559,19 @@ pub(super) fn exit_for_clap_error(
                     exit_code,
                 );
             }
-            let text = usage_error_text(err, &path, output::colors::stderr_enabled());
-            let _ = write!(std::io::stderr(), "{text}");
+            sink::err(&usage_error_text(
+                err,
+                &path,
+                output::colors::stderr_enabled(),
+            ));
             std::process::exit(exit_code)
         }
     }
 }
 
 fn exit_after_stdout_with_code(text: &str, code: i32) -> ! {
-    let _ = write_stdout(text);
+    let _ = sink::try_out(text);
     std::process::exit(code)
-}
-
-fn is_broken_pipe_panic(message: &str) -> bool {
-    message.contains("Broken pipe")
-        && (message.contains("failed printing to stdout")
-            || message.contains("failed printing to stderr"))
 }
 
 /// The command the line selected, for the panic message: a panic hook takes no
@@ -587,46 +583,29 @@ pub(super) fn name_command_in_panics(command: &str) {
     let _ = PANIC_COMMAND.set(command.to_string());
 }
 
-/// A closed pipe ends the process quietly. Any other panic is a bug: say so
-/// with the command path (never argument values) and exit 1.
+/// A panic is a bug: say so with the command path (never argument values) and
+/// exit 1. A closed pipe is not one, because nothing prints but through
+/// [`output::sink`].
 pub(super) fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
-        let payload = info.payload();
-        let message = payload
-            .downcast_ref::<&str>()
-            .map(|message| (*message).to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_default();
-        if is_broken_pipe_panic(&message) {
-            std::process::exit(0);
-        }
         let command = match PANIC_COMMAND.get() {
             Some(path) => format!("hyperliquid {path}"),
             None => "hyperliquid".to_string(),
         };
-        let _ = write!(
-            std::io::stderr(),
+        sink::err(&format!(
             "Unexpected error in {command}. This is a bug in hyperliquid-cli.\nVersion: {}\nReport it at:\n    https://github.com/{}/issues/new\n",
             env!("CARGO_PKG_VERSION"),
             hyperliquid_cli::update::REPO,
-        );
+        ));
         // Developers opt in to the panic message and location with RUST_BACKTRACE.
         if EnvSource::Process
             .get(env::RUST_BACKTRACE)
             .is_some_and(|value| !value.is_empty() && value != "0")
         {
-            let _ = writeln!(std::io::stderr(), "Panic: {info}");
+            sink::err_line(&format!("Panic: {info}"));
         }
         std::process::exit(1);
     }));
-}
-
-fn env_output_format(source: &EnvSource) -> Option<Result<OutputFormat, errors::CliError>> {
-    let raw = source.get(env::FORMAT)?;
-    if raw.trim().is_empty() {
-        return None;
-    }
-    Some(parse_env_output_format(&raw))
 }
 
 /// `--json` or `--format` as typed on the command line. `--json` wins; a
@@ -640,55 +619,6 @@ pub(super) fn requested_format(matches: &ArgMatches) -> Option<OutputFormat> {
         return matches.get_one::<OutputFormat>("format").copied();
     }
     None
-}
-
-/// The one precedence rule for the output format: what the command line
-/// requested, then `HYPERLIQUID_FORMAT`, then JSON for agents and non-terminal
-/// stdout, then the default. An unreadable `HYPERLIQUID_FORMAT` is the only error.
-fn resolve_output_format(
-    requested: Option<OutputFormat>,
-    surroundings: &Mode,
-    source: &EnvSource,
-) -> Result<OutputFormat, errors::CliError> {
-    if let Some(format) = requested {
-        return Ok(format);
-    }
-    if let Some(format) = env_output_format(source) {
-        return format;
-    }
-    if surroundings.agent || !surroundings.terminal.stdout {
-        return Ok(OutputFormat::Json);
-    }
-    Ok(OutputFormat::default())
-}
-
-/// What the environment decides before any command runs, and the one order it
-/// is read in: the output format first, because it names the format every later
-/// error is reported in, then the strict boolean variables, which are reported
-/// in that format. An unreadable `HYPERLIQUID_FORMAT` cannot be reported in the
-/// format it names, so it is reported as JSON. The error comes with the format
-/// to report it in.
-pub(super) fn startup(
-    requested: Option<OutputFormat>,
-    flags: &InvocationFlags,
-    terminal: Terminal,
-    source: &EnvSource,
-) -> Result<Mode, (errors::CliError, OutputFormat)> {
-    let surroundings = Mode::new(terminal, source);
-    let format = resolve_output_format(requested, &surroundings, source)
-        .map_err(|err| (err, OutputFormat::Json))?;
-    hyperliquid_cli::mode::validate_env(source).map_err(|err| (err, format))?;
-    Ok(surroundings.running(format, flags.non_interactive, flags.payload_from_stdin()))
-}
-
-fn parse_env_output_format(raw: &str) -> Result<OutputFormat, errors::CliError> {
-    <OutputFormat as ValueEnum>::from_str(raw.trim(), true).map_err(|_| {
-        errors::CliError::Configuration(format!(
-            "{} must be one of pretty, table, or json; got '{}'",
-            env::FORMAT,
-            raw.trim().to_ascii_lowercase()
-        ))
-    })
 }
 
 #[cfg(test)]
@@ -833,6 +763,23 @@ mod tests {
     }
 
     #[test]
+    fn the_secret_flags_are_the_global_options_that_warn_about_process_lists() {
+        let root = build_command();
+        let mut warned: Vec<&str> = root
+            .get_arguments()
+            .filter(|arg| {
+                arg.get_help()
+                    .is_some_and(|help| help.to_string().contains("appear in process lists"))
+            })
+            .map(|arg| arg.get_id().as_str())
+            .collect();
+        warned.sort_unstable();
+        let mut secret = SignerFlags::SECRET.to_vec();
+        secret.sort_unstable();
+        assert_eq!(warned, secret);
+    }
+
+    #[test]
     fn every_option_has_help_text() {
         let root = build_command();
         let mut missing = Vec::new();
@@ -875,101 +822,13 @@ mod tests {
         }
     }
 
-    fn quiet() -> (InvocationFlags, Terminal, EnvSource) {
-        (
-            InvocationFlags::default(),
-            Terminal::default(),
-            EnvSource::fixed::<&str, &str>([]),
-        )
-    }
-
-    #[test]
-    fn requested_format_wins_over_the_environment_facts() {
-        let piped_agent = Mode {
-            agent: true,
-            ..Mode::default()
-        };
-        assert_eq!(
-            resolve_output_format(
-                Some(OutputFormat::Table),
-                &piped_agent,
-                &EnvSource::fixed([(env::FORMAT, "json")])
-            )
-            .unwrap(),
-            OutputFormat::Table
-        );
-    }
-
-    #[test]
-    fn startup_reports_an_unreadable_format_variable_as_json() {
-        let (flags, terminal, _) = quiet();
-        let source = EnvSource::fixed([(env::FORMAT, "yaml"), (env::AGENT, "banana")]);
-        let (err, format) = startup(None, &flags, terminal, &source).unwrap_err();
-        assert!(err.to_string().contains(env::FORMAT), "{err}");
-        assert_eq!(format, OutputFormat::Json);
-    }
-
-    #[test]
-    fn startup_reports_an_unreadable_mode_variable_in_the_resolved_format() {
-        let (flags, terminal, _) = quiet();
-        for name in [env::AGENT, env::NO_UPDATE_CHECK] {
-            let source = EnvSource::fixed([(name, "banana")]);
-            let (err, format) =
-                startup(Some(OutputFormat::Table), &flags, terminal, &source).unwrap_err();
-            assert!(err.to_string().contains(name), "{err}");
-            assert_eq!(format, OutputFormat::Table);
-        }
-    }
-
-    #[test]
-    fn startup_resolves_the_format_from_the_environment_after_the_command_line() {
-        let (flags, terminal, _) = quiet();
-        let source = EnvSource::fixed([(env::FORMAT, "table")]);
-        let mode = startup(None, &flags, terminal, &source).unwrap();
-        assert_eq!(mode.format, OutputFormat::Table);
-        let mode = startup(Some(OutputFormat::Pretty), &flags, terminal, &source).unwrap();
-        assert_eq!(mode.format, OutputFormat::Pretty);
-    }
-
-    #[test]
-    fn startup_builds_the_one_mode_of_the_run() {
-        let terminal = Terminal {
-            stdin: true,
-            stdout: true,
-            stderr: true,
-        };
-        let flags = InvocationFlags {
-            non_interactive: true,
-            payload_file: Some("-".to_string()),
-            ..InvocationFlags::default()
-        };
-        let source = EnvSource::fixed([(env::AGENT, "1"), (env::CI, "1")]);
-        let mode = startup(None, &flags, terminal, &source).unwrap();
-        assert_eq!(mode.terminal, terminal);
-        assert!(mode.agent && mode.ci && mode.non_interactive_flag && mode.stdin_is_payload);
-        assert_eq!(
-            mode.format,
-            OutputFormat::Json,
-            "an agent defaults to JSON even on a terminal"
-        );
-    }
-
-    #[test]
-    fn the_environment_format_is_case_insensitive_and_names_the_variable_when_unreadable() {
-        assert_eq!(
-            parse_env_output_format(" Table ").unwrap(),
-            OutputFormat::Table
-        );
-        let err = parse_env_output_format("YAML").unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "Configuration error: HYPERLIQUID_FORMAT must be one of pretty, table, or json; got 'yaml'"
-        );
+    fn quiet() -> (Terminal, EnvSource) {
+        (Terminal::default(), EnvSource::fixed::<&str, &str>([]))
     }
 
     #[test]
     fn failed_parse_still_reads_explicit_format() {
-        let (_, terminal, source) = quiet();
+        let (terminal, source) = quiet();
         let args = |items: &[&str]| items.iter().map(OsString::from).collect::<Vec<_>>();
         for (argv, expected) in [
             (
@@ -1182,20 +1041,6 @@ mod tests {
             try_parse_cli_from(argv.iter().copied())
                 .unwrap_or_else(|err| panic!("{argv:?} should parse: {err}"));
         }
-    }
-
-    #[test]
-    fn broken_pipe_panics_are_recognized() {
-        assert!(is_broken_pipe_panic(
-            "failed printing to stdout: Broken pipe (os error 32)"
-        ));
-        assert!(is_broken_pipe_panic(
-            "failed printing to stderr: Broken pipe (os error 32)"
-        ));
-        assert!(!is_broken_pipe_panic("index out of bounds"));
-        assert!(!is_broken_pipe_panic(
-            "failed printing to stdout: Interrupted"
-        ));
     }
 
     #[test]

@@ -4,32 +4,37 @@
 //! Each kind owns its words and its machine shape, so a sentence is written
 //! once wherever it is printed: [`Notice::text`] is what a person reads,
 //! [`Notice::json`] is the object a program reads when the kind has one, and
-//! [`Notice::eprint`] picks between them for stderr.
+//! [`Notice::eprint`] writes the sentence to stderr through [`super::sink`].
+//!
+//! A warning is marked two ways: [`Notice::Warning`] puts a `!` before the
+//! message (`Warning:` when stderr is not rich), and [`caution`] paints a whole
+//! line, for the lines inside a prompt or a consent preview.
 
 use serde_json::{Value, json};
 
-use super::{colors, format};
+use super::{colors, format, sink};
+use crate::mode::DisplayBlocker;
+
+/// Marks the first line of a notice that needs attention, however it is built.
+const GLYPH: &str = "!";
 
 /// What an automatic retry or reconnect says it is doing.
 const RETRYING: &str = "Retrying automatically…";
 
 const STREAM_GAP: &str = "Connection was lost and restored. Events may have been missed.";
 
-/// Why a human-format run streams JSON lines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JsonLinesReason {
-    StdoutNotTerminal,
-    StdinNotTerminal,
-    Driven,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Notice {
     /// A warning for a person, on any format.
     Warning(String),
-    /// A multi-line block printed as written: a `! ` headline and the
-    /// indented lines that say what to do about it.
-    Advice(Vec<String>),
+    /// A `! ` headline and the indented lines under it that say what to do
+    /// about it, printed as written.
+    Advice {
+        headline: String,
+        lines: Vec<String>,
+    },
+    /// `text` painted as a whole line, for a prompt or a consent preview.
+    Caution(String),
     /// A read stopped at the API's per-request cap. `message` says how to
     /// continue; the JSON form also carries the counts and the cursor.
     Truncated {
@@ -48,30 +53,47 @@ pub enum Notice {
     ConnectionLost,
     Retrying,
     /// A human format on a pipe or an unattended run prints JSON lines.
-    JsonLines(JsonLinesReason),
+    JsonLines(DisplayBlocker),
 }
 
 impl Notice {
+    /// An advice with only a headline.
+    #[must_use]
+    pub fn advice(headline: impl Into<String>) -> Self {
+        Self::Advice {
+            headline: headline.into(),
+            lines: Vec::new(),
+        }
+    }
+
     #[must_use]
     pub fn text(&self) -> String {
         match self {
             Self::Warning(message) | Self::Truncated { message, .. } => warning_line(message),
-            Self::Advice(lines) => lines.join("\n"),
+            Self::Advice { headline, lines } => {
+                let mut text = format!("{GLYPH} {headline}");
+                for line in lines {
+                    text.push('\n');
+                    text.push_str(line);
+                }
+                text
+            }
+            Self::Caution(text) => caution(text),
             Self::Empty(sentence) => sentence.clone(),
             Self::Clipped { shown, total } => format!(
                 "Showing {} of {}. Remove --max-results to see all.",
                 format::thousands(*shown as u64),
                 format::thousands(*total as u64)
             ),
-            Self::ConnectionLost => format!("! Lost connection. {RETRYING}"),
+            Self::ConnectionLost => format!("{GLYPH} Lost connection. {RETRYING}"),
             Self::Retrying => RETRYING.to_string(),
-            Self::JsonLines(JsonLinesReason::StdoutNotTerminal) => {
+            Self::JsonLines(DisplayBlocker::StdoutNotTerminal | DisplayBlocker::NoTerminal) => {
                 "Streaming JSON lines because stdout isn't a terminal.".to_string()
             }
-            Self::JsonLines(JsonLinesReason::StdinNotTerminal) => {
+            Self::JsonLines(DisplayBlocker::StdinNotTerminal) => {
                 "Streaming JSON lines because stdin isn't a terminal.".to_string()
             }
-            Self::JsonLines(JsonLinesReason::Driven) => {
+            Self::JsonLines(DisplayBlocker::Driven) => {
                 "Streaming JSON lines because an agent, CI or --non-interactive run is driving."
                     .to_string()
             }
@@ -97,7 +119,8 @@ impl Notice {
                 }
             })),
             Self::Warning(_)
-            | Self::Advice(_)
+            | Self::Advice { .. }
+            | Self::Caution(_)
             | Self::Empty(_)
             | Self::Clipped { .. }
             | Self::ConnectionLost
@@ -106,12 +129,17 @@ impl Notice {
         }
     }
 
+    /// Print the sentence to stderr, best effort.
+    pub fn eprint(&self) {
+        sink::err_line(&self.text());
+    }
+
     /// Print to stderr: the JSON object when the run's output is JSON and the
     /// kind has one, else the sentence.
-    pub fn eprint(&self, machine_format: bool) {
+    pub fn eprint_as(&self, machine_format: bool) {
         match self.json().filter(|_| machine_format) {
-            Some(value) => eprintln!("{value}"),
-            None => eprintln!("{}", self.text()),
+            Some(value) => sink::err_line(&value.to_string()),
+            None => self.eprint(),
         }
     }
 }
@@ -133,15 +161,21 @@ pub fn stream_gap(subscription: &str) -> Value {
 /// `Warning: message` otherwise.
 fn warning_line(message: &str) -> String {
     if colors::stderr_enabled() {
-        format!("{} {message}", colors::stderr::yellow("!"))
+        format!("{} {message}", colors::stderr::yellow(GLYPH))
     } else {
         format!("Warning: {message}")
     }
 }
 
+/// `text` painted yellow as a whole when stderr is rich, as written otherwise.
+#[must_use]
+pub fn caution(text: &str) -> String {
+    colors::stderr::yellow(text)
+}
+
 /// Print a warning to stderr (all formats).
 pub fn warn(message: &str) {
-    Notice::Warning(message.to_string()).eprint(false);
+    Notice::Warning(message.to_string()).eprint();
 }
 
 #[cfg(test)]
@@ -214,12 +248,20 @@ mod tests {
     }
 
     #[test]
+    fn a_caution_follows_stderr_color_only() {
+        colors::with_streams_for_test(true, false, || assert_eq!(caution("q"), "q"));
+        colors::with_streams_for_test(false, true, || {
+            assert_eq!(caution("q"), colors::paint(colors::YELLOW, "q"));
+            assert_eq!(Notice::Caution("q".into()).text(), caution("q"));
+        });
+    }
+
+    #[test]
     fn advice_prints_its_lines_as_written_with_no_warning_prefix() {
-        let notice = Notice::Advice(vec![
-            "! Config file /c is readable by other users (mode 0644).".into(),
-            "  Restrict it:".into(),
-            "    chmod 600 /c".into(),
-        ]);
+        let notice = Notice::Advice {
+            headline: "Config file /c is readable by other users (mode 0644).".into(),
+            lines: vec!["  Restrict it:".into(), "    chmod 600 /c".into()],
+        };
         assert_eq!(
             notice.text(),
             "! Config file /c is readable by other users (mode 0644).\n  Restrict it:\n    chmod 600 /c"
@@ -243,8 +285,9 @@ mod tests {
             Notice::ConnectionLost,
             Notice::Retrying,
             Notice::Warning("x".into()),
-            Notice::Advice(vec!["! x".into()]),
-            Notice::JsonLines(JsonLinesReason::Driven),
+            Notice::advice("x"),
+            Notice::Caution("x".into()),
+            Notice::JsonLines(DisplayBlocker::Driven),
         ] {
             assert!(notice.json().is_none(), "{notice:?}");
         }

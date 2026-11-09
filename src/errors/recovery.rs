@@ -50,7 +50,7 @@ impl CliError {
                 instruction: "Check open orders and recent fills:".into(),
                 commands: vec![
                     NextCommand::new(crate::hints::CHECK_LIVE_COMMAND),
-                    NextCommand::new("hyperliquid account fills"),
+                    NextCommand::new(crate::hints::ACCOUNT_FILLS_COMMAND),
                 ],
                 note: None,
             }),

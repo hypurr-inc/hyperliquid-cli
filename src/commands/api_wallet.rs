@@ -11,7 +11,6 @@ use crate::clock::{self, DurationError};
 use crate::command_spec::{CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
 use crate::commands::common::support::action_json;
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::exchange::actions;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
@@ -315,8 +314,7 @@ async fn list(inv: &Invocation, master_address: Address) -> Result<(), anyhow::E
         .api()
         .sdk()
         .api_agents(master_address)
-        .await
-        .map_err(from_sdk)?
+        .await?
         .into_iter()
         .map(|agent| ApiAgentRow {
             name: agent.name,
