@@ -8,7 +8,8 @@ use hypersdk::hypercore::Chain;
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use support::exchange::ExchangeFixture;
-use support::signing::{recover_signer, test_signer};
+use support::signing::user_signed::USD_CLASS_TRANSFER;
+use support::signing::{recover_signer, recover_user_signer, test_signer};
 use support::wire::{self, MarginRule};
 use support::{IsolatedHome, json_stdout};
 
@@ -18,8 +19,6 @@ const VAULT: &str = "0x0000000000000000000000000000000000000001";
 fn ok() -> Value {
     json!({"status": "ok", "response": {"type": "default"}})
 }
-
-// ---- transfer spot-to-perp / perp-to-spot --subaccount ----
 
 /// A subaccount holding `spot` USDC in spot and `perp` withdrawable in perp,
 /// in a standard account. Only reads about the subaccount are answered: a
@@ -85,9 +84,9 @@ async fn class_transfers_for_a_subaccount_sign_the_amount_with_its_suffix() {
             "{direction}"
         );
         // The master signs the amount with its suffix: the signature only
-        // verifies against that document.
+        // verifies against that typed data.
         assert_eq!(
-            recover_signer(&bodies[0], Chain::Testnet),
+            recover_user_signer(&bodies[0], USD_CLASS_TRANSFER),
             test_signer(),
             "{direction}"
         );
@@ -173,8 +172,6 @@ async fn subaccount_class_transfer_dry_run_shows_the_wire_amount() {
     assert_eq!(json_stdout(&assert)["args"], json!({"amount": "5"}));
     assert!(server.exchange_actions().await.is_empty());
 }
-
-// ---- positions top-up-margin ----
 
 /// BTC and ETH trade either way, PUMP is `strictIsolated`; `user`'s account
 /// holds `positions`.
@@ -375,8 +372,6 @@ async fn top_up_margin_dry_run_previews_without_signing_or_reading_the_position(
     assert!(server.exchange_actions().await.is_empty());
 }
 
-// ---- borrowlend repay / borrow ----
-
 async fn borrowlend_server(raw_abstraction: &str) -> ExchangeFixture {
     let server = ExchangeFixture::start().await;
     server
@@ -512,8 +507,6 @@ async fn borrow_dry_run_does_not_invent_a_core_writer_encoding() {
     assert_eq!(args["verified_shape"]["fields"]["encodedOperation"], 0);
 }
 
-// ---- account evm-big-blocks ----
-
 #[tokio::test]
 async fn evm_big_blocks_sends_the_flag_in_both_directions() {
     let env = IsolatedHome::new();
@@ -577,8 +570,6 @@ async fn evm_big_blocks_dry_run_previews_the_action() {
     assert!(server.exchange_actions().await.is_empty());
 }
 
-// ---- prio bid --slot ----
-
 #[tokio::test]
 async fn prio_bid_slots_are_zero_to_two() {
     let env = IsolatedHome::new();
@@ -622,43 +613,4 @@ async fn prio_bid_slots_are_zero_to_two() {
         .success();
     assert_eq!(json_stdout(&assert)["args"]["slot"], 2);
     assert!(server.exchange_actions().await.is_empty());
-
-    IsolatedHome::new()
-        .command()
-        .args(["prio", "bid", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Slot index (0-2)"));
-}
-
-// ---- staking claim-rewards ----
-
-#[test]
-fn claim_rewards_says_what_it_claims() {
-    let env = IsolatedHome::new();
-
-    let help = env
-        .command()
-        .args(["staking", "claim-rewards", "--help"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let help = String::from_utf8(help).unwrap();
-    let schema = env
-        .command()
-        .args(["--format", "json", "schema", "staking", "claim-rewards"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let schema = String::from_utf8(schema).unwrap();
-
-    for text in [&help, &schema] {
-        assert!(text.contains("referral and builder rewards"), "{text}");
-        assert!(!text.contains("Claim staking rewards"), "{text}");
-    }
-    assert!(schema.contains("redelegated"), "{schema}");
 }

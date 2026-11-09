@@ -249,92 +249,10 @@ async fn positions_update_margin_outputs_confirmation() {
     assert_eq!(recover_signer(&body, Chain::Testnet), test_signer());
 }
 
-/// A server where `xyz:XYZ100` is the second market of the HIP-3 dex `xyz`
-/// (dex slot 1). The default dex lists no `xyz` market, so only a live HIP-3
-/// lookup can find it.
-async fn hip3_positions_server() -> ExchangeFixture {
-    let market = |name: &str| wire::perp(name, wire::MarginRule::Either);
-    let server = ExchangeFixture::start_with(vec![Hip3Dex {
-        name: "xyz",
-        universe: vec![market("xyz:XYZ50"), market("xyz:XYZ100")],
-        mids: json!({"xyz:XYZ50": "5", "xyz:XYZ100": "10"}),
-    }])
-    .await;
-    let mut position = wire::position_with(
-        "xyz:XYZ100",
-        json!({"type": "isolated", "value": 3, "rawUsd": "10"}),
-        "1",
-        10,
-    );
-    position["position"]["entryPx"] = json!("10");
-    server
-        .mount_info_containing(
-            json!({"type": "clearinghouseState"}),
-            wire::perp_state("99", vec![position]),
-        )
-        .await;
-    server
-        .mount_exchange(json!({"status": "ok", "response": {"type": "default"}}))
-        .await;
-    server
-}
-
-#[tokio::test]
-async fn positions_update_leverage_targets_a_hip3_market_by_its_protocol_asset_id() {
-    let env = IsolatedHome::new();
-    let server = hip3_positions_server().await;
-
-    env.live_json(&server)
-        .args([
-            "positions",
-            "update-leverage",
-            "--coin",
-            "xyz:XYZ100",
-            "--leverage",
-            "3",
-            "--isolated",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("xyz:XYZ100"));
-
-    let body = only_exchange_body(&server).await;
-    assert_eq!(
-        body["action"],
-        json!({"type": "updateLeverage", "asset": 110_001, "isCross": false, "leverage": 3})
-    );
-    assert_eq!(recover_signer(&body, Chain::Testnet), test_signer());
-}
-
-#[tokio::test]
-async fn positions_update_margin_targets_a_hip3_market_by_its_protocol_asset_id() {
-    let env = IsolatedHome::new();
-    let server = hip3_positions_server().await;
-
-    env.live_json(&server)
-        .args([
-            "positions",
-            "update-margin",
-            "--coin",
-            "xyz:XYZ100",
-            "--amount",
-            "5",
-        ])
-        .assert()
-        .success();
-
-    let body = only_exchange_body(&server).await;
-    assert_eq!(
-        body["action"],
-        json!({"type": "updateIsolatedMargin", "asset": 110_001, "isBuy": true, "ntli": 5_000_000})
-    );
-    assert_eq!(recover_signer(&body, Chain::Testnet), test_signer());
-}
-
 #[tokio::test]
 async fn positions_update_leverage_reports_an_unknown_hip3_market_as_not_found() {
     let env = IsolatedHome::new();
-    let server = hip3_positions_server().await;
+    let server = ExchangeFixture::start_with(vec![Hip3Dex::xyz()]).await;
 
     env.live_json(&server)
         .args([

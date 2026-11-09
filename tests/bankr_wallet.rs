@@ -576,5 +576,5 @@ fn a_dry_run_without_any_signer_previews_with_a_null_signer() {
         "1",
     ]));
     assert!(preview["signer"].is_null());
-    assert!(preview["signer_warning"].is_string());
+    assert_eq!(preview["signer_warning"], "Authentication required.");
 }

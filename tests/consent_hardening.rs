@@ -48,7 +48,7 @@ fn account_remove_yes_without_selector_is_missing_input_in_json_mode() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains("Select wallet").not());
-    let json: Value = serde_json::from_slice(&assert.get_output().stdout).unwrap();
+    let json = support::json_stdout(&assert);
 
     assert_eq!(json["category"], "missing_input");
     assert!(json["error"].as_str().unwrap().contains("<WALLET>"));
@@ -82,18 +82,6 @@ fn config_is_written_owner_only_and_atomically() {
         leftovers.is_empty(),
         "temp files left behind: {leftovers:?}"
     );
-}
-
-#[test]
-fn wallet_receipt_reports_config_keys_written() {
-    let env = IsolatedHome::new();
-
-    env.account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["wallet", "import", IMPORT_KEY])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Config keys written"))
-        .stdout(predicate::str::contains("default_wallet_id"));
 }
 
 #[test]

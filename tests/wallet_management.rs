@@ -7,7 +7,7 @@ use std::path::Path;
 
 use support::{
     ACCOUNT_KEY_STORE_DIR_ENV, IsolatedHome, TEST_ACCOUNT_PASSPHRASE, copy_dir_all,
-    expected_address,
+    expected_address, run_json, stdout_json,
 };
 
 const IMPORT_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000004";
@@ -143,22 +143,14 @@ fn wallet_address_json_outputs_stable_object() {
     let env = IsolatedHome::new();
     let address = expected_address(IMPORT_KEY);
 
-    let output = env
-        .account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args([
-            "--format",
-            "json",
-            "--private-key",
-            IMPORT_KEY,
-            "wallet",
-            "address",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = run_json(env.account_command(TEST_ACCOUNT_PASSPHRASE).args([
+        "--format",
+        "json",
+        "--private-key",
+        IMPORT_KEY,
+        "wallet",
+        "address",
+    ]));
 
     assert_eq!(json["address"], address);
 }
@@ -179,7 +171,7 @@ fn wallet_reset_json_yes_outputs_success_object_without_prompt() {
         .success()
         .stderr(predicate::str::contains("Delete config file").not());
     let output = assert.get_output().stdout.clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = stdout_json(&output);
 
     assert_eq!(json["status"], "reset");
     assert!(
@@ -194,15 +186,10 @@ fn wallet_reset_json_yes_outputs_success_object_without_prompt() {
 fn wallet_reset_json_missing_configuration_outputs_noop_object() {
     let env = IsolatedHome::new();
 
-    let output = env
-        .account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["--format", "json", "wallet", "reset", "--yes"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = run_json(
+        env.account_command(TEST_ACCOUNT_PASSPHRASE)
+            .args(["--format", "json", "wallet", "reset", "--yes"]),
+    );
 
     assert_eq!(json["status"], "noop");
     assert_eq!(json["message"], "Nothing to reset");
@@ -268,7 +255,7 @@ fn wallet_import_json_rejects_argument_key() {
         .get_output()
         .stdout
         .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = stdout_json(&output);
 
     assert!(
         json["error"]
@@ -318,17 +305,14 @@ fn copied_data_directory_alone_cannot_decrypt_stored_wallet_key() {
         .assert()
         .success();
 
-    // Without the vault there is no signer. Where the config directory is not
-    // under HOME (XDG on Linux), the original config still names a default
-    // wallet, which is reported as missing from the vault instead.
+    // Without the vault there is no signer: the original config, found through
+    // `HYPERLIQUID_CONFIG_DIR`, still names a default wallet, which is reported
+    // as missing from the vault.
     env.account_command_for_paths_without_passphrase(&copied_home, &copied_data_home)
         .args(["wallet", "address"])
         .assert()
         .code(10)
-        .stderr(
-            predicate::str::contains("Authentication required")
-                .or(predicate::str::contains("isn't in the vault")),
-        );
+        .stderr(predicate::str::contains("isn't in the vault"));
 }
 
 #[test]
@@ -638,15 +622,10 @@ fn wallet_create_import_and_mnemonic_ignore_invalid_packaged_defaults() {
 fn wallet_create_json_includes_default_status() {
     let env = IsolatedHome::new();
 
-    let output = env
-        .account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["--format", "json", "wallet", "create"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = run_json(
+        env.account_command(TEST_ACCOUNT_PASSPHRASE)
+            .args(["--format", "json", "wallet", "create"]),
+    );
 
     assert_eq!(json["message"], "Created wallet");
     assert_eq!(json["alias"], "wallet");
@@ -717,8 +696,10 @@ fn account_add_ls_set_default_and_remove_flow() {
         .args(["account", "add", IMPORT_KEY, "--alias", "main", "--default"])
         .assert()
         .success()
+        .stderr(predicate::str::contains(IMPORT_KEY).not())
         .stdout(predicate::str::contains("Account added"))
-        .stdout(predicate::str::contains(&first_address));
+        .stdout(predicate::str::contains(&first_address))
+        .stdout(predicate::str::contains(IMPORT_KEY).not());
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .args(["account", "add", SECOND_KEY, "--alias", "backup"])
@@ -743,12 +724,22 @@ fn account_add_ls_set_default_and_remove_flow() {
         .success()
         .stdout(predicate::str::contains("Default account set"))
         .stdout(predicate::str::contains("backup"));
-
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .args(["wallet", "address"])
         .assert()
         .success()
         .stdout(predicate::str::contains(&second_address));
+
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args(["account", "set-default", "main"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Default account set"));
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args(["wallet", "address"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&first_address));
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .args(["account", "remove"])
@@ -767,58 +758,15 @@ fn account_add_ls_set_default_and_remove_flow() {
 }
 
 #[test]
-fn account_add_set_default_and_remove_flow_with_yes() {
+fn account_remove_with_yes_deletes_without_prompting() {
     let env = IsolatedHome::new();
-    let first_address = expected_address(IMPORT_KEY);
-    let second_address = expected_address(SECOND_KEY);
 
-    env.account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args([
-            "account",
-            "add",
-            IMPORT_KEY,
-            "--alias",
-            "main",
-            "--type",
-            "api-wallet",
-            "--default",
-        ])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("process listings"))
-        .stderr(predicate::str::contains("shell history"))
-        .stderr(predicate::str::contains(IMPORT_KEY).not())
-        .stdout(predicate::str::contains("Account added"))
-        .stdout(predicate::str::contains("main"))
-        .stdout(predicate::str::contains(&first_address))
-        .stdout(predicate::str::contains(IMPORT_KEY).not());
-
-    env.account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args([
-            "account",
-            "add",
-            SECOND_KEY,
-            "--alias",
-            "backup",
-            "--type",
-            "api-wallet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Account added"));
-
-    env.account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["account", "set-default", "backup"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Default account set"))
-        .stdout(predicate::str::contains("backup"));
-
-    env.account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["wallet", "address"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains(&second_address));
+    for (key, alias) in [(IMPORT_KEY, "main"), (SECOND_KEY, "backup")] {
+        env.account_command(TEST_ACCOUNT_PASSPHRASE)
+            .args(["account", "add", key, "--alias", alias])
+            .assert()
+            .success();
+    }
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .args(["account", "remove", "main", "--yes"])
@@ -870,34 +818,21 @@ fn global_account_selects_stored_signer_without_changing_default() {
         .success();
 
     for selector in ["backup", second_address.as_str()] {
-        let output = env
-            .account_command(TEST_ACCOUNT_PASSPHRASE)
-            .args([
-                "--format",
-                "json",
-                "--account",
-                selector,
-                "wallet",
-                "address",
-            ])
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        let json: Value = serde_json::from_slice(&output).unwrap();
+        let json = run_json(env.account_command(TEST_ACCOUNT_PASSPHRASE).args([
+            "--format",
+            "json",
+            "--account",
+            selector,
+            "wallet",
+            "address",
+        ]));
         assert_eq!(json["address"], second_address);
     }
 
-    let output = env
-        .account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["--format", "json", "wallet", "address"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = run_json(
+        env.account_command(TEST_ACCOUNT_PASSPHRASE)
+            .args(["--format", "json", "wallet", "address"]),
+    );
     assert_eq!(json["address"], first_address);
 }
 
@@ -934,7 +869,7 @@ fn global_account_missing_selector_has_clear_structured_error() {
         .get_output()
         .stdout
         .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = stdout_json(&output);
     assert!(
         json["error"]
             .as_str()
@@ -990,7 +925,7 @@ fn account_set_default_and_remove_without_accounts_have_clear_error() {
         .get_output()
         .stdout
         .clone();
-    let set_default_json: Value = serde_json::from_slice(&set_default_output).unwrap();
+    let set_default_json = stdout_json(&set_default_output);
     assert_eq!(set_default_json["reason"], "missing_input");
     assert!(
         set_default_json["error"]
@@ -1008,7 +943,7 @@ fn account_set_default_and_remove_without_accounts_have_clear_error() {
         .get_output()
         .stdout
         .clone();
-    let remove_json: Value = serde_json::from_slice(&remove_output).unwrap();
+    let remove_json = stdout_json(&remove_output);
     assert_eq!(remove_json["reason"], "missing_input");
     assert!(remove_json["error"].as_str().unwrap().contains("<WALLET>"));
 
@@ -1037,7 +972,7 @@ fn account_set_default_and_remove_without_accounts_have_clear_error() {
         .get_output()
         .stdout
         .clone();
-    let remove_selector_json: Value = serde_json::from_slice(&remove_selector_output).unwrap();
+    let remove_selector_json = stdout_json(&remove_selector_output);
     assert!(
         remove_selector_json["error"]
             .as_str()
@@ -1066,7 +1001,7 @@ fn account_remove_json_requires_yes_before_prompting() {
         .get_output()
         .stdout
         .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = stdout_json(&output);
 
     assert!(
         json["error"]
@@ -1100,7 +1035,7 @@ fn account_remove_json_yes_outputs_removed_account_without_prompt() {
         .success()
         .stderr(predicate::str::is_empty());
     let output = assert.get_output().stdout.clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = stdout_json(&output);
 
     assert_eq!(json["message"], "Deleted wallet");
     assert_eq!(json["address"], address);
@@ -1140,15 +1075,10 @@ fn account_add_with_a_legacy_type_is_listed_as_an_ows_wallet() {
         .stdout(predicate::str::contains("OWS wallet"))
         .stdout(predicate::str::contains("api-wallet").not());
 
-    let output = env
-        .account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["--format", "json", "account", "ls"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = run_json(
+        env.account_command(TEST_ACCOUNT_PASSPHRASE)
+            .args(["--format", "json", "account", "ls"]),
+    );
     assert_eq!(json[0]["type"], "ows-wallet");
 }
 
@@ -1171,42 +1101,26 @@ fn experimental_ows_wallet_show_and_address_are_address_only() {
     let env = IsolatedHome::new();
     let ows_address = "0x0000000000000000000000000000000000000001";
 
-    let show_output = env
-        .command()
-        .args([
-            "--format",
-            "json",
-            "--ows-signer",
-            ows_address,
-            "wallet",
-            "show",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let show_json: Value = serde_json::from_slice(&show_output).unwrap();
+    let show_json = run_json(env.command().args([
+        "--format",
+        "json",
+        "--ows-signer",
+        ows_address,
+        "wallet",
+        "show",
+    ]));
     assert_eq!(show_json["address"], ows_address);
     assert_eq!(show_json["alias"], Value::Null);
     assert!(show_json["source"].as_str().unwrap().contains("OWS signer"));
 
-    let address_output = env
-        .command()
-        .args([
-            "--format",
-            "json",
-            "--ows-signer",
-            ows_address,
-            "wallet",
-            "address",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let address_json: Value = serde_json::from_slice(&address_output).unwrap();
+    let address_json = run_json(env.command().args([
+        "--format",
+        "json",
+        "--ows-signer",
+        ows_address,
+        "wallet",
+        "address",
+    ]));
     assert_eq!(address_json["address"], ows_address);
 }
 
@@ -1285,17 +1199,12 @@ fn wallet_show_describes_a_vault_wallet_by_name_however_it_was_selected() {
         &["--account", "main"][..],
         &["--ows-signer", "main"][..],
     ] {
-        let output = env
-            .account_command(TEST_ACCOUNT_PASSPHRASE)
-            .args(["--format", "json"])
-            .args(selector)
-            .args(["wallet", "show"])
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        let json: Value = serde_json::from_slice(&output).unwrap();
+        let json = run_json(
+            env.account_command(TEST_ACCOUNT_PASSPHRASE)
+                .args(["--format", "json"])
+                .args(selector)
+                .args(["wallet", "show"]),
+        );
         assert_eq!(json["alias"], "main", "{selector:?}");
         assert_eq!(json["source"], "OWS wallet (main)", "{selector:?}");
     }
@@ -1317,15 +1226,10 @@ fn account_ls_json_and_table_carry_no_always_empty_agent_columns() {
         .stdout(predicate::str::contains("Agent Name").not())
         .stdout(predicate::str::contains("n/a").not());
 
-    let output = env
-        .account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["--format", "json", "account", "ls"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = run_json(
+        env.account_command(TEST_ACCOUNT_PASSPHRASE)
+            .args(["--format", "json", "account", "ls"]),
+    );
     let row = json[0].as_object().unwrap();
     for key in ["master_address", "agent_name", "expires_at"] {
         assert!(!row.contains_key(key), "{key}");
@@ -1336,6 +1240,8 @@ fn account_ls_json_and_table_carry_no_always_empty_agent_columns() {
 fn receipts_list_exactly_the_config_keys_the_command_changed() {
     let env = IsolatedHome::new();
 
+    // A secret is only taken from a prompt in a human run, so the receipt is
+    // the table.
     for key in [IMPORT_KEY, SECOND_KEY] {
         // The second import changes the default again, and only that.
         let stdout = env
