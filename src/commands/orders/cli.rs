@@ -36,7 +36,7 @@ use super::{
 use crate::assets::canonical_dex;
 use crate::command_spec::{
     ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk, StreamBound,
-    arg,
+    YES_FOR_AUTOMATION, arg,
 };
 use crate::errors::CliError;
 use crate::input_hardening::{FilePolicy, validate_file_path};
@@ -45,6 +45,21 @@ use crate::margin::MarginPlan;
 use crate::stream::SnapshotWatchArgs;
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["orders"], "Manage orders").aliases(&["order"]);
+
+/// The sentence every prompting order command's description ends with.
+macro_rules! prompts_unless_yes {
+    ($orders:literal) => {
+        concat!(
+            "Mainnet ",
+            $orders,
+            " prompt for confirmation unless ",
+            $crate::yes_flag!(),
+            " is passed; --testnet ",
+            $orders,
+            " run without a prompt."
+        )
+    };
+}
 
 // What each order command says about the flags they share. A flag is described
 // here once, so every command that takes it gets the same input hardening.
@@ -57,7 +72,7 @@ const ON_BEHALF_OF: ArgSpec = arg("on_behalf_of")
 const ON_BEHALF_OF_DESCRIBED: ArgSpec = ON_BEHALF_OF.describe(
     "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
 );
-const YES: ArgSpec = arg("yes").kind(InputKind::Boolean).describe(
+const YES: ArgSpec = crate::command_spec::YES.describe(
     "Skip the mainnet confirmation prompt for deliberate automation. Testnet orders never prompt.",
 );
 const DEX: ArgSpec = arg("dex")
@@ -270,7 +285,7 @@ impl CliCommand for OrdersCreate {
         &["orders", "create"],
         "trade",
         "Create a new order",
-        "Create a live limit, market, stop-loss, take-profit, stop-limit, take-limit, or verified outcome limit order. Supports optional per-order builder fee params. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!("Create a live limit, market, stop-loss, take-profit, stop-limit, take-limit, or verified outcome limit order. Supports optional per-order builder fee params. ", prompts_unless_yes!("orders")),
     )
     .long_about("Create a new order.\n\
 \n\
@@ -308,7 +323,7 @@ hyperliquid orders create --coin BTC --side buy --price 60000 --size 0.001 --yes
         let spec = OrderSpec::from_create(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         let submission = prepare_create_order(client, &resolver, inv.settings(), &spec).await?;
         if inv.dry_run() {
             let parent = submission.parent();
@@ -339,23 +354,33 @@ impl CliCommand for OrdersScale {
         &["orders", "scale"],
         "trade",
         "Create a deterministic batch of scaled limit orders",
-        "Create a deterministic batch of evenly spaced limit orders. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!(
+            "Create a deterministic batch of evenly spaced limit orders. ",
+            prompts_unless_yes!("orders")
+        ),
     )
     .prompt()
     .testnet_unprompted()
     .args(&[
-        arg("coin").kind(InputKind::MarketSymbol).describe("Perpetual coin, for example BTC.").asset_input("coin"),
+        arg("coin")
+            .kind(InputKind::MarketSymbol)
+            .describe("Perpetual coin, for example BTC.")
+            .asset_input("coin"),
         DEX,
         arg("side").describe("Order side for every generated leg."),
         arg("start_price"),
         arg("end_price"),
-        arg("total_size").kind(InputKind::Amount).describe("Total base-asset size split across all legs."),
+        arg("total_size")
+            .kind(InputKind::Amount)
+            .describe("Total base-asset size split across all legs."),
         arg("orders").describe("Number of limit orders to generate."),
         arg("tif").describe("Time in force for generated limit orders: gtc, ioc, or alo."),
         arg("reduce_only").kind(InputKind::Boolean),
         ON_BEHALF_OF_DESCRIBED,
         MARGIN_MODE,
-        PRIORITY_RATE.describe(priority_rate_help!("). Requires --tif ioc, or --tif alo without --reduce-only.")),
+        PRIORITY_RATE.describe(priority_rate_help!(
+            "). Requires --tif ioc, or --tif alo without --reduce-only."
+        )),
         YES,
     ]);
 
@@ -363,7 +388,7 @@ impl CliCommand for OrdersScale {
         let ladder = ScaleLadder::from_args(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         let prepared =
             prepare_scale_batch(client, &resolver, inv.settings(), args, &ladder).await?;
         if inv.dry_run() {
@@ -387,14 +412,21 @@ impl CliCommand for OrdersBatchCreate {
         &["orders", "batch-create"],
         "trade",
         "Create a batch of limit orders from a JSON file",
-        "Create a batch of limit orders from a JSON order-leg file. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!(
+            "Create a batch of limit orders from a JSON order-leg file. ",
+            prompts_unless_yes!("orders")
+        ),
     )
     .prompt()
     .testnet_unprompted()
     .args(&[
-        arg("orders_file").kind(InputKind::FilePath).describe("JSON file containing an array of order legs or an object with an orders array."),
+        arg("orders_file").kind(InputKind::FilePath).describe(
+            "JSON file containing an array of order legs or an object with an orders array.",
+        ),
         ON_BEHALF_OF_DESCRIBED,
-        PRIORITY_RATE.describe(priority_rate_help!("). Every leg must be IOC, or every leg ALO and not reduce-only.")),
+        PRIORITY_RATE.describe(priority_rate_help!(
+            "). Every leg must be IOC, or every leg ALO and not reduce-only."
+        )),
         YES,
     ]);
 
@@ -411,7 +443,7 @@ impl CliCommand for OrdersBatchCreate {
         let orders = read_validated_batch_create_orders(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         let prepared = prepare_batch_create_orders(
             client,
             &resolver,
@@ -437,7 +469,7 @@ impl CliCommand for OrdersTpsl {
         &["orders", "tpsl"],
         "trade",
         "Create position-attached TP/SL orders",
-        "Create position-attached take-profit and/or stop-loss orders. Dry-run first. Retry: check_open_orders — a second tpsl can duplicate working triggers. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!("Create position-attached take-profit and/or stop-loss orders. Dry-run first. Retry: check_open_orders — a second tpsl can duplicate working triggers. ", prompts_unless_yes!("orders")),
     )
     .long_about("Create position-attached take-profit and/or stop-loss orders.\n\
 \n\
@@ -470,7 +502,7 @@ hyperliquid --format json orders tpsl --coin ETH --take-profit +10% --stop-loss 
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
         let perp = resolve_perp(client, &resolver, spec.dex.as_deref(), &spec.coin).await?;
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             let margin = MarginPlan::for_market(&perp, spec.margin_mode)?;
             let margin = run.previewed_margin(&perp, margin).await?;
@@ -490,7 +522,7 @@ impl CliCommand for OrdersTrailingStop {
         &["orders", "trailing-stop"],
         "trade",
         "Place a native trailing stop on a perp market",
-        "Place a native trailing stop on a perp market. It tracks the mark price and fires a market order once the mark retraces from its best level since activation. Dry-run first. Retry: check_open_orders — a second trailing stop can duplicate a working one. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!("Place a native trailing stop on a perp market. It tracks the mark price and fires a market order once the mark retraces from its best level since activation. Dry-run first. Retry: check_open_orders — a second trailing stop can duplicate a working one. ", prompts_unless_yes!("orders")),
     )
     .long_about("Place a native trailing stop on a perp market.\n\
 \n\
@@ -523,7 +555,7 @@ hyperliquid --format json orders trailing-stop --coin ETH --side sell --size 0.5
         let resolver = inv.trading_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
         let plan = prepare_trailing_stop_plan(&perp, args)?;
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             return run.preview(plan.dry_run_plan(args));
         }
@@ -556,7 +588,7 @@ impl CliCommand for OrdersCancel {
     ]);
 
     async fn run(inv: &Invocation, args: &CancelArgs) -> Result<(), anyhow::Error> {
-        let run = OrderRun::unprompted(inv, &Self::SPEC, args.on_behalf_of.as_deref())?;
+        let run = OrderRun::unprompted(inv, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
             return run.preview(cancel_dry_run_plan(args)?);
         }
@@ -585,11 +617,11 @@ impl CliCommand for OrdersCancelAll {
             .asset_input("coin"),
         DEX.describe("HIP-3 DEX name for the coin filter."),
         ON_BEHALF_OF,
-        YES.describe("Skip confirmation prompt for deliberate automation."),
+        YES_FOR_AUTOMATION,
     ]);
 
     async fn run(inv: &Invocation, args: &CancelAllArgs) -> Result<(), anyhow::Error> {
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         let resolver = inv.trading_resolver().await?;
         if inv.dry_run() {
             let client = inv.remote()?.api().sdk();
@@ -632,7 +664,7 @@ impl CliCommand for OrdersModify {
 
     async fn run(inv: &Invocation, args: &ModifyArgs) -> Result<(), anyhow::Error> {
         let identifier = validate_modify_args(args)?;
-        let run = OrderRun::unprompted(inv, &Self::SPEC, args.on_behalf_of.as_deref())?;
+        let run = OrderRun::unprompted(inv, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
             return run.preview(modify_dry_run_plan(args));
         }
@@ -651,7 +683,7 @@ impl CliCommand for OrdersBatchModify {
         &["orders", "batch-modify"],
         "trade",
         "Modify several existing orders in one request from a JSON file",
-        "Modify several existing orders in one batchModify action from a JSON order file; each modification names an order by order_id or cloid and the price, trigger_price or size to replace. Mainnet modifications prompt for confirmation unless --yes is passed; --testnet modifications run without a prompt.",
+        concat!("Modify several existing orders in one batchModify action from a JSON order file; each modification names an order by order_id or cloid and the price, trigger_price or size to replace. ", prompts_unless_yes!("modifications")),
     )
     .long_about("Modify several existing orders in one request.\n\
 \n\
@@ -679,7 +711,7 @@ hyperliquid --format json orders batch-modify --orders-file modifications.json -
 
     async fn run(inv: &Invocation, args: &BatchModifyArgs) -> Result<(), anyhow::Error> {
         let orders = read_validated_batch_modify_orders(args)?;
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             return run.preview(batch_modify_dry_run_plan(&orders, args));
         }
@@ -698,19 +730,28 @@ impl CliCommand for OrdersTwapCreate {
         &["orders", "twap-create"],
         "trade",
         "Create a TWAP order",
-        "Create a TWAP order. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!("Create a TWAP order. ", prompts_unless_yes!("orders")),
     )
     .prompt()
     .testnet_unprompted()
     .args(&[
-        arg("coin").kind(InputKind::MarketSymbol).describe("Perpetual coin, for example BTC.").asset_input("coin"),
+        arg("coin")
+            .kind(InputKind::MarketSymbol)
+            .describe("Perpetual coin, for example BTC.")
+            .asset_input("coin"),
         DEX,
         ON_BEHALF_OF,
         arg("side"),
-        arg("size").kind(InputKind::Amount).describe("Total base-asset size."),
-        arg("duration").kind(InputKind::Duration).describe("Whole-minute duration in seconds. Minimum 300."),
+        arg("size")
+            .kind(InputKind::Amount)
+            .describe("Total base-asset size."),
+        arg("duration")
+            .kind(InputKind::Duration)
+            .describe("Whole-minute duration in seconds. Minimum 300."),
         MARGIN_MODE.describe(margin_mode_help!("TWAP orders")),
-        arg("randomize").kind(InputKind::Boolean).describe("Randomize execution timing and suborder sizes up to ±20%."),
+        arg("randomize")
+            .kind(InputKind::Boolean)
+            .describe("Randomize execution timing and suborder sizes up to ±20%."),
         YES,
     ]);
 
@@ -719,7 +760,7 @@ impl CliCommand for OrdersTwapCreate {
         let resolver = inv.trading_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
         let plan = prepare_twap_create_plan(&perp, args)?;
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             let margin = run.previewed_margin(&plan.perp, plan.margin).await?;
             return run.preview(twap_create_dry_run_plan(&plan, args, &margin));
@@ -757,7 +798,7 @@ impl CliCommand for OrdersTwapCancel {
         let resolver = inv.trading_resolver().await?;
         let perp = resolve_perp(client, &resolver, args.dex.as_deref(), &args.coin).await?;
         let plan = prepare_twap_cancel_plan(&perp, args);
-        let run = OrderRun::unprompted(inv, &Self::SPEC, args.on_behalf_of.as_deref())?;
+        let run = OrderRun::unprompted(inv, args.on_behalf_of.as_deref())?;
         if inv.dry_run() {
             return run.preview(twap_cancel_dry_run_plan(&plan, args));
         }
@@ -775,12 +816,17 @@ impl CliCommand for OrdersScheduleCancel {
         &["orders", "schedule-cancel"],
         "trade",
         "Schedule a cancel-all (dead man's switch)",
-        "Configure a dead man's switch. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!(
+            "Configure a dead man's switch. ",
+            prompts_unless_yes!("orders")
+        ),
     )
     .prompt()
     .testnet_unprompted()
     .args(&[
-        arg("in_duration").kind(InputKind::Duration).describe("Relative duration, for example 30s or 5m."),
+        arg("in_duration")
+            .kind(InputKind::Duration)
+            .describe("Relative duration, for example 30s or 5m."),
         arg("clear").kind(InputKind::Boolean).schema_string(),
         ON_BEHALF_OF,
         YES,
@@ -788,7 +834,7 @@ impl CliCommand for OrdersScheduleCancel {
 
     async fn run(inv: &Invocation, args: &ScheduleCancelArgs) -> Result<(), anyhow::Error> {
         let plan = prepare_schedule_cancel_plan(args)?;
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             return run.preview(schedule_cancel_dry_run_plan(&plan, Utc::now()));
         }
@@ -806,7 +852,7 @@ impl CliCommand for OrdersChase {
         &["orders", "chase"],
         "trade",
         "Chase mid with ALO requotes",
-        "Bounded ALO requote loop that chases mid by a basis-point offset until fill, timeout, or max chase distance. Dry-run first. Retry: check_open_orders — not idempotent. Agent mode requires --timeout. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!("Bounded ALO requote loop that chases mid by a basis-point offset until fill, timeout, or max chase distance. Dry-run first. Retry: check_open_orders — not idempotent. Agent mode requires --timeout. ", prompts_unless_yes!("orders")),
     )
     .long_about("Bounded ALO requote loop that chases mid until fill, timeout, or max chase distance.\n\
 \n\
@@ -835,7 +881,7 @@ hyperliquid --format json orders chase --coin ETH --side buy --size 0.5 --timeou
         let timeout = chase_timeout(inv, args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             let plan = chase_dry_run_plan(client, &resolver, inv.settings(), args, timeout).await?;
             return run.preview(plan);
@@ -854,7 +900,7 @@ impl CliCommand for OrdersBracket {
         &["orders", "bracket"],
         "trade",
         "Create an entry order with linked TP/SL",
-        "Place an entry order, then arm position TP/SL. Limit entries wait for fill up to --entry-timeout. Dry-run first. Retry: check_open_orders — not idempotent. Emits one result object. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!("Place an entry order, then arm position TP/SL. Limit entries wait for fill up to --entry-timeout. Dry-run first. Retry: check_open_orders — not idempotent. Emits one result object. ", prompts_unless_yes!("orders")),
     )
     .long_about("Place an entry order, then arm position TP/SL. Limit entries wait for fill up to --entry-timeout.\n\
 \n\
@@ -886,7 +932,7 @@ hyperliquid --format json orders bracket --coin ETH --side buy --size 0.1 --take
         validate_bracket_args(args)?;
         let client = inv.remote()?.api().sdk();
         let resolver = inv.trading_resolver().await?;
-        let run = OrderRun::new(inv, &Self::SPEC, args.on_behalf_of.as_deref(), args.yes)?;
+        let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
             let plan = bracket_dry_run_plan(client, &resolver, inv.settings(), args).await?;
             return run.preview(plan);
@@ -905,7 +951,7 @@ impl CliCommand for Buy {
         &["buy"],
         "trade",
         "Buy at market (shortcut for orders create --side buy)",
-        "Market buy alias for orders create --side buy. Limit if --price is set. Accepts --size or --amount. Dry-run first. Retry: check_open_orders — not idempotent. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!("Market buy alias for orders create --side buy. Limit if --price is set. Accepts --size or --amount. Dry-run first. Retry: check_open_orders — not idempotent. ", prompts_unless_yes!("orders")),
     )
     .long_about("Buy at market. Shortcut for orders create --side buy. Places a limit order if --price is set.\n\
 \n\
@@ -935,7 +981,7 @@ impl CliCommand for Sell {
         &["sell"],
         "trade",
         "Sell at market (shortcut for orders create --side sell)",
-        "Market sell alias for orders create --side sell. Limit if --price is set. Accepts --size or --amount. Dry-run first. Retry: check_open_orders — not idempotent. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!("Market sell alias for orders create --side sell. Limit if --price is set. Accepts --size or --amount. Dry-run first. Retry: check_open_orders — not idempotent. ", prompts_unless_yes!("orders")),
     )
     .long_about("Sell at market. Shortcut for orders create --side sell. Places a limit order if --price is set.\n\
 \n\
@@ -964,7 +1010,7 @@ impl CliCommand for OutcomeBuy {
         &["outcome-buy"],
         "trade",
         "Buy a HIP-4 outcome token",
-        "Buy a HIP-4 outcome token. Coin must be #N or +N notation. Dry-run first. Retry: check_open_orders — not idempotent. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!("Buy a HIP-4 outcome token. Coin must be #N or +N notation. Dry-run first. Retry: check_open_orders — not idempotent. ", prompts_unless_yes!("orders")),
     )
     .long_about("Buy a HIP-4 outcome token. --coin must be #N or +N notation.\n\
 \n\
@@ -993,7 +1039,7 @@ impl CliCommand for OutcomeSell {
         &["outcome-sell"],
         "trade",
         "Sell a HIP-4 outcome token",
-        "Sell a HIP-4 outcome token. Coin must be #N or +N notation. Dry-run first. Retry: check_open_orders — not idempotent. Mainnet orders prompt for confirmation unless --yes is passed; --testnet orders run without a prompt.",
+        concat!("Sell a HIP-4 outcome token. Coin must be #N or +N notation. Dry-run first. Retry: check_open_orders — not idempotent. ", prompts_unless_yes!("orders")),
     )
     .long_about("Sell a HIP-4 outcome token. --coin must be #N or +N notation.\n\
 \n\
@@ -1048,7 +1094,6 @@ fn ensure_outcome_coin(coin: &str) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use crate::command_spec::Check;
-    use crate::network::Network;
 
     /// Every command that places or changes orders, by spec.
     fn order_specs() -> Vec<CommandSpec> {
@@ -1072,18 +1117,6 @@ mod tests {
             OutcomeBuy::SPEC,
             OutcomeSell::SPEC,
         ]
-    }
-
-    #[test]
-    fn a_command_has_a_yes_flag_exactly_when_it_asks_for_approval() {
-        for spec in order_specs() {
-            assert_eq!(
-                spec.arg("yes").is_some(),
-                spec.prompts_on(Network::Mainnet),
-                "{:?}",
-                spec.path
-            );
-        }
     }
 
     #[test]

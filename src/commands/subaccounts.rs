@@ -3,11 +3,11 @@ use hypersdk::hypercore::Chain;
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, YES, arg};
 use crate::commands::actions;
-use crate::commands::confirm;
 use crate::commands::rows::{ListRow, Row, Rows};
 use crate::commands::support::print_dry_run;
+use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
@@ -346,9 +346,9 @@ async fn transfer(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let chain = remote.chain();
-    confirm::unless_yes(
+    consent::approve(
+        inv,
         args.yes,
-        inv.mode(),
         &consent_preview(chain, signer, subaccount),
         &transfer_prompt(subaccount, args),
         "subaccount transfer aborted",
@@ -391,9 +391,9 @@ async fn spot_transfer(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let chain = remote.chain();
-    confirm::unless_yes(
+    consent::approve(
+        inv,
         args.yes,
-        inv.mode(),
         &consent_preview(chain, signer, subaccount),
         &spot_transfer_prompt(subaccount, args),
         "subaccount spot transfer aborted",
@@ -456,11 +456,8 @@ fn spot_transfer_prompt(subaccount: Address, args: &SpotTransferArgs) -> String 
 }
 
 /// The consent preview: where and as whom the transfer happens.
-fn consent_preview(chain: Chain, signer: &SelectedSigner, subaccount: Address) -> String {
-    format!(
-        "Network: {chain}\nSigner: {}\nSubaccount: {subaccount}",
-        signer.address()
-    )
+fn consent_preview(chain: Chain, signer: &SelectedSigner, subaccount: Address) -> ConsentBlock {
+    ConsentBlock::signed(chain, signer.address()).field("Subaccount", subaccount)
 }
 
 fn print_action(inv: &Invocation, row: SubaccountActionConfirmation) {
@@ -549,7 +546,7 @@ impl CliCommand for SubaccountTransfer {
         arg("subaccount").kind(InputKind::ActingAccountSelector).describe("Subaccount acting-account selector: subaccount address, wallet name, or wallet id. This does not apply to transfer recipients.").resource_id("subaccount selector"),
         arg("amount").kind(InputKind::Amount).describe("USDC amount; sent as integer units with 6 decimals."),
         arg("direction").describe("Deposit to or withdraw from the subaccount."),
-        arg("yes").kind(InputKind::Boolean),
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &TransferArgs) -> Result<(), anyhow::Error> {
@@ -585,7 +582,7 @@ impl CliCommand for SubaccountSpotTransfer {
         arg("token").kind(InputKind::MarketSymbol).describe("Spot token identifier.").resource_id("token"),
         arg("amount").kind(InputKind::Amount).describe("Token amount."),
         arg("direction").describe("Deposit to or withdraw from the subaccount."),
-        arg("yes").kind(InputKind::Boolean),
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &SpotTransferArgs) -> Result<(), anyhow::Error> {

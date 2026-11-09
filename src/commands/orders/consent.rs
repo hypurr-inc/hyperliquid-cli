@@ -1,5 +1,3 @@
-use std::io::{self, Write};
-
 use chrono::Utc;
 use hypersdk::hypercore::types::OrderGrouping;
 use hypersdk::{Address, Decimal};
@@ -9,6 +7,8 @@ use super::prepared::{
     PreparedOrder, PreparedOrderBatch, PreparedTpslBatch, QuoteAmount, TpslLegKind,
 };
 use crate::builder_fee::BuilderFee;
+use crate::command_spec::YES_FLAG;
+use crate::consent::{self as policy, ConsentBlock, Tone};
 use crate::errors::CliError;
 use crate::mode::Mode;
 use crate::network::Network;
@@ -41,12 +41,10 @@ impl ConsentKind {
             Self::ScheduleCancel => ("schedule-cancel", "action"),
             Self::TrailingStop => ("trailing stop", "trailing stop placement"),
             Self::ModifyOrders => ("batch modify", "order modification"),
-            Self::CancelAll => {
-                return CliError::Configuration("cancel-all aborted".to_string());
-            }
+            Self::CancelAll => return policy::declined("cancel-all aborted"),
         };
-        CliError::Configuration(format!(
-            "Mainnet {label} confirmation required; {cancelled} cancelled. Rerun with --yes for deliberate automation."
+        policy::declined(format!(
+            "Mainnet {label} confirmation required; {cancelled} cancelled. Rerun with {YES_FLAG} for deliberate automation."
         ))
     }
 }
@@ -287,33 +285,36 @@ impl<'a> ConsentTarget<'a> {
         self.network
     }
 
-    fn preview_lines(&self) -> Vec<String> {
-        let mut lines = vec![
-            format!("Network: {}", self.network()),
-            format!("Signer: {}", self.signer.address()),
-        ];
+    fn block(&self, details: &[String]) -> ConsentBlock {
+        let mut block = ConsentBlock::signed(self.network(), self.signer.address());
         if let Some(vault) = self.vault_address {
-            lines.push(format!("Acting as: {vault} (vault or subaccount)"));
+            block = block.field("Acting as", format!("{vault} (vault or subaccount)"));
         }
         if let Some(builder) = self.builder {
-            lines.push(format!(
-                "Builder: {} (max fee {}%)",
-                builder.address_wire(),
-                builder.percent()
-            ));
+            block = block.field(
+                "Builder",
+                format!(
+                    "{} (max fee {}%)",
+                    builder.address_wire(),
+                    builder.percent()
+                ),
+            );
             for sub in builder.subs() {
-                lines.push(format!(
-                    "Sub-builder: {} ({}% of the builder fee)",
-                    sub.address_wire(),
-                    sub.percent()
-                ));
+                block = block.field(
+                    "Sub-builder",
+                    format!(
+                        "{} ({}% of the builder fee)",
+                        sub.address_wire(),
+                        sub.percent()
+                    ),
+                );
             }
         }
-        lines
+        block.texts(details)
     }
 }
 
-/// Print the consent preview block on stderr, then ask `question`.
+/// Show the consent block on stderr, then ask `question`.
 ///
 /// Runs that can't prompt fail with `--yes` as the way to answer before the
 /// block is printed.
@@ -322,12 +323,7 @@ pub(super) fn ask_confirmation(
     details: &[String],
     question: &str,
 ) -> Result<bool, CliError> {
-    prompt::ensure_can_prompt(target.mode, "--yes")?;
-    let mut stderr = io::stderr();
-    for line in target.preview_lines().iter().chain(details) {
-        writeln!(stderr, "{line}").map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
-    }
-    prompt::confirm_warning(target.mode, question, "--yes")
+    policy::ask(target.mode, &target.block(details), question, Tone::Warning)
 }
 
 #[cfg(test)]

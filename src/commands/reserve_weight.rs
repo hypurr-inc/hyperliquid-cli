@@ -11,11 +11,11 @@ use hypersdk::hypercore::types::Action;
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
-use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
+use crate::command_spec::{CliCommand, CommandSpec, InputKind, YES_FOR_AUTOMATION, arg};
 use crate::commands::actions::{nonce_now, send_l1_action_raw};
-use crate::commands::confirm;
 use crate::commands::rows::{One, Row};
 use crate::commands::support::print_dry_run;
+use crate::consent::{self, ConsentBlock};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::wire::{AddressRole, address};
@@ -85,7 +85,7 @@ impl CliCommand for AccountReserveWeight {
         &["account", "reserve-weight"],
         "account",
         "Reserve extra rate-limit capacity for USDC",
-        "Reserve additional request weight at 0.0005 USDC per request, paid from the perps balance, for the signer or another existing address. Prompts for confirmation unless --yes is passed.",
+        concat!("Reserve additional request weight at 0.0005 USDC per request, paid from the perps balance, for the signer or another existing address. Prompts for confirmation unless ", crate::yes_flag!(), " is passed."),
     )
     .prompt()
     .args(&[
@@ -94,9 +94,7 @@ impl CliCommand for AccountReserveWeight {
             .kind(InputKind::RawDestinationAddress)
             .describe("Existing address to credit instead of the signer. Wallet aliases are not resolved.")
             .resource_id("destination address"),
-        arg("yes")
-            .kind(InputKind::Boolean)
-            .describe("Skip confirmation prompt for deliberate automation."),
+        YES_FOR_AUTOMATION,
     ]);
 
     async fn run(inv: &Invocation, args: &ReserveWeightArgs) -> Result<(), anyhow::Error> {
@@ -116,21 +114,14 @@ impl CliCommand for AccountReserveWeight {
         let signer = inv.resolve_signer()?;
         let remote = inv.remote()?;
         let credited = destination.unwrap_or_else(|| signer.query_address());
-        confirm::unless_yes(
+        consent::approve(
+            inv,
             args.yes,
-            inv.mode(),
-            &format!(
-                "\
-Network: {network}
-Signer: {signer}
-Credited to: {credited}
-Weight: {weight} requests
-Cost: {cost} USDC from the perps balance
-Reversibility: irreversible",
-                network = remote.chain(),
-                signer = signer.address(),
-                weight = args.weight,
-            ),
+            &ConsentBlock::signed(remote.chain(), signer.address())
+                .field("Credited to", credited)
+                .field("Weight", format!("{} requests", args.weight))
+                .field("Cost", format!("{cost} USDC from the perps balance"))
+                .field("Reversibility", "irreversible"),
             &format!("Reserve {} requests for {cost} USDC?", args.weight),
             "reserve-weight aborted",
         )?;

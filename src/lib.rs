@@ -2,6 +2,24 @@
 //!
 //! Exposes internal modules for integration testing.
 
+/// The id of the flag that answers a confirmation prompt. A macro so static
+/// text can `concat!` it; use [`command_spec::YES_ARG`] elsewhere.
+#[macro_export]
+macro_rules! yes_arg {
+    () => {
+        "yes"
+    };
+}
+
+/// The flag as typed, for static text built with `concat!`; use
+/// [`command_spec::YES_FLAG`] elsewhere.
+#[macro_export]
+macro_rules! yes_flag {
+    () => {
+        concat!("--", $crate::yes_arg!())
+    };
+}
+
 pub mod assets;
 pub mod auth;
 pub mod bankr;
@@ -11,6 +29,7 @@ pub mod command_registry;
 pub mod command_spec;
 pub mod commands;
 pub mod config;
+pub mod consent;
 pub mod dry_run;
 pub mod errors;
 pub mod exchange_reply;

@@ -5,13 +5,15 @@ use hypersdk::{Address, Decimal};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
+use crate::command_spec::{
+    CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, YES, YES_FLAG, arg,
+};
 use crate::commands::actions;
-use crate::commands::confirm;
 use crate::commands::rows::{ListRow, One, Row, Rows, or_missing, style_column};
 use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::support::print_dry_run;
 use crate::commands::user_signed::{self, AgentForm, UserSigned};
+use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
@@ -585,12 +587,14 @@ async fn link_staking_user(
         "Submit staking link {} for user {user}?",
         link_phase(is_finalize)
     );
-    confirm::unless_yes(
+    consent::approve(
+        inv,
         args.yes,
-        inv.mode(),
-        STAKING_LINK_WARNING,
+        &ConsentBlock::new().text(STAKING_LINK_WARNING),
         &question,
-        "staking-link confirmation required; action cancelled. Rerun with --yes for deliberate automation.",
+        &format!(
+            "staking-link confirmation required; action cancelled. Rerun with {YES_FLAG} for deliberate automation."
+        ),
     )?;
     let remote = inv.remote()?;
     user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| {
@@ -1013,7 +1017,7 @@ impl CliCommand for StakingLinkInitiate {
     .prompt()
     .args(&[
         arg("user").kind(InputKind::ProtocolObjectAddress).describe("Protocol user address for the staking account to link.").resource_id("staking-link user address"),
-        arg("yes").kind(InputKind::Boolean),
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &LinkArgs) -> Result<(), anyhow::Error> {
@@ -1037,7 +1041,7 @@ impl CliCommand for StakingLinkFinalize {
     .prompt()
     .args(&[
         arg("user").kind(InputKind::ProtocolObjectAddress).describe("Protocol user address for the trading account to link.").resource_id("staking-link user address"),
-        arg("yes").kind(InputKind::Boolean),
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &LinkArgs) -> Result<(), anyhow::Error> {

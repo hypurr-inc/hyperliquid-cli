@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, ValueEnum};
 use hyperliquid_cli::command_spec::{
-    CommandSpec, ConfirmationPolicy, DryRunPolicy, Entry, Risk, YES_ARG, supplied_secrets,
+    CommandSpec, ConfirmationPolicy, DryRunPolicy, Entry, Risk, YES_ARG, YES_FLAG, supplied_secrets,
 };
 use hyperliquid_cli::commands;
 use hyperliquid_cli::errors;
@@ -243,7 +243,7 @@ fn command_notes(spec: &CommandSpec, has_yes: bool) -> Option<String> {
     });
     let blockers = Mode::switchable_blockers();
     lines.push(match (spec.confirmation, has_yes) {
-        (ConfirmationPolicy::Prompt, true) => format!("  Confirmation: asks before it runs. Pass --{YES_ARG} to answer the prompt. Runs that can't prompt ({blockers}) fail without --{YES_ARG}. Use --{YES_ARG} there only after a human approves."),
+        (ConfirmationPolicy::Prompt, true) => format!("  Confirmation: asks before it runs. Pass {YES_FLAG} to answer the prompt. Runs that can't prompt ({blockers}) fail without {YES_FLAG}. Use {YES_FLAG} there only after a human approves."),
         (ConfirmationPolicy::Prompt, false) => format!("  Confirmation: asks before it runs. Runs that can't prompt ({blockers}) fail instead."),
         (ConfirmationPolicy::None, _) => {
             "  Confirmation: none. It runs as soon as you invoke it.".to_string()

@@ -1,4 +1,5 @@
 use super::CliError;
+use crate::command_spec::YES_FLAG;
 use crate::settings::env;
 
 /// A recovery command in the `next` list of an error envelope. `when` states
@@ -71,7 +72,7 @@ impl CliError {
                         note: None,
                     }),
                     None => approve.map(|approve| Recovery {
-                        instruction: "After a human approves, rerun with --yes:".into(),
+                        instruction: format!("After a human approves, rerun with {YES_FLAG}:"),
                         commands: vec![approve],
                         note: None,
                     }),

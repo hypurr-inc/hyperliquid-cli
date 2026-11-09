@@ -5,12 +5,14 @@ use hypersdk::hypercore::Chain;
 use serde::Serialize;
 
 use crate::builder_fee::{MaxFeeRate, percent_from_tenths_bps};
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::command_spec::{
+    CliCommand, CommandSpec, GroupSpec, InputKind, YES_FOR_LIVE_EXECUTION, arg,
+};
 use crate::commands::builder_approval::{self, ApproveBuilderFee};
-use crate::commands::confirm;
 use crate::commands::rows::{ListRow, One, Row, Rows};
 use crate::commands::support::print_dry_run;
 use crate::commands::user_signed::UserSigned;
+use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
@@ -218,10 +220,10 @@ async fn approve(
         request.max_fee_rate.percent(),
         request.max_fee_rate.tenths_bps()
     );
-    confirm::unless_yes(
+    consent::approve(
+        inv,
         yes,
-        inv.mode(),
-        "",
+        &ConsentBlock::new(),
         &question,
         "builder fee approval aborted",
     )?;
@@ -313,7 +315,7 @@ impl CliCommand for BuilderApprove {
     .args(&[
         arg("builder").kind(InputKind::ProtocolObjectAddress).resource_id("builder address"),
         arg("max_fee_rate").kind(InputKind::Amount).describe("Maximum builder fee as a percent string, e.g. 0.001%."),
-        arg("yes").kind(InputKind::Boolean).describe("Skip confirmation prompt for live execution."),
+        YES_FOR_LIVE_EXECUTION,
     ]);
 
     fn validate(args: &ApproveArgs) -> Result<(), CliError> {

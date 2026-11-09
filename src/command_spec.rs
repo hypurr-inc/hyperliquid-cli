@@ -22,7 +22,19 @@ use crate::signing::Signs;
 
 /// The flag that answers a confirmation prompt. Every command with this arg and
 /// [`ConfirmationPolicy::Prompt`] accepts it in place of the prompt.
-pub const YES_ARG: &str = "yes";
+pub const YES_ARG: &str = crate::yes_arg!();
+
+/// The flag as typed, for messages and prompts that name it.
+pub const YES_FLAG: &str = crate::yes_flag!();
+
+/// `--yes` without a description of its own.
+pub const YES: ArgSpec = arg(YES_ARG).kind(InputKind::Boolean);
+/// `--yes` for commands whose prompt is skipped for deliberate automation.
+pub const YES_FOR_AUTOMATION: ArgSpec =
+    YES.describe("Skip confirmation prompt for deliberate automation.");
+/// `--yes` for commands that only ever act on a live account.
+pub const YES_FOR_LIVE_EXECUTION: ArgSpec =
+    YES.describe("Skip confirmation prompt for live execution.");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -708,13 +720,21 @@ impl CommandSpec {
         self.auth_required && matches!(self.lifecycle, Lifecycle::LiveMutating)
     }
 
-    /// Whether a run on `network` asks for confirmation. `--testnet` and
-    /// `HYPERLIQUID_NETWORK=testnet` both resolve to the network; neither is
-    /// treated differently.
-    #[must_use]
-    pub fn prompts_on(&self, network: Network) -> bool {
-        self.confirmation == ConfirmationPolicy::Prompt
-            && !(self.testnet_unprompted && network == Network::Testnet)
+    /// Whether the command asks for confirmation. `network` is read only by a
+    /// command that skips the testnet prompt, so the others need no connection
+    /// to decide. `--testnet` and `HYPERLIQUID_NETWORK=testnet` both resolve to
+    /// the network; neither is treated differently.
+    pub fn prompts_on(
+        &self,
+        network: impl FnOnce() -> Result<Network, CliError>,
+    ) -> Result<bool, CliError> {
+        if self.confirmation != ConfirmationPolicy::Prompt {
+            return Ok(false);
+        }
+        if !self.testnet_unprompted {
+            return Ok(true);
+        }
+        Ok(network()? != Network::Testnet)
     }
 }
 

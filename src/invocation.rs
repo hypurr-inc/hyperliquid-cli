@@ -152,6 +152,18 @@ impl Invocation {
         self.command.key()
     }
 
+    /// Whether this run must be approved before it acts: the command prompts on
+    /// the resolved network and `yes` (`--yes`) was not given. The one rule the
+    /// pipeline, the commands and the order submit path share; see
+    /// [`crate::consent`] for asking.
+    pub fn requires_approval(&self, yes: bool) -> Result<bool, CliError> {
+        if yes {
+            return Ok(false);
+        }
+        self.command
+            .prompts_on(|| self.remote().map(Remote::network))
+    }
+
     #[must_use]
     pub fn session(&self) -> &Session {
         &self.session
@@ -484,6 +496,66 @@ mod tests {
         };
         flags.signer.bankr = true;
         invocation_over(settings, flags, command)
+    }
+
+    static ASKS: CommandSpec =
+        CommandSpec::read(&["probe", "asks"], "system", "Probe", "Probe.").prompt();
+    static ASKS_ON_MAINNET: CommandSpec =
+        CommandSpec::read(&["probe", "asks-on-mainnet"], "system", "Probe", "Probe.")
+            .prompt()
+            .testnet_unprompted();
+
+    fn on_network(command: &'static CommandSpec, testnet: bool) -> Invocation {
+        let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
+        invocation_over(
+            settings,
+            InvocationFlags {
+                testnet,
+                ..InvocationFlags::default()
+            },
+            command,
+        )
+    }
+
+    #[test]
+    fn a_prompting_command_needs_approval_unless_yes_was_given() {
+        for testnet in [false, true] {
+            let inv = on_network(&ASKS, testnet);
+            assert!(inv.requires_approval(false).unwrap(), "testnet={testnet}");
+            assert!(!inv.requires_approval(true).unwrap(), "testnet={testnet}");
+        }
+        let silent = on_network(&Probe::SPEC, false);
+        assert!(!silent.requires_approval(false).unwrap());
+    }
+
+    #[test]
+    fn a_command_that_skips_the_testnet_prompt_needs_approval_on_mainnet_only() {
+        assert!(
+            on_network(&ASKS_ON_MAINNET, false)
+                .requires_approval(false)
+                .unwrap()
+        );
+        assert!(
+            !on_network(&ASKS_ON_MAINNET, true)
+                .requires_approval(false)
+                .unwrap()
+        );
+        assert!(
+            !on_network(&ASKS_ON_MAINNET, false)
+                .requires_approval(true)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn only_a_command_that_skips_the_testnet_prompt_reads_the_network() {
+        let broken = || Settings::detached(EnvSource::fixed([(env::NETWORK, "nonsense")]), None);
+        let asks = invocation_over(broken(), InvocationFlags::default(), &ASKS);
+        assert!(asks.remote().is_err(), "the network setting is unusable");
+        assert!(asks.requires_approval(false).unwrap());
+
+        let skips = invocation_over(broken(), InvocationFlags::default(), &ASKS_ON_MAINNET);
+        assert!(skips.requires_approval(false).is_err());
     }
 
     #[test]
