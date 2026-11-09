@@ -1,5 +1,3 @@
-//! Gossip priority auction commands.
-
 use clap::Args;
 use hypersdk::Decimal;
 use hypersdk::hypercore::types::{Action, GossipPriorityBid};

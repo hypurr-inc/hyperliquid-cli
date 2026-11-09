@@ -1,9 +1,3 @@
-//! Outcome market discovery commands.
-//!
-//! Commands:
-//! - `hyperliquid outcomes list` — list active outcome market sides
-//! - `hyperliquid outcomes get <NOTATION>` — inspect an outcome side by `#N` or `+N`
-
 use clap::Args;
 use serde::{Deserialize, Serialize};
 

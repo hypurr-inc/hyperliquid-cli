@@ -1,5 +1,3 @@
-//! Authenticated transfer commands.
-
 use alloy::sol;
 use clap::Args;
 use hypersdk::hypercore::types::{Action, AssetTarget, SendAsset, SendToken, SpotSend, UsdSend};
@@ -231,13 +229,11 @@ struct TransferConfirmationContext {
     reversibility: ActionReversibility,
 }
 
-/// The USDC amount and `--to` address of `transfer send`.
 fn validate_send_args(args: &SendArgs) -> Result<Address, CliError> {
     quantity::require_positive(args.amount, "amount")?;
     parse_address(&args.to, "--to")
 }
 
-/// The `--to` address of `transfer spot-send`.
 fn validate_spot_send_args(args: &SpotSendArgs) -> Result<Address, CliError> {
     quantity::require_positive(args.amount, "amount")?;
     let destination = parse_address(&args.to, "--to")?;
@@ -245,7 +241,6 @@ fn validate_spot_send_args(args: &SpotSendArgs) -> Result<Address, CliError> {
     Ok(destination)
 }
 
-/// The parsed `--to`, `--source` and `--dest` of `transfer send-asset`.
 struct SendAssetRoute {
     destination: Address,
     source: ParsedAssetTarget,
@@ -268,13 +263,11 @@ fn validate_send_asset_args(args: &SendAssetArgs) -> Result<SendAssetRoute, CliE
     })
 }
 
-/// The `--to` address of `transfer withdraw`.
 fn validate_withdraw_args(args: &WithdrawArgs) -> Result<Address, CliError> {
     quantity::require_positive(args.amount, "amount")?;
     parse_address(&args.to, "--to")
 }
 
-/// Send USDC from perp balance to another Hyperliquid address.
 async fn send(
     inv: &Invocation,
     signer: &SelectedSigner,
@@ -322,7 +315,6 @@ async fn send(
     Ok(())
 }
 
-/// Send a spot token to another Hyperliquid address.
 async fn spot_send(
     inv: &Invocation,
     signer: &SelectedSigner,
@@ -433,7 +425,6 @@ async fn submit_send_asset(
     Ok(token.name)
 }
 
-/// Withdraw USDC to an Arbitrum address.
 async fn withdraw(
     inv: &Invocation,
     signer: &SelectedSigner,
@@ -501,8 +492,6 @@ fn parse_address(input: &str, flag: &str) -> Result<Address, CliError> {
     config_address(input, Some(flag), true)
 }
 
-/// Move USDC between the spot and perp balances: spot to perp for
-/// [`TransferActionKind::SpotToPerp`], perp to spot otherwise.
 async fn class_transfer(
     inv: &Invocation,
     signer: &SelectedSigner,

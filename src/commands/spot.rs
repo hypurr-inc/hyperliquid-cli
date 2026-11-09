@@ -1,8 +1,3 @@
-/// Spot market commands.
-///
-/// Commands:
-/// - `hyperliquid spot list` — list all spot markets
-/// - `hyperliquid spot get <PAIR>` — get details for a specific spot pair
 use clap::Args;
 use hypersdk::Decimal;
 use hypersdk::hypercore::PriceTick;
@@ -21,7 +16,6 @@ pub struct SpotGetArgs {
     pub pair: String,
 }
 
-/// Renderable spot market row.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SpotMarketRow {
     pub symbol: String,
@@ -49,7 +43,6 @@ impl From<SpotListing> for SpotMarketRow {
     }
 }
 
-/// Output wrapper for spot markets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotMarketsOutput {
     markets: Vec<SpotMarketRow>,
@@ -105,7 +98,6 @@ impl TableData for SpotMarketsOutput {
     }
 }
 
-/// Output wrapper for a single spot market.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotMarketDetailsOutput {
     market: SpotMarketRow,
@@ -138,7 +130,6 @@ pub async fn list(inv: &Invocation) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Resolve, fetch, and render one spot market.
 pub async fn get(inv: &Invocation, pair: &str) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
     let resolver = inv.asset_resolver().await?;

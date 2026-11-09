@@ -18,7 +18,6 @@ const SPOT_OFFSET: usize = SPOT_ASSET_ID_OFFSET as usize;
 const HIP3_OFFSET: usize = HIP3_ASSET_ID_OFFSET as usize;
 const HIP3_SLOT_SIZE: usize = HIP3_DEX_SLOT_SIZE as usize;
 
-/// Which id range a protocol asset id falls in, with the fields the range encodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetIdLayout {
     Perp { index: u64 },

@@ -1,5 +1,3 @@
-//! Position listing and position-management commands.
-
 use std::fmt;
 
 use clap::Args;

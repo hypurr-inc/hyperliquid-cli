@@ -168,7 +168,6 @@ impl RiskAlert {
         )
     }
 
-    /// Announces that an account has no open positions.
     fn heartbeat(user: Address) -> Self {
         Self::build(
             "heartbeat",
@@ -339,7 +338,6 @@ impl RiskEvalState {
         }
     }
 
-    /// Drop the age and funding clocks of a position that is no longer open.
     fn forget_clocks(&mut self, coin: &str) {
         self.first_seen.remove(coin);
         self.funding_seen.remove(coin);

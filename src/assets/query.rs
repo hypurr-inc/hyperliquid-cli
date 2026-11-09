@@ -1,6 +1,3 @@
-//! Parsing of the asset names users type.
-
-/// Parsed user asset input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssetQuery {
     /// Default perpetual market symbol, e.g. `BTC`.

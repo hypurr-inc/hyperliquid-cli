@@ -1,5 +1,3 @@
-//! `subscribe ...`: real-time streams.
-
 use clap::Args;
 use hypersdk::hypercore::CandleInterval;
 

@@ -1,11 +1,3 @@
-//! Public account data commands.
-//!
-//! Commands:
-//! - `hyperliquid account fills <ADDRESS>` — public fill history
-//! - `hyperliquid account orders <ADDRESS>` — public open orders
-//! - `hyperliquid account portfolio <ADDRESS>` — public portfolio summary
-//! - `hyperliquid account subaccounts <ADDRESS>` — public subaccount list
-
 use alloy::sol;
 use chrono::DateTime;
 use clap::{Args, ValueEnum};
@@ -239,7 +231,6 @@ impl TableData for AbstractionSetOutput {
     }
 }
 
-/// List the subaccounts of a public master address.
 pub(crate) async fn subaccounts(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     // The exchange answers `null` for an account without subaccounts.
     let subaccounts = inv
@@ -258,7 +249,6 @@ pub(crate) async fn subaccounts(inv: &Invocation, user: Address) -> Result<(), a
     Ok(())
 }
 
-/// The account abstraction mode `user` currently has.
 pub async fn fetch_abstraction(
     api: &ApiClient,
     user: Address,
@@ -372,7 +362,6 @@ fn validate_optional_time_range(start: Option<u64>, end: Option<u64>) -> Result<
     Ok(())
 }
 
-/// Print the answer to a user-scoped `/info` request as-is.
 async fn print_info_value(
     inv: &Invocation,
     request: InfoRequest,

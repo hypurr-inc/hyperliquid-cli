@@ -1,5 +1,3 @@
-//! Referral status and set-referrer commands.
-
 use clap::Args;
 use hypersdk::Address;
 use hypersdk::hypercore::Chain;
@@ -173,7 +171,6 @@ struct ReferrerAction<'a> {
     code: &'a str,
 }
 
-/// Query referral status for the authenticated user.
 async fn status(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     let raw = inv
         .remote()?
