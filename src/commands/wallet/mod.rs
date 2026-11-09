@@ -12,25 +12,29 @@ pub use output::{AccountRow, AccountsOutput};
 use clap::Args;
 use ows_lib::types::WalletInfo;
 
+use crate::bankr_credentials::KeySource;
 use crate::command_spec::{
     CliCommand, CommandSpec, DryRunPolicy, GroupSpec, InputKind, Lifecycle, NoArgs, OwsSupport,
     Risk, YES, YES_ARG, YES_FLAG, YES_FOR_AUTOMATION, arg,
 };
 use crate::commands::support::print_dry_run;
-use crate::config::{BankrLogin, Config, nonblank};
+use crate::config::{BankrLogin, Config};
 use crate::consent::{self, ConsentBlock, Tone};
+use crate::env;
+use crate::env::nonblank;
 use crate::errors::CliError;
+use crate::hints::wallet::{
+    self as hints, SET_DEFAULT, SETUP, WALLET_IMPORT, WALLET_IMPORT_MNEMONIC, WALLET_LOGIN,
+};
 use crate::invocation::Invocation;
 use crate::mode::Mode;
-use crate::output::{self as out, OutputFormat};
+use crate::output as out;
 use crate::ows::WalletSource;
-use crate::ows::hints::{
-    self, SET_DEFAULT, SETUP, WALLET_IMPORT, WALLET_IMPORT_MNEMONIC, WALLET_LOGIN,
-};
 use crate::ows::vault::{HyperliquidAccount, Vault};
 use crate::prompt;
-use crate::settings::{KeySource, Settings, env};
+use crate::settings::Settings;
 use crate::signing::SelectedSigner;
+use crate::terminal::OutputFormat;
 use crate::wallet_store::{ConfigEdit, NewWallet, StoredWallet, WalletName, WalletStore};
 use crate::{builder_fee, referral_code};
 use output::{
@@ -1161,13 +1165,13 @@ mod tests {
     #[test]
     fn setup_defaults_fill_only_what_the_config_lacks() {
         let settings = Settings::detached(
-            crate::settings::EnvSource::fixed([
+            crate::env::EnvSource::fixed([
                 (
-                    crate::settings::env::DEFAULT_BUILDER_ADDRESS,
+                    crate::env::DEFAULT_BUILDER_ADDRESS,
                     "0x0000000000000000000000000000000000000abc",
                 ),
-                (crate::settings::env::DEFAULT_BUILDER_FEE_RATE, "0.001%"),
-                (crate::settings::env::DEFAULT_REFERRAL_CODE, "FRIEND"),
+                (crate::env::DEFAULT_BUILDER_FEE_RATE, "0.001%"),
+                (crate::env::DEFAULT_REFERRAL_CODE, "FRIEND"),
             ]),
             None,
         );
@@ -1199,10 +1203,7 @@ mod tests {
     #[test]
     fn a_setup_default_that_fails_validation_is_skipped_with_a_warning() {
         let settings = Settings::detached(
-            crate::settings::EnvSource::fixed([(
-                crate::settings::env::DEFAULT_REFERRAL_CODE,
-                "not a code!",
-            )]),
+            crate::env::EnvSource::fixed([(crate::env::DEFAULT_REFERRAL_CODE, "not a code!")]),
             None,
         );
 

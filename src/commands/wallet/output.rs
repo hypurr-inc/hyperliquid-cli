@@ -2,9 +2,10 @@ use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
 use crate::invocation::Invocation;
-use crate::output::{OutputFormat, TableData, serialize_row};
+use crate::output::{TableData, serialize_row};
 use crate::ows::WalletSource;
 use crate::ows::vault::{HyperliquidAccount, Vault};
+use crate::terminal::OutputFormat;
 use ows_lib::types::WalletInfo as VaultWalletInfo;
 
 /// The `type` every `account ls` row reports: the vault is the only backend.

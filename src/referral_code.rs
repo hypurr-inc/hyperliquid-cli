@@ -93,8 +93,8 @@ mod tests {
     fn suggested_referral_code_is_validated() {
         let settings = |code: &str| {
             Settings::detached(
-                crate::settings::EnvSource::fixed([(
-                    crate::settings::env::DEFAULT_REFERRAL_CODE,
+                crate::env::EnvSource::fixed([(
+                    crate::env::DEFAULT_REFERRAL_CODE,
                     code.to_string(),
                 )]),
                 None,

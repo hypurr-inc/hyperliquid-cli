@@ -17,14 +17,13 @@
 //! Timing feedback:
 //! - "Completed in 1.2s" is printed to stderr only for human formats on a terminal
 
-use clap::ValueEnum;
 use serde_json::Value;
-use std::fmt;
 use std::io::Write;
 use std::sync::OnceLock;
 use tabwriter::TabWriter;
 
 use crate::response_sanitization::is_format_char;
+use crate::terminal::OutputFormat;
 
 mod session;
 
@@ -34,25 +33,6 @@ pub use session::Session;
 pub mod colors;
 pub mod format;
 pub mod notice;
-pub mod terminal;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
-pub enum OutputFormat {
-    #[default]
-    Pretty,
-    Table,
-    Json,
-}
-
-impl fmt::Display for OutputFormat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Pretty => write!(f, "pretty"),
-            Self::Table => write!(f, "table"),
-            Self::Json => write!(f, "json"),
-        }
-    }
-}
 
 /// `--select`, `--results-only` and `--max-results`, applied to JSON output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -748,9 +728,9 @@ mod tests {
 
     fn tty_env() -> Mode {
         Mode {
-            terminal: terminal::Terminal {
+            terminal: crate::terminal::Terminal {
                 stdout: true,
-                ..terminal::Terminal::default()
+                ..crate::terminal::Terminal::default()
             },
             ..Mode::default()
         }

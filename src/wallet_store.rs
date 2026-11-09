@@ -9,7 +9,7 @@ use ows_lib::types::WalletInfo;
 
 use crate::config::Config;
 use crate::errors::CliError;
-use crate::ows::hints;
+use crate::hints::wallet as hints;
 use crate::ows::vault::{HyperliquidAccount, Vault};
 use crate::settings::{ConfigTransaction, Settings};
 
@@ -29,7 +29,7 @@ impl<'a> WalletName<'a> {
     /// The alias the user gave, trimmed; none or a blank one is `Next(base)`.
     #[must_use]
     pub fn from_alias(alias: Option<&'a str>, base: &'a str) -> Self {
-        match crate::config::nonblank(alias) {
+        match crate::env::nonblank(alias) {
             Some(alias) => Self::Exact(alias),
             None => Self::Next(base),
         }
@@ -196,8 +196,8 @@ impl<'a> WalletStore<'a> {
 mod tests {
     use super::*;
     use crate::config::ConfigFile;
+    use crate::env::{self, EnvSource};
     use crate::ows::vault::test_support::{KEY, import_test_wallet};
-    use crate::settings::{EnvSource, env};
     use tempfile::TempDir;
 
     fn settings(tmp: &TempDir) -> Settings {

@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn a_run_that_cannot_ask_names_the_flag_that_answers() {
-        let mode = Mode::default().running(crate::output::OutputFormat::Json, false, false);
+        let mode = Mode::default().running(crate::terminal::OutputFormat::Json, false, false);
         let err = ensure_can_ask(&mode).unwrap_err();
         assert_eq!(
             err.to_string(),

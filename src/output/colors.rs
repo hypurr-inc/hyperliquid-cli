@@ -7,8 +7,8 @@
 
 use std::sync::OnceLock;
 
-use super::terminal::{self, Terminal};
-use crate::settings::{EnvSource, env as settings_env};
+use crate::env::{self, EnvSource};
+use crate::terminal::Terminal;
 
 macro_rules! style_codes {
     ($($name:ident = $code:literal),+ $(,)?) => {
@@ -99,14 +99,12 @@ pub fn init(no_color_flag: bool, env: &EnvSource, terminal: Terminal) {
 
 fn resolve(no_color_flag: bool, env: &EnvSource, terminal: Terminal) -> (bool, bool) {
     let no_color_env = env
-        .get_os(settings_env::NO_COLOR)
+        .get_os(env::NO_COLOR)
         .is_some_and(|value| !value.is_empty());
-    let dumb = env
-        .get(settings_env::TERM)
-        .is_some_and(|term| term == "dumb");
+    let dumb = env.get(env::TERM).is_some_and(|term| term == "dumb");
     decide(
         no_color_flag || no_color_env,
-        terminal::env_flag(env, settings_env::FORCE_COLOR),
+        env::flag(env, env::FORCE_COLOR),
         dumb,
         (terminal.stdout, terminal.stderr),
     )
@@ -118,14 +116,14 @@ fn resolve(no_color_flag: bool, env: &EnvSource, terminal: Terminal) -> (bool, b
 /// off one (`0`, `false`, `no`, `off`) forces color, so `FORCE_COLOR=2` works.
 fn decide(
     disabled: bool,
-    force: terminal::EnvFlag,
+    force: env::EnvFlag,
     dumb_terminal: bool,
     is_terminal: (bool, bool),
 ) -> (bool, bool) {
     if disabled {
         return (false, false);
     }
-    if force != terminal::EnvFlag::Unset {
+    if force != env::EnvFlag::Unset {
         let on = force.on_unless_off();
         return (on, on);
     }
@@ -214,11 +212,11 @@ mod tests {
     fn force_color_follows_the_shared_flag_parser() {
         let ttys = (false, false);
         for on in ["1", "true", "YES", "on", "2", "3"] {
-            let force = terminal::parse_flag(on);
+            let force = env::parse_flag(on);
             assert_eq!(decide(false, force, false, ttys), (true, true), "{on}");
         }
         for off in ["0", "false", "no", "OFF"] {
-            let force = terminal::parse_flag(off);
+            let force = env::parse_flag(off);
             assert_eq!(
                 decide(false, force, false, (true, true)),
                 (false, false),
@@ -229,10 +227,10 @@ mod tests {
 
     #[test]
     fn disabling_beats_forcing_and_terminals_decide_the_rest() {
-        let force = terminal::parse_flag("1");
+        let force = env::parse_flag("1");
         assert_eq!(decide(true, force, false, (true, true)), (false, false));
 
-        let unset = terminal::parse_flag("");
+        let unset = env::parse_flag("");
         assert_eq!(decide(false, unset, false, (true, false)), (true, false));
         assert_eq!(decide(false, unset, true, (true, true)), (false, false));
     }

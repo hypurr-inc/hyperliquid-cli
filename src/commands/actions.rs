@@ -12,9 +12,7 @@ use crate::errors::{self, CliError};
 use crate::exchange_reply::{self, Reply};
 use crate::http_api::ApiClient;
 use crate::response_sanitization::Untrusted;
-use crate::signing::{
-    SelectedSigner, Signs, USER_SIGNED_PREFIX, ensure_supports_expires_after, nonce,
-};
+use crate::signing::{SelectedSigner, Signs, USER_SIGNED_PREFIX, ensure_supports_expires_after};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,7 +56,7 @@ fn expires_after_now(api: &ApiClient) -> Option<u64> {
 /// Sign and send an L1 action supported by hypersdk, returning the ok response
 /// payload as the exchange sent it. The sender takes the nonce (the current
 /// time in milliseconds, raised above every nonce this machine already signed
-/// with, see [`nonce`]) and the expiry at the moment it signs, so a caller that
+/// with, see [`crate::signing::nonce`]) and the expiry at the moment it signs, so a caller that
 /// returns early, as a dry run does, spends neither.
 pub(crate) async fn send_l1_action(
     api: &ApiClient,
@@ -67,7 +65,15 @@ pub(crate) async fn send_l1_action(
     vault_address: Option<Address>,
     context: &'static str,
 ) -> Result<serde_json::Value, CliError> {
-    send_l1_action_with_nonce(api, signer, action, nonce::next(), vault_address, context).await
+    send_l1_action_with_nonce(
+        api,
+        signer,
+        action,
+        api.nonces().next(),
+        vault_address,
+        context,
+    )
+    .await
 }
 
 /// [`send_l1_action`] with a nonce the caller owns: one the person supplied
@@ -94,7 +100,7 @@ pub(crate) async fn send_default_l1_action(
     signer: &SelectedSigner,
     action: Action,
 ) -> Result<(), CliError> {
-    send_default_l1_action_with_nonce(api, signer, action, nonce::next()).await
+    send_default_l1_action_with_nonce(api, signer, action, api.nonces().next()).await
 }
 
 /// [`send_default_l1_action`] with a nonce the signed document embeds
@@ -171,7 +177,7 @@ pub(crate) async fn send_raw_l1_json_action<A: Serialize>(
     vault_address: Option<Address>,
     context: &'static str,
 ) -> Result<serde_json::Value, CliError> {
-    let nonce = nonce::next();
+    let nonce = api.nonces().next();
     let expires_after = expires_after_now(api);
     let signature = sign_raw_l1_action(
         signer,

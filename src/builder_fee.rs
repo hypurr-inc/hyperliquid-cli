@@ -374,7 +374,7 @@ fn parse_default_builder_pair(setting: BuilderDefaultSetting) -> Result<(Address
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::settings::{EnvSource, env};
+    use crate::env::{self, EnvSource};
 
     fn tenths_bps(raw: &str) -> Result<u64, CliError> {
         MaxFeeRate::parse(raw).map(|rate| rate.tenths_bps())

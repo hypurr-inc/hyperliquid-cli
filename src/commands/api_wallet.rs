@@ -13,8 +13,9 @@ use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
-use crate::output::{OutputFormat, TableData, serialize_row};
-use crate::signing::{SelectedSigner, Signs, nonce};
+use crate::output::{TableData, serialize_row};
+use crate::signing::{SelectedSigner, Signs};
+use crate::terminal::OutputFormat;
 use crate::wire::{AddressRole, address};
 
 const MAX_AGENT_EXPIRATION_MS: u64 = 180 * 24 * 60 * 60 * 1000;
@@ -391,7 +392,7 @@ async fn approve_prepared(
     ensure_generated_key_projection_is_safe(&prepared, inv)?;
 
     let signer = inv.resolve_signer()?;
-    let nonce = nonce::next();
+    let nonce = remote.api().nonces().next();
     let (approval, approval_value) = approval_document(chain, &prepared, nonce)?;
     actions::send_l1_action_with_nonce(
         remote.api(),

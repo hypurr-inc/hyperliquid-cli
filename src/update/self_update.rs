@@ -8,8 +8,9 @@ use super::release::{
 };
 use crate::errors::CliError;
 use crate::invocation::Invocation;
-use crate::output::{OutputFormat, TableData};
+use crate::output::TableData;
 use crate::private_fs;
+use crate::terminal::OutputFormat;
 
 const TEMP_DIR_ATTEMPTS: u32 = 16;
 const EXECUTABLE_MODE: u32 = 0o755;

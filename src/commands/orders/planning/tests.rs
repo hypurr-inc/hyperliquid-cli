@@ -10,7 +10,7 @@ use crate::commands::orders::args::{
     CreateTpslGroupingArg, DEFAULT_MARKET_ORDER_SLIPPAGE_BPS, PositionTpslGroupingArg, TpslArgs,
 };
 use crate::commands::orders::validation::{MAX_BATCH_ORDER_COUNT, validate_order_for_market};
-use crate::settings::EnvSource;
+use crate::env::EnvSource;
 
 fn resolver() -> AssetResolver {
     AssetResolver::new(AssetMetadata::from_assets(

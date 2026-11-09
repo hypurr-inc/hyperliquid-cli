@@ -7,9 +7,10 @@
 
 mod last_error;
 
+use crate::env::EnvSource;
 use crate::errors::{CliError, ErrorEnvelope, StdoutDocument};
-use crate::output::{OutputFormat, colors};
-use crate::settings::EnvSource;
+use crate::output::colors;
+use crate::terminal::OutputFormat;
 
 pub use last_error::LastError;
 

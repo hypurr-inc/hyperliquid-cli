@@ -13,11 +13,12 @@ use serde_json::{Value, json};
 
 use crate::command_spec::{
     ArgSpec, CommandSpec, ConfirmationPolicy, DryRunPolicy, GroupSpec, InputKind, Lifecycle,
-    Mutability, OutputContract, OwsSupport, RawPayloadPolicy, Risk, SignerSupport, StreamBound,
-    Transport, YES_ARG,
+    Mutability, OutputContract, OwsSupport, RawPayloadPolicy, Risk, SignerSupport, Transport,
+    YES_ARG,
 };
 use crate::commands;
 use crate::output::serialize_row;
+use crate::stream_bounds::StreamBound;
 
 /// The order `schema`, the MCP tool list and the contract fixtures list commands
 /// in. Every registered command appears exactly once; a test fails when one does not.

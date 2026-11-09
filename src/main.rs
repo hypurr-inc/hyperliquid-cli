@@ -5,9 +5,9 @@ use hyperliquid_cli::auth::SignerFlags;
 use hyperliquid_cli::errors;
 use hyperliquid_cli::invocation::{Invocation, InvocationFlags};
 use hyperliquid_cli::output;
-use hyperliquid_cli::output::terminal::Terminal;
 use hyperliquid_cli::report;
 use hyperliquid_cli::settings::Settings;
+use hyperliquid_cli::terminal::{OutputFormat, Terminal};
 
 #[cfg(test)]
 mod cli_contract_tests;
@@ -36,7 +36,7 @@ Examples:
 Learn more:
   hyperliquid <command> --help
   hyperliquid --format json schema <command>",
-        hyperliquid_cli::settings::env_help_section()
+        hyperliquid_cli::env::help_section()
     )
 }
 
@@ -57,7 +57,7 @@ struct Cli {
         reason = "declares the option for clap; the format precedence reads it from the ArgMatches so a failed parse resolves the same way"
     )]
     #[arg(long, short, global = true, value_enum, default_value = "pretty", help_heading = GLOBAL_OPTIONS)]
-    format: output::OutputFormat,
+    format: OutputFormat,
 
     /// Shortcut for --format json
     #[allow(dead_code, reason = "see `format`")]
@@ -80,7 +80,7 @@ struct Cli {
     results_only: bool,
 
     /// Limit the top-level result count for JSON, table, and pretty output
-    #[arg(long, global = true, value_name = "N", value_parser = hyperliquid_cli::stream::parse_positive_usize, help_heading = GLOBAL_OPTIONS)]
+    #[arg(long, global = true, value_name = "N", value_parser = hyperliquid_cli::stream_bounds::parse_positive_usize, help_heading = GLOBAL_OPTIONS)]
     max_results: Option<usize>,
 
     /// Validate and preview mutating commands without side effects

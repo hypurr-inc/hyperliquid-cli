@@ -97,6 +97,31 @@ fn agent_mode_usage_errors_are_structured_json() {
     assert_eq!(json["exit_code"], 2);
 }
 
+/// `HYPERLIQUID_AGENT` and `HYPERLIQUID_NO_UPDATE_CHECK` were always checked;
+/// the rest of the strict flags used to read a typo as off.
+#[test]
+fn an_invalid_value_of_any_strict_flag_variable_is_a_configuration_error() {
+    for name in hyperliquid_cli::env::strict_flags() {
+        let output = hermetic_command()
+            .env(name, "banana")
+            .args(["--format", "json", "schema", "orders", "create"])
+            .assert()
+            .code(2)
+            .get_output()
+            .stdout
+            .clone();
+        let json = stdout_json(&output);
+        assert_eq!(json["reason"], "invalid_config", "{name}");
+        assert_eq!(
+            json["error"],
+            format!(
+                "Configuration error: {name} must be one of 1, true, yes, on, 0, false, no, off"
+            ),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn an_ows_signer_without_a_resolved_wallet_fails_closed_before_any_live_action() {
     let env = IsolatedHome::new();

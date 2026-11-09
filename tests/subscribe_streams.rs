@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use hyperliquid_cli::output::JsonRenderOptions;
-use hyperliquid_cli::stream::{StreamBounds, SubscribeTarget, stream_target};
+use hyperliquid_cli::stream::{SubscribeTarget, stream_target};
+use hyperliquid_cli::stream_bounds::StreamBounds;
 use hyperliquid_cli::ws::BookAggregationArgs;
 use hypersdk::Address;
 use hypersdk::hypercore::WebSocket;

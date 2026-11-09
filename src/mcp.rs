@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use crate::command_registry::{ArgType, CommandContract, CommandRegistry};
 use crate::command_spec::YES_ARG;
+use crate::env::{self, EnvSource};
 use crate::errors::CliError;
 use crate::mode::env_enabled;
-use crate::settings::{EnvSource, env};
 
 const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 

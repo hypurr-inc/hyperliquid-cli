@@ -327,7 +327,7 @@ async fn chase_does_not_read_the_default_builder_configuration() {
         ],
     )
     .env(
-        hyperliquid_cli::settings::env::DEFAULT_BUILDER_ADDRESS,
+        hyperliquid_cli::env::DEFAULT_BUILDER_ADDRESS,
         "0x00000000000000000000000000000000000000bb",
     )
     .assert()

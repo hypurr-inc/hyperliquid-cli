@@ -15,13 +15,15 @@ use crossterm::terminal::{
 use futures::StreamExt;
 use hypersdk::hypercore::{Chain, Subscription, WebSocket, ws::Event as WsEvent};
 
+use crate::env;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::mode::{Mode, NON_INTERACTIVE_FLAG};
 use crate::output::notice::{JsonLinesReason, Notice};
-use crate::output::{self, OutputFormat, Session, TableData};
-use crate::settings::env;
-use crate::stream::{EXIT_SIGINT, StreamBounds, StreamEnd, run_stream, write_stdout_line};
+use crate::output::{self, Session, TableData};
+use crate::stream::{EXIT_SIGINT, StreamEnd, run_stream, write_stdout_line};
+use crate::stream_bounds::StreamBounds;
+use crate::terminal::OutputFormat;
 use crate::ws::websocket_for_chain;
 
 const WATCH_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
@@ -374,7 +376,7 @@ async fn try_read_key_event() -> Result<Option<KeyEvent>, anyhow::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::terminal::Terminal;
+    use crate::terminal::Terminal;
     use crossterm::event::{KeyEvent, KeyModifiers};
     use std::collections::VecDeque;
     use std::sync::{

@@ -84,6 +84,7 @@
 - `api-wallet create|approve|revoke --dry-run` no longer draws nonces: a preview used to raise the machine-wide nonce mark and write the data directory. The preview's `approval_action.nonce` is now the clock time.
 - A vault wallet whose Hyperliquid account address is malformed is an error (`ows_malformed_response`) when the default signer is chosen, as it already was in `account ls`; the default signer lookup used to skip such a wallet silently.
 - Builder, protocol (validator, staking-link user, sub-builder) and watched-account addresses accept an uppercase `0X` prefix, as `--account` and `api-wallet --agent-address` always did.
+- An invalid value of `HYPERLIQUID_AUTO_UPDATE` or `HYPERLIQUID_MCP_ALLOW_UNSAFE` is a configuration error (exit `2`) on every command, like `HYPERLIQUID_AGENT` and `HYPERLIQUID_NO_UPDATE_CHECK`: a typo in `HYPERLIQUID_AUTO_UPDATE` used to read as off and `HYPERLIQUID_MCP_ALLOW_UNSAFE` was checked only by `mcp`. The accepted values stay `1|true|yes|on|0|false|no|off`.
 
 ## 0.18.0 - 2026-11-09
 
