@@ -9,10 +9,10 @@ use crate::commands::actions;
 use crate::commands::rows::{One, Row, or_missing};
 use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
+use crate::env;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::referral_code::{validate_referral_code, validate_referrer_code};
-use crate::settings::env;
 use crate::signing::SelectedSigner;
 use crate::wire::InfoRequest;
 

@@ -25,6 +25,7 @@ use crate::errors::{
 };
 use crate::network::Network;
 use crate::response_sanitization::Untrusted;
+use crate::signing::nonce::NonceStore;
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -122,6 +123,8 @@ pub struct ApiClient {
     on_retry: Option<fn()>,
     /// `--expires-after`: how long after signing a signed action stays valid.
     request_lifetime: Option<Duration>,
+    /// Where the nonces of actions signed for this client are recorded.
+    nonces: NonceStore,
 }
 
 impl std::fmt::Debug for ApiClient {
@@ -153,6 +156,7 @@ impl ApiClient {
             rate_limit_backoff: &RATE_LIMIT_RETRY_BACKOFF,
             on_retry: None,
             request_lifetime: None,
+            nonces: NonceStore::in_process(),
         }
     }
 
@@ -170,6 +174,19 @@ impl ApiClient {
     pub fn with_request_lifetime(mut self, lifetime: Option<Duration>) -> Self {
         self.request_lifetime = lifetime;
         self
+    }
+
+    /// Record the nonces of signed actions in `store`, so concurrent processes
+    /// of one machine never reuse one.
+    #[must_use]
+    pub(crate) fn with_nonce_store(mut self, store: NonceStore) -> Self {
+        self.nonces = store;
+        self
+    }
+
+    /// The nonce source of signed actions sent through this client.
+    pub(crate) fn nonces(&self) -> &NonceStore {
+        &self.nonces
     }
 
     /// The `--expires-after` lifetime, when one was asked for.

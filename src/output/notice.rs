@@ -27,6 +27,9 @@ pub enum JsonLinesReason {
 pub enum Notice {
     /// A warning for a person, on any format.
     Warning(String),
+    /// A multi-line block printed as written: a `! ` headline and the
+    /// indented lines that say what to do about it.
+    Advice(Vec<String>),
     /// A read stopped at the API's per-request cap. `message` says how to
     /// continue; the JSON form also carries the counts and the cursor.
     Truncated {
@@ -53,6 +56,7 @@ impl Notice {
     pub fn text(&self) -> String {
         match self {
             Self::Warning(message) | Self::Truncated { message, .. } => warning_line(message),
+            Self::Advice(lines) => lines.join("\n"),
             Self::Empty(sentence) => sentence.clone(),
             Self::Clipped { shown, total } => format!(
                 "Showing {} of {}. Remove --max-results to see all.",
@@ -93,6 +97,7 @@ impl Notice {
                 }
             })),
             Self::Warning(_)
+            | Self::Advice(_)
             | Self::Empty(_)
             | Self::Clipped { .. }
             | Self::ConnectionLost
@@ -209,6 +214,19 @@ mod tests {
     }
 
     #[test]
+    fn advice_prints_its_lines_as_written_with_no_warning_prefix() {
+        let notice = Notice::Advice(vec![
+            "! Config file /c is readable by other users (mode 0644).".into(),
+            "  Restrict it:".into(),
+            "    chmod 600 /c".into(),
+        ]);
+        assert_eq!(
+            notice.text(),
+            "! Config file /c is readable by other users (mode 0644).\n  Restrict it:\n    chmod 600 /c"
+        );
+    }
+
+    #[test]
     fn row_notices_read_as_plain_sentences() {
         assert_eq!(Notice::Empty("No orders.".into()).text(), "No orders.");
         assert_eq!(
@@ -225,6 +243,7 @@ mod tests {
             Notice::ConnectionLost,
             Notice::Retrying,
             Notice::Warning("x".into()),
+            Notice::Advice(vec!["! x".into()]),
             Notice::JsonLines(JsonLinesReason::Driven),
         ] {
             assert!(notice.json().is_none(), "{notice:?}");

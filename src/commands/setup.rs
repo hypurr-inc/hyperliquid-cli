@@ -12,18 +12,20 @@ use crate::command_spec::{
     CliCommand, CommandSpec, InputKind, Lifecycle, NetworkUse, OwsSupport, Risk, YES, YES_FLAG, arg,
 };
 use crate::commands::builder_approval;
+use crate::env;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::mode::Mode;
 use crate::network::Network;
-use crate::output::{OutputFormat, TableData};
+use crate::output::TableData;
 use crate::ows::vault::Vault;
 use crate::prompt;
 use crate::referral_code;
-use crate::settings::{Settings, env};
+use crate::settings::Settings;
 use crate::signing::SelectedSigner;
+use crate::terminal::OutputFormat;
 use crate::wallet_store::{ConfigEdit, NewWallet, WalletName, WalletStore};
 use crate::wire::{self, AddressRole};
 use ows_lib::types::WalletInfo;

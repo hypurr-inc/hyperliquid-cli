@@ -27,7 +27,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::private_fs::{self, FileLock, LockError};
-use crate::settings::EnvSource;
 
 const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -138,25 +137,53 @@ fn read_mark(path: &Path) -> std::io::Result<Option<u64>> {
 static GUARD: NonceGuard = NonceGuard::new();
 static WARNED: AtomicBool = AtomicBool::new(false);
 
-/// The mark file. Unit tests never touch the machine's data directory.
-fn store_path() -> Option<PathBuf> {
-    if cfg!(test) {
-        return None;
-    }
-    crate::paths::nonce_high_water_file(&EnvSource::Process)
+/// Where the nonces of one run are recorded for other processes, and who is
+/// told when they cannot be. The edge that builds the API client decides both
+/// (the data directory comes from its settings, the notice from its terminal),
+/// so nothing here reads the process environment or prints.
+#[derive(Debug, Clone)]
+pub struct NonceStore {
+    mark: Option<PathBuf>,
+    on_unrecorded: fn(&str),
 }
 
-/// The nonce for the next signed action of this process.
-pub(crate) fn next() -> u64 {
-    let issued = GUARD.next(crate::clock::now_ms(), store_path().as_deref());
-    if let Some(problem) = issued.unrecorded
-        && !WARNED.swap(true, Ordering::Relaxed)
-    {
-        crate::output::warn(&format!(
-            "Nonce high-water mark not recorded ({problem}); concurrent hyperliquid processes may reuse a nonce."
-        ));
+impl NonceStore {
+    /// Record every nonce in the file at `mark`. `on_unrecorded` hears, once
+    /// per process, why a nonce could not be recorded there.
+    #[must_use]
+    pub fn recorded_at(mark: PathBuf, on_unrecorded: fn(&str)) -> Self {
+        Self {
+            mark: Some(mark),
+            on_unrecorded,
+        }
     }
-    issued.nonce
+
+    /// Keep no mark: nonces are unique within this process only. For a run
+    /// with no data directory and for code that never signs for real.
+    #[must_use]
+    pub fn in_process() -> Self {
+        Self {
+            mark: None,
+            on_unrecorded: |_| {},
+        }
+    }
+
+    /// The nonce for the next signed action of this process.
+    pub(crate) fn next(&self) -> u64 {
+        self.issue(&WARNED)
+    }
+
+    fn issue(&self, warned: &AtomicBool) -> u64 {
+        let issued = GUARD.next(crate::clock::now_ms(), self.mark.as_deref());
+        if let Some(problem) = issued.unrecorded
+            && !warned.swap(true, Ordering::Relaxed)
+        {
+            (self.on_unrecorded)(&format!(
+                "Nonce high-water mark not recorded ({problem}); concurrent hyperliquid processes may reuse a nonce."
+            ));
+        }
+        issued.nonce
+    }
 }
 
 #[cfg(test)]
@@ -291,6 +318,41 @@ mod tests {
         let second = guard.next(NOW, Some(&path));
         assert_eq!((first.nonce, second.nonce), (NOW, NOW + 1));
         assert!(first.unrecorded.is_some(), "{first:?}");
+    }
+
+    #[test]
+    fn a_store_records_where_it_is_told_and_reports_an_unusable_mark_once() {
+        use std::sync::Mutex;
+        static HEARD: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        fn hear(message: &str) {
+            HEARD.lock().unwrap().push(message.to_string());
+        }
+
+        let (_dir, path) = mark_file();
+        let first = NonceStore::recorded_at(path.clone(), hear).next();
+        assert!(recorded(&path) >= first, "the mark is the store's own path");
+        assert!(HEARD.lock().unwrap().is_empty());
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let blocker = dir.path().join("data");
+        std::fs::write(&blocker, b"").unwrap();
+        let broken = NonceStore::recorded_at(blocker.join("nonce-high-water"), hear);
+        let warned = AtomicBool::new(false);
+        let (a, b) = (broken.issue(&warned), broken.issue(&warned));
+        assert!(b > a, "an unrecorded nonce is still unique");
+        let heard = HEARD.lock().unwrap();
+        assert_eq!(heard.len(), 1, "{heard:?}");
+        assert!(
+            heard[0].starts_with("Nonce high-water mark not recorded (")
+                && heard[0].ends_with("); concurrent hyperliquid processes may reuse a nonce."),
+            "{heard:?}"
+        );
+    }
+
+    #[test]
+    fn a_store_without_a_mark_never_touches_the_disk_or_speaks() {
+        let store = NonceStore::in_process();
+        assert!(store.next() < store.next());
     }
 
     #[test]

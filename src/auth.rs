@@ -19,11 +19,13 @@ use hypersdk::hypercore::PrivateKeySigner;
 use ows_lib::types::WalletInfo;
 
 use crate::bankr::BankrClient;
+use crate::bankr_credentials::KeySource;
+use crate::env;
 use crate::errors::CliError;
 use crate::legacy_accounts::{LegacyAccount, LegacyAccounts};
 use crate::mode::Mode;
 use crate::ows::vault::{HyperliquidAccount, Vault};
-use crate::settings::{KeySource, Settings, env};
+use crate::settings::Settings;
 use crate::signing::SelectedSigner;
 use crate::wire::selector_address;
 
@@ -374,8 +376,8 @@ pub(crate) fn lookup_account_address(
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::env::EnvSource;
     use crate::ows::vault::test_support::import_test_wallet;
-    use crate::settings::EnvSource;
     use crate::signing::Signs;
     use tempfile::TempDir;
 

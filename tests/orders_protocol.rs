@@ -344,14 +344,8 @@ async fn the_default_builder_is_checked_like_an_explicit_one() {
             "0.1",
         ],
     )
-    .env(
-        hyperliquid_cli::settings::env::DEFAULT_BUILDER_ADDRESS,
-        BUILDER,
-    )
-    .env(
-        hyperliquid_cli::settings::env::DEFAULT_BUILDER_FEE_RATE,
-        "0.01%",
-    )
+    .env(hyperliquid_cli::env::DEFAULT_BUILDER_ADDRESS, BUILDER)
+    .env(hyperliquid_cli::env::DEFAULT_BUILDER_FEE_RATE, "0.01%")
     .assert()
     .code(13);
 

@@ -1,3 +1,7 @@
+//! The public path of the asset layer: tests and every command name assets
+//! through the re-exports here, so the submodules stay private and can be
+//! reorganised without touching a caller.
+
 pub mod asset_id;
 mod dexes;
 mod market;

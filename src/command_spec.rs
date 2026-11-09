@@ -17,8 +17,8 @@ use crate::errors::CliError;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
 use crate::network::Network;
-use crate::settings::env;
 use crate::signing::Signs;
+use crate::stream_bounds::StreamBound;
 
 /// The flag that answers a confirmation prompt. Every command with this arg and
 /// [`ConfirmationPolicy::Prompt`] accepts it in place of the prompt.
@@ -151,116 +151,6 @@ pub enum NetworkUse {
 pub enum Transport {
     CliProcess,
     CliInteractive,
-}
-
-/// How a command bounds its output in machine contexts. One definition: the
-/// schema, the pipeline's check and the environment fallback all read it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamBound {
-    /// `--watch` needs `--max-ticks` (or `HYPERLIQUID_WATCH_MAX_TICKS`).
-    SnapshotWatch,
-    /// Needs `--max-events`, `--idle-timeout-ms` or `HYPERLIQUID_SUBSCRIBE_MAX_EVENTS`.
-    Subscribe,
-    /// A polling alert stream. Needs `--max-events` or `--idle-timeout-ms`; no environment fallback.
-    Polled,
-}
-
-/// What `0` means in a bound's environment variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnvZero {
-    /// Not a bound: the variable is ignored, as if unset.
-    Unbounded,
-    /// A real bound of zero items: the stream stops right after it starts.
-    StopImmediately,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StreamEnv {
-    pub name: &'static str,
-    pub zero: EnvZero,
-}
-
-impl StreamBound {
-    #[must_use]
-    pub const fn cli_args(self) -> &'static [&'static str] {
-        match self {
-            Self::SnapshotWatch => &["max_ticks"],
-            Self::Subscribe | Self::Polled => &["max_events", "idle_timeout_ms"],
-        }
-    }
-
-    /// The boolean arg that makes the bound apply; the bound always applies when `None`.
-    #[must_use]
-    pub const fn required_when(self) -> Option<&'static str> {
-        match self {
-            Self::SnapshotWatch => Some("watch"),
-            Self::Subscribe | Self::Polled => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn env(self) -> Option<StreamEnv> {
-        match self {
-            Self::SnapshotWatch => Some(StreamEnv {
-                name: env::WATCH_MAX_TICKS,
-                zero: EnvZero::Unbounded,
-            }),
-            Self::Subscribe => Some(StreamEnv {
-                name: env::SUBSCRIBE_MAX_EVENTS,
-                zero: EnvZero::StopImmediately,
-            }),
-            Self::Polled => None,
-        }
-    }
-
-    /// What a machine-context run is told when it declares no stop condition:
-    /// the flags and the environment variable that would bound it. `command`
-    /// names the run for a stream that is a command of its own (`Polled`),
-    /// whose message also carries a runnable example.
-    #[must_use]
-    pub fn unbounded_message(self, command: &str) -> String {
-        let mut ways: Vec<String> = self
-            .cli_args()
-            .iter()
-            .map(|id| format!("--{} <N>", id.replace('_', "-")))
-            .collect();
-        ways.extend(self.env().map(|env| env.name.to_string()));
-        match self {
-            Self::SnapshotWatch => format!(
-                "JSON watch output must be bounded with {}",
-                join_alternatives(ways)
-            ),
-            Self::Subscribe => format!(
-                "JSON subscribe output must be bounded with {}",
-                join_alternatives(ways)
-            ),
-            Self::Polled => {
-                let flags = self
-                    .cli_args()
-                    .iter()
-                    .map(|id| format!("--{}", id.replace('_', "-")))
-                    .collect::<Vec<_>>()
-                    .join(" or ");
-                format!(
-                    "{command} requires {flags} in agent mode.\n  \
-                     hyperliquid --format json {command} {POLLED_EXAMPLE_ARGS} --max-events 20"
-                )
-            }
-        }
-    }
-}
-
-/// The address a polled stream's example names: every polled stream watches an
-/// address.
-const POLLED_EXAMPLE_ARGS: &str = "--user 0x0000000000000000000000000000000000000001";
-
-fn join_alternatives(mut ways: Vec<String>) -> String {
-    let last = ways.pop().unwrap_or_default();
-    match ways.len() {
-        0 => last,
-        1 => format!("{} or {last}", ways[0]),
-        _ => format!("{}, or {last}", ways.join(", ")),
-    }
 }
 
 /// Rejects a malformed value before the command runs.

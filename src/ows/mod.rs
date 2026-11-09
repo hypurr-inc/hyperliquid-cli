@@ -4,7 +4,6 @@
 //! (create, import, list, rename, export, delete, default selection) and
 //! [`signing`] owns signing with a vault wallet.
 
-pub(crate) mod hints;
 pub mod signing;
 pub mod vault;
 

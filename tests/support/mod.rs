@@ -10,7 +10,7 @@
 #![allow(dead_code)]
 
 use assert_cmd::Command;
-use hyperliquid_cli::settings::env;
+use hyperliquid_cli::env;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use wiremock::matchers::{body_json, body_partial_json, body_string_contains, method, path};
@@ -31,21 +31,6 @@ pub const ACCOUNT_KEY_STORE_DIR_ENV: &str = env::ACCOUNT_KEY_STORE_DIR;
 pub const TEST_ACCOUNT_PASSPHRASE: &str = "deterministic integration account encryption passphrase";
 pub const VALID_PRIVATE_KEY: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000009";
-
-/// Variables the CLI's HTTP stack reads that are not in `settings::env`.
-/// `reqwest` honors the proxy families and does not bypass loopback, so a proxy
-/// in the shell would swallow every request to a mock server.
-pub const PROCESS_ENV_OUTSIDE_SETTINGS: &[&str] = &[
-    "HTTP_PROXY",
-    "http_proxy",
-    "HTTPS_PROXY",
-    "https_proxy",
-    "ALL_PROXY",
-    "all_proxy",
-    "NO_PROXY",
-    "no_proxy",
-    "RUST_BACKTRACE",
-];
 
 /// Hosts the CLI must reach directly even when a proxy variable is set.
 pub const LOOPBACK_NO_PROXY: &str = "127.0.0.1,localhost,::1";
@@ -74,7 +59,7 @@ fn point_platform_dirs_at(command: &mut Command, root: &Path) {
 /// by hand.
 pub fn hermetic_command() -> Command {
     let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    for name in env::ALL.iter().chain(PROCESS_ENV_OUTSIDE_SETTINGS) {
+    for name in env::ALL {
         command.env_remove(name);
     }
     command.env("NO_PROXY", LOOPBACK_NO_PROXY);

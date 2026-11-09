@@ -8,11 +8,13 @@ use std::path::{Path, PathBuf};
 use hypersdk::Address;
 use ows_lib::types::{AccountInfo, WalletInfo};
 
-use super::hints::{SET_DEFAULT, WALLET_CREATE};
 use super::{EVM_CAIP2, HYPERLIQUID_CAIP2, HYPERLIQUID_CHAIN_ALIAS, map_ows_error};
+use crate::env;
 use crate::errors::CliError;
+use crate::hints::wallet::{SET_DEFAULT, WALLET_CREATE};
+use crate::output::Notice;
 use crate::resolvers::parse_hex_address;
-use crate::settings::{Settings, env};
+use crate::settings::Settings;
 use crate::wire::selector_address;
 
 #[derive(Clone, Default)]
@@ -88,13 +90,16 @@ impl Vault {
             |path| path.join("wallets").display().to_string(),
         );
         let passphrase_env = env::OWS_PASSPHRASE;
-        eprintln!(
-            "! {passphrase_env} isn't set, so this wallet is encrypted with an empty passphrase."
-        );
-        eprintln!(
-            "  Anyone who can read {vault} can recover the key. To use a passphrase, delete the wallet and recreate it with:"
-        );
-        eprintln!("    {passphrase_env}=<passphrase> {WALLET_CREATE}");
+        Notice::Advice(vec![
+            format!(
+                "! {passphrase_env} isn't set, so this wallet is encrypted with an empty passphrase."
+            ),
+            format!(
+                "  Anyone who can read {vault} can recover the key. To use a passphrase, delete the wallet and recreate it with:"
+            ),
+            format!("    {passphrase_env}=<passphrase> {WALLET_CREATE}"),
+        ])
+        .eprint(false);
     }
 
     /// Whether the vault's wallet directory exists. Reads must not create it.

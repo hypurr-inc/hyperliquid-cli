@@ -160,7 +160,12 @@ async fn verify_margin_mode(
         let acting_as = context.vault_address.map(|vault| vault.to_string());
         return Err(CliError::Configuration(format!(
             "orders requested --margin-mode {requested} but the current {coin} margin mode is {current}; use `{}` first",
-            hints::update_leverage_command(&coin, "<N>", requested, acting_as.as_deref())
+            hints::update_leverage_command(
+                &coin,
+                "<N>",
+                !requested.is_cross(),
+                acting_as.as_deref()
+            )
         ))
         .into());
     }

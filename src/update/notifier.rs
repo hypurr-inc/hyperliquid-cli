@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use super::release::{InstallMethod, ReleaseClient, is_newer_version, normalize_version};
 use crate::mode::Mode;
-use crate::output::terminal;
-use crate::settings::{EnvSource, env};
+
+use crate::env::{self, EnvSource};
 
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(20 * 60 * 60);
 const NOTICE_INTERVAL_SECS: i64 = 24 * 60 * 60;
@@ -89,8 +89,7 @@ impl Suppression {
     fn current(mode: &Mode, disabled: bool, source: &EnvSource) -> Self {
         Self {
             disabled,
-            no_update_check_env: terminal::env_flag(source, env::NO_UPDATE_CHECK)
-                == terminal::EnvFlag::On,
+            no_update_check_env: env::flag(source, env::NO_UPDATE_CHECK) == env::EnvFlag::On,
             no_update_notifier: source
                 .get_os(env::NO_UPDATE_NOTIFIER)
                 .is_some_and(|value| !value.is_empty()),
@@ -112,7 +111,7 @@ pub fn maybe_start_update_check(mode: &Mode, disabled: bool, source: &EnvSource)
     start_update_check(
         Suppression::current(mode, disabled, source),
         crate::paths::version_cache_file(source),
-        terminal::env_flag(source, env::AUTO_UPDATE) == terminal::EnvFlag::On,
+        env::flag(source, env::AUTO_UPDATE) == env::EnvFlag::On,
         source,
     )
 }
@@ -165,7 +164,7 @@ async fn maybe_auto_update(cache_path: &Path, source: &EnvSource) {
         return;
     };
     let current_version = env!("CARGO_PKG_VERSION");
-    if !crate::update::is_newer_version(&cache.latest_version, current_version) {
+    if !is_newer_version(&cache.latest_version, current_version) {
         return;
     }
     let now = now_unix_seconds();
@@ -189,7 +188,7 @@ async fn maybe_auto_update(cache_path: &Path, source: &EnvSource) {
         "Automatically updating hyperliquid from {current_version} to {}...",
         cache.latest_version
     );
-    if let Err(e) = crate::update::download_and_replace_binary(
+    if let Err(e) = super::self_update::download_and_replace_binary(
         &client,
         &cache.latest_version,
         &current_exe,
@@ -313,8 +312,8 @@ fn now_unix_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::OutputFormat;
-    use crate::output::terminal::Terminal;
+    use crate::terminal::OutputFormat;
+    use crate::terminal::Terminal;
     use tempfile::TempDir;
 
     fn allowing() -> Suppression {

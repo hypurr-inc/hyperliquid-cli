@@ -7,11 +7,11 @@ use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-use hyperliquid_cli::settings::env;
+use hyperliquid_cli::env;
 use support::exchange::ExchangeFixture;
 use support::{
-    IsolatedHome, LOOPBACK_NO_PROXY, PROCESS_ENV_OUTSIDE_SETTINGS, TEST_ACCOUNT_PASSPHRASE,
-    VALID_PRIVATE_KEY, expected_address, hermetic_command, json_stdout,
+    IsolatedHome, LOOPBACK_NO_PROXY, TEST_ACCOUNT_PASSPHRASE, VALID_PRIVATE_KEY, expected_address,
+    hermetic_command, json_stdout,
 };
 
 /// Test files that still spawn the binary themselves. Each one skips the
@@ -101,11 +101,7 @@ fn the_hermetic_command_clears_every_setting_and_proxy_variable() {
             .1
     };
 
-    for name in env::ALL
-        .iter()
-        .chain(PROCESS_ENV_OUTSIDE_SETTINGS)
-        .filter(|name| **name != "NO_PROXY")
-    {
+    for name in env::ALL.iter().filter(|name| **name != "NO_PROXY") {
         assert!(value_of(name).is_none(), "{name} must be removed");
     }
     assert_eq!(

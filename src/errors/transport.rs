@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use super::CliError;
+use crate::env::{self, EnvSource};
 use crate::response_sanitization::sanitize_untrusted_text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +108,7 @@ pub fn network_error(err: &reqwest::Error, timeout: Option<Duration>) -> CliErro
         .unwrap_or_else(|| "the Hyperliquid API".to_string());
     let mut error = unreachable(&target, &transport_cause(err, timeout));
     if let (Some((name, host)), CliError::Unavailable(message)) =
-        (active_proxy(err.url()), &mut error)
+        (active_proxy(err.url(), &EnvSource::Process), &mut error)
     {
         message.push_str(&format!(" The request used {name} ({host})."));
     }
@@ -159,15 +160,25 @@ fn host_label(url: &reqwest::Url) -> Option<String> {
 
 /// The proxy variable that applies to this URL, with the proxy host only
 /// (credentials in the proxy URL are never printed).
-fn active_proxy(url: Option<&reqwest::Url>) -> Option<(&'static str, String)> {
+fn active_proxy(url: Option<&reqwest::Url>, source: &EnvSource) -> Option<(&'static str, String)> {
     let https = url.is_none_or(|url| url.scheme() == "https");
     let names: &[&'static str] = if https {
-        &["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        &[
+            env::HTTPS_PROXY,
+            env::HTTPS_PROXY_LOWER,
+            env::ALL_PROXY,
+            env::ALL_PROXY_LOWER,
+        ]
     } else {
-        &["HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"]
+        &[
+            env::HTTP_PROXY,
+            env::HTTP_PROXY_LOWER,
+            env::ALL_PROXY,
+            env::ALL_PROXY_LOWER,
+        ]
     };
     for name in names {
-        let Ok(value) = std::env::var(name) else {
+        let Some(value) = source.get(name) else {
             continue;
         };
         let value = value.trim();
@@ -230,6 +241,35 @@ mod tests {
         assert_eq!(
             transport_cause(&request_err, Some(Duration::from_secs(10))),
             "Connection refused"
+        );
+    }
+
+    #[test]
+    fn the_proxy_named_is_the_one_the_source_sets_for_the_requests_scheme() {
+        let https = reqwest::Url::parse("https://api.hyperliquid.xyz/info").unwrap();
+        let http = reqwest::Url::parse("http://127.0.0.1:1/info").unwrap();
+        let source = EnvSource::fixed([
+            (env::HTTPS_PROXY_LOWER, "user:secret@proxy.example:3128"),
+            (env::HTTP_PROXY, "http://plain.example:8080"),
+            (env::ALL_PROXY, ""),
+        ]);
+        assert_eq!(
+            active_proxy(Some(&https), &source),
+            Some((env::HTTPS_PROXY_LOWER, "proxy.example:3128".to_string())),
+            "credentials are never named"
+        );
+        assert_eq!(
+            active_proxy(Some(&http), &source),
+            Some((env::HTTP_PROXY, "plain.example:8080".to_string()))
+        );
+        let fallback = EnvSource::fixed([(env::ALL_PROXY_LOWER, "http://all.example:1")]);
+        assert_eq!(
+            active_proxy(Some(&https), &fallback).map(|(name, _)| name),
+            Some(env::ALL_PROXY_LOWER)
+        );
+        assert_eq!(
+            active_proxy(None, &EnvSource::fixed::<&str, &str>([])),
+            None
         );
     }
 }

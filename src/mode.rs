@@ -7,10 +7,9 @@
 //! pipeline step agrees. Nothing else reads `HYPERLIQUID_AGENT`, `CI` or a TTY
 //! to decide whether to prompt, bound a stream, announce or redraw.
 
+use crate::env::{self, EnvFlag, EnvSource};
 use crate::errors::CliError;
-use crate::output::OutputFormat;
-use crate::output::terminal::{EnvFlag, Terminal, env_flag};
-use crate::settings::{EnvSource, env};
+use crate::terminal::{OutputFormat, Terminal};
 
 /// `--non-interactive`, as named in the error that says why a prompt is off.
 pub const NON_INTERACTIVE_FLAG: &str = "--non-interactive";
@@ -41,8 +40,8 @@ impl Mode {
             terminal,
             // An invalid `HYPERLIQUID_AGENT` counts as off here;
             // [`validate_env`] rejects it.
-            agent: env_flag(env, env::AGENT) == EnvFlag::On,
-            ci: env_flag(env, env::CI).on_unless_off(),
+            agent: env::flag(env, env::AGENT) == EnvFlag::On,
+            ci: env::flag(env, env::CI).on_unless_off(),
             ..Self::default()
         }
     }
@@ -163,7 +162,7 @@ impl Mode {
 /// (case-insensitive) is a configuration error naming the variable, so a typo
 /// never silently falls back to the default.
 fn env_bool(env: &EnvSource, name: &str) -> Result<Option<bool>, CliError> {
-    flag_value(name, env_flag(env, name))
+    flag_value(name, env::flag(env, name))
 }
 
 /// [`env_bool`] for a switch that is off unless the variable says otherwise.
@@ -182,16 +181,20 @@ fn flag_value(name: &str, flag: EnvFlag) -> Result<Option<bool>, CliError> {
     }
 }
 
+/// Reject an invalid value of every strict flag in the [`env`] table, so a
+/// typo in `HYPERLIQUID_AUTO_UPDATE` fails the run like one in `HYPERLIQUID_AGENT`
+/// instead of reading as off.
 pub fn validate_env(source: &EnvSource) -> Result<(), CliError> {
-    env_bool(source, env::AGENT)?;
-    env_bool(source, env::NO_UPDATE_CHECK)?;
+    for name in env::strict_flags() {
+        env_bool(source, name)?;
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::terminal::parse_flag;
+    use crate::env::parse_flag;
 
     #[test]
     fn strict_bool_accepts_known_values_and_treats_empty_as_unset() {
@@ -205,6 +208,35 @@ mod tests {
         let err = flag_value("HYPERLIQUID_AGENT", parse_flag("banana")).unwrap_err();
         assert_eq!(err.exit_code(), 2);
         assert!(err.to_string().contains("HYPERLIQUID_AGENT"));
+    }
+
+    #[test]
+    fn every_strict_flag_in_the_table_is_validated_by_name() {
+        for name in env::strict_flags() {
+            let err = validate_env(&EnvSource::fixed([(name, "banana")])).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{name}");
+            assert!(err.to_string().contains(name), "{name}: {err}");
+            for fine in ["1", "TRUE", " off ", ""] {
+                assert!(
+                    validate_env(&EnvSource::fixed([(name, fine)])).is_ok(),
+                    "{name}={fine:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_typo_in_auto_update_or_mcp_allow_unsafe_fails_every_run_like_agent_does() {
+        for name in [env::AUTO_UPDATE, env::MCP_ALLOW_UNSAFE] {
+            let err = validate_env(&EnvSource::fixed([(name, "yes please")])).unwrap_err();
+            assert!(matches!(err, CliError::Configuration(_)), "{name}");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "Configuration error: {name} must be one of 1, true, yes, on, 0, false, no, off"
+                )
+            );
+        }
     }
 
     fn json() -> Mode {

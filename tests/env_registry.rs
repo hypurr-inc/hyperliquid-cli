@@ -1,4 +1,4 @@
-//! `settings::env` is the one place environment variable names are spelled.
+//! `env` is the one place environment variable names are spelled.
 //!
 //! A name written as a string literal anywhere else in `src/` is a second copy
 //! that a rename or a new variable silently misses. Tests (everything from the
@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use hyperliquid_cli::settings::env;
+use hyperliquid_cli::env;
 
 fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap() {
@@ -67,7 +67,7 @@ fn mentions(literal: &str, name: &str) -> bool {
 }
 
 #[test]
-fn environment_variable_names_are_spelled_only_in_the_settings_table() {
+fn environment_variable_names_are_spelled_only_in_the_env_table() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = Vec::new();
     rust_files(&root, &mut files);
@@ -80,7 +80,7 @@ fn environment_variable_names_are_spelled_only_in_the_settings_table() {
 
     let mut offenders = Vec::new();
     for file in files {
-        if file.ends_with("settings.rs") {
+        if file.ends_with("env.rs") {
             continue;
         }
         let text = fs::read_to_string(&file).unwrap();
@@ -100,7 +100,7 @@ fn environment_variable_names_are_spelled_only_in_the_settings_table() {
 
     assert!(
         offenders.is_empty(),
-        "spell these through `settings::env`:\n{}",
+        "spell these through `env`:\n{}",
         offenders.join("\n")
     );
 }

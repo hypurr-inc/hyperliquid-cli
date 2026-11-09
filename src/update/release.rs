@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::env::{self, EnvSource};
 use crate::errors::{CliError, network_error};
-use crate::settings::{EnvSource, env};
 
 /// The GitHub repository, as `owner/name`: the one spelling every release,
 /// download and issue URL derives from. Must match the repository and archive

@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::clock::{self, DurationError};
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, StreamBound, arg};
+use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::abstraction::{
     AccountMode, DexCollateral, UnifiedRisk, fetch_abstraction, load_dex_collateral,
     unified_account_ratio,
@@ -26,10 +26,11 @@ use crate::commands::spot_balances::user_spot_balances_raw;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::output::{OutputFormat, Session};
-use crate::stream::{
-    self, StreamBoundArgs, StreamBounds, StreamEnd, Ticker, emit_json_line, write_stdout_line,
-};
+use crate::output::Session;
+use crate::stream::{self, StreamEnd, Ticker, emit_json_line, write_stdout_line};
+use crate::stream_bounds::StreamBound;
+use crate::stream_bounds::{StreamBoundArgs, StreamBounds};
+use crate::terminal::OutputFormat;
 use crate::wire::{AddressRole, address};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
