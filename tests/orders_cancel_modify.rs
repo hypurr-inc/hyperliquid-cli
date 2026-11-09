@@ -2,7 +2,7 @@ mod support;
 
 use predicates::prelude::*;
 use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY};
-use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
+use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_CLOID: &str = "0x0000000000000000000000000000abcd";
@@ -206,6 +206,26 @@ async fn mock_order_management_server_with_spot_meta(
     server
 }
 
+async fn exchange_actions(server: &MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path() == "/exchange")
+        .map(|request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["action"].clone()
+        })
+        .collect()
+}
+
+async fn assert_single_cancel(server: &MockServer, cancels: serde_json::Value) {
+    let actions = exchange_actions(server).await;
+    assert_eq!(actions.len(), 1, "exactly one /exchange request");
+    assert_eq!(actions[0]["type"], "cancel");
+    assert_eq!(actions[0]["cancels"], cancels);
+}
+
 #[tokio::test]
 async fn orders_cancel_by_oid_outputs_confirmation() {
     let env = IsolatedHome::new();
@@ -225,6 +245,8 @@ async fn orders_cancel_by_oid_outputs_confirmation() {
         .success()
         .stdout(predicate::str::contains("cancelled"))
         .stdout(predicate::str::contains("12345"));
+
+    assert_single_cancel(&server, serde_json::json!([{"a": 0, "o": 12345}])).await;
 }
 
 #[tokio::test]
@@ -246,6 +268,14 @@ async fn orders_cancel_by_cloid_outputs_confirmation() {
         .success()
         .stdout(predicate::str::contains("cancelled"))
         .stdout(predicate::str::contains(TEST_CLOID));
+
+    let actions = exchange_actions(&server).await;
+    assert_eq!(actions.len(), 1, "exactly one /exchange request");
+    assert_eq!(actions[0]["type"], "cancelByCloid");
+    assert_eq!(
+        actions[0]["cancels"],
+        serde_json::json!([{"asset": 0, "cloid": TEST_CLOID}])
+    );
 }
 
 #[tokio::test]
@@ -349,22 +379,6 @@ async fn orders_cancel_outcome_order_uses_encoded_asset_id() {
     )
     .await;
 
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_string_contains("\"a\":100000010"))
-        .and(body_string_contains("\"o\":12347"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {
-                "type": "cancel",
-                "data": {
-                    "statuses": ["success"]
-                }
-            }
-        })))
-        .mount(&server)
-        .await;
-
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
@@ -373,6 +387,8 @@ async fn orders_cancel_outcome_order_uses_encoded_asset_id() {
         .success()
         .stdout(predicate::str::contains("#10"))
         .stdout(predicate::str::contains("12347"));
+
+    assert_single_cancel(&server, serde_json::json!([{"a": 100_000_010, "o": 12347}])).await;
 }
 
 #[tokio::test]
@@ -385,7 +401,7 @@ async fn orders_cancel_unknown_order_exits_with_unknown_order_error() {
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
         .args(["orders", "cancel", "999999999", "--testnet"])
         .assert()
-        .failure()
+        .code(13)
         .stderr(predicate::str::contains("unknown order"))
         .stderr(predicate::str::contains("999999999"));
 }
@@ -402,22 +418,6 @@ async fn orders_cancel_spot_internal_asset_id_uses_numeric_asset() {
     )
     .await;
 
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_string_contains("\"a\":11035"))
-        .and(body_string_contains("\"o\":223344"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {
-                "type": "cancel",
-                "data": {
-                    "statuses": ["success"]
-                }
-            }
-        })))
-        .mount(&server)
-        .await;
-
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
@@ -426,6 +426,8 @@ async fn orders_cancel_spot_internal_asset_id_uses_numeric_asset() {
         .success()
         .stdout(predicate::str::contains("HYPE/USDC"))
         .stdout(predicate::str::contains("223344"));
+
+    assert_single_cancel(&server, serde_json::json!([{"a": 11035, "o": 223344}])).await;
 }
 
 #[tokio::test]
@@ -478,6 +480,8 @@ async fn orders_cancel_all_prompts_and_aborts_on_no() {
         .stderr(predicate::str::contains("Signer: 0x"))
         .stderr(predicate::str::contains("Cancel 1 open order on testnet?"))
         .stderr(predicate::str::contains("cancel-all aborted"));
+
+    assert!(exchange_actions(&server).await.is_empty());
 }
 
 #[tokio::test]
@@ -548,6 +552,12 @@ async fn orders_cancel_all_yes_skips_prompt_and_shows_count() {
         .stdout(predicate::str::contains("Cancelled Orders"))
         .stdout(predicate::str::contains("2"))
         .stderr(predicate::str::contains("Cancel 2 open orders on testnet?").not());
+
+    assert_single_cancel(
+        &server,
+        serde_json::json!([{"a": 0, "o": 111}, {"a": 1, "o": 222}]),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -561,21 +571,6 @@ async fn orders_cancel_all_coin_filter_cancels_only_matching_coin() {
     )
     .await;
 
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_string_contains("\"o\":111"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {
-                "type": "cancel",
-                "data": {
-                    "statuses": ["success"]
-                }
-            }
-        })))
-        .mount(&server)
-        .await;
-
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
@@ -584,6 +579,8 @@ async fn orders_cancel_all_coin_filter_cancels_only_matching_coin() {
         .success()
         .stdout(predicate::str::contains("BTC"))
         .stdout(predicate::str::contains("1"));
+
+    assert_single_cancel(&server, serde_json::json!([{"a": 0, "o": 111}])).await;
 }
 
 #[tokio::test]
@@ -614,22 +611,6 @@ async fn orders_cancel_all_outcome_filter_normalizes_yes_notation() {
     )
     .await;
 
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_string_contains("\"a\":100000010"))
-        .and(body_string_contains("\"o\":333"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {
-                "type": "cancel",
-                "data": {
-                    "statuses": ["success"]
-                }
-            }
-        })))
-        .mount(&server)
-        .await;
-
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
@@ -638,6 +619,8 @@ async fn orders_cancel_all_outcome_filter_normalizes_yes_notation() {
         .success()
         .stdout(predicate::str::contains("+10"))
         .stdout(predicate::str::contains("1"));
+
+    assert_single_cancel(&server, serde_json::json!([{"a": 100_000_010, "o": 333}])).await;
 }
 
 #[tokio::test]
@@ -655,22 +638,6 @@ async fn orders_cancel_all_coin_filter_accepts_spot_pair() {
     )
     .await;
 
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .and(body_string_contains("\"a\":11035"))
-        .and(body_string_contains("\"o\":555"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {
-                "type": "cancel",
-                "data": {
-                    "statuses": ["success"]
-                }
-            }
-        })))
-        .mount(&server)
-        .await;
-
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
@@ -686,6 +653,8 @@ async fn orders_cancel_all_coin_filter_accepts_spot_pair() {
         .success()
         .stdout(predicate::str::contains("HYPE/USDC"))
         .stdout(predicate::str::contains("1"));
+
+    assert_single_cancel(&server, serde_json::json!([{"a": 11035, "o": 555}])).await;
 }
 
 #[tokio::test]
@@ -722,6 +691,10 @@ async fn orders_modify_price_and_size_outputs_updated_details() {
         .stdout(predicate::str::contains("modified"))
         .stdout(predicate::str::contains("51000"))
         .stdout(predicate::str::contains("0.05"));
+
+    let action = modify_exchange_action(&server).await;
+    assert_eq!(action["modifies"][0]["order"]["p"], "51000");
+    assert_eq!(action["modifies"][0]["order"]["s"], "0.05");
 }
 
 #[tokio::test]
@@ -901,6 +874,8 @@ async fn orders_modify_trigger_limit_requires_trigger_price_to_preserve_trigger(
         .code(2)
         .stderr(predicate::str::contains("--trigger-price"))
         .stderr(predicate::str::contains("stop-limit"));
+
+    assert!(exchange_actions(&server).await.is_empty());
 }
 
 #[tokio::test]

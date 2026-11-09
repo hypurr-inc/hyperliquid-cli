@@ -1,12 +1,10 @@
-use assert_cmd::Command;
+mod support;
+
 use predicates::prelude::*;
 use serde_json::Value;
+use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-const PRIVATE_KEY_ENV: &str = "HYPERLIQUID_PRIVATE_KEY";
-const VALID_PRIVATE_KEY: &str =
-    "0x0000000000000000000000000000000000000000000000000000000000000009";
 
 async fn mock_spot_quote_server() -> MockServer {
     let server = MockServer::start().await;
@@ -223,9 +221,9 @@ async fn mock_advanced_server() -> MockServer {
 async fn perps_list_dex_filters_to_hip3_markets() {
     let server = mock_advanced_server().await;
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+    IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args(["perps", "list", "--dex", "xyz"])
         .assert()
         .success()
@@ -237,9 +235,9 @@ async fn perps_list_dex_filters_to_hip3_markets() {
 async fn perps_get_dex_accepts_unprefixed_token_from_prefixed_market() {
     let server = mock_advanced_server().await;
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+    IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args(["perps", "get", "TOKEN", "--dex", "xyz"])
         .assert()
         .success()
@@ -251,9 +249,9 @@ async fn perps_get_dex_accepts_unprefixed_token_from_prefixed_market() {
 async fn orders_create_dry_run_resolves_hip3_dex_markets() {
     let server = mock_advanced_server().await;
 
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+    let output = IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args([
             "--format",
             "json",
@@ -305,9 +303,9 @@ async fn hip3_order_attempt(fail_abstraction: bool) -> (assert_cmd::assert::Asse
         .mount(&server)
         .await;
 
-    let assert = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+    let assert = IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
         .args([
             "orders",
@@ -339,7 +337,9 @@ async fn exchange_requests(server: &MockServer) -> usize {
 #[tokio::test]
 async fn hip3_margin_helper_does_not_transfer_when_the_dex_balance_cannot_be_read() {
     let (assert, server) = hip3_order_attempt(false).await;
-    assert.failure();
+    assert
+        .failure()
+        .stderr(predicate::str::contains("clearinghouse_state"));
     assert_eq!(
         exchange_requests(&server).await,
         0,
@@ -350,7 +350,7 @@ async fn hip3_margin_helper_does_not_transfer_when_the_dex_balance_cannot_be_rea
 #[tokio::test]
 async fn hip3_margin_helper_does_not_skip_the_transfer_when_the_account_mode_cannot_be_read() {
     let (assert, server) = hip3_order_attempt(true).await;
-    assert.failure();
+    assert.code(12);
     assert_eq!(exchange_requests(&server).await, 0);
 }
 
@@ -358,9 +358,9 @@ async fn hip3_margin_helper_does_not_skip_the_transfer_when_the_account_mode_can
 async fn orders_create_dry_run_resolves_non_xyz_hip3_dex_markets() {
     let server = mock_advanced_server().await;
 
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+    let output = IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args([
             "--format",
             "json",
@@ -392,9 +392,9 @@ async fn orders_create_dry_run_resolves_non_xyz_hip3_dex_markets() {
 async fn orders_tpsl_dry_run_resolves_hip3_dex_markets() {
     let server = mock_advanced_server().await;
 
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+    let output = IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args([
             "--format",
             "json",
@@ -425,9 +425,9 @@ async fn orders_tpsl_dry_run_resolves_hip3_dex_markets() {
 async fn orders_twap_create_dry_run_resolves_hip3_dex_markets() {
     let server = mock_advanced_server().await;
 
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+    let output = IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args([
             "--format",
             "json",
@@ -458,9 +458,9 @@ async fn orders_twap_create_dry_run_resolves_hip3_dex_markets() {
 async fn orders_twap_cancel_dry_run_resolves_hip3_dex_markets() {
     let server = mock_advanced_server().await;
 
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+    let output = IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args([
             "--format",
             "json",
@@ -486,9 +486,9 @@ async fn orders_twap_cancel_dry_run_resolves_hip3_dex_markets() {
 async fn orders_create_dry_run_reports_non_usdc_spot_quote_amount_unit() {
     let server = mock_spot_quote_server().await;
 
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+    let output = IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args([
             "--format",
             "json",
@@ -520,13 +520,11 @@ async fn orders_create_dry_run_reports_non_usdc_spot_quote_amount_unit() {
 async fn perps_list_unknown_dex_exits_13() {
     let server = mock_advanced_server().await;
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
-        .env("HYPERLIQUID_FORMAT", "pretty")
+    IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args(["perps", "list", "--dex", "nonexistent"])
         .assert()
-        .failure()
         .code(13)
         .stderr(predicate::str::contains("Unknown DEX: nonexistent"));
 }
@@ -535,10 +533,9 @@ async fn perps_list_unknown_dex_exits_13() {
 async fn prio_status_shows_auction_status() {
     let server = mock_advanced_server().await;
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
-        .env("HYPERLIQUID_FORMAT", "pretty")
+    IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args(["prio", "status"])
         .assert()
         .success()
@@ -548,12 +545,10 @@ async fn prio_status_shows_auction_status() {
 
 #[test]
 fn prio_bid_without_required_parameters_exits_2_with_usage() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_FORMAT", "pretty")
+    IsolatedHome::new()
+        .command()
         .args(["prio", "bid"])
         .assert()
-        .failure()
         .code(2)
         .stderr(predicate::str::contains("--max"))
         .stderr(predicate::str::contains("--ip"));
@@ -563,10 +558,9 @@ fn prio_bid_without_required_parameters_exits_2_with_usage() {
 async fn prio_bid_with_explicit_parameters_submits_signed_bid() {
     let server = mock_advanced_server().await;
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
-        .env("HYPERLIQUID_FORMAT", "pretty")
+    IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
         .args([
             "prio",
@@ -600,10 +594,9 @@ async fn prio_bid_with_explicit_parameters_submits_signed_bid() {
 async fn prio_bid_cap_below_current_gas_does_not_exit_zero_or_submit() {
     let server = mock_advanced_server().await;
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
-        .env("HYPERLIQUID_FORMAT", "pretty")
+    IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
         .args([
             "prio",
@@ -617,7 +610,6 @@ async fn prio_bid_cap_below_current_gas_does_not_exit_zero_or_submit() {
             "--testnet",
         ])
         .assert()
-        .failure()
         .code(13)
         .stderr(predicate::str::contains("priority bid not submitted"));
 
@@ -635,10 +627,9 @@ async fn prio_bid_cap_below_current_gas_does_not_exit_zero_or_submit() {
 async fn prio_bid_compares_decimal_current_gas_after_converting_to_wei() {
     let server = mock_advanced_server().await;
 
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
-        .env("HYPERLIQUID_FORMAT", "pretty")
+    IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
         .args([
             "prio",
@@ -652,7 +643,6 @@ async fn prio_bid_compares_decimal_current_gas_after_converting_to_wei() {
             "--testnet",
         ])
         .assert()
-        .failure()
         .code(13)
         .stderr(predicate::str::contains(
             "current gas 0.01 is at or above --max 0.009",
@@ -675,9 +665,9 @@ async fn prio_bid_compares_decimal_current_gas_after_converting_to_wei() {
 async fn orders_bracket_dry_run_resolves_hip3_dex_markets() {
     let server = mock_advanced_server().await;
 
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HYPERLIQUID_API_BASE_URL", server.uri())
+    let output = IsolatedHome::new()
+        .command()
+        .env(API_OVERRIDE_ENV, server.uri())
         .args([
             "--format",
             "json",

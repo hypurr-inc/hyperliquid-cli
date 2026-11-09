@@ -980,8 +980,14 @@ mod tests {
         };
         assert_eq!(validate_twap_create_args(&args(300)).unwrap(), 5);
         assert_eq!(validate_twap_create_args(&args(3600)).unwrap(), 60);
-        assert!(validate_twap_create_args(&args(299)).is_err());
-        assert!(validate_twap_create_args(&args(330)).is_err());
-        assert!(validate_twap_create_args(&args(7 * 24 * 60 * 60 + 60)).is_err());
+        for (duration, message) in [
+            (299, "at least 300 seconds"),
+            (330, "whole-minute value in seconds"),
+            (7 * 24 * 60 * 60 + 60, "cannot exceed 7 days"),
+        ] {
+            let err = validate_twap_create_args(&args(duration)).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{duration}");
+            assert!(err.to_string().contains(message), "{duration}: {err}");
+        }
     }
 }

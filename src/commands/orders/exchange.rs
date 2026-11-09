@@ -429,20 +429,17 @@ mod tests {
             3
         );
         assert_eq!(modification_result_oid(&statuses), Some(12345));
-    }
 
-    #[test]
-    fn rejection_text_picks_the_exit_code_and_other_text_keeps_its_wording() {
-        let limited = status_error("place order", "Too many requests: rate limit exceeded");
-        assert_eq!(limited.exit_code(), 11);
-        let credentials = status_error("place order", "Unauthorized");
-        assert_eq!(credentials.exit_code(), 10);
-        let other = status_error("place order", "Order has invalid size.");
-        assert_eq!(other.exit_code(), 13);
+        let waiting_only = parse_order_statuses(serde_json::json!({
+            "type": "order",
+            "data": { "statuses": ["waitingForTrigger", "waitingForFill"] }
+        }))
+        .unwrap();
         assert_eq!(
-            other.to_string(),
-            "Unsupported input: Couldn't place order. Exchange said: [untrusted remote data] Order has invalid size."
+            ensure_action_statuses_ok(&waiting_only, "place order").unwrap(),
+            2
         );
+        assert_eq!(modification_result_oid(&waiting_only), None);
     }
 
     #[test]

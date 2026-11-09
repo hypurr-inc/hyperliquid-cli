@@ -594,34 +594,72 @@ mod tests {
         }
     }
 
-    #[test]
-    fn market_entry_requires_size_or_amount() {
-        let mut args = sample_args();
-        args.size = None;
-        assert!(validate_bracket_args(&args).is_err());
+    type Tweak = fn(&mut BracketArgs);
+
+    fn limit_entry(args: &mut BracketArgs) {
+        args.entry = CreateOrderType::Limit;
+        args.price = Some(Decimal::from(100));
     }
 
     #[test]
-    fn limit_entry_requires_price() {
-        let mut args = sample_args();
-        args.entry = CreateOrderType::Limit;
-        assert!(validate_bracket_args(&args).is_err());
-        args.price = Some(Decimal::from(100));
-        assert!(validate_bracket_args(&args).is_ok());
-    }
-
-    #[test]
-    fn limit_entry_refuses_a_quote_amount() {
-        let mut args = sample_args();
-        args.entry = CreateOrderType::Limit;
-        args.price = Some(Decimal::from(100));
-        args.amount = Some(Decimal::from(50));
-        let err = validate_bracket_args(&args).unwrap_err();
-        assert_eq!(err.exit_code(), 2);
-        assert!(
-            err.to_string()
-                .contains("--entry limit does not accept --amount")
-        );
+    fn bracket_entry_flag_combinations_are_validated_before_any_read() {
+        let cases: [(&str, Tweak, Option<&str>); 9] = [
+            ("market with size", |_| {}, None),
+            (
+                "market with amount only",
+                |args| {
+                    args.size = None;
+                    args.amount = Some(Decimal::from(50));
+                },
+                None,
+            ),
+            (
+                "market without size or amount",
+                |args| args.size = None,
+                Some("requires --size or --amount for market entry"),
+            ),
+            (
+                "market with size and amount",
+                |args| args.amount = Some(Decimal::from(50)),
+                Some("accepts --size or --amount, not both"),
+            ),
+            (
+                "market with a price",
+                |args| args.price = Some(Decimal::from(100)),
+                Some("--entry market does not accept --price"),
+            ),
+            ("limit with price and size", limit_entry, None),
+            (
+                "limit without price",
+                |args| args.entry = CreateOrderType::Limit,
+                Some("--entry limit requires --price and --size"),
+            ),
+            (
+                "limit with a quote amount",
+                |args| {
+                    limit_entry(args);
+                    args.amount = Some(Decimal::from(50));
+                },
+                Some("--entry limit does not accept --amount"),
+            ),
+            (
+                "stop entry",
+                |args| args.entry = CreateOrderType::StopLoss,
+                Some("--entry supports market or limit"),
+            ),
+        ];
+        for (name, tweak, expected) in cases {
+            let mut args = sample_args();
+            tweak(&mut args);
+            match (validate_bracket_args(&args), expected) {
+                (Ok(()), None) => {}
+                (Err(err), Some(message)) => {
+                    assert_eq!(err.exit_code(), 2, "{name}");
+                    assert!(err.to_string().contains(message), "{name}: {err}");
+                }
+                (outcome, expected) => panic!("{name}: got {outcome:?}, expected {expected:?}"),
+            }
+        }
     }
 
     #[test]
@@ -669,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn bracket_result_is_one_json_object() {
+    fn a_protected_bracket_result_does_not_look_like_an_error_envelope() {
         let output = BracketOutput {
             status: "armed".to_string(),
             coin: "ETH".to_string(),
@@ -678,12 +716,11 @@ mod tests {
             problem: None,
         };
         let value = output.to_json_value();
-        assert!(value.is_object());
-        assert_eq!(value["kind"], "result");
-        assert!(
-            serde_json::from_str::<serde_json::Value>(&value.to_string()).is_ok(),
-            "bracket result must parse as one JSON value"
-        );
+        assert_eq!(value["status"], "armed");
+        assert_eq!(value["protected_size"], "0.1");
+        for key in ["category", "exit_code", "error", "next", "entry_order_id"] {
+            assert!(value.get(key).is_none(), "{key} on a success result");
+        }
     }
 
     #[test]
