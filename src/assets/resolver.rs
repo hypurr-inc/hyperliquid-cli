@@ -14,9 +14,8 @@ use super::query::{AssetQuery, eq_asset_name, normalize_asset_name, parse_asset_
 
 /// Why an asset name did not resolve.
 ///
-/// Deliberately not a `std::error::Error`: it must be converted to
-/// [`CliError`] explicitly (`CliError::from`), because the user-facing text of
-/// [`AssetError::UnsupportedOutcome`] belongs to the commands, not the resolver.
+/// Deliberately not a `std::error::Error`: `?` into an `anyhow::Error` must not
+/// skip the [`CliError`] conversion that gives each case its exit code and text.
 #[derive(Debug)]
 pub enum AssetError {
     NotFound {
@@ -27,6 +26,28 @@ pub enum AssetError {
     UnsupportedOutcome { input: String },
     /// The live HIP-3 lookup failed.
     Load(CliError),
+}
+
+impl From<AssetError> for CliError {
+    fn from(err: AssetError) -> Self {
+        match err {
+            AssetError::NotFound {
+                asset,
+                suggestion: Some(suggestion),
+            } => CliError::AssetNotFound {
+                asset,
+                suggestions: suggestion,
+            },
+            AssetError::NotFound {
+                asset,
+                suggestion: None,
+            } => CliError::AssetNotFoundNoSuggestion { asset },
+            AssetError::UnsupportedOutcome { input } => {
+                CliError::unsupported_outcome_notation(&input)
+            }
+            AssetError::Load(err) => err,
+        }
+    }
 }
 
 /// Asset resolver over a metadata snapshot.
@@ -114,22 +135,6 @@ impl AssetResolver {
         }
     }
 
-    /// Resolve a perp like [`Self::resolve_perp_or_fetch`] and return a resolver
-    /// that also lists it, for planners that resolve again without a client.
-    pub async fn with_resolved_perp(
-        self,
-        client: &HttpClient,
-        input: &str,
-    ) -> Result<(Self, PerpAsset), AssetError> {
-        match self.resolve_perp(input) {
-            Ok(perp) => Ok((self, perp)),
-            Err(err) => {
-                let perp = fetch_hip3_perp(client, input, err).await?;
-                Ok((self.with_perp(&perp), perp))
-            }
-        }
-    }
-
     /// Spot protocol asset id for an info-endpoint `@N` key, if listed.
     #[must_use]
     pub fn spot_asset_index_for_internal_id(&self, internal_id: usize) -> Option<usize> {
@@ -176,15 +181,6 @@ impl AssetResolver {
     #[must_use]
     pub fn suggestions(&self, input: &str) -> Vec<String> {
         suggestions(input, self.metadata.all_candidate_names())
-    }
-
-    #[must_use]
-    pub fn with_perp(&self, asset: &PerpAsset) -> Self {
-        let mut metadata = self.metadata.clone();
-        if !metadata.has_perp(asset) {
-            metadata.perps.push(asset.clone());
-        }
-        Self { metadata }
     }
 
     fn spot_for_internal_id(&self, internal_id: usize) -> Option<&SpotAsset> {
@@ -429,12 +425,32 @@ mod tests {
     }
 
     #[test]
-    fn with_perp_adds_only_unlisted_markets() {
-        let resolver = resolver();
-        let listed = hip3_perp("DEX", "token", 110_001);
-        let new = hip3_perp("other", "NEW", 120_000);
+    fn asset_errors_convert_to_their_cli_errors() {
+        let not_found = CliError::from(AssetError::NotFound {
+            asset: "BTCC".to_string(),
+            suggestion: Some("BTC".to_string()),
+        });
+        assert_eq!(not_found.exit_code(), 13);
+        assert_eq!(
+            not_found.to_string(),
+            "Couldn't find asset \"BTCC\". Did you mean BTC?"
+        );
+        assert_eq!(not_found.suggestion(), Some("BTC"));
 
-        assert_eq!(resolver.with_perp(&listed).perps().len(), 2);
-        assert_eq!(resolver.with_perp(&new).perps().len(), 3);
+        let bare = CliError::from(AssetError::NotFound {
+            asset: "ZZZ".to_string(),
+            suggestion: None,
+        });
+        assert!(matches!(bare, CliError::AssetNotFoundNoSuggestion { .. }));
+
+        let outcome = CliError::from(AssetError::UnsupportedOutcome {
+            input: "#10".to_string(),
+        });
+        assert_eq!(outcome.exit_code(), 13);
+        assert!(outcome.to_string().contains("outcome-aware command path"));
+        assert!(outcome.to_string().contains("outcomes get #10"));
+
+        let load = CliError::from(AssetError::Load(CliError::AuthRequired));
+        assert!(matches!(load, CliError::AuthRequired));
     }
 }

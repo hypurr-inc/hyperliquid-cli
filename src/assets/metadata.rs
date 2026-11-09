@@ -150,17 +150,6 @@ impl AssetMetadata {
             .chain(self.spots.iter().map(|spot| spot.symbol.clone()))
             .collect()
     }
-
-    /// Whether `asset` is already listed, by protocol id or by DEX and name.
-    pub(super) fn has_perp(&self, asset: &PerpAsset) -> bool {
-        self.perps.iter().any(|existing| {
-            existing.index == asset.index
-                || (matches!(
-                    (&existing.dex, &asset.dex),
-                    (Some(left), Some(right)) if eq_asset_name(left, right)
-                ) && eq_asset_name(&existing.name, &asset.name))
-        })
-    }
 }
 
 fn sz_decimals(value: i64, market: &str) -> Result<u32, CliError> {

@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::actions;
-use crate::commands::support::print_signed_dry_run;
+use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::invocation::Invocation;
@@ -549,11 +549,9 @@ impl CliCommand for SubaccountCreate {
     async fn run(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error> {
         validate_create_args(args)?;
         if inv.dry_run() {
-            return print_signed_dry_run(
+            return print_dry_run(
                 inv,
-                "subaccount create",
                 "create_subaccount",
-                SubaccountActionKind::Create.reversibility(),
                 create_dry_run_value(inv.remote()?.chain(), args),
             );
         }
@@ -585,11 +583,9 @@ impl CliCommand for SubaccountTransfer {
         validate_transfer_args(args)?;
         let subaccount = inv.resolve_acting_account(&args.subaccount)?;
         if inv.dry_run() {
-            return print_signed_dry_run(
+            return print_dry_run(
                 inv,
-                "subaccount transfer",
                 "subaccount_usdc_transfer",
-                SubaccountActionKind::TransferUsdc.reversibility(),
                 transfer_dry_run_value(inv.remote()?.chain(), subaccount, args)?,
             );
         }
@@ -622,11 +618,9 @@ impl CliCommand for SubaccountSpotTransfer {
         validate_spot_transfer_args(args)?;
         let subaccount = inv.resolve_acting_account(&args.subaccount)?;
         if inv.dry_run() {
-            return print_signed_dry_run(
+            return print_dry_run(
                 inv,
-                "subaccount spot-transfer",
                 "subaccount_spot_transfer",
-                SubaccountActionKind::TransferSpot.reversibility(),
                 spot_transfer_dry_run_value(inv.remote()?.chain(), subaccount, args)?,
             );
         }

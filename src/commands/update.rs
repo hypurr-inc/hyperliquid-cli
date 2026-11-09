@@ -17,8 +17,7 @@ impl CliCommand for Update {
     )
     .lifecycle(Lifecycle::InteractiveLocal)
     .risk(Risk::LocalState)
-    .dry_run(DryRunPolicy::Optional)
-    .dangerous(true)
+    .dry_run(DryRunPolicy::Optional).dangerous()
     .local();
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {

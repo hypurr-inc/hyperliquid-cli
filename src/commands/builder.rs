@@ -14,7 +14,7 @@ use hypersdk::hypercore::Chain;
 use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::commands::support::print_signed_dry_run;
+use crate::commands::support::{print_dry_run, require_master_signer};
 use crate::commands::user_signed::{self, UserSigned};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
@@ -520,34 +520,22 @@ impl CliCommand for BuilderApprove {
     async fn run(inv: &Invocation, args: &ApproveArgs) -> Result<(), anyhow::Error> {
         let builder = parse_builder_address(&args.builder)?;
         validate_max_fee_rate(&args.max_fee_rate)?;
+        let resolved = inv.resolve_signer();
+        if let Ok(signer) = &resolved {
+            require_master_signer(signer, "approveBuilderFee")?;
+        }
         if inv.dry_run() {
-            let signer_context = inv.resolve_signer().ok();
+            let signer = resolved.ok();
             let preview_args = approve_dry_run_value(
                 inv.remote()?.chain(),
-                signer_context.as_ref().map(|resolved| resolved.address()),
-                signer_context
-                    .as_ref()
-                    .map(|resolved| resolved.query_address()),
+                signer.as_ref().map(|resolved| resolved.address()),
+                signer.as_ref().map(|resolved| resolved.query_address()),
                 builder,
                 args,
             )?;
-            return print_signed_dry_run(
-                inv,
-                "builder approve",
-                "approve_builder_fee",
-                APPROVE_REVERSIBILITY,
-                preview_args,
-            );
+            return print_dry_run(inv, "approve_builder_fee", preview_args);
         }
-        let resolved = inv.resolve_signer()?;
-        if resolved.query_address() != resolved.address() {
-            return Err(CliError::Unsupported(
-            "approveBuilderFee must be signed by the master account; select the master wallet, not a stored API wallet"
-                .to_string(),
-        )
-        .into());
-        }
-        approve(inv, &resolved.selected_signer(), builder, args).await
+        approve(inv, &resolved?.selected_signer(), builder, args).await
     }
 }
 

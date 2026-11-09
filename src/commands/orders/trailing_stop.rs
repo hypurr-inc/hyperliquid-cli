@@ -220,11 +220,7 @@ pub(crate) fn prepare_trailing_stop_plan(
 impl TrailingStopPlan {
     /// The `--dry-run` preview of this plan.
     pub(crate) fn dry_run_plan(&self, args: &TrailingStopArgs) -> OrderDryRunPlan {
-        OrderDryRunPlan::new(
-            "orders trailing-stop",
-            "trailing_stop",
-            self.dry_run_args(args),
-        )
+        OrderDryRunPlan::new("trailing_stop", self.dry_run_args(args))
     }
 }
 

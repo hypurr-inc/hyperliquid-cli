@@ -729,15 +729,14 @@ impl CliCommand for AccountAdd {
         "Add a signing wallet. Passing private_key exposes it to the child process argv.",
     )
     .long_about("Add an OWS wallet.\n\
-\n\
-Recommended for humans: run `hyperliquid account add` without PRIVATE_KEY and paste the key at the hidden prompt.\n\
-\n\
-For controlled automation, pass PRIVATE_KEY with --alias, --type, and optionally --default. Passing a private key as an argument can expose it in OS process listings and shell history.")
+    \n\
+    Recommended for humans: run `hyperliquid account add` without PRIVATE_KEY and paste the key at the hidden prompt.\n\
+    \n\
+    For controlled automation, pass PRIVATE_KEY with --alias, --type, and optionally --default. Passing a private key as an argument can expose it in OS process listings and shell history.")
     .lifecycle(Lifecycle::InteractiveLocal)
     .risk(Risk::LocalSecret)
     .dry_run(DryRunPolicy::Optional)
-    .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .ows(OwsSupport::NotApplicable).dangerous()
     .prompt()
     .local()
     .args(&[
@@ -751,15 +750,12 @@ For controlled automation, pass PRIVATE_KEY with --alias, --type, and optionally
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "account add",
+                "store_encrypted_signing_account",
                 serde_json::json!({
-                    "would_execute": "store_encrypted_signing_account",
-                    "args": {
-                        "private_key_supplied": args.private_key.is_some(),
-                        "alias": args.alias,
-                        "type": args.account_type,
-                        "default": args.default
-                    }
+                    "private_key_supplied": args.private_key.is_some(),
+                    "alias": args.alias,
+                    "type": args.account_type,
+                    "default": args.default
                 }),
             );
         }
@@ -809,7 +805,7 @@ impl CliCommand for AccountSetDefault {
     .risk(Risk::LocalState)
     .dry_run(DryRunPolicy::Optional)
     .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .dangerous()
     .local()
     .args(&[arg("selector")
         .describe("Wallet name, wallet id, or address.")
@@ -820,11 +816,8 @@ impl CliCommand for AccountSetDefault {
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "account set-default",
-                serde_json::json!({
-                    "would_execute": "set_default_account",
-                    "args": {"selector": args.selector}
-                }),
+                "set_default_account",
+                serde_json::json!({"selector": args.selector}),
             );
         }
         account_set_default(inv, &Settings::from_process(), args.selector.as_deref())
@@ -846,7 +839,7 @@ impl CliCommand for AccountRemove {
     .risk(Risk::LocalState)
     .dry_run(DryRunPolicy::Optional)
     .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .dangerous()
     .prompt()
     .confirms_with_arg("selector")
     .local()
@@ -864,11 +857,8 @@ impl CliCommand for AccountRemove {
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "account remove",
-                serde_json::json!({
-                    "would_execute": "remove_stored_account",
-                    "args": {"selector": args.selector, "yes": args.yes}
-                }),
+                "remove_stored_account",
+                serde_json::json!({"selector": args.selector, "yes": args.yes}),
             );
         }
         account_remove(
@@ -895,15 +885,15 @@ impl CliCommand for WalletCreate {
     .risk(Risk::LocalSecret)
     .dry_run(DryRunPolicy::Optional)
     .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .dangerous()
     .local();
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "wallet create",
-                serde_json::json!({"would_execute": "create_and_store_encrypted_wallet"}),
+                "create_and_store_encrypted_wallet",
+                serde_json::Value::Null,
             );
         }
         create(inv, &Settings::from_process())
@@ -922,15 +912,14 @@ impl CliCommand for WalletImport {
         "Import a private key into the OWS vault. Passing private_key exposes it to the child process argv.",
     )
     .long_about("Import an existing private key.\n\
-\n\
-Recommended for humans: run `hyperliquid wallet import` without PRIVATE_KEY and paste the key at the hidden prompt.\n\
-\n\
-Warning: `hyperliquid wallet import <PRIVATE_KEY>` can expose the key in OS process listings and shell history. Use the argument form only for controlled automation.")
+    \n\
+    Recommended for humans: run `hyperliquid wallet import` without PRIVATE_KEY and paste the key at the hidden prompt.\n\
+    \n\
+    Warning: `hyperliquid wallet import <PRIVATE_KEY>` can expose the key in OS process listings and shell history. Use the argument form only for controlled automation.")
     .lifecycle(Lifecycle::InteractiveLocal)
     .risk(Risk::LocalSecret)
     .dry_run(DryRunPolicy::Optional)
-    .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .ows(OwsSupport::NotApplicable).dangerous()
     .prompt()
     .local()
     .args(&[
@@ -941,11 +930,8 @@ Warning: `hyperliquid wallet import <PRIVATE_KEY>` can expose the key in OS proc
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "wallet import",
-                serde_json::json!({
-                    "would_execute": "validate_and_store_encrypted_wallet",
-                    "args": {"private_key_supplied": args.private_key.is_some()}
-                }),
+                "validate_and_store_encrypted_wallet",
+                serde_json::json!({"private_key_supplied": args.private_key.is_some()}),
             );
         }
         import(inv, &Settings::from_process(), args.private_key.as_deref())
@@ -964,15 +950,14 @@ impl CliCommand for WalletImportMnemonic {
         "Import an existing wallet from a BIP-39 mnemonic phrase.",
     )
     .long_about("Import an existing wallet from a BIP-39 mnemonic phrase.\n\
-\n\
-Recommended for humans: run `hyperliquid wallet import-mnemonic` without MNEMONIC and paste the phrase at the hidden prompt.\n\
-\n\
-Warning: passing a mnemonic as an argument can expose it in OS process listings and shell history. Use the argument form only for controlled automation.")
+    \n\
+    Recommended for humans: run `hyperliquid wallet import-mnemonic` without MNEMONIC and paste the phrase at the hidden prompt.\n\
+    \n\
+    Warning: passing a mnemonic as an argument can expose it in OS process listings and shell history. Use the argument form only for controlled automation.")
     .lifecycle(Lifecycle::InteractiveLocal)
     .risk(Risk::LocalSecret)
     .dry_run(DryRunPolicy::Optional)
-    .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .ows(OwsSupport::NotApplicable).dangerous()
     .prompt()
     .local()
     .args(&[
@@ -984,11 +969,8 @@ Warning: passing a mnemonic as an argument can expose it in OS process listings 
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "wallet import-mnemonic",
-                serde_json::json!({
-                    "would_execute": "import_mnemonic_to_ows_vault",
-                    "args": {"mnemonic_supplied": args.mnemonic.is_some(), "alias": args.alias}
-                }),
+                "import_mnemonic_to_ows_vault",
+                serde_json::json!({"mnemonic_supplied": args.mnemonic.is_some(), "alias": args.alias}),
             );
         }
         import_mnemonic(
@@ -1012,15 +994,14 @@ impl CliCommand for WalletLogin {
         "Store a Bankr API key and the wallet address it reports.",
     )
     .long_about("Log in to a Bankr hosted wallet.\n\
-\n\
-The key is checked against https://api.bankr.bot before it is stored, then saved owner-only in the config file with the wallet address. Signing commands use that wallet with the global --bankr flag.\n\
-\n\
-Recommended for humans: run `hyperliquid wallet login` without --api-key and paste the key at the hidden prompt.")
+    \n\
+    The key is checked against https://api.bankr.bot before it is stored, then saved owner-only in the config file with the wallet address. Signing commands use that wallet with the global --bankr flag.\n\
+    \n\
+    Recommended for humans: run `hyperliquid wallet login` without --api-key and paste the key at the hidden prompt.")
     .lifecycle(Lifecycle::InteractiveLocal)
     .risk(Risk::LocalSecret)
     .dry_run(DryRunPolicy::Optional)
-    .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .ows(OwsSupport::NotApplicable).dangerous()
     .prompt()
     .local()
     .args(&[
@@ -1032,13 +1013,10 @@ Recommended for humans: run `hyperliquid wallet login` without --api-key and pas
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "wallet login",
+                "validate_and_store_bankr_api_key",
                 serde_json::json!({
-                    "would_execute": "validate_and_store_bankr_api_key",
-                    "args": {
-                        "api_key_supplied": args.api_key.is_some(),
-                        "api_url": args.api_url
-                    }
+                    "api_key_supplied": args.api_key.is_some(),
+                    "api_url": args.api_url
                 }),
             );
         }
@@ -1067,11 +1045,7 @@ impl CliCommand for WalletLogout {
 
     async fn run(inv: &Invocation, args: &WalletLogoutArgs) -> Result<(), anyhow::Error> {
         if inv.dry_run() {
-            return print_dry_run(
-                inv,
-                "wallet logout",
-                serde_json::json!({"would_execute": "remove_bankr_api_key"}),
-            );
+            return print_dry_run(inv, "remove_bankr_api_key", serde_json::Value::Null);
         }
         logout(inv, &Settings::from_process(), args.yes)
     }
@@ -1090,7 +1064,7 @@ impl CliCommand for WalletShow {
     )
     .risk(Risk::LocalSecret)
     .ows(OwsSupport::AddressSelectorSupported)
-    .auth(true);
+    .auth();
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         let signer = inv.resolve_signer()?;
@@ -1112,7 +1086,7 @@ impl CliCommand for WalletAddress {
     )
     .risk(Risk::LocalSecret)
     .ows(OwsSupport::AddressSelectorSupported)
-    .auth(true);
+    .auth();
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
         let signer = inv.resolve_signer()?;
@@ -1156,7 +1130,7 @@ impl CliCommand for WalletRename {
     .lifecycle(Lifecycle::InteractiveLocal)
     .risk(Risk::LocalState)
     .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .dangerous()
     .local()
     .dry_run_refusal("--dry-run is not supported for wallet rename")
     .args(&[arg("selector"), arg("new_name")]);
@@ -1186,7 +1160,7 @@ impl CliCommand for WalletDelete {
     .risk(Risk::LocalState)
     .dry_run(DryRunPolicy::Optional)
     .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .dangerous()
     .prompt()
     .local()
     .args(&[arg("selector"), arg("yes").kind(InputKind::Boolean)]);
@@ -1195,11 +1169,8 @@ impl CliCommand for WalletDelete {
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "wallet delete",
-                serde_json::json!({
-                    "would_execute": "delete_ows_wallet",
-                    "args": {"selector": args.selector, "yes": args.yes}
-                }),
+                "delete_ows_wallet",
+                serde_json::json!({"selector": args.selector, "yes": args.yes}),
             );
         }
         account_remove(
@@ -1225,7 +1196,7 @@ impl CliCommand for WalletExport {
     .lifecycle(Lifecycle::InteractiveLocal)
     .risk(Risk::LocalSecret)
     .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .dangerous()
     .prompt()
     .local()
     .dry_run_refusal("--dry-run is not supported for wallet export")
@@ -1250,8 +1221,7 @@ impl CliCommand for WalletReset {
     .lifecycle(Lifecycle::InteractiveLocal)
     .risk(Risk::LocalState)
     .dry_run(DryRunPolicy::Optional)
-    .ows(OwsSupport::NotApplicable)
-    .dangerous(true)
+    .ows(OwsSupport::NotApplicable).dangerous()
     .prompt()
     .local()
     .args(&[
@@ -1262,11 +1232,8 @@ impl CliCommand for WalletReset {
         if inv.dry_run() {
             return print_dry_run(
                 inv,
-                "wallet reset",
-                serde_json::json!({
-                    "would_execute": "remove_wallet_configuration",
-                    "args": {"yes": args.yes}
-                }),
+                "remove_wallet_configuration",
+                serde_json::json!({"yes": args.yes}),
             );
         }
         reset(inv, &Settings::from_process(), args.yes)

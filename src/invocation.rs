@@ -15,7 +15,6 @@ use hypersdk::hypercore::Chain;
 use crate::assets::{AssetResolver, MetadataCache};
 use crate::auth::{ResolvedSigner, SignerSelection};
 use crate::command_spec::CommandSpec;
-use crate::dry_run::{DryRunEnvelope, DryRunRunContext};
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::input_hardening::{FilePolicy, parse_json_text, read_json_file};
@@ -241,26 +240,6 @@ impl Invocation {
             let _ = self.payload.set(payload);
         }
         Ok(())
-    }
-
-    /// Print a dry-run envelope. A command that resolves the network names it,
-    /// and the signer when its previews are signed; a local command names
-    /// neither.
-    pub fn print_dry_run(&self, envelope: DryRunEnvelope) {
-        let context = if self.command.local {
-            None
-        } else {
-            self.remote.get().map(|remote| {
-                let signer = self.command.dry_run_names_signer().then(|| {
-                    self.resolve_signer()
-                        .map(|signer| signer.address().to_string())
-                        .map_err(|err| err.to_string())
-                });
-                DryRunRunContext::new(remote.network(), signer)
-            })
-        };
-        self.session
-            .print_untimed(&envelope.with_run_context(context));
     }
 
     // ── Network, signer and assets ──────────────────────────────────────

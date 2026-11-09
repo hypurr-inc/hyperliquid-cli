@@ -202,12 +202,6 @@ fn rows_from_meta(response: OutcomeMetaResponse) -> Vec<OutcomeSideRow> {
     rows
 }
 
-pub fn unsupported_outcome_trading_error(raw: &str) -> CliError {
-    CliError::Unsupported(format!(
-        "outcome asset notation '{raw}' requires an outcome-aware command path; use `hyperliquid outcomes get {raw}` to inspect the encoded HIP-4 asset id. Live limit orders support outcome notation."
-    ))
-}
-
 #[derive(Debug, Serialize)]
 struct OutcomeMetaRequest {
     #[serde(rename = "type")]

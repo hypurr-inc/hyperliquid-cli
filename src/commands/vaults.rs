@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::actions;
 use crate::commands::positions::PositionRow;
-use crate::commands::support::print_signed_dry_run;
+use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -39,14 +39,6 @@ impl VaultTransferActionKind {
             "deposit"
         } else {
             "withdraw"
-        }
-    }
-
-    fn command(self) -> &'static str {
-        if self.is_deposit() {
-            "vault deposit"
-        } else {
-            "vault withdraw"
         }
     }
 
@@ -476,11 +468,9 @@ async fn run_transfer(
     let vault = parse_address(&args.vault)?;
     let usd = validate_usdc_amount(args.amount)?;
     if inv.dry_run() {
-        return print_signed_dry_run(
+        return print_dry_run(
             inv,
-            action_kind.command(),
             action_kind.would_execute(),
-            TRANSFER_REVERSIBILITY,
             transfer_dry_run_value(inv.remote()?.chain(), args, action_kind, vault, usd),
         );
     }

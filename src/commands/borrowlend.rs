@@ -10,7 +10,7 @@ use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs,
 use crate::commands::account::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::actions;
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
-use crate::commands::support::print_signed_dry_run;
+use crate::commands::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -763,11 +763,9 @@ async fn borrowlend_action(
     let token = resolve_spot_token(remote.api().sdk(), &args.token).await?;
     let wei = borrowlend_wei(args, token.wei_decimals)?;
     if inv.dry_run() {
-        return print_signed_dry_run(
+        return print_dry_run(
             inv,
-            &format!("borrowlend {}", operation.as_str()),
             &format!("{}_borrowlend", operation.as_str()),
-            REVERSIBILITY,
             action_preview(remote.chain(), operation, args, &token, wei),
         );
     }

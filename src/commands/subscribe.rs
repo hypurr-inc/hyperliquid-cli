@@ -162,8 +162,7 @@ impl CliCommand for SubscribeOrderUpdates {
     )
     .lifecycle(Lifecycle::Streaming)
     .risk(Risk::AccountState)
-    .ows(OwsSupport::ExperimentalFeatureGated)
-    .auth(true)
+    .ows(OwsSupport::ExperimentalFeatureGated).auth()
     .stream(StreamBound::Subscribe)
     .args(&[
         arg("max_events").describe("Stop after this many matching events."),
@@ -189,8 +188,7 @@ impl CliCommand for SubscribeFills {
     )
     .lifecycle(Lifecycle::Streaming)
     .risk(Risk::AccountState)
-    .ows(OwsSupport::ExperimentalFeatureGated)
-    .auth(true)
+    .ows(OwsSupport::ExperimentalFeatureGated).auth()
     .stream(StreamBound::Subscribe)
     .args(&[
         arg("max_events").describe("Stop after this many matching events."),

@@ -421,14 +421,14 @@ impl CommandSpec {
     }
 
     #[must_use]
-    pub const fn auth(mut self, required: bool) -> Self {
-        self.auth_required = required;
+    pub const fn auth(mut self) -> Self {
+        self.auth_required = true;
         self
     }
 
     #[must_use]
-    pub const fn dangerous(mut self, dangerous: bool) -> Self {
-        self.dangerous = dangerous;
+    pub const fn dangerous(mut self) -> Self {
+        self.dangerous = true;
         self
     }
 

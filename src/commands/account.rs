@@ -17,9 +17,7 @@ use serde::Serialize;
 use crate::command_spec::{ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
 use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
 use crate::commands::spot_balances::{RawSpotBalance, user_spot_balances_raw};
-use crate::commands::support::{
-    canonical_dex, dry_run_signed_details, dry_run_signer_address, print_dry_run,
-};
+use crate::commands::support::{canonical_dex, print_dry_run, require_master_signer};
 use crate::commands::user_signed::{self, UserSigned};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -279,19 +277,20 @@ pub async fn fetch_abstraction(
 
 fn abstraction_set_dry_run_value(
     chain: hypersdk::hypercore::Chain,
-    signer: Address,
+    signer: Option<Address>,
     mode: AbstractionModeArg,
 ) -> serde_json::Value {
+    let user = signer.map(|address| address.to_string());
     serde_json::json!({
         "mode": mode.cli_value(),
         "protocol_mode": mode.protocol_value(),
         "network": chain.to_string(),
-        "user": signer.to_string(),
+        "user": user,
         "action": {
             "type": UserSetAbstraction::ACTION_TYPE,
             "hyperliquidChain": chain.to_string(),
             "signatureChainId": chain.arbitrum_id().to_string(),
-            "user": signer.to_string(),
+            "user": user,
             "abstraction": mode.protocol_value(),
         }
     })
@@ -1356,32 +1355,22 @@ impl CliCommand for AccountAbstractionSet {
     ]);
 
     async fn run(inv: &Invocation, args: &SetAbstractionArgs) -> Result<(), anyhow::Error> {
+        let resolved = inv.resolve_signer();
+        if let Ok(signer) = &resolved {
+            require_master_signer(signer, "userSetAbstraction")?;
+        }
         if inv.dry_run() {
-            let signer_address = inv.resolve_signer().ok().map(|r| r.address());
-            let fallback_address: Address = "0x0000000000000000000000000000000000000001"
-                .parse()
-                .expect("valid placeholder address");
-            let preview_args = abstraction_set_dry_run_value(
-                inv.remote()?.chain(),
-                signer_address.unwrap_or(fallback_address),
-                args.mode,
-            );
-            let signer = dry_run_signer_address(inv);
             return print_dry_run(
                 inv,
-                "account abstraction set",
-                dry_run_signed_details(inv, "set_abstraction", preview_args, signer, None, None),
+                "set_abstraction",
+                abstraction_set_dry_run_value(
+                    inv.remote()?.chain(),
+                    resolved.ok().map(|signer| signer.address()),
+                    args.mode,
+                ),
             );
         }
-        let resolved = inv.resolve_signer()?;
-        if resolved.query_address() != resolved.address() {
-            return Err(CliError::Unsupported(
-                "userSetAbstraction must be signed by the master account; select the master wallet, not a stored API wallet"
-                    .to_string(),
-            )
-            .into());
-        }
-        set_abstraction(inv, &resolved.selected_signer(), args).await
+        set_abstraction(inv, &resolved?.selected_signer(), args).await
     }
 }
 
