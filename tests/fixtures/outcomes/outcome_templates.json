@@ -1,0 +1,183 @@
+[
+ {
+  "id": "binaryPrice",
+  "role": {
+   "standaloneOutcome": {
+    "sideNames": [
+     "Yes",
+     "No"
+    ]
+   }
+  },
+  "name": "{perp} above {threshold} at {time}?",
+  "description": "The market resolves to Yes if the {perp} price is above {threshold} at {time}, and otherwise resolves to No. Settlement is according to the {seconds}-second TWA",
+  "keywords": [
+   [
+    "perp",
+    "hlPerp"
+   ],
+   [
+    "priceDescription",
+    "string"
+   ],
+   [
+    "seconds",
+    "uInt"
+   ],
+   [
+    "threshold",
+    "uDecimal"
+   ],
+   [
+    "time",
+    "dateTime"
+   ]
+  ]
+ },
+ {
+  "id": "sportsContestDraw2",
+  "role": {
+   "questionOutcome": {
+    "parent": "sportsContestResult"
+   }
+  },
+  "name": "Draw",
+  "description": "This outcome resolves to Yes if, under the parent question's rules, the Contest Result is a draw or the Residual Conditions apply, and otherwise resolves to No.",
+  "keywords": []
+ },
+ {
+  "id": "sportsContestParticipant2",
+  "role": {
+   "questionOutcome": {
+    "parent": "sportsContestResult"
+   }
+  },
+  "name": "{participant}",
+  "description": "This outcome resolves to Yes if {participant} is the sole winner of the Contest under the parent question's rules, and otherwise resolves to No.",
+  "keywords": [
+   [
+    "participant",
+    "string"
+   ]
+  ]
+ },
+ {
+  "id": "sportsContestResult",
+  "role": "question",
+  "name": "{competition} {stage}: {participantA} v {participantB}",
+  "description": "This {sport} market has three possible results: {participantA}, Draw, or {participantB}. Exactly one corresponding named outcome resolves to Yes; the other two ",
+  "keywords": [
+   [
+    "competition",
+    "string"
+   ],
+   [
+    "contestType",
+    "string"
+   ],
+   [
+    "countedPlay",
+    "string"
+   ],
+   [
+    "officialSource",
+    "string"
+   ],
+   [
+    "participantA",
+    "string"
+   ],
+   [
+    "participantB",
+    "string"
+   ],
+   [
+    "resolutionDeadline",
+    "dateTime"
+   ],
+   [
+    "scheduledStart",
+    "dateTime"
+   ],
+   [
+    "season",
+    "string"
+   ],
+   [
+    "sport",
+    "string"
+   ],
+   [
+    "stage",
+    "string"
+   ]
+  ]
+ },
+ {
+  "id": "sportsContestWinner",
+  "role": {
+   "standaloneOutcome": {
+    "sideNames": [
+     "{shortNameA}",
+     "{shortNameB}"
+    ]
+   }
+  },
+  "name": "{competition} {stage}: {participantA} v {participantB}",
+  "description": "This {sport} market has two sides, {shortNameA} for {participantA} and {shortNameB} for {participantB}. It covers the {contestType} between {participantA} and {",
+  "keywords": [
+   [
+    "competition",
+    "string"
+   ],
+   [
+    "contestType",
+    "string"
+   ],
+   [
+    "countedPlay",
+    "string"
+   ],
+   [
+    "officialSource",
+    "string"
+   ],
+   [
+    "participantA",
+    "string"
+   ],
+   [
+    "participantB",
+    "string"
+   ],
+   [
+    "resolutionDeadline",
+    "dateTime"
+   ],
+   [
+    "scheduledStart",
+    "dateTime"
+   ],
+   [
+    "season",
+    "string"
+   ],
+   [
+    "shortNameA",
+    "shortString"
+   ],
+   [
+    "shortNameB",
+    "shortString"
+   ],
+   [
+    "sport",
+    "string"
+   ],
+   [
+    "stage",
+    "string"
+   ]
+  ]
+ }
+]

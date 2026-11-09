@@ -271,8 +271,15 @@ Canonical top-level aliases accepted by the CLI:
 | `perps get <COIN> [--dex <DEX>]` | Show one perpetual market, including its `margin_mode`. |
 | `spot list` | List spot markets. |
 | `spot get <PAIR>` | Show one spot pair, for example `PURR/USDC`. |
-| `outcomes list [--limit <N>]` | List active outcome market sides from `outcomeMeta`. |
+| `outcomes list [--limit <N>] [--oldest-first]` | List active outcome market sides from `outcomeMeta`, newest outcome first, with template names resolved, `quote_token`, `venue`, `deployer_fee_scale`, the `question` the outcome belongs to (`question_role` `named` or `fallback`) and per-row `warnings`. |
 | `outcomes get #<ENCODING>` / `outcomes get +<ENCODING>` | Show outcome side metadata and derived asset ID. |
+| `outcomes questions [--limit <N>] [--oldest-first]` | List questions: `named_outcomes`, the `fallback_outcome` and `settled_named_outcomes` of each. |
+| `outcomes settled <OUTCOME>` | Show how a settled outcome resolved: `settle_fraction`, per-side payouts, deployer details and its question. Settlement pays out automatically; there is nothing to claim. |
+| `outcomes templates` | List the `outcomeTemplates` outcomes named `template:<id>` are built from. |
+| `outcomes split --outcome <ID> --amount <N> [--yes]` | Split quote tokens into shares of both sides of an outcome (`userOutcome` L1 action). Mainnet prompts unless `--yes`. |
+| `outcomes merge --outcome <ID> (--amount <N> \| --max) [--yes]` | Merge both sides of an outcome back into quote tokens. |
+| `outcomes merge-question --question <ID> (--amount <N> \| --max) [--yes]` | Merge Yes shares of every outcome of a question into quote tokens. |
+| `outcomes negate --question <ID> --outcome <ID> --amount <N> [--yes]` | Convert No shares of a question outcome into Yes shares of every other outcome of the question. |
 | `search <QUERY> [--type perp\|hip3\|spot\|outcome\|all]` | Search perps, HIP-3, spot, and outcomes in one list. Alias of `asset search`. |
 | `book <COIN> [-w] [--max-ticks <TICKS>]` | Show L2 order book snapshot or watch updates. |
 | `mids [-w] [--max-ticks <TICKS>] [--dex <NAME>]` | Show all mid prices. |
