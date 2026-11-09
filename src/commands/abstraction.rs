@@ -152,13 +152,24 @@ pub struct UnifiedRatio {
     pub collateral_token: u32,
 }
 
-/// The unified account ratio of `dexes`, each given with its collateral token
-/// and clearinghouse state, against the spot `balances`. A token whose balance
-/// less isolated margin is not positive has no ratio; `None` when no token has.
+/// What the unified account ratio finds: the worst token's ratio, or a token
+/// whose cross maintenance margin has no collateral left to cover it, which is
+/// worse than any ratio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnifiedRisk {
+    Ratio(UnifiedRatio),
+    Uncovered { collateral_token: u32 },
+}
+
+/// The unified account risk of `dexes`, each given with its collateral token
+/// and clearinghouse state, against the spot `balances`. A token with no
+/// cross maintenance margin is not at risk. A token that has some but whose
+/// balance less isolated margin is missing or not positive is `Uncovered`, and
+/// outranks every ratio; `None` when no token has maintenance margin.
 pub(crate) fn unified_account_ratio(
     dexes: &[(u32, &ClearinghouseState)],
     balances: &[RawSpotBalance],
-) -> Option<UnifiedRatio> {
+) -> Option<UnifiedRisk> {
     // Per collateral token: cross maintenance margin, and the margin isolated
     // positions hold out of the balance.
     let mut claims: BTreeMap<u32, (Decimal, Decimal)> = BTreeMap::new();
@@ -172,21 +183,32 @@ pub(crate) fn unified_account_ratio(
             .map(|position| position.position.margin_used)
             .sum::<Decimal>();
     }
-    claims
-        .into_iter()
-        .filter_map(|(token, (maintenance, isolated))| {
-            let index = usize::try_from(token).ok()?;
-            let held = balances
+    let mut worst: Option<UnifiedRatio> = None;
+    for (token, (maintenance, isolated)) in claims {
+        if maintenance <= Decimal::ZERO {
+            continue;
+        }
+        let held = usize::try_from(token).ok().and_then(|index| {
+            balances
                 .iter()
-                .find(|balance| balance.token == Some(index))?
-                .total;
-            let available = held - isolated;
-            (available > Decimal::ZERO).then(|| UnifiedRatio {
-                ratio: maintenance / available,
+                .find(|balance| balance.token == Some(index))
+                .map(|balance| balance.total)
+        });
+        let available = held.map_or(Decimal::ZERO, |held| held - isolated);
+        if available <= Decimal::ZERO {
+            return Some(UnifiedRisk::Uncovered {
                 collateral_token: token,
-            })
-        })
-        .max_by_key(|ratio| ratio.ratio)
+            });
+        }
+        let ratio = maintenance / available;
+        if worst.is_none_or(|current| ratio > current.ratio) {
+            worst = Some(UnifiedRatio {
+                ratio,
+                collateral_token: token,
+            });
+        }
+    }
+    worst.map(UnifiedRisk::Ratio)
 }
 
 #[cfg(test)]
@@ -266,6 +288,13 @@ mod tests {
         }
     }
 
+    fn ratio_of(risk: Option<UnifiedRisk>) -> UnifiedRatio {
+        match risk {
+            Some(UnifiedRisk::Ratio(ratio)) => ratio,
+            other => panic!("expected a ratio, got {other:?}"),
+        }
+    }
+
     #[test]
     fn the_ratio_sums_dexes_of_one_collateral_and_removes_isolated_margin_only() {
         // (500 + 400) / (1100 - 100 isolated). The cross position's 7000 of
@@ -273,44 +302,62 @@ mod tests {
         let default_dex = state("500", "100", "7000");
         let other_dex = state("400", "0", "0");
 
-        let ratio =
-            unified_account_ratio(&[(0, &default_dex), (0, &other_dex)], &[balance(0, "1100")])
-                .unwrap();
+        let ratio = ratio_of(unified_account_ratio(
+            &[(0, &default_dex), (0, &other_dex)],
+            &[balance(0, "1100")],
+        ));
 
         assert_eq!(ratio.ratio, Decimal::new(9, 1));
         assert_eq!(ratio.collateral_token, 0);
     }
 
     #[test]
-    fn the_account_ratio_is_the_worst_collateral_token_that_has_a_positive_balance() {
+    fn the_account_ratio_is_the_worst_collateral_token() {
         let usdc_dex = state("90", "0", "0");
         let usdh_dex = state("95", "0", "0");
-        let unfunded_dex = state("1000", "0", "0");
-        let swallowed_dex = state("1", "60", "0");
+        let idle_dex = state("0", "0", "0");
 
-        let ratio = unified_account_ratio(
-            &[
-                (0, &usdc_dex),
-                (360, &usdh_dex),
-                (7, &unfunded_dex),
-                (8, &swallowed_dex),
-            ],
-            // Token 7 has no balance; token 8's balance is all isolated margin.
-            &[balance(0, "100"), balance(360, "100"), balance(8, "60")],
-        )
-        .unwrap();
+        let ratio = ratio_of(unified_account_ratio(
+            &[(0, &usdc_dex), (360, &usdh_dex), (7, &idle_dex)],
+            &[balance(0, "100"), balance(360, "100")],
+        ));
 
         assert_eq!(ratio.ratio, Decimal::new(95, 2));
         assert_eq!(ratio.collateral_token, 360);
     }
 
     #[test]
-    fn no_positive_balance_means_no_ratio() {
+    fn maintenance_margin_with_nothing_to_cover_it_is_uncovered_not_silent() {
         let dex = state("10", "0", "0");
-        assert_eq!(unified_account_ratio(&[(0, &dex)], &[]), None);
-        assert_eq!(
-            unified_account_ratio(&[(0, &dex)], &[balance(0, "0")]),
-            None
-        );
+        let swallowed = state("1", "60", "0");
+        let covered = state("99", "0", "0");
+
+        for (dexes, balances, token) in [
+            // No balance for the token at all.
+            (vec![(0, &dex)], vec![], 0),
+            // A zero balance.
+            (vec![(0, &dex)], vec![balance(0, "0")], 0),
+            // The whole balance is isolated margin.
+            (vec![(8, &swallowed)], vec![balance(8, "60")], 8),
+            // Uncovered outranks a token at 99%.
+            (
+                vec![(0, &covered), (8, &swallowed)],
+                vec![balance(0, "100"), balance(8, "60")],
+                8,
+            ),
+        ] {
+            assert_eq!(
+                unified_account_ratio(&dexes, &balances),
+                Some(UnifiedRisk::Uncovered {
+                    collateral_token: token
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn no_maintenance_margin_means_nothing_at_risk() {
+        let idle = state("0", "0", "0");
+        assert_eq!(unified_account_ratio(&[(0, &idle)], &[]), None);
     }
 }
