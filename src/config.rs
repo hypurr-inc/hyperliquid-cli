@@ -14,7 +14,6 @@ use hypersdk::Address;
 use crate::errors::CliError;
 use crate::network::Network;
 use crate::private_fs::{self, FileLock, LockError};
-use crate::settings::EnvSource;
 
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
@@ -193,12 +192,6 @@ impl ConfigFile {
     #[must_use]
     pub fn at(path: PathBuf) -> Self {
         Self { path }
-    }
-
-    /// The platform config file, or the one `env` redirects to.
-    #[must_use]
-    pub fn default_location(env: &EnvSource) -> Option<Self> {
-        crate::paths::config_file(env).map(Self::at)
     }
 
     #[must_use]

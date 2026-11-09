@@ -248,13 +248,6 @@ pub struct ConfigTransaction<'a> {
 }
 
 impl ConfigTransaction<'_> {
-    /// The config as the file held it when the lock was taken (the default for a
-    /// missing file).
-    #[must_use]
-    pub fn config(&self) -> &Config {
-        &self.before
-    }
-
     /// Apply `edit`, save when it changed anything, and return the config keys
     /// it changed (set, changed or cleared).
     pub fn commit(self, edit: impl FnOnce(&mut Config)) -> Result<Vec<String>, anyhow::Error> {
@@ -298,7 +291,8 @@ impl Settings {
     pub fn from_process() -> Self {
         Self::build(
             EnvSource::Process,
-            ConfigFile::default_location(&EnvSource::Process)
+            crate::paths::config_file(&EnvSource::Process)
+                .map(ConfigFile::at)
                 .map_or(ConfigSource::Absent, ConfigSource::File),
             true,
         )
@@ -919,7 +913,7 @@ mod tests {
             (env::HOME_DIR, "/home/fixed"),
         ]);
         assert_eq!(
-            ConfigFile::default_location(&env).unwrap().path(),
+            crate::paths::config_file(&env).unwrap(),
             std::path::Path::new("/cfg/hyperliquid/config.json")
         );
         assert_eq!(

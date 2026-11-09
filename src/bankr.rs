@@ -4,10 +4,14 @@
 //! linked wallet from `GET /wallet/me`, and asks Bankr to sign Hyperliquid L1
 //! actions as EIP-712 typed data (`POST /wallet/sign`).
 //!
-//! Signing is synchronous in this CLI (every command handler signs through
-//! [`crate::signing::SelectedSigner`]), so each Bankr request runs a fresh
+//! Most signing is synchronous in this CLI (command handlers sign through
+//! [`crate::signing::SelectedSigner`]), so those Bankr requests run on a fresh
 //! current-thread runtime on a scoped thread: the handler's own runtime is never
-//! blocked on a future it would have to poll.
+//! blocked on a future it would have to poll. Async callers await the request.
+//!
+//! Bankr signs trading actions and spot-to-perp USDC moves; every other
+//! user-signed action is refused by [`BankrTypedData::for_payload`] before a
+//! request is sent.
 //!
 //! Every returned signature is recovered locally against the expected wallet
 //! address before it is used, so a Bankr reply can never sign for a different

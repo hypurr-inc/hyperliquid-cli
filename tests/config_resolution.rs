@@ -381,8 +381,8 @@ mod settings_tests {
 
     #[test]
     fn config_paths_live_under_a_hyperliquid_directory() {
-        let file = ConfigFile::default_location(&EnvSource::Process).expect("config dir");
-        let path = file.path().to_string_lossy();
+        let path = hyperliquid_cli::paths::config_file(&EnvSource::Process).expect("config dir");
+        let path = path.to_string_lossy();
         assert!(path.contains("hyperliquid"));
         assert!(path.ends_with("config.json"));
     }
