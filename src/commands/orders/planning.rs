@@ -35,7 +35,7 @@ use crate::assets::{
 };
 use crate::builder_fee::{self, BuilderFee};
 use crate::commands::common::position::find_position;
-use crate::errors::{CliError, from_sdk};
+use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::margin::{MarginModeArg, MarginPlan};
 use crate::quantity::require_positive;
@@ -204,11 +204,7 @@ pub(super) async fn market_mid_price(
     dex: Option<&str>,
 ) -> Result<Decimal, CliError> {
     let (key, label) = mid_key(market, coin, dex)?;
-    let mids = client
-        .sdk()
-        .all_mids(market_dex(market))
-        .await
-        .map_err(from_sdk)?;
+    let mids = client.sdk().all_mids(market_dex(market)).await?;
     mids.get(&key).copied().ok_or_else(|| {
         CliError::Unavailable(format!(
             "mid price for {label} was not available. Retry after market data refresh."

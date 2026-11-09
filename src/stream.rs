@@ -5,8 +5,6 @@
 //! exits `128 + signal`. A closed stdout (for example `| head`) ends the stream
 //! quietly with exit 0.
 
-use std::error::Error as StdError;
-use std::fmt;
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::time::Duration;
@@ -21,8 +19,10 @@ use tokio::time::Sleep;
 
 use crate::errors::CliError;
 use crate::invocation::Invocation;
+use crate::mode::DisplayBlocker;
 use crate::output::JsonRenderOptions;
-use crate::output::notice::{self, JsonLinesReason, Notice};
+use crate::output::notice::{self, Notice};
+use crate::output::sink;
 use crate::stream_bounds::{StreamBoundArgs, StreamBounds};
 use crate::ws::BookAggregationArgs;
 use crate::{output, ws};
@@ -30,44 +30,6 @@ use crate::{output, ws};
 /// Exit status for SIGINT and the Ctrl+C key (`128 + 2`). A stop signal exits
 /// `128 +` its number.
 pub(crate) const EXIT_SIGINT: i32 = 130;
-
-/// Stdout was closed by the reader (`| head`); the stream should end quietly.
-#[derive(Debug)]
-pub struct StdoutClosed;
-
-impl fmt::Display for StdoutClosed {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("stdout closed")
-    }
-}
-
-impl StdError for StdoutClosed {}
-
-pub fn is_stdout_closed(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<StdoutClosed>().is_some()
-}
-
-fn map_write_error(err: io::Error) -> anyhow::Error {
-    if err.kind() == io::ErrorKind::BrokenPipe {
-        StdoutClosed.into()
-    } else {
-        err.into()
-    }
-}
-
-/// Write `line` plus a newline to `output` and flush. A broken pipe becomes [`StdoutClosed`].
-fn write_line<W: Write + ?Sized>(output: &mut W, line: &str) -> Result<(), anyhow::Error> {
-    output
-        .write_all(line.as_bytes())
-        .and_then(|()| output.write_all(b"\n"))
-        .and_then(|()| output.flush())
-        .map_err(map_write_error)
-}
-
-/// Write one complete line to stdout. A broken pipe becomes [`StdoutClosed`].
-pub(crate) fn write_stdout_line(line: &str) -> Result<(), anyhow::Error> {
-    write_line(&mut io::stdout().lock(), line)
-}
 
 /// Write one compact JSON line, applying `--select`, `--results-only` and
 /// `--max-results` with stream-envelope rules.
@@ -86,7 +48,7 @@ where
     } else {
         serde_json::to_string(item)?
     };
-    write_line(output, &line)
+    sink::write_line(output, &line)
 }
 
 pub struct ShutdownSignals {
@@ -151,8 +113,7 @@ pub(crate) enum StreamEnd {
 
 /// Flush the standard streams and exit with a signal status. Call after cleanup.
 fn exit_for_signal(code: i32) -> ! {
-    let _ = io::stdout().flush();
-    let _ = io::stderr().flush();
+    sink::flush();
     std::process::exit(code)
 }
 
@@ -174,7 +135,7 @@ where
     match end {
         Ok(StreamEnd::Finished) => Ok(()),
         Ok(StreamEnd::Signal(code)) => exit_for_signal(code),
-        Err(err) if is_stdout_closed(&err) => Ok(()),
+        Err(err) if sink::is_stdout_closed(&err) => Ok(()),
         Err(err) => Err(err),
     }
 }
@@ -466,8 +427,10 @@ pub async fn stream_subscription(
     let mode = inv.mode();
     let projection = inv.session().json_options();
     let bounds = StreamBounds::subscribe(args, inv.settings().env());
-    if !mode.terminal.stdout && !mode.machine_format() {
-        Notice::JsonLines(JsonLinesReason::StdoutNotTerminal).eprint(false);
+    if !mode.machine_format()
+        && let Some(blocker @ DisplayBlocker::StdoutNotTerminal) = mode.live_display_blocker()
+    {
+        Notice::JsonLines(blocker).eprint();
     }
     let announce_loss = mode.person_on_stderr();
 
@@ -637,7 +600,7 @@ where
             if !*gap_pending {
                 *gap_pending = true;
                 if announce_loss {
-                    Notice::ConnectionLost.eprint(false);
+                    Notice::ConnectionLost.eprint();
                 }
             }
             Ok(false)
@@ -646,7 +609,7 @@ where
             if *gap_pending {
                 *gap_pending = false;
                 // Control line: written unprojected so --select cannot drop the gap marker.
-                write_line(output, &notice::stream_gap(subscription_label).to_string())?;
+                sink::write_line(output, &notice::stream_gap(subscription_label).to_string())?;
             }
             Ok(false)
         }
@@ -663,43 +626,11 @@ fn subscription_idle_timeout_error(idle_timeout: Duration) -> CliError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::output::sink::{StdoutClosed, is_stdout_closed};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
-
-    #[test]
-    fn broken_pipe_write_becomes_stdout_closed() {
-        struct ClosedPipe;
-        impl Write for ClosedPipe {
-            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-                Err(io::ErrorKind::BrokenPipe.into())
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let err = write_line(&mut ClosedPipe, "{}").unwrap_err();
-        assert!(is_stdout_closed(&err));
-    }
-
-    #[test]
-    fn other_write_errors_stay_errors() {
-        struct Failing;
-        impl Write for Failing {
-            fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-                Err(io::Error::other("disk full"))
-            }
-            fn flush(&mut self) -> io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let err = write_line(&mut Failing, "{}").unwrap_err();
-        assert!(!is_stdout_closed(&err));
-        assert!(err.to_string().contains("disk full"));
-    }
 
     #[cfg(unix)]
     #[tokio::test]

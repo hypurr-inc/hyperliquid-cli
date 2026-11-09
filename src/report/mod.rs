@@ -9,7 +9,7 @@ mod last_error;
 
 use crate::env::EnvSource;
 use crate::errors::{CliError, ErrorEnvelope, StdoutDocument};
-use crate::output::colors;
+use crate::output::{colors, sink};
 use crate::terminal::OutputFormat;
 
 pub use last_error::LastError;
@@ -49,7 +49,7 @@ fn render_human_error(err: &CliError, rich: bool) -> String {
 /// single JSON document carrying the envelope keys.
 fn print_json_error(err: &CliError) {
     match err.stdout_document() {
-        StdoutDocument::Envelope => println!("{}", ErrorEnvelope::from_cli_error(err).to_json()),
+        StdoutDocument::Envelope => sink::out_line(&ErrorEnvelope::from_cli_error(err).to_json()),
         StdoutDocument::CommandResult => {}
     }
 }
@@ -57,7 +57,7 @@ fn print_json_error(err: &CliError) {
 /// Print the human error block to **stderr** (`✗ ...` when stderr supports
 /// styling, `Error: ...` otherwise).
 fn print_human_error(err: &CliError) {
-    eprintln!("{}", render_human_error(err, colors::stderr_enabled()));
+    sink::err_line(&render_human_error(err, colors::stderr_enabled()));
 }
 
 /// Record the error for `report-incident` (with the failing `command` path,

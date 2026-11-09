@@ -16,7 +16,7 @@ use crate::assets::{
     AssetQuery, AssetResolver, ListedSpot, Market, outcome_coin, parse_asset_query,
     qualify_dex_asset,
 };
-use crate::errors::{CliError, from_sdk};
+use crate::errors::CliError;
 use crate::hints::{
     CANCEL_ORDER_COMMAND, CANCEL_TWAP_COMMAND, CREATE_TWAP_COMMAND, TRAILING_STOP_COMMAND,
 };
@@ -30,8 +30,7 @@ async fn lookup_order(
     let order = client
         .sdk()
         .order_status(user, identifier.to_status_identifier())
-        .await
-        .map_err(from_sdk)?
+        .await?
         .ok_or_else(|| CliError::Unsupported(format!("unknown order {}", identifier.display())))?;
     Ok(order.order)
 }
@@ -221,8 +220,7 @@ pub(super) async fn prepare_cancel_all_orders_plan(
             user,
             coin_filter.as_ref().and_then(|filter| filter.dex.clone()),
         )
-        .await
-        .map_err(from_sdk)?;
+        .await?;
     let orders = filter_orders_by_coin(
         open_orders,
         coin_filter.as_ref().map(|filter| filter.coin.as_str()),

@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::assets::DexMeta;
 use crate::cli_command::CliCommand;
 use crate::command_spec::{CommandSpec, NoArgs};
-use crate::errors::from_sdk;
+use crate::hints;
 use crate::invocation::Invocation;
 use crate::output::format::{duration, plural};
 use crate::output::{TableData, serialize_row};
@@ -50,14 +50,19 @@ impl TableData for StatusOutput {
 
 /// `rate_limit_status` is a constant, not a read. The request budget the API
 /// reports is per account: `account rate-limit`.
-pub const RATE_LIMIT_NOTE: &str = "no rate-limit response observed; 429 responses map to exit code 11 and should be retried with backoff; run `hyperliquid account rate-limit [ADDRESS]` for an account's request budget";
+fn rate_limit_note() -> String {
+    format!(
+        "no rate-limit response observed; 429 responses map to exit code 11 and should be retried with backoff; run `{} [ADDRESS]` for an account's request budget",
+        hints::ACCOUNT_RATE_LIMIT_COMMAND
+    )
+}
 
 pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let api = remote.api();
     let probe_start = Instant::now();
     let perps = DexMeta::load(api, None).await?;
-    let mids = api.sdk().all_mids(None).await.map_err(from_sdk)?;
+    let mids = api.sdk().all_mids(None).await?;
     let latency = probe_start.elapsed();
 
     inv.print(&StatusOutput {
@@ -68,7 +73,7 @@ pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
         perps_count: perps.market_count(),
         mids_count: mids.len(),
         rate_limit_status: "ok".to_string(),
-        rate_limit_note: RATE_LIMIT_NOTE.to_string(),
+        rate_limit_note: rate_limit_note(),
     });
     Ok(())
 }

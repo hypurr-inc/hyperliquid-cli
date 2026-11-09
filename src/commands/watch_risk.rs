@@ -22,12 +22,11 @@ use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::borrow_lend_state::fetch_user_state;
 use crate::commands::common::position::mark_price;
 use crate::commands::common::rows::{One, Row};
-use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::output::Session;
+use crate::output::{Session, sink};
 use crate::spot_balances::user_spot_balances_raw;
-use crate::stream::{self, StreamEnd, Ticker, emit_json_line, write_stdout_line};
+use crate::stream::{self, StreamEnd, Ticker, emit_json_line};
 use crate::stream_bounds::StreamBound;
 use crate::stream_bounds::{StreamBoundArgs, StreamBounds};
 use crate::terminal::OutputFormat;
@@ -216,7 +215,7 @@ fn emit_alert(alert: RiskAlert, session: &Session) -> Result<(), anyhow::Error> 
             &alert,
             session.json_options(),
         ),
-        _ => write_stdout_line(&session.render(&One::new(alert))),
+        _ => sink::stream_line(&session.render(&One::new(alert))),
     }
 }
 
@@ -240,7 +239,7 @@ impl<'a> RiskWatcher<'a> {
         user: Address,
         args: &WatchRiskArgs,
     ) -> Result<Self, anyhow::Error> {
-        let fills = api.sdk().user_fills(user).await.map_err(from_sdk)?;
+        let fills = api.sdk().user_fills(user).await?;
         Ok(Self {
             inv,
             api,
@@ -275,8 +274,7 @@ impl<'a> RiskWatcher<'a> {
                         .api
                         .sdk()
                         .clearinghouse_state(self.user, Some(name.clone()))
-                        .await
-                        .map_err(from_sdk)?;
+                        .await?;
                     others.push((*token, other));
                 }
                 let mut states = vec![(collateral.default_token, state)];
@@ -311,15 +309,9 @@ impl Ticker for RiskWatcher<'_> {
         let mode = fetch_abstraction(self.api, self.user)
             .await?
             .normalized_mode;
-        let state = client
-            .clearinghouse_state(self.user, None)
-            .await
-            .map_err(from_sdk)?;
-        let open_orders = client
-            .open_orders(self.user, None)
-            .await
-            .map_err(from_sdk)?;
-        let mids = client.all_mids(None).await.map_err(from_sdk)?;
+        let state = client.clearinghouse_state(self.user, None).await?;
+        let open_orders = client.open_orders(self.user, None).await?;
+        let mids = client.all_mids(None).await?;
         let margin = self.margin_basis(mode, &state).await?;
 
         let snapshot = RiskSnapshot {

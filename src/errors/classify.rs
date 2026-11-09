@@ -298,7 +298,7 @@ pub fn from_anyhow(err: anyhow::Error) -> CliError {
 /// `HTTP {status} body={text}`) and transport failures carry a
 /// `reqwest::Error`. Everything else is plain text.
 /// Typed [`CliError`]s that were already attached are recovered unchanged.
-pub fn from_sdk(err: anyhow::Error) -> CliError {
+pub(crate) fn from_sdk(err: anyhow::Error) -> CliError {
     let err = match recover_typed(err) {
         Ok(cli_err) => return cli_err,
         Err(err) => err,

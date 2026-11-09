@@ -1,4 +1,5 @@
-//! The layer rule for `commands`, enforced on the source.
+//! The layer rules, enforced on the source: the layer rule for `commands`, and
+//! that nothing prints but through `output::sink`.
 //!
 //! A command is a module under `src/commands/` that implements `CliCommand`.
 //! Commands are leaves, not a hub:
@@ -564,4 +565,62 @@ fn only_the_clock_reads_the_wall_clock() {
         "these read the wall clock directly; use clock::now_utc or clock::now_ms:\n  {}",
         offenders.join("\n  ")
     );
+}
+
+/// `source` as production code: comments and literals blanked, and the unit
+/// tests (the first `#[cfg(test)] mod`) cut off.
+fn production_code(source: &str) -> String {
+    let code = code_only(source);
+    let marker = "#[cfg(test)]";
+    let mut from = 0;
+    while let Some(found) = code[from..].find(marker) {
+        let start = from + found;
+        let after = code[start + marker.len()..].trim_start();
+        if after.starts_with("mod ") || after.starts_with("pub mod ") {
+            return code[..start].to_string();
+        }
+        from = start + marker.len();
+    }
+    code
+}
+
+/// The print macros panic on a closed pipe, and each used to be a policy of its
+/// own. `output::sink` is the one writer to stdout and stderr: it decides what
+/// a reader that went away means.
+#[test]
+fn nothing_prints_but_through_the_output_sink() {
+    let mut offenders = Vec::new();
+    for file in rust_files(&src_dir()) {
+        if file.ends_with("output/sink.rs") {
+            continue;
+        }
+        let code = production_code(&fs::read_to_string(&file).unwrap());
+        for name in ["println!", "eprintln!", "print!", "eprint!", "dbg!"] {
+            for (at, _) in code.match_indices(name) {
+                let glued = code[..at]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric() || c == '_');
+                if !glued {
+                    offenders.push(format!("{}: {name}", file.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "print through `output::sink` instead:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// The scan is not vacuous: it sees a print macro in code and ignores one in a
+/// string, a comment or the unit tests.
+#[test]
+fn the_print_scan_reads_code_and_not_prose_or_tests() {
+    let source = "fn f() { eprintln!(\"x\"); }\n// println!(\"x\")\nfn g() { let _ = \"print!\"; }\n#[cfg(test)]\nmod tests { fn t() { println!(); } }";
+    let code = production_code(source);
+    assert!(code.contains("eprintln!"));
+    assert!(!code.contains("\nprintln!") && !code.contains(" println!"));
+    assert!(!code.contains("print!(\"") && !code.contains("tests"));
 }

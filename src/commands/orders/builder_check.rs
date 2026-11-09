@@ -4,15 +4,14 @@
 //! after the order is sent. Reading `maxBuilderFee` first turns that into an
 //! early failure with the command that fixes it.
 
-use std::io::Write;
-
 use hypersdk::Address;
 
 use crate::builder_fee::{BuilderFee, max_builder_fee, percent_from_tenths_bps};
 use crate::errors::CliError;
+use crate::hints;
 use crate::http_api::ApiClient;
 use crate::mode::Mode;
-use crate::prompt;
+use crate::output::Notice;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BuilderApproval {
@@ -64,10 +63,10 @@ impl BuilderApproval {
         };
         let requested = percent_from_tenths_bps(fee.tenths_bps());
         Some(CliError::Unsupported(format!(
-            "Account {user} has approved builder {} for a max fee of {} ({approved_tenths_bps} tenths of a basis point), below the {requested} this order carries. Approve at least that with the main wallet, which an API wallet cannot do:\n    hyperliquid builder approve --builder {} --max-fee-rate {requested}",
+            "Account {user} has approved builder {} for a max fee of {} ({approved_tenths_bps} tenths of a basis point), below the {requested} this order carries. Approve at least that with the main wallet, which an API wallet cannot do:\n    {}",
             fee.address_wire(),
             percent_from_tenths_bps(*approved_tenths_bps),
-            fee.address_wire(),
+            hints::builder_approve_command(fee.address_wire(), &requested),
         )))
     }
 }
@@ -105,13 +104,12 @@ pub(super) async fn ensure_approved(
         return Err(refusal);
     }
     if let (BuilderApproval::Unread { reason }, true) = (&approval, mode.person_on_stderr()) {
-        let notice = prompt::warning(&format!(
+        Notice::Caution(format!(
             "Couldn't check that builder {} is approved for {}: {reason}. Sending the order anyway; the exchange rejects it if the fee is not approved.",
             fee.address_wire(),
             percent_from_tenths_bps(fee.tenths_bps()),
-        ));
-        // A notice that cannot be written must not stop an order.
-        let _ = writeln!(std::io::stderr(), "{notice}");
+        ))
+        .eprint();
     }
     Ok(())
 }

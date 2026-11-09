@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use hyperliquid_cli::auth::SignerFlags;
 use hyperliquid_cli::errors;
 use hyperliquid_cli::invocation::{Invocation, InvocationFlags};
+use hyperliquid_cli::mode::Mode;
 use hyperliquid_cli::output;
 use hyperliquid_cli::report;
 use hyperliquid_cli::settings::Settings;
@@ -15,14 +16,10 @@ mod cli_runtime;
 mod cli_shell;
 
 use cli_shell::{
-    ParsedCli, exit_for_clap_error, install_panic_hook, name_command_in_panics,
-    print_help_to_stdout, startup, try_parse_cli_from,
+    ParsedCli, install_panic_hook, name_command_in_panics, parse_command_line, print_help_to_stdout,
 };
 
 const GLOBAL_OPTIONS: &str = "Global Options";
-
-/// Global options whose values are secrets. Suggested commands never repeat them.
-const SECRET_GLOBALS: &[&str] = &["private_key", "keystore_password"];
 
 fn root_after_help() -> String {
     format!(
@@ -122,11 +119,7 @@ async fn main() {
         cli,
         selected,
         requested_format,
-    } = match try_parse_cli_from(&raw_args) {
-        Ok(parsed) => parsed,
-        Err(err) => exit_for_clap_error(err, &raw_args, terminal, settings.env()),
-    };
-    output::colors::init(cli.no_color, settings.env(), terminal);
+    } = parse_command_line(&raw_args, terminal, settings.env());
     let command = selected
         .as_ref()
         .map(|selected| selected.entry.spec.path.join(" "));
@@ -147,7 +140,13 @@ async fn main() {
         expires_after: cli.expires_after,
     };
     let env = settings.env().clone();
-    let mode = match startup(requested_format, &flags, terminal, &env) {
+    let mode = match Mode::resolve(
+        requested_format,
+        flags.non_interactive,
+        flags.payload_from_stdin(),
+        terminal,
+        &env,
+    ) {
         Ok(mode) => mode,
         Err((err, format)) => report::exit_with_error(err, format, command.as_deref(), &env),
     };
@@ -171,7 +170,7 @@ async fn main() {
     };
     if let Err(err) = result {
         // This path handles CliError and anyhow errors from command handlers.
-        // clap usage errors (exit 2) are handled by exit_for_clap_error before
+        // clap usage errors (exit 2) are handled by parse_command_line before
         // the command runs, so they don't go through this path.
         hyperliquid_cli::update::flush_update_check_silent(update_check_handle).await;
         report::exit_with_error(

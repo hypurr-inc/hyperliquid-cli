@@ -14,7 +14,7 @@ use serde::{Serialize, Serializer};
 
 use crate::assets::PerpAsset;
 use crate::commands::common::rows::{ListRow, MISSING, Row, or_missing, style_column};
-use crate::errors::{CliError, from_sdk};
+use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::output;
 
@@ -168,8 +168,7 @@ pub(crate) async fn find_position(
     Ok(client
         .sdk()
         .clearinghouse_state(account, perp.dex.clone())
-        .await
-        .map_err(from_sdk)?
+        .await?
         .asset_positions
         .into_iter()
         .find(|position| {

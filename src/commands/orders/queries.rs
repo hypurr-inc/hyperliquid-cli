@@ -6,7 +6,7 @@ use super::args::StatusArgs;
 use super::cloid::{cloid_text, parse_lookup_cloid};
 use crate::assets::AssetResolver;
 use crate::commands::common::order_list::{OrderListOutput, display_row, open_orders_output};
-use crate::errors::{CliError, from_sdk};
+use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::JsonValueOutput;
@@ -110,18 +110,15 @@ async fn historical_orders(
     api: &ApiClient,
     user: Address,
 ) -> Result<Vec<HistoricalOrder>, CliError> {
-    match api.sdk().historical_orders(user).await {
-        Ok(updates) => Ok(updates
+    match api.sdk().historical_orders(user).await? {
+        Some(updates) => Ok(updates
             .into_iter()
             .map(|update| HistoricalOrder {
                 order: update.order,
                 status: Some((status_label(update.status), update.status_timestamp)),
             })
             .collect()),
-        Err(err) if should_fallback_to_raw_historical_orders(&err) => {
-            historical_orders_raw(api, user).await
-        }
-        Err(err) => Err(from_sdk(err)),
+        None => historical_orders_raw(api, user).await,
     }
 }
 
@@ -133,17 +130,7 @@ fn status_label(status: OrderStatus) -> String {
     }
 }
 
-/// hypersdk decodes `historicalOrders` as `OrderUpdate<BasicOrder>`; when the
-/// payload is a bare order list the decode fails with a serde error, and the raw
-/// path accepts both shapes.
-fn should_fallback_to_raw_historical_orders(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| {
-        cause
-            .downcast_ref::<serde_json::Error>()
-            .is_some_and(|decode| decode.classify() == serde_json::error::Category::Data)
-    })
-}
-
+/// The raw path accepts both the SDK's `OrderUpdate` list and a bare order list.
 async fn historical_orders_raw(
     api: &ApiClient,
     user: Address,
@@ -156,27 +143,4 @@ async fn historical_orders_raw(
         .into_iter()
         .map(HistoricalOrderItem::into_order)
         .collect())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn decode_error(text: &str) -> anyhow::Error {
-        anyhow::Error::from(serde_json::from_str::<Vec<u8>>(text).unwrap_err())
-            .context("[historical_orders] body=...")
-    }
-
-    #[test]
-    fn only_a_shape_mismatch_falls_back_to_the_raw_historical_list() {
-        assert!(should_fallback_to_raw_historical_orders(&decode_error(
-            r#"{"not":"a list"}"#
-        )));
-        assert!(!should_fallback_to_raw_historical_orders(&decode_error(
-            "[1, 2"
-        )));
-        assert!(!should_fallback_to_raw_historical_orders(&anyhow::anyhow!(
-            "connection reset"
-        )));
-    }
 }
