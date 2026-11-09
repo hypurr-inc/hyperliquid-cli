@@ -16,7 +16,7 @@ use crate::invocation::Invocation;
 use crate::mode::Mode;
 use crate::output::TableData;
 use crate::quantity::{self, Scale, ScaleError};
-use crate::resolvers::{HexAddressError, parse_exact_hex_address};
+use crate::resolvers::{HexAddressError, parse_hex_address};
 use crate::settings::{BuilderDefaultSetting, Settings};
 use crate::signing::{SelectedSigner, Signs};
 use crate::wire::InfoRequest;
@@ -317,7 +317,7 @@ fn approve_output_row(
 }
 
 pub fn parse_builder_address(raw: &str) -> Result<Address, CliError> {
-    parse_exact_hex_address(raw, true).map_err(|err| match err {
+    parse_hex_address(raw, true).map_err(|err| match err {
         HexAddressError::Format => CliError::Unsupported(format!("Invalid builder address: {raw}")),
         HexAddressError::Zero => {
             CliError::Unsupported("builder address cannot be the zero address".to_string())

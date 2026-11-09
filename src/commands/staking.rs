@@ -17,7 +17,7 @@ use crate::invocation::Invocation;
 use crate::mode::Mode;
 use crate::output::{self, JsonValueOutput, TableData};
 use crate::quantity::{self, Scale};
-use crate::resolvers::{HexAddressError, parse_exact_hex_address};
+use crate::resolvers::{HexAddressError, parse_hex_address};
 use crate::signing::{SelectedSigner, Signs};
 use crate::wire::InfoRequest;
 
@@ -775,10 +775,9 @@ async fn link_staking_user(
     Ok(())
 }
 
-/// A validator or linked-user address argument: `0x`-prefixed, never the zero
-/// address. `subject` names the address in the zero-address error.
+/// A validator or linked-user address argument, never the zero address. `subject` names the address in the zero-address error.
 fn protocol_address(raw: &str, subject: &str) -> Result<Address, CliError> {
-    parse_exact_hex_address(raw, true).map_err(|err| match err {
+    parse_hex_address(raw, true).map_err(|err| match err {
         HexAddressError::Format => CliError::Unsupported(format!("Invalid address: {raw}")),
         HexAddressError::Zero => {
             CliError::Configuration(format!("{subject} address must not be the zero address"))
@@ -1201,9 +1200,9 @@ mod tests {
     }
 
     #[test]
-    fn protocol_address_requires_the_0x_prefix() {
-        let err =
-            protocol_address("0000000000000000000000000000000000000002", "validator").unwrap_err();
+    fn protocol_address_accepts_a_bare_hex_address_and_names_a_malformed_one() {
+        assert!(protocol_address("0000000000000000000000000000000000000002", "validator").is_ok());
+        let err = protocol_address("0x02", "validator").unwrap_err();
         assert_eq!(err.exit_code(), 13);
         assert!(err.to_string().contains("Invalid address"));
     }

@@ -203,7 +203,7 @@ impl RiskAlert {
 }
 
 pub fn parse_watch_user(raw: &str) -> Result<Address, CliError> {
-    crate::resolvers::parse_exact_hex_address(raw, false)
+    crate::resolvers::parse_hex_address(raw, false)
         .map_err(|_| CliError::Unsupported(format!("Invalid address: {raw}")))
 }
 
@@ -741,8 +741,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_watch_user_requires_a_0x_prefixed_address() {
-        assert!(parse_watch_user("0000000000000000000000000000000000000001").is_err());
+    fn parse_watch_user_takes_the_address_with_or_without_the_0x_prefix() {
+        assert!(parse_watch_user("0000000000000000000000000000000000000001").is_ok());
         assert!(parse_watch_user("0x0000000000000000000000000000000000000001").is_ok());
     }
 
