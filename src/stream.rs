@@ -365,7 +365,7 @@ fn require_polled_bound(args: &StreamBoundArgs) -> Result<(), CliError> {
     if StreamBounds::watch_risk(args).is_bounded() {
         return Ok(());
     }
-    Err(CliError::Configuration(
+    Err(CliError::Unsupported(
         "watch risk requires --max-events or --idle-timeout-ms in agent mode.\n  \
          hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20"
             .to_string(),
@@ -833,7 +833,7 @@ mod tests {
     #[test]
     fn polled_streams_must_declare_a_bound_with_the_watch_risk_hint() {
         let err = require_bound(StreamBound::Polled, &matches(&["c"])).unwrap_err();
-        assert_eq!(err.exit_code(), 2);
+        assert_eq!(err.exit_code(), 13);
         assert!(err.to_string().contains("--max-events 20"), "{err}");
         for bounded in [["c", "--max-events", "3"], ["c", "--idle-timeout-ms", "50"]] {
             assert!(require_bound(StreamBound::Polled, &matches(&bounded)).is_ok());
