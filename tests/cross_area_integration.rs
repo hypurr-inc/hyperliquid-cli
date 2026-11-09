@@ -371,6 +371,18 @@ async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
     )
     .await;
 
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
+            serde_json::json!({"type": "spotMetaAndAssetCtxs"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {"universe": [], "tokens": []},
+            [{"coin": "PURR/USDC", "markPx": "0.1", "midPx": "0.1"}]
+        ])))
+        .mount(&server)
+        .await;
+
     let run = |args: &[&str]| -> serde_json::Value {
         let output = env
             .command_with_server(&server)
@@ -411,7 +423,10 @@ async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
     assert_eq!(spot[0]["base_sz_decimals"], 0);
     assert_eq!(spot[0]["quote_sz_decimals"], 6);
     assert_eq!(tick(&spot[0]), 0.0001);
-    assert_eq!(run(&["spot", "get", "PURR/USDC"]), spot[0]);
+    let pair = run(&["spot", "get", "PURR/USDC"]);
+    for (key, value) in spot[0].as_object().unwrap() {
+        assert_eq!(&pair[key], value, "spot get repeats the list field {key}");
+    }
 }
 
 #[tokio::test]

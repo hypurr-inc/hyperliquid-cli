@@ -1,19 +1,31 @@
 use clap::Args;
 use hypersdk::Decimal;
 use hypersdk::hypercore::PriceTick;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::assets::{AssetQuery, SpotListing, eq_asset_name, load_spot_markets, parse_asset_query};
+use crate::assets::asset_id;
+use crate::assets::{
+    AssetQuery, SpotListing, eq_asset_name, load_spot_markets, parse_asset_query,
+    require_spot_token,
+};
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
 use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::output::JsonValueOutput;
+use crate::wire::InfoRequest;
 
 #[derive(Args, Debug)]
 pub struct SpotGetArgs {
     /// Spot pair (e.g., PURR/USDC, HYPE/USDC)
     pub pair: String,
+}
+
+#[derive(Args, Debug)]
+pub struct SpotTokenArgs {
+    /// Token name (e.g. HYPE) or its 0x-prefixed 32-hex-digit token id
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -102,7 +114,143 @@ pub async fn get(inv: &Invocation, pair: &str) -> Result<(), anyhow::Error> {
         }
     };
 
-    inv.print(&One::new(market));
+    let ctx = spot_context(inv.remote()?.api(), &market).await?;
+    inv.print(&One::new(SpotMarketDetailRow::new(market, ctx)));
+    Ok(())
+}
+
+/// A spot market with the live prices and volume of its asset context.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SpotMarketDetailRow {
+    #[serde(flatten)]
+    pub market: SpotMarketRow,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub mark_price: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub mid_price: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub prev_day_price: Option<Decimal>,
+    /// Traded notional over the last 24 hours, in the quote token.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub day_notional_volume: Option<Decimal>,
+    /// Traded size over the last 24 hours, in the base token.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub day_base_volume: Option<Decimal>,
+}
+
+impl SpotMarketDetailRow {
+    fn new(market: SpotMarketRow, ctx: Option<SpotAssetContext>) -> Self {
+        let ctx = ctx.unwrap_or_default();
+        Self {
+            market,
+            mark_price: ctx.mark_px,
+            mid_price: ctx.mid_px,
+            prev_day_price: ctx.prev_day_px,
+            day_notional_volume: ctx.day_ntl_vlm,
+            day_base_volume: ctx.day_base_vlm,
+        }
+    }
+}
+
+impl Row for SpotMarketDetailRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Symbol",
+        "Index",
+        "Base",
+        "Quote",
+        "Base Sz Decimals",
+        "Quote Sz Decimals",
+        "Tick Size @ Price 1",
+        "Mark Price",
+        "Mid Price",
+        "Prev Day Price",
+        "Day Notional Volume",
+        "Day Base Volume",
+    ];
+
+    fn cells(&self) -> Vec<String> {
+        let mut cells = self.market.cells();
+        cells.extend([
+            or_missing(self.mark_price),
+            or_missing(self.mid_price),
+            or_missing(self.prev_day_price),
+            or_missing(self.day_notional_volume),
+            or_missing(self.day_base_volume),
+        ]);
+        cells
+    }
+}
+
+/// One entry of `spotMetaAndAssetCtxs`' context list. A market with no book
+/// has no mid, so every price is optional.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SpotAssetContext {
+    #[serde(default)]
+    coin: String,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    mark_px: Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    mid_px: Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    prev_day_px: Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    day_ntl_vlm: Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    day_base_vlm: Option<Decimal>,
+}
+
+/// The context of `market`, keyed the way info endpoints name a spot coin:
+/// `@<index>`, except the first pair, which is named by its symbol.
+async fn spot_context(
+    api: &ApiClient,
+    market: &SpotMarketRow,
+) -> Result<Option<SpotAssetContext>, CliError> {
+    let internal = asset_id::spot_internal_id(market.index);
+    let key = if internal == 0 {
+        market.symbol.clone()
+    } else {
+        asset_id::spot_internal_coin_key(internal)
+    };
+    let (_meta, contexts): (serde::de::IgnoredAny, Vec<SpotAssetContext>) = api
+        .info(
+            &InfoRequest::new("spotMetaAndAssetCtxs"),
+            "loading spot asset contexts",
+        )
+        .await?;
+    Ok(contexts.into_iter().find(|ctx| ctx.coin == key))
+}
+
+/// The token id `tokenDetails` takes: a `0x` id as given, or the id of the
+/// token called `token`.
+async fn token_id(inv: &Invocation, token: &str) -> Result<String, CliError> {
+    let token = token.trim();
+    if let Some(hex) = token.strip_prefix("0x") {
+        return if hex.len() == 32 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            Ok(token.to_ascii_lowercase())
+        } else {
+            Err(CliError::Configuration(
+                "token id must be 0x followed by 32 hex digits".to_string(),
+            ))
+        };
+    }
+    let found = require_spot_token(inv.remote()?.api().sdk(), token).await?;
+    Ok(format!("{:#x}", found.token_id))
+}
+
+async fn token(inv: &Invocation, token: &str) -> Result<(), anyhow::Error> {
+    let token_id = token_id(inv, token).await?;
+    let details: Option<serde_json::Value> = inv
+        .remote()?
+        .api()
+        .info(
+            &InfoRequest::new("tokenDetails").field("tokenId", token_id.clone()),
+            "loading token details",
+        )
+        .await?;
+    let details =
+        details.ok_or_else(|| CliError::Unsupported(format!("no token details for {token_id}")))?;
+    inv.print(&JsonValueOutput::new(details, "No token details."));
     Ok(())
 }
 
@@ -143,7 +291,7 @@ impl CliCommand for SpotGet {
         &["spot", "get"],
         "market",
         "Get details for a specific spot pair",
-        "Get details for a spot pair.",
+        "Get details for a spot pair, with its mark, mid and previous-day price and 24-hour volume.",
     )
     .args(&[arg("pair")
         .kind(InputKind::MarketSymbol)
@@ -152,5 +300,26 @@ impl CliCommand for SpotGet {
 
     async fn run(inv: &Invocation, args: &SpotGetArgs) -> Result<(), anyhow::Error> {
         get(inv, &args.pair).await
+    }
+}
+
+pub struct SpotToken;
+
+impl CliCommand for SpotToken {
+    type Args = SpotTokenArgs;
+
+    const SPEC: CommandSpec = CommandSpec::read(
+        &["spot", "token"],
+        "market",
+        "Show a spot token's supply, prices and genesis",
+        "Show a spot token's details: supply, decimals, mid, mark and previous-day price, deployer, deploy time and genesis balances. Takes the token name or its 0x token id.",
+    )
+    .args(&[arg("token")
+        .kind(InputKind::Identifier)
+        .describe("Token name, for example HYPE, or 0x token id.")
+        .resource_id("spot token")]);
+
+    async fn run(inv: &Invocation, args: &SpotTokenArgs) -> Result<(), anyhow::Error> {
+        token(inv, &args.token).await
     }
 }

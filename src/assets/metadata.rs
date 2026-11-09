@@ -302,14 +302,70 @@ async fn load_raw_spot_meta(api: &ApiClient) -> Result<RawSpotMeta, CliError> {
         .await
 }
 
-/// One `perpDexs` entry. hypersdk 0.3's `Dex` no longer carries the deployer fee
-/// scale, so the raw response is the only place to read it.
+/// One `perpDexs` entry. The dex carries no deployer fee scale: it is a
+/// property of each market in the dex's own `meta` (see
+/// [`load_deployer_fee_scales`]).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawPerpDex {
     pub name: String,
-    #[serde(default, with = "rust_decimal::serde::str_option")]
-    pub deployer_fee_scale: Option<Decimal>,
+}
+
+/// The deployer fee scale of each market of one HIP-3 dex that states one.
+/// Markets of the same dex can differ.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DeployerFeeScales {
+    markets: Vec<(String, Decimal)>,
+}
+
+impl DeployerFeeScales {
+    /// The scale every market shares; `None` when the dex lists no scale or its
+    /// markets disagree.
+    pub(crate) fn uniform(&self) -> Option<Decimal> {
+        let (_, first) = self.markets.first()?;
+        self.markets
+            .iter()
+            .all(|(_, scale)| scale == first)
+            .then_some(*first)
+    }
+
+    /// Each market's scale, as `(coin, scale)`.
+    pub(crate) fn by_market(&self) -> &[(String, Decimal)] {
+        &self.markets
+    }
+}
+
+/// Read the deployer fee scales from `meta{dex}.universe[].deployerFeeScale`.
+pub(crate) async fn load_deployer_fee_scales(
+    api: &ApiClient,
+    dex: &str,
+) -> Result<DeployerFeeScales, CliError> {
+    #[derive(Deserialize)]
+    struct DexMeta {
+        universe: Vec<DexMarket>,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DexMarket {
+        name: String,
+        #[serde(default, with = "rust_decimal::serde::str_option")]
+        deployer_fee_scale: Option<Decimal>,
+    }
+
+    let meta: DexMeta = api
+        .info(
+            &InfoRequest::new("meta").field("dex", dex),
+            "loading perp DEX markets",
+        )
+        .await?;
+    Ok(DeployerFeeScales {
+        markets: meta
+            .universe
+            .into_iter()
+            .filter_map(|market| Some((market.name, market.deployer_fee_scale?)))
+            .collect(),
+    })
 }
 
 /// The raw `perpDexs` list. Slot `n` is the dex at protocol position `n`, so a

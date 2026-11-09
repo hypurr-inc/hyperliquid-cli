@@ -17,6 +17,17 @@
 - `borrowlend user` reads `borrowLendUserState` instead of reinterpreting spot balances, whose numbers were wrong for unified accounts. Positions carry `supplied`, `borrowed`, `supply_basis` and `borrow_basis`; the output adds `health` and `health_factor`. The `hold` key is gone: it described spot holds, not borrow/lend.
 - Orders on a HIP-3 dex under dex abstraction no longer get a helper `sendAsset`: the exchange moves the collateral itself in that mode, as it does for unified and portfolio-margin accounts.
 - `account abstraction set` help and schema describe the protocol cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode, and unified and portfolio-margin accounts are limited to 50k actions per day.
+- `account fills`, `account ledger`, `account funding` and `perps funding-history` say on stderr when a page is exactly the API's cap (2000 fills, 2000 ledger updates, 500 funding rows) and name the `--start` that continues; a JSON run gets one `{"warning":{"code":"truncated",...,"next_start":N}}` line on stderr and stdout keeps its array. `--all` pages through the window by the last returned timestamp (rows repeated at that millisecond are dropped; at most 50 requests). `account fills` without `--start` at 2000 rows says earlier fills are not shown.
+- `account orders` takes `--dex`, so HIP-3 open orders can be read; an unknown dex exits `13` before any order read.
+- `account fills` rows add `hash` and, when present, `builder_fee`, `liquidation` and `twap_id`; an unknown fill direction no longer fails the command, and spot fills show the pair name (`HYPE/USDC`) instead of `@107`.
+- `account portfolio` positions add `return_on_equity`, `max_leverage` and `cum_funding` (`all_time`, `since_open`, `since_change`).
+- `vault list` and `vault search` read the exchange's public stats dataset (`stats-data.hyperliquid.xyz`; `/info` `vaultSummaries` answers `[]` on mainnet and testnet), so they return the real vaults; a dataset failure is an error, not an empty list. `--user` takes each vault's deposit from the user's vault equities.
+- `vault get` renames `followers` to `followers_returned` (the API lists at most 100 followers) and adds `followers_truncated`; `--user` adds `follower_state` with that user's stake (`null` when they hold none). The table column is `Followers Returned`.
+- `perps list` and `perps get` add `delisted` (nothing is hidden) and, for HIP-3 markets, `deployer_fee_scale`; the table adds a `Delisted` column.
+- `meta` reads each dex's `deployer_fee_scale` from `meta{dex}.universe[].deployerFeeScale` (it was always `null` because `perpDexs` carries none); when a dex's markets disagree it is `null` and `deployer_fee_scale_by_market` lists them.
+- New reads: `perps dexs`, `perps dex-limits <DEX>`, `perps at-oi-cap [--dex]`, `perps funding-predicted [--coin]`, `perps funding-history <COIN> --start`, `spot token <NAME|ID>`, `account role`, `account multisig-signers`, `account asset-data --coin`.
+- `spot get` adds `mark_price`, `mid_price`, `prev_day_price`, `day_notional_volume` and `day_base_volume` from `spotMetaAndAssetCtxs`.
+- `status` keeps its constant `rate_limit_status`; its `rate_limit_note` now points at `account rate-limit` for an account's request budget.
 
 ## 0.18.0 - 2026-11-09
 

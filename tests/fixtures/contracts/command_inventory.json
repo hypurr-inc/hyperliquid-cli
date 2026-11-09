@@ -86,6 +86,115 @@
     },
     {
       "auth_required": false,
+      "command": "hyperliquid perps funding-history <COIN>",
+      "command_path": [
+        "perps",
+        "funding-history"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "market",
+      "input_kinds": {
+        "all": "boolean",
+        "coin": "market_symbol"
+      },
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid perps funding-predicted",
+      "command_path": [
+        "perps",
+        "funding-predicted"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "market",
+      "input_kinds": {
+        "coin": "market_symbol"
+      },
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid perps at-oi-cap",
+      "command_path": [
+        "perps",
+        "at-oi-cap"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "market",
+      "input_kinds": {
+        "dex": "venue_selector"
+      },
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid perps dexs",
+      "command_path": [
+        "perps",
+        "dexs"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "market",
+      "input_kinds": {},
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid perps dex-limits <DEX>",
+      "command_path": [
+        "perps",
+        "dex-limits"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "market",
+      "input_kinds": {
+        "dex": "venue_selector"
+      },
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
       "command": "hyperliquid spot list",
       "command_path": [
         "spot",
@@ -117,6 +226,28 @@
       "group": "market",
       "input_kinds": {
         "pair": "market_symbol"
+      },
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid spot token <TOKEN>",
+      "command_path": [
+        "spot",
+        "token"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "market",
+      "input_kinds": {
+        "token": "identifier"
       },
       "mutability": "read_only",
       "output_contract": "json_value",
@@ -563,7 +694,8 @@
       "group": "account",
       "input_kinds": {
         "address": "public_user_selector",
-        "aggregate_by_time": "boolean"
+        "aggregate_by_time": "boolean",
+        "all": "boolean"
       },
       "mutability": "read_only",
       "output_contract": "json_value",
@@ -717,7 +849,8 @@
       "dry_run": "not_supported",
       "group": "account",
       "input_kinds": {
-        "address": "public_user_selector"
+        "address": "public_user_selector",
+        "all": "boolean"
       },
       "mutability": "read_only",
       "output_contract": "json_value",
@@ -739,7 +872,8 @@
       "dry_run": "not_supported",
       "group": "account",
       "input_kinds": {
-        "address": "public_user_selector"
+        "address": "public_user_selector",
+        "all": "boolean"
       },
       "mutability": "read_only",
       "output_contract": "json_value",
@@ -785,6 +919,73 @@
       "input_kinds": {
         "address": "public_user_selector",
         "aggregate_by_time": "boolean"
+      },
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid account role <ADDRESS>",
+      "command_path": [
+        "account",
+        "role"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "account",
+      "input_kinds": {
+        "address": "public_user_selector"
+      },
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid account multisig-signers <ADDRESS>",
+      "command_path": [
+        "account",
+        "multisig-signers"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "account",
+      "input_kinds": {
+        "address": "public_user_selector"
+      },
+      "mutability": "read_only",
+      "output_contract": "json_value",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "auth_required": false,
+      "command": "hyperliquid account asset-data <ADDRESS>",
+      "command_path": [
+        "account",
+        "asset-data"
+      ],
+      "confirmation": "none",
+      "dangerous": false,
+      "dry_run": "not_supported",
+      "group": "account",
+      "input_kinds": {
+        "address": "public_user_selector",
+        "coin": "market_symbol"
       },
       "mutability": "read_only",
       "output_contract": "json_value",
@@ -1534,7 +1735,8 @@
       "dry_run": "not_supported",
       "group": "vault",
       "input_kinds": {
-        "address": "protocol_object_address"
+        "address": "protocol_object_address",
+        "user": "public_user_selector"
       },
       "mutability": "read_only",
       "output_contract": "json_value",
