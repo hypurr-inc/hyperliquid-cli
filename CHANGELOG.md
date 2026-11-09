@@ -17,6 +17,11 @@
 - `borrowlend user` reads `borrowLendUserState` instead of reinterpreting spot balances, whose numbers were wrong for unified accounts. Positions carry `supplied`, `borrowed`, `supply_basis` and `borrow_basis`; the output adds `health` and `health_factor`. The `hold` key is gone: it described spot holds, not borrow/lend.
 - Orders on a HIP-3 dex under dex abstraction no longer get a helper `sendAsset`: the exchange moves the collateral itself in that mode, as it does for unified and portfolio-margin accounts.
 - `account abstraction set` help and schema describe the protocol cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode, and unified and portfolio-margin accounts are limited to 50k actions per day.
+- `subscribe` adds `bbo`, `active-asset-ctx` and `active-asset-data` (market and per-user perp limits), and the user streams `user-events`, `user-fundings`, `notifications`, `twap-states`, `twap-slice-fills`, `clearinghouse-state`, `open-orders` and `spot-state`. HIP-3 markets are subscribed by their dex-qualified name. `userNonFundingLedgerUpdates` is not offered: hypersdk 0.3.0 cannot parse the exchange's frame (`nonFundingLedgerUpdates` key) and drops it silently.
+- `subscribe all-mids` takes `--dex`; `subscribe orderbook` and `book` take `--n-sig-figs` (2-5) and `--mantissa` (1, 2 or 5, only with `--n-sig-figs 5`; a mantissa without it exits `2`). An aggregated `subscribe orderbook` reports `l2Book(<coin>,nSigFigs=<n>[,mantissa=<m>])` as its `subscription`; the unaggregated label is unchanged. `spread` stays unaggregated: aggregated best levels are not the best bid and ask.
+- `subscribe fills` and `subscribe order-updates` take `--user` (address, wallet name or wallet id) like other public reads; without it they still use the selected signer.
+- `subscribe fills`, `user-fundings` and `twap-slice-fills` take `--skip-snapshot`: the `isSnapshot:true` history message the exchange sends first is neither written nor counted by `--max-events`. Without the flag the output is unchanged.
+- `subscribe clearinghouse-state`, `open-orders` and `twap-states` repeat `--dex` (one subscription per distinct dex on one connection); a command refuses more than the documented 1000 WebSocket subscriptions per IP with exit `13` before any lookup or connection.
 
 ## 0.18.0 - 2026-11-09
 

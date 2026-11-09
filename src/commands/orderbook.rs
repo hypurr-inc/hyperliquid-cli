@@ -17,7 +17,7 @@ use crate::errors::from_sdk;
 use crate::invocation::Invocation;
 use crate::output::TableData;
 use crate::stream::SnapshotWatchArgs;
-use crate::ws::{Awaited, first_matching_message};
+use crate::ws::{Awaited, BookAggregationArgs, first_matching_message};
 
 const WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(15);
 const VALID_INTERVALS: &str = "1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M";
@@ -368,17 +368,25 @@ impl TableData for MidsOutput {
 
 /// A HIP-3 `dex:TOKEN` input is looked up on its dex, so `xyz:XYZ100` works
 /// without first loading every dex into the metadata snapshot.
-async fn book(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
+async fn book(
+    inv: &Invocation,
+    coin: &str,
+    aggregation: BookAggregationArgs,
+) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
     let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
-    inv.print(&book_snapshot_for(remote.chain(), &coin).await?);
+    inv.print(&book_snapshot_for(remote.chain(), &coin, aggregation).await?);
     Ok(())
 }
 
 /// One L2 book snapshot for an already-resolved info coin.
-async fn book_snapshot_for(chain: Chain, coin: &str) -> Result<BookSnapshot, anyhow::Error> {
-    let book = fetch_l2_book(chain, coin).await?;
+async fn book_snapshot_for(
+    chain: Chain,
+    coin: &str,
+    aggregation: BookAggregationArgs,
+) -> Result<BookSnapshot, anyhow::Error> {
+    let book = fetch_l2_book(chain, coin, aggregation).await?;
     Ok(BookSnapshot::from(book))
 }
 
@@ -430,7 +438,7 @@ async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
     let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
-    let book = fetch_l2_book(remote.chain(), &coin).await?;
+    let book = fetch_l2_book(remote.chain(), &coin, BookAggregationArgs::default()).await?;
     inv.print(&spread_row_from_book(&coin, &book)?);
     Ok(())
 }
@@ -538,7 +546,7 @@ fn market_info_coin(market: Market, input: &str) -> Result<String, CliError> {
 }
 
 /// Resolve a perpetual, fetching the market when it belongs to another dex.
-async fn resolve_perp_coin_or_fetch(
+pub(crate) async fn resolve_perp_coin_or_fetch(
     client: &HttpClient,
     resolver: &AssetResolver,
     coin: &str,
@@ -563,15 +571,14 @@ pub(crate) async fn resolve_market_coin(
     market_info_coin(market, coin)
 }
 
-async fn fetch_l2_book(chain: Chain, coin: &str) -> Result<L2Book, CliError> {
+async fn fetch_l2_book(
+    chain: Chain,
+    coin: &str,
+    aggregation: BookAggregationArgs,
+) -> Result<L2Book, CliError> {
     first_matching_message(
         chain,
-        Subscription::L2Book {
-            coin: coin.to_string(),
-            n_sig_figs: None,
-            mantissa: None,
-            fast: false,
-        },
+        aggregation.subscription(coin),
         WEBSOCKET_TIMEOUT,
         &Awaited {
             closed: "an order book snapshot",
@@ -624,6 +631,8 @@ pub struct BookArgs {
     /// Asset name (e.g., BTC)
     pub coin: String,
     #[command(flatten)]
+    pub aggregation: BookAggregationArgs,
+    #[command(flatten)]
     pub watch: SnapshotWatchArgs,
 }
 
@@ -675,17 +684,25 @@ impl CliCommand for Book {
             .kind(InputKind::MarketSymbol)
             .describe("Asset name, for example BTC.")
             .resource_id("coin"),
+        arg("n_sig_figs")
+            .describe("Aggregate price levels to this many significant figures (2-5). Omit for full precision."),
+        arg("mantissa")
+            .describe("Further aggregation (1, 2 or 5); only valid with n_sig_figs 5."),
         arg("watch")
             .kind(InputKind::Boolean)
             .describe("Watch live snapshots. Use max_ticks to bound automation calls."),
         arg("max_ticks").describe("Stop after this many watch snapshots."),
     ]);
 
+    fn validate(args: &BookArgs) -> Result<(), CliError> {
+        args.aggregation.validate()
+    }
+
     async fn run(inv: &Invocation, args: &BookArgs) -> Result<(), anyhow::Error> {
         if args.watch.watch {
-            watch_book(inv, &args.coin, args.watch.max_ticks).await
+            watch_book(inv, &args.coin, args.aggregation, args.watch.max_ticks).await
         } else {
-            book(inv, &args.coin).await
+            book(inv, &args.coin, args.aggregation).await
         }
     }
 }
@@ -805,6 +822,7 @@ impl CliCommand for Funding {
 async fn watch_book(
     inv: &Invocation,
     coin: &str,
+    aggregation: BookAggregationArgs,
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
@@ -816,16 +834,11 @@ async fn watch_book(
         inv,
         &format!("Live order book: {subscription_coin}"),
         chain,
-        vec![Subscription::L2Book {
-            coin: subscription_coin.clone(),
-            n_sig_figs: None,
-            mantissa: None,
-            fast: false,
-        }],
+        vec![aggregation.subscription(subscription_coin.clone())],
         max_ticks,
         move || {
             let coin = subscription_coin.clone();
-            async move { book_snapshot_for(chain, &coin).await }
+            async move { book_snapshot_for(chain, &coin, aggregation).await }
         },
     )
     .await

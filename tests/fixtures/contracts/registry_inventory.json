@@ -251,6 +251,32 @@
           "short": null
         },
         {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Aggregate price levels to this many significant figures (2-5). Omit for full precision.",
+          "enum_values": [],
+          "id": "n_sig_figs",
+          "input_kind": null,
+          "long": "n-sig-figs",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Further aggregation (1, 2 or 5); only valid with n_sig_figs 5.",
+          "enum_values": [],
+          "id": "mantissa",
+          "input_kind": null,
+          "long": "mantissa",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
           "arg_type": "boolean",
           "default": null,
           "description": "Watch live snapshots. Use max_ticks to bound automation calls.",
@@ -8348,6 +8374,32 @@
         {
           "arg_type": "integer",
           "default": null,
+          "description": "Aggregate price levels to this many significant figures (2-5). Omit for full precision.",
+          "enum_values": [],
+          "id": "n_sig_figs",
+          "input_kind": null,
+          "long": "n-sig-figs",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Further aggregation (1, 2 or 5); only valid with n_sig_figs 5.",
+          "enum_values": [],
+          "id": "mantissa",
+          "input_kind": null,
+          "long": "mantissa",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
           "description": "Stop after this many matching events.",
           "enum_values": [],
           "id": "max_events",
@@ -8506,6 +8558,19 @@
       "aliases": [],
       "args": [
         {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3). Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "input_kind": null,
+          "long": "dex",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
           "arg_type": "integer",
           "default": null,
           "description": "Stop after this many matching events.",
@@ -8572,6 +8637,19 @@
     {
       "aliases": [],
       "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
         {
           "arg_type": "integer",
           "default": null,
@@ -8640,6 +8718,32 @@
       "aliases": [],
       "args": [
         {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Drop the isSnapshot:true history message the exchange sends first; it is not counted by max_events.",
+          "enum_values": [],
+          "id": "skip_snapshot",
+          "input_kind": "boolean",
+          "long": "skip-snapshot",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
           "arg_type": "integer",
           "default": null,
           "description": "Stop after this many matching events.",
@@ -8680,6 +8784,964 @@
       },
       "dangerous": false,
       "description": "Stream authenticated fill events. automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Asset name, for example BTC.",
+          "enum_values": [],
+          "id": "asset",
+          "input_kind": null,
+          "long": "asset",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid subscribe bbo",
+      "command_path": [
+        "subscribe",
+        "bbo"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream best bid and offer updates, sent when the best bid or offer changes in a block. automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Asset name, for example BTC.",
+          "enum_values": [],
+          "id": "asset",
+          "input_kind": null,
+          "long": "asset",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": false,
+      "bankr_signer": "not_required",
+      "command": "hyperliquid subscribe active-asset-ctx",
+      "command_path": [
+        "subscribe",
+        "active-asset-ctx"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream a market's live asset context (mark price, funding, open interest for a perpetual). automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "not_required",
+      "raw_payload": "unsupported",
+      "risk": "none",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perpetual asset name, for example BTC or xyz:XYZ100.",
+          "enum_values": [],
+          "id": "asset",
+          "input_kind": null,
+          "long": "asset",
+          "multiple": false,
+          "positional_index": null,
+          "required": true,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid subscribe active-asset-data",
+      "command_path": [
+        "subscribe",
+        "active-asset-data"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream a user's leverage and trade-size limits on one perpetual (the exchange serves perpetuals only). automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid subscribe user-events",
+      "command_path": [
+        "subscribe",
+        "user-events"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream a user's account events: fills, funding payments, liquidations and non-user cancels. automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Drop the isSnapshot:true history message the exchange sends first; it is not counted by max_events.",
+          "enum_values": [],
+          "id": "skip_snapshot",
+          "input_kind": "boolean",
+          "long": "skip-snapshot",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid subscribe user-fundings",
+      "command_path": [
+        "subscribe",
+        "user-fundings"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream a user's funding payments: a snapshot of recent payments, then each payment on the hour. automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid subscribe notifications",
+      "command_path": [
+        "subscribe",
+        "notifications"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream a user's exchange notifications. automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3); repeat to subscribe to several. Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "input_kind": null,
+          "long": "dex",
+          "multiple": true,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid subscribe twap-states",
+      "command_path": [
+        "subscribe",
+        "twap-states"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream a user's active TWAP order states. automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "boolean",
+          "default": null,
+          "description": "Drop the isSnapshot:true history message the exchange sends first; it is not counted by max_events.",
+          "enum_values": [],
+          "id": "skip_snapshot",
+          "input_kind": "boolean",
+          "long": "skip-snapshot",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid subscribe twap-slice-fills",
+      "command_path": [
+        "subscribe",
+        "twap-slice-fills"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream a user's TWAP slice fills: a snapshot of recent slice fills, then each new one. automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3); repeat to subscribe to several. Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "input_kind": null,
+          "long": "dex",
+          "multiple": true,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid subscribe clearinghouse-state",
+      "command_path": [
+        "subscribe",
+        "clearinghouse-state"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream a user's perp clearinghouse state (margin summary and positions) per perp dex. automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "Perp dex name (HIP-3); repeat to subscribe to several. Defaults to the first dex.",
+          "enum_values": [],
+          "id": "dex",
+          "input_kind": null,
+          "long": "dex",
+          "multiple": true,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid subscribe open-orders",
+      "command_path": [
+        "subscribe",
+        "open-orders"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream a user's open orders per perp dex. automation callers should set max_events or idle_timeout_ms so the call returns.",
+      "dry_run": "not_supported",
+      "group": "subscribe",
+      "lifecycle": "streaming",
+      "mutability": "streaming",
+      "output_contract": "bounded_ndjson_stream",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "unsupported",
+      "risk": "account_state",
+      "stream_bounds": {
+        "cli_args": [
+          "max_events",
+          "idle_timeout_ms"
+        ],
+        "env": [
+          "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
+        ],
+        "output_mode": "ndjson",
+        "required_in_machine_context": true
+      },
+      "transport": [
+        "cli_process"
+      ]
+    },
+    {
+      "aliases": [],
+      "args": [
+        {
+          "arg_type": "string",
+          "default": null,
+          "description": "User address, wallet name, or wallet id. Defaults to the selected signer.",
+          "enum_values": [],
+          "id": "user",
+          "input_kind": "public_user_selector",
+          "long": "user",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop after this many matching events.",
+          "enum_values": [],
+          "id": "max_events",
+          "input_kind": null,
+          "long": "max-events",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        },
+        {
+          "arg_type": "integer",
+          "default": null,
+          "description": "Stop if no matching events arrive within this many milliseconds.",
+          "enum_values": [],
+          "id": "idle_timeout_ms",
+          "input_kind": null,
+          "long": "idle-timeout-ms",
+          "multiple": false,
+          "positional_index": null,
+          "required": false,
+          "short": null
+        }
+      ],
+      "auth_required": true,
+      "bankr_signer": "supported",
+      "command": "hyperliquid subscribe spot-state",
+      "command_path": [
+        "subscribe",
+        "spot-state"
+      ],
+      "confirmation": "none",
+      "confirmation_bypass": {
+        "arg": null,
+        "supported": false
+      },
+      "dangerous": false,
+      "description": "Stream a user's spot state (token balances). automation callers should set max_events or idle_timeout_ms so the call returns.",
       "dry_run": "not_supported",
       "group": "subscribe",
       "lifecycle": "streaming",
