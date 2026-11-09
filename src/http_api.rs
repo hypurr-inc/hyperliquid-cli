@@ -93,17 +93,6 @@ impl InfoReply {
     }
 }
 
-/// The error for a non-2xx reply from a service the CLI calls once, such as the
-/// release host: a rate limit, else the failure status.
-#[must_use]
-pub(crate) fn failed_reply(status: StatusCode, body: &str) -> CliError {
-    if http_response_indicates_rate_limit(status.as_u16(), body) {
-        CliError::rate_limited()
-    } else {
-        CliError::api_status(status, body)
-    }
-}
-
 /// Everything one run needs to talk to one Hyperliquid network.
 pub struct ApiClient {
     chain: Chain,
@@ -502,16 +491,6 @@ mod tests {
         );
         assert_eq!(err.detail().as_deref(), Some("HTTP 502 Bad Gateway"));
         assert!(!err.to_string().contains("network"));
-    }
-
-    #[test]
-    fn failed_reply_is_a_rate_limit_or_an_api_status() {
-        assert_eq!(
-            failed_reply(StatusCode::TOO_MANY_REQUESTS, "").exit_code(),
-            11
-        );
-        let err = failed_reply(StatusCode::NOT_FOUND, "missing");
-        assert!(matches!(err, CliError::ApiStatus { status: 404, .. }));
     }
 
     #[test]
