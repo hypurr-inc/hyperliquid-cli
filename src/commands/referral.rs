@@ -13,19 +13,7 @@ use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::output::TableData;
 use crate::settings::Settings;
-use crate::signing::SelectedSigner;
-
-/// Resolve the default referral code.
-///
-/// Priority: `HYPERLIQUID_DEFAULT_REFERRAL_CODE`, the config file
-/// `default_referral_code`, the build-time default, then `TESTNET` on testnet.
-/// On mainnet `None` means the caller should require an explicit code.
-pub fn resolve_default_referral_code(
-    settings: &Settings,
-    is_testnet: bool,
-) -> Result<Option<String>, CliError> {
-    settings.default_referral_code(is_testnet)
-}
+use crate::wire::InfoRequest;
 
 /// The referral code setup and wallet creation offer. Skips the config file and
 /// rejects a code that wouldn't be accepted by `referral set`.
@@ -67,25 +55,58 @@ struct ReferralSetOutput {
     row: ReferralSetConfirmation,
 }
 
+/// Hyperliquid accepts referral codes of up to 32 characters to apply, but
+/// caps the codes a user registers at 20.
+const MAX_REFERRAL_CODE_LEN: usize = 32;
+const MAX_REFERRER_CODE_LEN: usize = 20;
+const REVERSIBILITY: ActionReversibility = ActionReversibility::Irreversible;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReferralActionKind {
+enum ReferralActionKind {
     Set,
     Register,
 }
 
 impl ReferralActionKind {
-    #[must_use]
-    pub fn reversibility(self) -> ActionReversibility {
-        match self {
-            Self::Set | Self::Register => ActionReversibility::Irreversible,
-        }
-    }
-
-    #[must_use]
-    pub fn action_type(self) -> &'static str {
+    fn action_type(self) -> &'static str {
         match self {
             Self::Set => "setReferrer",
             Self::Register => "registerReferrer",
+        }
+    }
+
+    fn command(self) -> &'static str {
+        match self {
+            Self::Set => "referral set",
+            Self::Register => "referral register",
+        }
+    }
+
+    fn would_execute(self) -> &'static str {
+        match self {
+            Self::Set => "set_referral_code",
+            Self::Register => "register_referrer_code",
+        }
+    }
+
+    fn confirmation_action(self) -> &'static str {
+        match self {
+            Self::Set => "set-referrer",
+            Self::Register => "register-referrer",
+        }
+    }
+
+    fn submit_context(self) -> &'static str {
+        match self {
+            Self::Set => "set referrer",
+            Self::Register => "register referrer",
+        }
+    }
+
+    fn validate(self, code: &str) -> Result<(), CliError> {
+        match self {
+            Self::Set => validate_referral_code(code),
+            Self::Register => validate_referrer_code(code),
         }
     }
 }
@@ -153,116 +174,76 @@ impl TableData for ReferralSetOutput {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReferralInfoRequest<'a> {
-    #[serde(rename = "type")]
-    request_type: &'static str,
-    user: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SetReferrerAction<'a> {
-    #[serde(rename = "type")]
-    action_type: &'static str,
-    code: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RegisterReferrerAction<'a> {
+struct ReferrerAction<'a> {
     #[serde(rename = "type")]
     action_type: &'static str,
     code: &'a str,
 }
 
 /// Query referral status for the authenticated user.
-pub async fn status(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    let user = user.to_string();
+async fn status(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
     let raw = inv
         .remote()?
         .api()
         .info::<serde_json::Value>(
-            &ReferralInfoRequest {
-                request_type: "referral",
-                user: &user,
-            },
-            "",
+            &InfoRequest::user("referral", user),
+            "loading referral status",
         )
         .await?;
-    inv.print(&referral_status_from_value(user, &raw));
+    inv.print(&referral_status_from_value(user.to_string(), &raw));
     Ok(())
 }
 
-/// Set the authenticated user's referrer code.
-pub async fn set(
+/// `referral set` and `referral register`: preview under `--dry-run`, otherwise
+/// sign and submit `code`.
+async fn run_code_action(
     inv: &Invocation,
-    signer: &SelectedSigner,
+    kind: ReferralActionKind,
     code: &str,
 ) -> Result<(), anyhow::Error> {
-    validate_referral_code(code)?;
+    kind.validate(code)?;
+    if inv.dry_run() {
+        let signer_context = inv.resolve_signer().ok();
+        return print_signed_dry_run(
+            inv,
+            kind.command(),
+            kind.would_execute(),
+            REVERSIBILITY,
+            referral_dry_run_value(
+                inv.remote()?.chain(),
+                signer_context.as_ref().map(|resolved| resolved.address()),
+                signer_context
+                    .as_ref()
+                    .map(|resolved| resolved.query_address()),
+                code,
+                kind,
+            ),
+        );
+    }
+    let resolved = inv.resolve_signer()?;
+    let signer = resolved.selected_signer();
     let remote = inv.remote()?;
-    let chain = remote.chain();
     actions::send_raw_l1_json_action(
         remote.api(),
-        signer,
-        &SetReferrerAction {
-            action_type: "setReferrer",
+        &signer,
+        &ReferrerAction {
+            action_type: kind.action_type(),
             code,
         },
         actions::RawL1ActionMetadata::new(actions::nonce_now()),
-        "set referrer",
+        kind.submit_context(),
     )
     .await?;
 
     inv.print(&ReferralSetOutput {
         row: ReferralSetConfirmation {
-            action: "set-referrer".to_string(),
+            action: kind.confirmation_action().to_string(),
             status: "submitted".to_string(),
-            network: chain.to_string(),
+            network: remote.chain().to_string(),
             signer: signer.address().to_string(),
             query_address: signer.query_address().to_string(),
             code: code.to_string(),
-            reversibility: (ReferralActionKind::Set.reversibility())
-                .as_str()
-                .to_string(),
-        },
-    });
-    Ok(())
-}
-
-/// Register/create a referral code for the authenticated user.
-pub async fn register(
-    inv: &Invocation,
-    signer: &SelectedSigner,
-    code: &str,
-) -> Result<(), anyhow::Error> {
-    validate_referrer_code(code)?;
-    let remote = inv.remote()?;
-    let chain = remote.chain();
-    actions::send_raw_l1_json_action(
-        remote.api(),
-        signer,
-        &RegisterReferrerAction {
-            action_type: "registerReferrer",
-            code,
-        },
-        actions::RawL1ActionMetadata::new(actions::nonce_now()),
-        "register referrer",
-    )
-    .await?;
-
-    inv.print(&ReferralSetOutput {
-        row: ReferralSetConfirmation {
-            action: "register-referrer".to_string(),
-            status: "submitted".to_string(),
-            network: chain.to_string(),
-            signer: signer.address().to_string(),
-            query_address: signer.query_address().to_string(),
-            code: code.to_string(),
-            reversibility: (ReferralActionKind::Register.reversibility())
-                .as_str()
-                .to_string(),
+            reversibility: REVERSIBILITY.as_str().to_string(),
         },
     });
     Ok(())
@@ -300,14 +281,14 @@ pub fn referral_status_from_value(user: String, raw: &serde_json::Value) -> Refe
 }
 
 pub fn validate_referral_code(code: &str) -> Result<(), CliError> {
-    validate_code(code, 32, "referral code")
+    validate_code(code, MAX_REFERRAL_CODE_LEN, "referral code")
 }
 
-pub fn validate_referrer_code(code: &str) -> Result<(), CliError> {
-    validate_code(code, 20, "referrer code")
+fn validate_referrer_code(code: &str) -> Result<(), CliError> {
+    validate_code(code, MAX_REFERRER_CODE_LEN, "referrer code")
 }
 
-pub fn referral_dry_run_value(
+fn referral_dry_run_value(
     chain: Chain,
     signer: Option<Address>,
     query_address: Option<Address>,
@@ -323,7 +304,7 @@ pub fn referral_dry_run_value(
             "type": action.action_type(),
             "code": code,
         },
-        "reversibility": action.reversibility(),
+        "reversibility": REVERSIBILITY,
     })
 }
 
@@ -394,51 +375,25 @@ impl CliCommand for ReferralSet {
         .resource_id("referral code")]);
 
     async fn run(inv: &Invocation, args: &ReferralSetArgs) -> Result<(), anyhow::Error> {
-        let code = args.code.as_deref();
-
-        let owned_default: Option<String>;
-        let code: &str = match code {
-            Some(code) => code,
+        let code = match args.code.as_deref() {
+            Some(code) => code.to_string(),
             None => {
+                // `HYPERLIQUID_DEFAULT_REFERRAL_CODE`, the config file
+                // `default_referral_code`, the build-time default, then `TESTNET`
+                // on testnet. On mainnet nothing is assumed.
                 let remote = inv.remote()?;
-                owned_default = resolve_default_referral_code(
-                    remote.settings(),
-                    remote.network().is_testnet(),
-                )?;
-                match owned_default.as_deref() {
-                    Some(default_code) => default_code,
-                    None => {
-                        return Err(CliError::Unsupported(
-                        "referral code is required; pass CODE explicitly, set HYPERLIQUID_DEFAULT_REFERRAL_CODE, or use --testnet"
-                            .to_string(),
-                    )
-                    .into());
-                    }
-                }
+                remote
+                    .settings()
+                    .default_referral_code(remote.network().is_testnet())?
+                    .ok_or_else(|| {
+                        CliError::Unsupported(
+                            "referral code is required; pass CODE explicitly, set HYPERLIQUID_DEFAULT_REFERRAL_CODE, or use --testnet"
+                                .to_string(),
+                        )
+                    })?
             }
         };
-        validate_referral_code(code)?;
-        if inv.dry_run() {
-            let signer_context = inv.resolve_signer().ok();
-            return print_signed_dry_run(
-                inv,
-                "referral set",
-                "set_referral_code",
-                ReferralActionKind::Set.reversibility(),
-                referral_dry_run_value(
-                    inv.remote()?.chain(),
-                    signer_context.as_ref().map(|resolved| resolved.address()),
-                    signer_context
-                        .as_ref()
-                        .map(|resolved| resolved.query_address()),
-                    code,
-                    ReferralActionKind::Set,
-                ),
-            );
-        }
-        let resolved = inv.resolve_signer()?;
-        let signer = resolved.selected_signer();
-        set(inv, &signer, code).await
+        run_code_action(inv, ReferralActionKind::Set, &code).await
     }
 }
 
@@ -456,30 +411,7 @@ impl CliCommand for ReferralRegister {
     .args(&[arg("code").resource_id("referrer code")]);
 
     async fn run(inv: &Invocation, args: &ReferralRegisterArgs) -> Result<(), anyhow::Error> {
-        let code = args.code.as_str();
-
-        validate_referrer_code(code)?;
-        if inv.dry_run() {
-            let signer_context = inv.resolve_signer().ok();
-            return print_signed_dry_run(
-                inv,
-                "referral register",
-                "register_referrer_code",
-                ReferralActionKind::Register.reversibility(),
-                referral_dry_run_value(
-                    inv.remote()?.chain(),
-                    signer_context.as_ref().map(|resolved| resolved.address()),
-                    signer_context
-                        .as_ref()
-                        .map(|resolved| resolved.query_address()),
-                    code,
-                    ReferralActionKind::Register,
-                ),
-            );
-        }
-        let resolved = inv.resolve_signer()?;
-        let signer = resolved.selected_signer();
-        register(inv, &signer, code).await
+        run_code_action(inv, ReferralActionKind::Register, &args.code).await
     }
 }
 
@@ -572,14 +504,15 @@ mod tests {
     }
 
     #[test]
-    fn referral_actions_declare_reversibility() {
-        assert_eq!(
-            ReferralActionKind::Set.reversibility(),
-            ActionReversibility::Irreversible
-        );
-        assert_eq!(
-            ReferralActionKind::Register.reversibility(),
-            ActionReversibility::Irreversible
+    fn registered_codes_are_capped_lower_than_applied_codes() {
+        let code = "A".repeat(MAX_REFERRER_CODE_LEN + 1);
+
+        assert!(ReferralActionKind::Set.validate(&code).is_ok());
+        assert!(ReferralActionKind::Register.validate(&code).is_err());
+        assert!(
+            ReferralActionKind::Set
+                .validate(&"A".repeat(MAX_REFERRAL_CODE_LEN + 1))
+                .is_err()
         );
     }
 

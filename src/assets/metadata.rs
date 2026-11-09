@@ -4,12 +4,14 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use hypersdk::hypercore::{Chain, Dex, HttpClient, PerpMarket, SpotMarket};
+use hypersdk::Decimal;
+use hypersdk::hypercore::{Chain, Dex, HttpClient, PerpMarket, SpotMarket, SpotToken};
 use serde::Deserialize;
 
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
+use crate::wire::InfoRequest;
 
 use super::asset_id;
 use super::market::{PerpAsset, SpotAsset};
@@ -72,16 +74,8 @@ impl AssetMetadata {
             sz_decimals: u32,
         }
 
-        #[derive(Deserialize)]
-        struct RawPerpDex {
-            name: String,
-        }
-
         let meta = api
-            .info::<MetaResponse>(
-                &serde_json::json!({ "type": "meta" }),
-                "loading perpetual metadata",
-            )
+            .info::<MetaResponse>(&InfoRequest::new("meta"), "loading perpetual metadata")
             .await?;
         let spot_meta = load_raw_spot_meta(api).await?;
 
@@ -99,18 +93,12 @@ impl AssetMetadata {
             })
             .collect::<Vec<_>>();
 
-        if let Ok(dexes) = api
-            .info::<Vec<Option<RawPerpDex>>>(
-                &serde_json::json!({ "type": "perpDexs" }),
-                "loading HIP-3 DEX metadata",
-            )
-            .await
-        {
+        if let Ok(dexes) = load_raw_perp_dexes(api).await {
             for (dex_slot, dex) in dexes.into_iter().enumerate() {
                 let Some(dex) = dex else { continue };
                 let Ok(meta) = api
                     .info::<MetaResponse>(
-                        &serde_json::json!({ "type": "meta", "dex": dex.name.clone() }),
+                        &InfoRequest::new("meta").field("dex", dex.name.clone()),
                         "loading HIP-3 perpetual metadata",
                     )
                     .await
@@ -313,11 +301,40 @@ impl RawSpotMeta {
 }
 
 async fn load_raw_spot_meta(api: &ApiClient) -> Result<RawSpotMeta, CliError> {
-    api.info(
-        &serde_json::json!({ "type": "spotMeta" }),
-        "loading raw spot metadata",
-    )
-    .await
+    api.info(&InfoRequest::new("spotMeta"), "loading raw spot metadata")
+        .await
+}
+
+/// One `perpDexs` entry. hypersdk 0.3's `Dex` no longer carries the deployer fee
+/// scale, so the raw response is the only place to read it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RawPerpDex {
+    pub name: String,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub deployer_fee_scale: Option<Decimal>,
+}
+
+/// The raw `perpDexs` list. Slot `n` is the dex at protocol position `n`, so a
+/// removed dex stays in the list as `None`.
+pub(crate) async fn load_raw_perp_dexes(
+    api: &ApiClient,
+) -> Result<Vec<Option<RawPerpDex>>, CliError> {
+    api.info(&InfoRequest::new("perpDexs"), "loading perp DEX metadata")
+        .await
+}
+
+/// The spot token called `name`, ignoring case and surrounding whitespace.
+pub(crate) async fn find_spot_token(
+    client: &HttpClient,
+    name: &str,
+) -> Result<Option<SpotToken>, CliError> {
+    Ok(client
+        .spot_tokens()
+        .await
+        .map_err(from_sdk)?
+        .into_iter()
+        .find(|token| eq_asset_name(&token.name, name)))
 }
 
 /// Find a HIP-3 DEX by name, case-insensitively.

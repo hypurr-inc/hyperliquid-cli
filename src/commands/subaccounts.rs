@@ -3,7 +3,6 @@
 use clap::{Args, ValueEnum};
 use hypersdk::hypercore::Chain;
 use hypersdk::{Address, Decimal};
-use rust_decimal::prelude::ToPrimitive;
 use serde::Serialize;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
@@ -14,9 +13,8 @@ use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::mode::Mode;
 use crate::output::TableData;
+use crate::quantity::{self, Scale, ScaleError};
 use crate::signing::SelectedSigner;
-
-const USDC_WIRE_SCALE: u64 = 1_000_000;
 
 /// Arguments for `subaccount create`.
 #[derive(Args, Debug, Clone)]
@@ -207,7 +205,7 @@ struct SubaccountSpotTransferAction {
     amount: String,
 }
 
-pub fn validate_create_args(args: &CreateArgs) -> Result<(), CliError> {
+fn validate_create_args(args: &CreateArgs) -> Result<(), CliError> {
     if args.name.trim().is_empty() {
         return Err(CliError::Configuration(
             "subaccount name cannot be empty".to_string(),
@@ -216,20 +214,20 @@ pub fn validate_create_args(args: &CreateArgs) -> Result<(), CliError> {
     Ok(())
 }
 
-pub fn validate_transfer_args(args: &TransferArgs) -> Result<(), CliError> {
+fn validate_transfer_args(args: &TransferArgs) -> Result<(), CliError> {
     usdc_to_wire_units(args.amount)?;
     Ok(())
 }
 
-pub fn validate_spot_transfer_args(args: &SpotTransferArgs) -> Result<(), CliError> {
-    validate_positive_amount(args.amount, "amount")?;
+fn validate_spot_transfer_args(args: &SpotTransferArgs) -> Result<(), CliError> {
+    quantity::require_positive(args.amount, "amount")?;
     if args.token.trim().is_empty() {
         return Err(CliError::Configuration("token cannot be empty".to_string()));
     }
     Ok(())
 }
 
-pub fn create_dry_run_value(chain: Chain, args: &CreateArgs) -> serde_json::Value {
+fn create_dry_run_value(chain: Chain, args: &CreateArgs) -> serde_json::Value {
     serde_json::json!({
         "name": args.name.trim(),
         "network": chain.to_string(),
@@ -237,7 +235,7 @@ pub fn create_dry_run_value(chain: Chain, args: &CreateArgs) -> serde_json::Valu
     })
 }
 
-pub fn transfer_dry_run_value(
+fn transfer_dry_run_value(
     chain: Chain,
     subaccount: Address,
     args: &TransferArgs,
@@ -255,7 +253,7 @@ pub fn transfer_dry_run_value(
     }))
 }
 
-pub fn spot_transfer_dry_run_value(
+fn spot_transfer_dry_run_value(
     chain: Chain,
     subaccount: Address,
     args: &SpotTransferArgs,
@@ -273,24 +271,17 @@ pub fn spot_transfer_dry_run_value(
     }))
 }
 
-pub fn usdc_to_wire_units(amount: Decimal) -> Result<u64, CliError> {
-    validate_positive_amount(amount, "amount")?;
-    let scaled = amount
-        .checked_mul(Decimal::from(USDC_WIRE_SCALE))
-        .ok_or_else(|| CliError::Configuration("amount is too large".to_string()))?;
-    let normalized = scaled.normalize();
-    if normalized.scale() != 0 {
-        return Err(CliError::Configuration(
+fn usdc_to_wire_units(amount: Decimal) -> Result<u64, CliError> {
+    quantity::positive(amount, Scale::USDC).map_err(|err| match err {
+        ScaleError::TooPrecise => CliError::Configuration(
             "subaccount USDC transfer amount supports at most 6 decimal places".to_string(),
-        ));
-    }
-    normalized
-        .to_u64()
-        .ok_or_else(|| CliError::Configuration("amount is too large".to_string()))
+        ),
+        err => err.config("amount", Scale::USDC),
+    })
 }
 
 /// Create a new subaccount signed by the configured master account.
-pub async fn create(
+async fn create(
     inv: &Invocation,
     signer: &SelectedSigner,
     args: &CreateArgs,
@@ -337,7 +328,7 @@ pub async fn create(
 }
 
 /// Transfer USDC between the configured master account and a subaccount.
-pub async fn transfer(
+async fn transfer(
     inv: &Invocation,
     signer: &SelectedSigner,
     subaccount: Address,
@@ -396,7 +387,7 @@ pub async fn transfer(
 }
 
 /// Transfer a spot token between the configured master account and a subaccount.
-pub async fn spot_transfer(
+async fn spot_transfer(
     inv: &Invocation,
     signer: &SelectedSigner,
     subaccount: Address,
@@ -452,15 +443,6 @@ pub async fn spot_transfer(
             token: Some(args.token.trim().to_string()),
         },
     );
-    Ok(())
-}
-
-fn validate_positive_amount(amount: Decimal, name: &'static str) -> Result<(), CliError> {
-    if amount <= Decimal::ZERO {
-        return Err(CliError::Configuration(format!(
-            "{name} must be greater than zero"
-        )));
-    }
     Ok(())
 }
 
@@ -544,8 +526,8 @@ impl CliCommand for SubaccountList {
         .schema_required()]);
 
     async fn run(inv: &Invocation, args: &SubaccountListArgs) -> Result<(), anyhow::Error> {
-        let address = inv.resolve_user(args.address.as_deref())?.to_string();
-        crate::commands::account::subaccounts(inv, &address).await
+        let user = inv.resolve_user(args.address.as_deref())?;
+        crate::commands::account::subaccounts(inv, user).await
     }
 }
 

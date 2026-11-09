@@ -205,7 +205,7 @@ impl RiskAlert {
 }
 
 pub fn parse_watch_user(raw: &str) -> Result<Address, CliError> {
-    raw.parse::<Address>()
+    crate::resolvers::parse_exact_hex_address(raw, false)
         .map_err(|_| CliError::Unsupported(format!("Invalid address: {raw}")))
 }
 
@@ -282,8 +282,8 @@ impl Ticker for RiskWatcher<'_> {
             .client
             .open_orders(self.user, None)
             .await
-            .unwrap_or_default();
-        let mids = self.client.all_mids(None).await.unwrap_or_default();
+            .map_err(from_sdk)?;
+        let mids = self.client.all_mids(None).await.map_err(from_sdk)?;
 
         let snapshot = RiskSnapshot {
             positions: &state.asset_positions,
@@ -640,16 +640,21 @@ fn enabled_rules(args: &WatchRiskArgs) -> Vec<RiskRule> {
 
 fn parse_secs(raw: &str) -> Result<Duration, String> {
     let trimmed = raw.trim();
-    if let Some(ms) = trimmed.strip_suffix("ms") {
+    let interval = if let Some(ms) = trimmed.strip_suffix("ms") {
         let value: u64 = ms.parse().map_err(|_| format!("invalid duration {raw}"))?;
-        return Ok(Duration::from_millis(value));
+        Duration::from_millis(value)
+    } else {
+        let seconds = trimmed
+            .strip_suffix('s')
+            .unwrap_or(trimmed)
+            .parse::<u64>()
+            .map_err(|_| format!("invalid duration {raw}"))?;
+        Duration::from_secs(seconds)
+    };
+    if interval.is_zero() {
+        return Err(format!("duration must be greater than zero: {raw}"));
     }
-    let seconds = trimmed
-        .strip_suffix('s')
-        .unwrap_or(trimmed)
-        .parse::<u64>()
-        .map_err(|_| format!("invalid duration {raw}"))?;
-    Ok(Duration::from_secs(seconds))
+    Ok(interval)
 }
 
 struct AlertTable(RiskAlert);
@@ -739,6 +744,20 @@ mod tests {
     #[test]
     fn parse_watch_user_rejects_invalid_address() {
         assert!(parse_watch_user("not-an-address").is_err());
+    }
+
+    #[test]
+    fn parse_watch_user_requires_a_0x_prefixed_address() {
+        assert!(parse_watch_user("0000000000000000000000000000000000000001").is_err());
+        assert!(parse_watch_user("0x0000000000000000000000000000000000000001").is_ok());
+    }
+
+    #[test]
+    fn poll_interval_must_be_positive() {
+        assert!(parse_secs("0").is_err());
+        assert!(parse_secs("0ms").is_err());
+        assert_eq!(parse_secs("500ms").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_secs("15s").unwrap(), Duration::from_secs(15));
     }
 
     #[test]

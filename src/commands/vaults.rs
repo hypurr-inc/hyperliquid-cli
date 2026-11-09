@@ -1,52 +1,64 @@
 //! Vault public queries and authenticated vault transfers.
 
 use clap::{Args, ValueEnum};
+use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::api::VaultTransfer;
-use hypersdk::hypercore::types::{Action, LeverageType};
-use hypersdk::hypercore::{AssetPosition, Chain};
+use hypersdk::hypercore::types::Action;
 use hypersdk::{Address, Decimal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::actions;
+use crate::commands::positions::PositionRow;
 use crate::commands::support::print_signed_dry_run;
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::output::{self, TableData};
-use crate::signing::SelectedSigner;
+use crate::output::TableData;
+use crate::quantity::{self, Scale};
+use crate::wire::{InfoRequest, config_address};
+
+const TRANSFER_REVERSIBILITY: ActionReversibility = ActionReversibility::PartiallyReversible;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VaultTransferActionKind {
+enum VaultTransferActionKind {
     Deposit,
     Withdraw,
 }
 
 impl VaultTransferActionKind {
-    #[must_use]
-    pub fn reversibility(self) -> ActionReversibility {
-        ActionReversibility::PartiallyReversible
-    }
-
-    #[must_use]
-    pub fn is_deposit(self) -> bool {
+    fn is_deposit(self) -> bool {
         matches!(self, Self::Deposit)
     }
 
-    #[must_use]
-    pub fn action_name(self) -> &'static str {
+    fn action_name(self) -> &'static str {
         if self.is_deposit() {
             "deposit"
         } else {
             "withdraw"
         }
     }
+
+    fn command(self) -> &'static str {
+        if self.is_deposit() {
+            "vault deposit"
+        } else {
+            "vault withdraw"
+        }
+    }
+
+    fn would_execute(self) -> &'static str {
+        if self.is_deposit() {
+            "deposit_usdc_to_vault"
+        } else {
+            "withdraw_usdc_from_vault"
+        }
+    }
 }
 
-/// Arguments for `vault deposit` and `vault withdraw`.
 #[derive(Args, Debug, Clone)]
 pub struct VaultTransferArgs {
     /// Vault address
@@ -114,21 +126,55 @@ impl VaultKindArg {
             Self::All => true,
             Self::Protocol => kind.eq_ignore_ascii_case("normal"),
             Self::User => kind.eq_ignore_ascii_case("child") || kind.eq_ignore_ascii_case("parent"),
-            _ => self.to_string().eq_ignore_ascii_case(kind),
+            Self::Normal | Self::Child | Self::Parent => self
+                .to_possible_value()
+                .is_some_and(|value| value.get_name().eq_ignore_ascii_case(kind)),
         }
     }
 }
 
-impl std::fmt::Display for VaultKindArg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::All => write!(f, "all"),
-            Self::Normal => write!(f, "normal"),
-            Self::Child => write!(f, "child"),
-            Self::Parent => write!(f, "parent"),
-            Self::Protocol => write!(f, "protocol"),
-            Self::User => write!(f, "user"),
-        }
+pub struct VaultPositionsOutput {
+    vault_address: String,
+    rows: Vec<PositionRow>,
+}
+
+impl TableData for VaultPositionsOutput {
+    fn headers(&self) -> Vec<&str> {
+        std::iter::once("Vault")
+            .chain(PositionRow::HEADERS)
+            .collect()
+    }
+
+    fn rows(&self) -> Vec<Vec<String>> {
+        self.rows
+            .iter()
+            .map(|row| self.with_vault(row.cells()))
+            .collect()
+    }
+
+    fn pretty_rows(&self) -> Vec<Vec<String>> {
+        self.rows
+            .iter()
+            .map(|row| self.with_vault(row.pretty_cells()))
+            .collect()
+    }
+
+    fn empty_message(&self) -> Option<&str> {
+        Some("No open positions.")
+    }
+
+    fn to_json_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "vault_address": self.vault_address,
+            "positions": self.rows,
+        })
+    }
+}
+
+impl VaultPositionsOutput {
+    fn with_vault(&self, mut cells: Vec<String>) -> Vec<String> {
+        cells.insert(0, self.vault_address.clone());
+        cells
     }
 }
 
@@ -186,31 +232,6 @@ struct VaultSummaryRow {
 
 pub struct VaultSummaryOutput {
     rows: Vec<VaultSummaryRow>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct VaultPositionRow {
-    coin: String,
-    side: String,
-    #[serde(with = "rust_decimal::serde::str")]
-    size: Decimal,
-    #[serde(with = "rust_decimal::serde::str_option")]
-    entry: Option<Decimal>,
-    #[serde(with = "rust_decimal::serde::str")]
-    mark: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    unrealized_pnl: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    position_value: Decimal,
-    leverage: String,
-    #[serde(with = "rust_decimal::serde::str")]
-    margin_used: Decimal,
-    liquidation_price: Option<String>,
-}
-
-pub struct VaultPositionsOutput {
-    vault_address: String,
-    rows: Vec<VaultPositionRow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -307,84 +328,6 @@ impl TableData for VaultSummaryOutput {
     }
 }
 
-impl TableData for VaultPositionsOutput {
-    fn headers(&self) -> Vec<&str> {
-        vec![
-            "Vault",
-            "Coin",
-            "Side",
-            "Size",
-            "Entry",
-            "Mark",
-            "Unrealized PnL",
-            "Position Value",
-            "Leverage",
-            "Margin Used",
-            "Liquidation",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.rows
-            .iter()
-            .map(|row| {
-                vec![
-                    self.vault_address.clone(),
-                    row.coin.clone(),
-                    row.side.clone(),
-                    row.size.to_string(),
-                    row.entry
-                        .map(|entry| entry.to_string())
-                        .unwrap_or_else(|| "n/a".to_string()),
-                    row.mark.to_string(),
-                    row.unrealized_pnl.to_string(),
-                    row.position_value.to_string(),
-                    row.leverage.clone(),
-                    row.margin_used.to_string(),
-                    row.liquidation_price
-                        .clone()
-                        .unwrap_or_else(|| "n/a".to_string()),
-                ]
-            })
-            .collect()
-    }
-
-    fn pretty_rows(&self) -> Vec<Vec<String>> {
-        self.rows()
-            .into_iter()
-            .map(|mut row| {
-                if row.len() > 6
-                    && let Some(position) =
-                        self.rows.iter().find(|position| position.coin == row[1])
-                {
-                    if position.unrealized_pnl > Decimal::ZERO {
-                        row[6] = output::colors::green(&row[6]);
-                    } else if position.unrealized_pnl < Decimal::ZERO {
-                        row[6] = output::colors::red(&row[6]);
-                    }
-                }
-                for cell in &mut row {
-                    if cell == "n/a" {
-                        *cell = output::colors::gray(cell);
-                    }
-                }
-                row
-            })
-            .collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No open positions.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        serde_json::json!({
-            "vault_address": self.vault_address,
-            "positions": self.rows,
-        })
-    }
-}
-
 impl TableData for VaultTransferOutput {
     fn headers(&self) -> Vec<&str> {
         vec![
@@ -420,7 +363,7 @@ impl TableData for VaultTransferOutput {
 }
 
 /// Get vault details.
-pub async fn get(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
+async fn get(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
     let vault = parse_address(address)?;
     let row = raw_vault_details_row(inv.remote()?.api(), vault).await?;
     inv.print(&VaultDetailsOutput { row });
@@ -428,7 +371,7 @@ pub async fn get(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
 }
 
 /// List vault summaries.
-pub async fn list(inv: &Invocation, args: &VaultListArgs) -> Result<(), anyhow::Error> {
+async fn list(inv: &Invocation, args: &VaultListArgs) -> Result<(), anyhow::Error> {
     let user = validate_list_args(args)?;
     let mut rows = vault_summary_rows(inv.remote()?.api(), user).await?;
     rows.retain(|row| args.kind.matches(&row.kind));
@@ -439,7 +382,7 @@ pub async fn list(inv: &Invocation, args: &VaultListArgs) -> Result<(), anyhow::
 }
 
 /// Search vault summaries by name, leader, or address.
-pub async fn search(inv: &Invocation, args: &VaultSearchArgs) -> Result<(), anyhow::Error> {
+async fn search(inv: &Invocation, args: &VaultSearchArgs) -> Result<(), anyhow::Error> {
     let user = validate_search_args(args)?;
     let query = args.query.to_ascii_lowercase();
     let mut rows = vault_summary_rows(inv.remote()?.api(), user)
@@ -458,60 +401,32 @@ pub async fn search(inv: &Invocation, args: &VaultSearchArgs) -> Result<(), anyh
 }
 
 /// List a vault's open positions.
-pub async fn positions(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
+async fn positions(inv: &Invocation, address: &str) -> Result<(), anyhow::Error> {
     let vault = parse_address(address)?;
-    let rows = inv
+    let positions = inv
         .remote()?
         .api()
         .sdk()
         .clearinghouse_state(vault, None)
         .await
         .map_err(from_sdk)?
-        .asset_positions
-        .into_iter()
-        .map(VaultPositionRow::from)
-        .filter(|row| !row.size.is_zero())
-        .collect::<Vec<_>>();
+        .asset_positions;
 
     inv.print(&VaultPositionsOutput {
         vault_address: address.to_string(),
-        rows,
+        rows: PositionRow::open(positions),
     });
     Ok(())
 }
 
-/// Deposit USDC to a vault.
-pub async fn deposit(
-    inv: &Invocation,
-    signer: &SelectedSigner,
-    args: &VaultTransferArgs,
-) -> Result<(), anyhow::Error> {
-    transfer(inv, signer, args, VaultTransferActionKind::Deposit).await
-}
-
-/// Withdraw USDC from a vault.
-pub async fn withdraw(
-    inv: &Invocation,
-    signer: &SelectedSigner,
-    args: &VaultTransferArgs,
-) -> Result<(), anyhow::Error> {
-    transfer(inv, signer, args, VaultTransferActionKind::Withdraw).await
-}
-
-pub fn validate_transfer_args(args: &VaultTransferArgs) -> Result<(), CliError> {
-    parse_address(&args.vault)?;
-    validate_usdc_amount(args.amount)?;
-    Ok(())
-}
-
-pub fn transfer_dry_run_value(
+fn transfer_dry_run_value(
     chain: Chain,
     args: &VaultTransferArgs,
     action_kind: VaultTransferActionKind,
-) -> Result<serde_json::Value, CliError> {
-    let vault = parse_address(&args.vault)?;
-    let usd = validate_usdc_amount(args.amount)?;
-    Ok(serde_json::json!({
+    vault: Address,
+    usd: u64,
+) -> serde_json::Value {
+    serde_json::json!({
         "action": action_kind.action_name(),
         "network": chain.to_string(),
         "vault": vault.to_string(),
@@ -519,17 +434,17 @@ pub fn transfer_dry_run_value(
         "asset": "USDC",
         "is_deposit": action_kind.is_deposit(),
         "usd": usd,
-        "reversibility": action_kind.reversibility(),
+        "reversibility": TRANSFER_REVERSIBILITY,
         "verified_shape": {
             "type": "vaultTransfer",
             "vaultAddress": vault.to_string(),
             "isDeposit": action_kind.is_deposit(),
             "usd": usd
         }
-    }))
+    })
 }
 
-pub fn validate_list_args(args: &VaultListArgs) -> Result<Option<Address>, CliError> {
+fn validate_list_args(args: &VaultListArgs) -> Result<Option<Address>, CliError> {
     if args.limit == 0 {
         return Err(CliError::Configuration(
             "vault list --limit must be greater than zero".to_string(),
@@ -538,33 +453,7 @@ pub fn validate_list_args(args: &VaultListArgs) -> Result<Option<Address>, CliEr
     parse_optional_user(args.user.as_deref())
 }
 
-pub fn parse_kind_arg(value: &str) -> Result<VaultKindArg, CliError> {
-    match value.to_ascii_lowercase().as_str() {
-        "all" => Ok(VaultKindArg::All),
-        "normal" => Ok(VaultKindArg::Normal),
-        "child" => Ok(VaultKindArg::Child),
-        "parent" => Ok(VaultKindArg::Parent),
-        "protocol" => Ok(VaultKindArg::Protocol),
-        "user" => Ok(VaultKindArg::User),
-        _ => Err(CliError::Configuration(format!(
-            "vault kind must be one of all, normal, child, parent, protocol, user: {value}"
-        ))),
-    }
-}
-
-pub fn parse_sort_arg(value: &str) -> Result<VaultSortArg, CliError> {
-    match value.to_ascii_lowercase().as_str() {
-        "tvl" => Ok(VaultSortArg::Tvl),
-        "apr" => Ok(VaultSortArg::Apr),
-        "age" => Ok(VaultSortArg::Age),
-        "name" => Ok(VaultSortArg::Name),
-        _ => Err(CliError::Configuration(format!(
-            "vault sort must be one of tvl, apr, age, name: {value}"
-        ))),
-    }
-}
-
-pub fn validate_search_args(args: &VaultSearchArgs) -> Result<Option<Address>, CliError> {
+fn validate_search_args(args: &VaultSearchArgs) -> Result<Option<Address>, CliError> {
     if args.query.trim().is_empty() {
         return Err(CliError::Configuration(
             "vault search query cannot be empty".to_string(),
@@ -578,33 +467,46 @@ pub fn validate_search_args(args: &VaultSearchArgs) -> Result<Option<Address>, C
     parse_optional_user(args.user.as_deref())
 }
 
-async fn transfer(
+/// Deposit USDC to a vault or withdraw it, previewing instead under `--dry-run`.
+async fn run_transfer(
     inv: &Invocation,
-    signer: &SelectedSigner,
     args: &VaultTransferArgs,
     action_kind: VaultTransferActionKind,
 ) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    let (api, chain) = (remote.api(), remote.chain());
     let vault = parse_address(&args.vault)?;
     let usd = validate_usdc_amount(args.amount)?;
-    let nonce = actions::nonce_now();
-    let hl_action = Action::VaultTransfer(VaultTransfer {
-        vault_address: vault,
-        is_deposit: action_kind.is_deposit(),
-        usd,
-    });
-
-    actions::send_l1_action(api, signer, hl_action, nonce).await?;
+    if inv.dry_run() {
+        return print_signed_dry_run(
+            inv,
+            action_kind.command(),
+            action_kind.would_execute(),
+            TRANSFER_REVERSIBILITY,
+            transfer_dry_run_value(inv.remote()?.chain(), args, action_kind, vault, usd),
+        );
+    }
+    let resolved = inv.resolve_signer()?;
+    let signer = resolved.selected_signer();
+    let remote = inv.remote()?;
+    actions::send_l1_action(
+        remote.api(),
+        &signer,
+        Action::VaultTransfer(VaultTransfer {
+            vault_address: vault,
+            is_deposit: action_kind.is_deposit(),
+            usd,
+        }),
+        actions::nonce_now(),
+    )
+    .await?;
 
     inv.print(&VaultTransferOutput {
         row: VaultTransferConfirmation {
             action: action_kind.action_name().to_string(),
             status: "submitted".to_string(),
-            network: chain.to_string(),
+            network: remote.chain().to_string(),
             signer: signer.address().to_string(),
             acting_as: signer.query_address().to_string(),
-            reversibility: (action_kind.reversibility()).as_str().to_string(),
+            reversibility: TRANSFER_REVERSIBILITY.as_str().to_string(),
             vault_address: args.vault.clone(),
             amount: args.amount,
             asset: "USDC".to_string(),
@@ -613,21 +515,47 @@ async fn transfer(
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RawVaultDetailsRequest {
-    #[serde(rename = "type")]
-    request_type: &'static str,
-    vault_address: Address,
+async fn raw_vault_details_row(
+    api: &ApiClient,
+    vault: Address,
+) -> Result<VaultDetailsRow, CliError> {
+    // The exchange answers `null` for an address that is not a vault.
+    let details = api
+        .info::<Option<RawVaultDetails>>(
+            &InfoRequest::new("vaultDetails").address("vaultAddress", vault),
+            "fetching vault details",
+        )
+        .await?
+        .ok_or_else(|| CliError::Unsupported(format!("vault details not found for {vault}")))?;
+    details.into_row(vault)
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RawVaultSummariesRequest {
-    #[serde(rename = "type")]
-    request_type: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
+async fn vault_summary_rows(
+    api: &ApiClient,
     user: Option<Address>,
+) -> Result<Vec<VaultSummaryRow>, CliError> {
+    let summaries: Vec<RawVaultSummary> = api
+        .info(
+            &InfoRequest::new("vaultSummaries").address_if("user", user),
+            "fetching vault summaries",
+        )
+        .await?;
+    summaries
+        .into_iter()
+        .map(RawVaultSummary::into_row)
+        .collect()
+}
+
+fn parse_optional_user(raw: Option<&str>) -> Result<Option<Address>, CliError> {
+    raw.map(parse_address).transpose()
+}
+
+fn parse_address(input: &str) -> Result<Address, CliError> {
+    config_address(input, None, true)
+}
+
+fn validate_usdc_amount(amount: Decimal) -> Result<u64, CliError> {
+    quantity::positive(amount, Scale::USDC).map_err(|err| err.config("amount", Scale::USDC))
 }
 
 #[derive(Debug, Deserialize)]
@@ -671,43 +599,6 @@ struct RawVaultDetails {
     max_withdrawable: Value,
 }
 
-async fn raw_vault_details_row(
-    api: &ApiClient,
-    vault: Address,
-) -> Result<VaultDetailsRow, CliError> {
-    // The exchange answers `null` for an address that is not a vault.
-    let details = api
-        .info::<Option<RawVaultDetails>>(
-            &RawVaultDetailsRequest {
-                request_type: "vaultDetails",
-                vault_address: vault,
-            },
-            "fetching vault details",
-        )
-        .await?
-        .ok_or_else(|| CliError::Unsupported(format!("vault details not found for {vault}")))?;
-    details.into_row(vault)
-}
-
-async fn vault_summary_rows(
-    api: &ApiClient,
-    user: Option<Address>,
-) -> Result<Vec<VaultSummaryRow>, CliError> {
-    let summaries: Vec<RawVaultSummary> = api
-        .info(
-            &RawVaultSummariesRequest {
-                request_type: "vaultSummaries",
-                user,
-            },
-            "fetching vault summaries",
-        )
-        .await?;
-    summaries
-        .into_iter()
-        .map(RawVaultSummary::into_row)
-        .collect()
-}
-
 impl RawVaultSummary {
     fn into_row(self) -> Result<VaultSummaryRow, CliError> {
         let kind = self
@@ -727,10 +618,6 @@ impl RawVaultSummary {
             user_deposit: self.user_deposit.as_ref().and_then(optional_decimal_field),
         })
     }
-}
-
-fn parse_optional_user(raw: Option<&str>) -> Result<Option<Address>, CliError> {
-    raw.map(parse_address).transpose()
 }
 
 fn sort_vault_rows(rows: &mut [VaultSummaryRow], sort: VaultSortArg) {
@@ -857,58 +744,6 @@ fn raw_portfolio_summary(portfolio: &Value) -> (Vec<String>, Option<Decimal>) {
     (periods, latest_tvl)
 }
 
-impl From<AssetPosition> for VaultPositionRow {
-    fn from(value: AssetPosition) -> Self {
-        let position = value.position;
-        let abs_size = position.abs_size();
-        let mark = if abs_size.is_zero() {
-            Decimal::ZERO
-        } else {
-            position.position_value / abs_size
-        };
-        let leverage_mode = match position.leverage.leverage_type {
-            LeverageType::Cross => "cross",
-            LeverageType::Isolated => "isolated",
-        };
-        let side = position.side().to_string();
-
-        Self {
-            coin: position.coin,
-            side,
-            size: position.szi,
-            entry: position.entry_px,
-            mark,
-            unrealized_pnl: position.unrealized_pnl,
-            position_value: position.position_value,
-            leverage: format!("{leverage_mode} {}x", position.leverage.value),
-            margin_used: position.margin_used,
-            liquidation_price: position.liquidation_px.map(|px| px.to_string()),
-        }
-    }
-}
-
-fn parse_address(input: &str) -> Result<Address, CliError> {
-    use crate::resolvers::{HexAddressError, parse_exact_hex_address};
-    parse_exact_hex_address(input, true).map_err(|err| match err {
-        HexAddressError::Zero => {
-            CliError::Configuration("address must not be the zero address".to_string())
-        }
-        HexAddressError::Format => {
-            CliError::Configuration("address must be a 0x-prefixed 40-byte hex string".to_string())
-        }
-    })
-}
-
-fn validate_usdc_amount(amount: Decimal) -> Result<u64, CliError> {
-    crate::quantity::scaled_u64(
-        amount,
-        1_000_000,
-        CliError::Configuration("amount must be greater than zero".to_string()),
-        CliError::Configuration("amount supports at most 6 decimal places".to_string()),
-        CliError::Configuration("amount is too large".to_string()),
-    )
-}
-
 pub const GROUP: GroupSpec = GroupSpec::new(&["vault"], "Query and fund vaults")
     .aliases(&["vaults"])
     .schema_aliases();
@@ -1028,23 +863,7 @@ impl CliCommand for VaultDeposit {
     ]);
 
     async fn run(inv: &Invocation, args: &VaultTransferArgs) -> Result<(), anyhow::Error> {
-        validate_transfer_args(args)?;
-        if inv.dry_run() {
-            let args_json = transfer_dry_run_value(
-                inv.remote()?.chain(),
-                args,
-                VaultTransferActionKind::Deposit,
-            )?;
-            return print_signed_dry_run(
-                inv,
-                "vault deposit",
-                "deposit_usdc_to_vault",
-                VaultTransferActionKind::Deposit.reversibility(),
-                args_json,
-            );
-        }
-        let resolved = inv.resolve_signer()?;
-        deposit(inv, &resolved.selected_signer(), args).await
+        run_transfer(inv, args, VaultTransferActionKind::Deposit).await
     }
 }
 
@@ -1069,23 +888,7 @@ impl CliCommand for VaultWithdraw {
     ]);
 
     async fn run(inv: &Invocation, args: &VaultTransferArgs) -> Result<(), anyhow::Error> {
-        validate_transfer_args(args)?;
-        if inv.dry_run() {
-            let args_json = transfer_dry_run_value(
-                inv.remote()?.chain(),
-                args,
-                VaultTransferActionKind::Withdraw,
-            )?;
-            return print_signed_dry_run(
-                inv,
-                "vault withdraw",
-                "withdraw_usdc_from_vault",
-                VaultTransferActionKind::Withdraw.reversibility(),
-                args_json,
-            );
-        }
-        let resolved = inv.resolve_signer()?;
-        withdraw(inv, &resolved.selected_signer(), args).await
+        run_transfer(inv, args, VaultTransferActionKind::Withdraw).await
     }
 }
 
@@ -1116,14 +919,12 @@ mod tests {
     }
 
     #[test]
-    fn vault_transfer_actions_declare_reversibility() {
-        assert_eq!(
-            VaultTransferActionKind::Deposit.reversibility(),
-            ActionReversibility::PartiallyReversible
-        );
-        assert_eq!(
-            VaultTransferActionKind::Withdraw.reversibility(),
-            ActionReversibility::PartiallyReversible
-        );
+    fn kind_filter_maps_protocol_and_user_to_relationship_kinds() {
+        assert!(VaultKindArg::All.matches("anything"));
+        assert!(VaultKindArg::Protocol.matches("normal"));
+        assert!(VaultKindArg::User.matches("child"));
+        assert!(VaultKindArg::User.matches("parent"));
+        assert!(VaultKindArg::Child.matches("CHILD"));
+        assert!(!VaultKindArg::Parent.matches("child"));
     }
 }

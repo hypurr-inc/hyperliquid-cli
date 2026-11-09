@@ -28,6 +28,7 @@ pub mod subscribe;
 pub(crate) mod support;
 pub mod transfers;
 pub mod update;
+mod user_signed;
 pub mod vaults;
 pub mod wallet;
 pub mod watch_risk;
