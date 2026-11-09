@@ -7,8 +7,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use support::{
     API_OVERRIDE_ENV, IsolatedHome, MAINNET_API_OVERRIDE_ENV, TEST_ACCOUNT_PASSPHRASE,
     TESTNET_API_OVERRIDE_ENV, fixture_basic_order, fixture_fill, fixture_order_success_response,
-    fixture_perp_meta_btc_eth, mount_account_state, mount_common_public_endpoints,
-    mount_market_meta, mount_override_healthcheck, mount_perp_dexs, mount_spot_meta,
+    mount_account_state, mount_common_public_endpoints, mount_market_meta,
+    mount_override_healthcheck, mount_perp_dexs, mount_spot_meta,
     mount_successful_exchange_actions,
 };
 
@@ -331,7 +331,17 @@ async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
     let env = IsolatedHome::new();
     let server = MockServer::start().await;
     mount_override_healthcheck(&server).await;
-    mount_market_meta(&server, fixture_perp_meta_btc_eth()).await;
+    mount_market_meta(
+        &server,
+        serde_json::json!({
+            "universe": [
+                {"name": "BTC", "szDecimals": 5, "maxLeverage": 50, "onlyIsolated": false, "marginMode": null, "growthMode": "disabled"},
+                {"name": "kPEPE", "szDecimals": 0, "maxLeverage": 10, "onlyIsolated": false, "marginMode": null, "growthMode": "disabled"}
+            ],
+            "collateralToken": 0
+        }),
+    )
+    .await;
     mount_perp_dexs(&server, serde_json::json!([])).await;
     mount_spot_meta(
         &server,
@@ -372,9 +382,10 @@ async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
     assert_eq!(perps[0]["sz_decimals"], 5);
     assert_eq!(perps[0]["collateral"], "USDC");
     assert_eq!(tick(&perps[0]), 0.1);
-    assert_eq!(perps[1]["name"], "ETH");
-    assert_eq!(tick(&perps[1]), 0.01);
-    assert_eq!(run(&["perps", "get", "ETH"]), perps[1]);
+    assert_eq!(perps[1]["name"], "kPEPE");
+    assert_eq!(perps[1]["sz_decimals"], 0);
+    assert_eq!(tick(&perps[1]), 0.0001);
+    assert_eq!(run(&["perps", "get", "kPEPE"]), perps[1]);
 
     let spot = run(&["spot", "list"]);
     assert_eq!(spot[0]["symbol"], "PURR/USDC");
