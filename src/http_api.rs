@@ -20,7 +20,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crate::errors::{
-    CliError, http_response_indicates_rate_limit, is_server_status, network_error, transport_cause,
+    CliError, address_rate_limit_in_body, http_response_indicates_rate_limit, is_server_status,
+    network_error, transport_cause,
 };
 use crate::network::Network;
 use crate::response_sanitization::Untrusted;
@@ -30,6 +31,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Backoff before each automatic read retry (the read is retried at most this many times).
 const READ_RETRY_BACKOFF: [Duration; 2] = [Duration::from_millis(250), Duration::from_millis(750)];
+/// Backoff before each retry that follows a 429 without `Retry-After`. The
+/// limit is a weight spent over a one-minute window, so a retry a few hundred
+/// milliseconds later is refused again and only spends more of it.
+const RATE_LIMIT_RETRY_BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 /// Longest `Retry-After` the CLI will wait out. A longer ask is reported, not waited.
 const RETRY_AFTER_CAP: Duration = Duration::from_secs(5);
 /// Upper bound on the total time spent sleeping between read attempts. It
@@ -40,6 +45,12 @@ const RETRY_TOTAL_BUDGET: Duration = Duration::from_secs(6);
 const _: () = {
     assert!(RETRY_TOTAL_BUDGET.as_millis() >= RETRY_AFTER_CAP.as_millis());
     assert!(RETRY_TOTAL_BUDGET.as_millis() < 2 * RETRY_AFTER_CAP.as_millis());
+    // Both retries at the longest jitter (+25%) still fit the budget, so a
+    // 429 without `Retry-After` is retried twice, not once.
+    assert!(
+        (RATE_LIMIT_RETRY_BACKOFF[0].as_millis() + RATE_LIMIT_RETRY_BACKOFF[1].as_millis()) * 5 / 4
+            <= RETRY_TOTAL_BUDGET.as_millis()
+    );
 };
 
 /// Whether a failed API call was a read (safe to resend) or a mutation.
@@ -102,6 +113,8 @@ pub struct ApiClient {
     timeout: Duration,
     /// Wait before each automatic read retry; the read is retried once per entry.
     retry_backoff: &'static [Duration],
+    /// Wait before each read retry that follows a 429 without `Retry-After`.
+    rate_limit_backoff: &'static [Duration],
     on_retry: Option<fn()>,
 }
 
@@ -131,6 +144,7 @@ impl ApiClient {
             http: OnceLock::new(),
             timeout: DEFAULT_API_TIMEOUT,
             retry_backoff: &READ_RETRY_BACKOFF,
+            rate_limit_backoff: &RATE_LIMIT_RETRY_BACKOFF,
             on_retry: None,
         }
     }
@@ -152,7 +166,29 @@ impl ApiClient {
     #[cfg(test)]
     fn with_retry_backoff(mut self, backoff: &'static [Duration]) -> Self {
         self.retry_backoff = backoff;
+        self.rate_limit_backoff = backoff;
         self
+    }
+
+    #[cfg(test)]
+    fn with_rate_limit_backoff(mut self, backoff: &'static [Duration]) -> Self {
+        self.rate_limit_backoff = backoff;
+        self
+    }
+
+    /// The backoff table for the retry after `status`. A 429 that names its
+    /// own wait (`Retry-After`) is waited out by that wait; one that doesn't
+    /// gets the longer rate-limit backoff.
+    fn backoff_for(
+        &self,
+        status: Option<StatusCode>,
+        retry_after: Option<u64>,
+    ) -> &'static [Duration] {
+        if status == Some(StatusCode::TOO_MANY_REQUESTS) && retry_after.is_none() {
+            self.rate_limit_backoff
+        } else {
+            self.retry_backoff
+        }
     }
 
     #[must_use]
@@ -301,20 +337,21 @@ impl ApiClient {
         let mut retries = 0;
         let mut announced = false;
         loop {
-            let (outcome, retry_after) = match self
+            let (outcome, retry_after, status) = match self
                 .send_once(&url, request, self.timeout, Disposition::Read)
                 .await
             {
                 Ok(reply) if is_transient_status(reply.status) => {
-                    let retry_after = reply.retry_after;
-                    (Ok(reply), retry_after)
+                    let (retry_after, status) = (reply.retry_after, Some(reply.status));
+                    (Ok(reply), retry_after, status)
                 }
                 Ok(reply) => return Ok(reply),
-                Err(attempt) if attempt.transient => (Err(attempt.error), None),
+                Err(attempt) if attempt.transient => (Err(attempt.error), None, None),
                 Err(attempt) => return Err(attempt.error),
             };
 
-            let Some(delay) = read_retry_delay(self.retry_backoff, retries, retry_after) else {
+            let backoff = self.backoff_for(status, retry_after);
+            let Some(delay) = read_retry_delay(backoff, retries, retry_after) else {
                 return outcome;
             };
             if waited + delay > RETRY_TOTAL_BUDGET {
@@ -396,10 +433,10 @@ fn read_retry_delay(
 
 fn rate_limit_error(reply: &Reply, disposition: Disposition) -> Option<CliError> {
     http_response_indicates_rate_limit(reply.status.as_u16(), &reply.body).then(|| {
-        CliError::RateLimited {
+        address_rate_limit_in_body(&reply.body).unwrap_or(CliError::RateLimited {
             retry_after: reply.retry_after,
             retryable: disposition == Disposition::Read,
-        }
+        })
     })
 }
 
@@ -610,6 +647,87 @@ mod tests {
             err.to_string(),
             "Too many requests to the Hyperliquid API. Try again in 7s."
         );
+    }
+
+    /// Stands in for the rate-limit backoff, long enough to measure and short
+    /// enough to keep the test fast.
+    static SLOW_RATE_LIMIT_BACKOFF: [Duration; 2] =
+        [Duration::from_millis(120), Duration::from_millis(120)];
+
+    #[test]
+    fn a_429_without_retry_after_gets_the_longer_backoff() {
+        let client = ApiClient::new(Network::Mainnet, None);
+        let tables = |status, retry_after| client.backoff_for(status, retry_after);
+
+        assert_eq!(
+            tables(Some(StatusCode::TOO_MANY_REQUESTS), None),
+            &RATE_LIMIT_RETRY_BACKOFF
+        );
+        // A 429 that names its wait is waited out by that wait.
+        assert_eq!(
+            tables(Some(StatusCode::TOO_MANY_REQUESTS), Some(2)),
+            &READ_RETRY_BACKOFF
+        );
+        assert_eq!(
+            tables(Some(StatusCode::SERVICE_UNAVAILABLE), None),
+            &READ_RETRY_BACKOFF
+        );
+        assert_eq!(tables(None, None), &READ_RETRY_BACKOFF);
+        assert!(
+            RATE_LIMIT_RETRY_BACKOFF[0] > READ_RETRY_BACKOFF[1],
+            "the first rate-limit wait outlasts every plain read retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_read_429_without_retry_after_waits_the_rate_limit_backoff() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/info"))
+            .respond_with(ResponseTemplate::new(429))
+            .mount(&server)
+            .await;
+
+        let started = std::time::Instant::now();
+        let err = client_for(&server.uri())
+            .with_rate_limit_backoff(&SLOW_RATE_LIMIT_BACKOFF)
+            .info::<serde_json::Value>(&json!({}), "testing")
+            .await
+            .expect_err("persistent 429 fails");
+
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        // Two waits of at least 75% of 120 ms; the plain 1 ms and 2 ms backoff would end far sooner.
+        assert!(
+            started.elapsed() >= Duration::from_millis(180),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(err.exit_code(), 11);
+    }
+
+    #[tokio::test]
+    async fn exchange_200_cumulative_request_limit_is_the_address_rate_limit_and_sent_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/exchange"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "err",
+                "response": "Too many cumulative requests sent (37986 > 10436) for cumulative volume traded $437.92. Place taker orders to free up 1 request per USDC traded."
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let err = client_for(&server.uri())
+            .exchange::<serde_json::Value>(&json!({}))
+            .await
+            .expect_err("rate limited");
+
+        assert!(matches!(err, CliError::AddressRateLimited(_)), "{err:?}");
+        assert_eq!(err.exit_code(), 11);
+        assert_eq!(err.retry_after(), Some(10));
+        assert_eq!(err.retryable(), None, "mutations never claim retryable");
+        assert!(err.hint().is_some());
     }
 
     #[tokio::test]

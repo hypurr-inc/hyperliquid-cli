@@ -129,11 +129,17 @@ pub(super) const WALLET_ACCOUNT_MISSING: Spec = Spec::new(
     "wallet_account_missing",
     "Use an OWS wallet with a Hyperliquid or EVM account.",
 );
+pub(super) const SIGNER_NOT_REGISTERED: Spec = Spec::new(
+    10,
+    "auth",
+    "signer_not_registered",
+    "The signature recovered to an address the exchange doesn't know as a user or API wallet (the address is in the remote message). Likely causes: the API wallet was never approved, expired or was pruned (approving a new unnamed API wallet replaces the old one), or the wrong key signed. Check `hyperliquid api-wallet list`; the master account approves a wallet with `hyperliquid api-wallet approve`. If the named address is not your signer's, the signed payload differs from what the exchange hashed.",
+);
 pub(super) const RATE_LIMITED: Spec = Spec::new(
     11,
     "rate_limited",
     "rate_limited",
-    "Back off for `retry_after` seconds when present; prefer streaming over REST polling.",
+    "Back off for `retry_after` seconds when present; prefer streaming over REST polling. The address-based limit (`Too many cumulative requests`) only grows with trading volume or the `reserveRequestWeight` action; meanwhile the address may send one request every 10 seconds. `hyperliquid account rate-limit` shows its usage.",
 )
 .retry(Retry::Sometimes(
     "reads only; a rate-limited mutation is never marked retryable",
@@ -170,6 +176,66 @@ pub(super) const UNSUPPORTED_INPUT: Spec = Spec::new(
     "unsupported_input",
     "Correct the asset, DEX, address, or value the message names.",
 );
+pub(super) const MIN_ORDER_VALUE: Spec = Spec::new(
+    13,
+    "unsupported",
+    "order_below_minimum_value",
+    "Raise the size or price until the order's notional value is at least $10 (spot: 10 units of the quote token).",
+);
+pub(super) const REDUCE_ONLY_VIOLATION: Spec = Spec::new(
+    13,
+    "unsupported",
+    "reduce_only_violation",
+    "A reduce-only order may only shrink an existing position on the same market. Check the side and size in `hyperliquid positions list`, or drop --reduce-only.",
+);
+pub(super) const POST_ONLY_WOULD_CROSS: Spec = Spec::new(
+    13,
+    "unsupported",
+    "post_only_would_cross",
+    "A post-only (--tif alo) order may not match on entry. Price it behind the best bid or ask (`hyperliquid book`), or use --tif gtc.",
+);
+pub(super) const IOC_NO_MATCH: Spec = Spec::new(
+    13,
+    "unsupported",
+    "ioc_no_match",
+    "An IOC order found nothing to match and was canceled. Move the limit price across the book (`hyperliquid book`) or reduce the size.",
+);
+pub(super) const BAD_PRICE: Spec = Spec::new(
+    13,
+    "unsupported",
+    "bad_price",
+    "Round the price to the market's tick: at most 5 significant figures and at most (6 for perps, 8 for spot) minus szDecimals decimal places; integer prices are always allowed.",
+);
+pub(super) const PRICE_OUT_OF_BAND: Spec = Spec::new(
+    13,
+    "unsupported",
+    "price_out_of_band",
+    "The price is too far from the oracle or reference price. Price closer to the current mark (`hyperliquid book`, `hyperliquid perps get`).",
+);
+pub(super) const ZERO_SIZE: Spec = Spec::new(
+    13,
+    "unsupported",
+    "zero_size",
+    "The size is zero after rounding to the market's size decimals. Use a larger --size.",
+);
+pub(super) const OPEN_INTEREST_CAP: Spec = Spec::new(
+    13,
+    "unsupported",
+    "open_interest_cap",
+    "The market is at or growing toward its open-interest cap, so orders that increase open interest are refused. Reduce or close a position, trade another market, or retry later.",
+);
+pub(super) const INVALID_TRIGGER_PRICE: Spec = Spec::new(
+    13,
+    "unsupported",
+    "invalid_trigger_price",
+    "The TP/SL trigger price is not valid for this order against the current market (for example a trigger on the wrong side of the mark price). Check the trigger price and side.",
+);
+pub(super) const NO_MARKET_LIQUIDITY: Spec = Spec::new(
+    13,
+    "unsupported",
+    "no_market_liquidity",
+    "The book has nothing to fill a market order against. Place a limit order, or retry when the book has depth (`hyperliquid book`).",
+);
 pub(super) const CONFIRMATION_REQUIRED: Spec = Spec::new(
     13,
     "unsupported",
@@ -203,12 +269,23 @@ pub(super) const ALL: &[&Spec] = &[
     &INVALID_AUTH,
     &WALLET_NOT_FOUND,
     &WALLET_ACCOUNT_MISSING,
+    &SIGNER_NOT_REGISTERED,
     &RATE_LIMITED,
     &NETWORK_ERROR,
     &API_ERROR,
     &TIMEOUT,
     &UNKNOWN_OUTCOME,
     &UNSUPPORTED_INPUT,
+    &MIN_ORDER_VALUE,
+    &REDUCE_ONLY_VIOLATION,
+    &POST_ONLY_WOULD_CROSS,
+    &IOC_NO_MATCH,
+    &BAD_PRICE,
+    &PRICE_OUT_OF_BAND,
+    &ZERO_SIZE,
+    &OPEN_INTEREST_CAP,
+    &INVALID_TRIGGER_PRICE,
+    &NO_MARKET_LIQUIDITY,
     &CONFIRMATION_REQUIRED,
     &ASSET_NOT_FOUND,
     &PARTIAL_FAILURE,
