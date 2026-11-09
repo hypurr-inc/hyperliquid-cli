@@ -4,13 +4,13 @@
 //! schema derived from each one.
 
 use clap::Args;
-use serde_json::{Value, json};
+use serde_json::Value;
 
-use crate::command_registry::{ArgType, CommandContract, CommandRegistry};
-use crate::command_spec::{CliCommand, CommandSpec, OutputContract, arg};
+use crate::command_registry::{CommandContract, CommandRegistry};
+use crate::command_spec::{CliCommand, CommandSpec, NetworkUse, OutputContract, arg};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
-use crate::output::TableData;
+use crate::output::{TableData, serialize_row};
 
 /// The schema entries asked for: the JSON they print, and the table rows built
 /// from the same contracts.
@@ -22,28 +22,28 @@ pub struct SchemaOutput {
 
 impl SchemaOutput {
     /// The entry of the one command named by its exact path.
-    fn one(contract: &CommandContract) -> Result<Self, CliError> {
-        Ok(Self {
-            json: schema_entry(contract)?,
+    fn one(contract: &CommandContract) -> Self {
+        Self {
+            json: schema_entry(contract),
             rows: vec![table_row(contract)],
-        })
+        }
     }
 
     /// A list of entries, in registry order.
-    fn many<'a>(contracts: impl Iterator<Item = &'a CommandContract>) -> Result<Self, CliError> {
+    fn many<'a>(contracts: impl Iterator<Item = &'a CommandContract>) -> Self {
         let contracts: Vec<_> = contracts.collect();
-        Ok(Self {
+        Self {
             json: Value::Array(
                 contracts
                     .iter()
                     .map(|contract| schema_entry(contract))
-                    .collect::<Result<_, _>>()?,
+                    .collect(),
             ),
             rows: contracts
                 .iter()
                 .map(|contract| table_row(contract))
                 .collect(),
-        })
+        }
     }
 }
 
@@ -76,30 +76,29 @@ pub fn show(inv: &Invocation, command_path: &[String]) -> Result<(), anyhow::Err
 }
 
 /// One command's entry: its contract plus the JSON schema of its inputs.
-fn schema_entry(contract: &CommandContract) -> Result<Value, CliError> {
+fn schema_entry(contract: &CommandContract) -> Value {
     #[derive(serde::Serialize)]
     struct Entry<'a> {
         #[serde(flatten)]
         contract: &'a CommandContract,
         json_schema: Value,
     }
-    serde_json::to_value(Entry {
+    serialize_row(&Entry {
         contract,
-        json_schema: json_schema(contract)?,
+        json_schema: contract.json_schema(),
     })
-    .map_err(|err| CliError::Internal(anyhow::anyhow!(err)))
 }
 
 pub fn schema_query(command_path: &[String]) -> Result<SchemaOutput, anyhow::Error> {
     let contracts = CommandRegistry::get().commands();
 
     let output = if command_path.is_empty() {
-        SchemaOutput::many(contracts.iter())?
+        SchemaOutput::many(contracts.iter())
     } else if let Some(contract) = contracts
         .iter()
         .find(|contract| contract.command_path.as_slice() == command_path)
     {
-        SchemaOutput::one(contract)?
+        SchemaOutput::one(contract)
     } else {
         let mut matches = contracts
             .iter()
@@ -112,7 +111,7 @@ pub fn schema_query(command_path: &[String]) -> Result<SchemaOutput, anyhow::Err
             ))
             .into());
         }
-        SchemaOutput::many(matches)?
+        SchemaOutput::many(matches)
     };
 
     Ok(output)
@@ -124,74 +123,6 @@ fn command_path_is_prefix(prefix: &[String], command_path: &[String]) -> bool {
             .iter()
             .zip(prefix)
             .all(|(actual, requested)| actual == requested)
-}
-
-/// The JSON schema of the command's inputs, with the contract's policy as the
-/// `x-hyperliquid` extension.
-fn json_schema(contract: &CommandContract) -> Result<Value, CliError> {
-    let internal = |err: serde_json::Error| CliError::Internal(anyhow::anyhow!(err));
-    let mut properties = serde_json::Map::new();
-    let mut required = Vec::new();
-
-    for input in &contract.inputs {
-        let scalar = match input.arg_type {
-            ArgType::Boolean => "boolean",
-            ArgType::Integer => "number",
-            ArgType::String => "string",
-        };
-        let mut prop = serde_json::Map::new();
-        if input.multiple {
-            prop.insert("type".into(), json!("array"));
-            prop.insert("items".into(), json!({"type": scalar}));
-        } else {
-            prop.insert("type".into(), json!(scalar));
-        }
-        if !input.enum_values.is_empty() {
-            prop.insert("enum".into(), json!(input.enum_values));
-        }
-        if let Some(description) = &input.description {
-            prop.insert("description".into(), json!(description));
-        }
-        if let Some(default) = &input.default {
-            prop.insert("default".into(), json!(default));
-        }
-        if let Some(kind) = input.kind {
-            prop.insert(
-                "input_kind".into(),
-                serde_json::to_value(kind).map_err(internal)?,
-            );
-        }
-        properties.insert(input.id.clone(), Value::Object(prop));
-        if input.required {
-            required.push(json!(input.id));
-        }
-    }
-
-    let mut schema = serde_json::Map::new();
-    schema.insert("type".into(), json!("object"));
-    schema.insert("properties".into(), Value::Object(properties));
-    if !required.is_empty() {
-        schema.insert("required".into(), Value::Array(required));
-    }
-    if !contract.spec.one_of_required.is_empty() {
-        schema.insert(
-            "oneOf".into(),
-            Value::Array(
-                contract
-                    .spec
-                    .one_of_required
-                    .iter()
-                    .map(|required| json!({ "required": required }))
-                    .collect(),
-            ),
-        );
-    }
-    schema.insert(
-        "x-hyperliquid".into(),
-        serde_json::to_value(&contract.policy).map_err(internal)?,
-    );
-    schema.insert("additionalProperties".into(), json!(false));
-    Ok(Value::Object(schema))
 }
 
 #[derive(Args, Debug, Clone)]
@@ -219,7 +150,7 @@ hyperliquid --format json schema\n  \
 hyperliquid --format json schema orders create\n  \
 hyperliquid --format json --select command,description schema orders",
     )
-    .local()
+    .network(NetworkUse::None)
     .schema_command("hyperliquid schema")
     .output(OutputContract::SchemaArrayOrObject)
     .args(&[arg("command_path")

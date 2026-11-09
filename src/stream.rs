@@ -24,6 +24,7 @@ use crate::command_spec::{EnvZero, StreamBound, StreamEnv};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::output::JsonRenderOptions;
+use crate::output::notice::{self, JsonLinesReason, Notice};
 use crate::settings::EnvSource;
 use crate::ws::BookAggregationArgs;
 use crate::{output, ws};
@@ -34,15 +35,6 @@ pub(crate) const EXIT_SIGINT: i32 = 130;
 
 /// A polling stream with no explicit idle bound ends after this long without output.
 const POLL_DEFAULT_IDLE: Duration = Duration::from_secs(60 * 60);
-
-pub(crate) const JSON_LINES_STDOUT_NOTICE: &str =
-    "Streaming JSON lines because stdout isn't a terminal.";
-pub(crate) const JSON_LINES_STDIN_NOTICE: &str =
-    "Streaming JSON lines because stdin isn't a terminal.";
-pub(crate) const JSON_LINES_DRIVEN_NOTICE: &str =
-    "Streaming JSON lines because an agent, CI or --non-interactive run is driving.";
-pub(crate) const CONNECTION_LOST_NOTICE: &str = "! Lost connection. Retrying automatically…";
-const STREAM_GAP_MESSAGE: &str = "Connection was lost and restored. Events may have been missed.";
 
 /// Stdout was closed by the reader (`| head`); the stream should end quietly.
 #[derive(Debug)]
@@ -314,6 +306,7 @@ impl StreamBounds {
 /// The environment variable is consulted, and checked for validity, only when
 /// no flag bounds the run.
 pub fn require_bound(
+    command: &str,
     bound: StreamBound,
     matches: &ArgMatches,
     source: &EnvSource,
@@ -339,7 +332,7 @@ pub fn require_bound(
             return Ok(());
         }
     }
-    Err(CliError::Unsupported(bound.unbounded_message()))
+    Err(CliError::Unsupported(bound.unbounded_message(command)))
 }
 
 /// Restarts on every emitted item; never fires when no idle bound is set.
@@ -630,7 +623,7 @@ pub async fn stream_subscription(
     let projection = inv.session().json_options();
     let bounds = StreamBounds::subscribe(args, inv.settings().env());
     if !mode.terminal.stdout && !mode.machine_format() {
-        eprintln!("{JSON_LINES_STDOUT_NOTICE}");
+        Notice::JsonLines(JsonLinesReason::StdoutNotTerminal).eprint(false);
     }
     let announce_loss = mode.person_on_stderr();
 
@@ -800,7 +793,7 @@ where
             if !*gap_pending {
                 *gap_pending = true;
                 if announce_loss {
-                    eprintln!("{CONNECTION_LOST_NOTICE}");
+                    Notice::ConnectionLost.eprint(false);
                 }
             }
             Ok(false)
@@ -809,15 +802,7 @@ where
             if *gap_pending {
                 *gap_pending = false;
                 // Control line: written unprojected so --select cannot drop the gap marker.
-                write_line(
-                    output,
-                    &serde_json::to_string(&serde_json::json!({
-                        "type": "warning",
-                        "reason": "stream_gap",
-                        "subscription": subscription_label,
-                        "message": STREAM_GAP_MESSAGE,
-                    }))?,
-                )?;
+                write_line(output, &notice::stream_gap(subscription_label).to_string())?;
             }
             Ok(false)
         }
@@ -969,22 +954,33 @@ mod tests {
     }
 
     #[test]
-    fn polled_streams_must_declare_a_bound_with_the_watch_risk_hint() {
+    fn polled_streams_must_declare_a_bound_and_name_their_own_command() {
         let none = env(&[]);
-        let err = require_bound(StreamBound::Polled, &matches(&["c"]), &none).unwrap_err();
+        let err =
+            require_bound("watch risk", StreamBound::Polled, &matches(&["c"]), &none).unwrap_err();
         assert_eq!(err.exit_code(), 13);
-        assert!(err.to_string().contains("--max-events 20"), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "Unsupported input: JSON watch risk output must be bounded with --max-events <N> or --idle-timeout-ms <N>"
+        );
+        let other =
+            require_bound("alerts feed", StreamBound::Polled, &matches(&["c"]), &none).unwrap_err();
+        assert!(
+            other.to_string().contains("JSON alerts feed output"),
+            "{other}"
+        );
         for bounded in [["c", "--max-events", "3"], ["c", "--idle-timeout-ms", "50"]] {
-            assert!(require_bound(StreamBound::Polled, &matches(&bounded), &none).is_ok());
+            assert!(require_bound("c", StreamBound::Polled, &matches(&bounded), &none).is_ok());
         }
     }
 
     #[test]
     fn snapshot_watch_is_bounded_only_when_watching() {
         let none = env(&[]);
-        assert!(require_bound(StreamBound::SnapshotWatch, &matches(&["c"]), &none).is_ok());
+        assert!(require_bound("c", StreamBound::SnapshotWatch, &matches(&["c"]), &none).is_ok());
         assert!(
             require_bound(
+                "c",
                 StreamBound::SnapshotWatch,
                 &matches(&["c", "--watch", "--max-ticks", "2"]),
                 &none
@@ -992,6 +988,7 @@ mod tests {
             .is_ok()
         );
         let err = require_bound(
+            "c",
             StreamBound::SnapshotWatch,
             &matches(&["c", "--watch"]),
             &none,
@@ -1007,16 +1004,16 @@ mod tests {
     #[test]
     fn subscribe_is_bounded_by_events_idle_or_the_environment() {
         let none = env(&[]);
-        let err = require_bound(StreamBound::Subscribe, &matches(&["c"]), &none).unwrap_err();
+        let err = require_bound("c", StreamBound::Subscribe, &matches(&["c"]), &none).unwrap_err();
         assert_eq!(
             err.to_string(),
             "Unsupported input: JSON subscribe output must be bounded with --max-events <N>, --idle-timeout-ms <N>, or HYPERLIQUID_SUBSCRIBE_MAX_EVENTS"
         );
         for bounded in [["c", "--max-events", "0"], ["c", "--idle-timeout-ms", "10"]] {
-            assert!(require_bound(StreamBound::Subscribe, &matches(&bounded), &none).is_ok());
+            assert!(require_bound("c", StreamBound::Subscribe, &matches(&bounded), &none).is_ok());
         }
         let zero = env(&[("HYPERLIQUID_SUBSCRIBE_MAX_EVENTS", "0")]);
-        assert!(require_bound(StreamBound::Subscribe, &matches(&["c"]), &zero).is_ok());
+        assert!(require_bound("c", StreamBound::Subscribe, &matches(&["c"]), &zero).is_ok());
     }
 
     #[test]
@@ -1037,7 +1034,8 @@ mod tests {
         );
 
         let garbage = env(&[("HYPERLIQUID_SUBSCRIBE_MAX_EVENTS", "many")]);
-        let err = require_bound(StreamBound::Subscribe, &matches(&["c"]), &garbage).unwrap_err();
+        let err =
+            require_bound("c", StreamBound::Subscribe, &matches(&["c"]), &garbage).unwrap_err();
         assert_eq!(err.exit_code(), 2);
         assert!(
             err.to_string()
@@ -1045,6 +1043,7 @@ mod tests {
         );
         assert!(
             require_bound(
+                "c",
                 StreamBound::Subscribe,
                 &matches(&["c", "--max-events", "3"]),
                 &garbage

@@ -67,6 +67,12 @@
 - `orders create`, `buy`, `sell`, `scale` and `batch-create` take `--priority-rate <N>` (order write priority, `grouping: {"p": N}`, N/100,000,000 of notional, so 80000 is 8 bps, at most 100000000). It needs IOC orders, or non-reduce-only ALO orders, on non-outcome markets (otherwise exit `13`) and cannot combine with `--grouping`, `--take-profit` or `--stop-loss`; the confirmation prompt and `--dry-run` (`priority_rate`, `grouping_wire`) show it.
 - `orders create`, `buy` and `sell` take a repeatable `--sub-builder ADDRESS:SHARE` (up to 5, SHARE a percent of the builder fee such as `25%`, summing to at most 100%) with `--builder`, sent as the builder's `s` list.
 - `orders batch-modify --orders-file <PATH>` modifies several orders in one `batchModify` action, with the planning rules of `orders modify` (precision truncation, trigger prices kept, `--always-place`) per order, the `orders batch-create` file conventions and confirmation, and a per-order result with a partial-failure exit `15`.
+- `mcp` exits `2` (configuration error) when `HYPERLIQUID_MCP_TIMEOUT_MS` is not a positive whole number of milliseconds or `HYPERLIQUID_MCP_ALLOW_UNSAFE` is not one of `1|true|yes|on|0|false|no|off`, like the other environment bounds; it used to fall back silently to 30 seconds or to read-only. A client that closes the server's stdout now ends it instead of being ignored.
+- An SDK error whose text says `User or API Wallet … does not exist` exits `10` (`signer_not_registered`) like the same text from the exchange, and an address rate limit reported under the status `error`, `failed` or `failure` (not only `err`) is recognised as `rate_limited` with its hint.
+- The `rate_limited` entry in `.claude/error-catalog.json` points agents at `data.hint` for the address limit instead of repeating its text; the hint itself is unchanged.
+- The refusal of an unbounded `watch risk` run in agent mode names the command and the options (`JSON watch risk output must be bounded with --max-events <N> or --idle-timeout-ms <N>`); it is generated like the other stream bounds.
+- A one-shot WebSocket read that times out (the `book` snapshot and funding context) reports the reason `timeout` (exit `12` as before) instead of `network_error`, like a silent `subscribe`.
+- `update` reports a failed release request as `Couldn't reach <host>. <cause>.` (refused, timed out, DNS, TLS) like API calls do, instead of the raw HTTP client text.
 
 ## 0.18.0 - 2026-11-09
 

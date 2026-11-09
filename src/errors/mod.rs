@@ -8,6 +8,7 @@
 mod classify;
 mod envelope;
 mod recovery;
+mod refusal;
 mod spec;
 mod transport;
 
@@ -16,11 +17,12 @@ use thiserror::Error;
 use crate::response_sanitization::Untrusted;
 
 pub use classify::{
-    Refusal, Rejection, address_rate_limit_in_body, classify_rejection, from_anyhow,
+    Decisive, Rejection, address_rate_limit_in_body, classify_rejection, from_anyhow,
     from_exchange_rejection, from_sdk, http_response_indicates_rate_limit, is_server_status,
 };
 pub use envelope::{ErrorEnvelope, UsageParts, partial_results_fields};
 pub use recovery::NextCommand;
+pub use refusal::Refusal;
 pub use spec::StdoutDocument;
 pub use transport::{network_error, transport_cause};
 
@@ -158,12 +160,6 @@ pub enum CliError {
     PartialResults(String),
 }
 
-/// The address-based limit lets a spent address send one request every 10
-/// seconds.
-const ADDRESS_LIMIT_RETRY_AFTER_SECS: u64 = 10;
-
-const ADDRESS_RATE_LIMIT_HINT: &str = "Each address earns 1 request per USDC of cumulative volume traded, on top of a 10000-request starting buffer. Once that is spent it may send one request every 10 seconds; cancels have a higher cap, so open orders can still be canceled. Trade (taker fills) to free requests, or buy capacity with the `reserveRequestWeight` action (0.0005 USDC per request). `hyperliquid account rate-limit` shows the address's usage.";
-
 fn rate_limit_hint(retry_after: &Option<u64>) -> String {
     match retry_after {
         Some(seconds) => format!("Try again in {seconds}s."),
@@ -177,6 +173,27 @@ fn api_status_headline(status: u16) -> &'static str {
     } else {
         "The Hyperliquid API rejected the request."
     }
+}
+
+/// Every text in the error system that tells a person or agent to run a
+/// command: agent actions, hints, recovery commands and the outcome-notation
+/// advice. The registry test resolves the `hyperliquid <words>` in them.
+#[cfg(test)]
+pub(crate) fn command_advice() -> Vec<String> {
+    let mut texts = Vec::new();
+    for spec in spec::catalog_specs()
+        .into_iter()
+        .chain([&spec::ADDRESS_RATE_LIMITED])
+    {
+        texts.push(spec.agent_action.to_string());
+        texts.extend(spec.hint.map(str::to_string));
+    }
+    let recoveries = [CliError::AuthRequired, CliError::unknown_outcome("x")];
+    for recovery in recoveries.iter().filter_map(CliError::recovery) {
+        texts.extend(recovery.commands.into_iter().map(|next| next.command));
+    }
+    texts.push(CliError::unsupported_outcome_notation("#1").to_string());
+    texts
 }
 
 impl CliError {
@@ -193,7 +210,8 @@ impl CliError {
             Self::SignerNotRegistered(_) => &spec::SIGNER_NOT_REGISTERED,
             Self::OwsWalletNotFound { .. } => &spec::WALLET_NOT_FOUND,
             Self::OwsNoChainAccount { .. } => &spec::WALLET_ACCOUNT_MISSING,
-            Self::RateLimited { .. } | Self::AddressRateLimited(_) => &spec::RATE_LIMITED,
+            Self::RateLimited { .. } => &spec::RATE_LIMITED,
+            Self::AddressRateLimited(_) => &spec::ADDRESS_RATE_LIMITED,
             Self::Unavailable(_) => &spec::NETWORK_ERROR,
             Self::ApiStatus { .. } => &spec::API_ERROR,
             Self::Timeout(_) => &spec::TIMEOUT,
@@ -250,13 +268,13 @@ impl CliError {
         }
     }
 
-    /// Seconds to wait before retrying, from `Retry-After`.
+    /// Seconds to wait before retrying: the `Retry-After` header of a rate
+    /// limit, or the wait its spec names.
     #[must_use]
     pub fn retry_after(&self) -> Option<u64> {
         match self {
             Self::RateLimited { retry_after, .. } => *retry_after,
-            Self::AddressRateLimited(_) => Some(ADDRESS_LIMIT_RETRY_AFTER_SECS),
-            _ => None,
+            _ => self.spec().retry_after_secs,
         }
     }
 
@@ -325,16 +343,12 @@ impl CliError {
         }
     }
 
-    /// What to do about this failure, for the refusals that have a specific
-    /// answer. The JSON envelope carries it as `data.hint`.
+    /// What to do about this failure, for the failures that have a specific
+    /// answer: the refusals, an unregistered signer, the address rate limit.
+    /// The JSON envelope carries it as `data.hint`.
     #[must_use]
     pub fn hint(&self) -> Option<&'static str> {
-        match self {
-            Self::ExchangeRefused { refusal, .. } => Some(refusal.spec().agent_action),
-            Self::SignerNotRegistered(_) => Some(spec::SIGNER_NOT_REGISTERED.agent_action),
-            Self::AddressRateLimited(_) => Some(ADDRESS_RATE_LIMIT_HINT),
-            _ => None,
-        }
+        self.spec().hint
     }
 
     /// Outcome asset notation given to a command that only trades or reads perp
@@ -435,7 +449,8 @@ mod tests {
         ];
         variants.extend(
             Refusal::ALL
-                .map(|refusal| CliError::refused(refusal, "lead: ", &Untrusted::from_remote("x"))),
+                .iter()
+                .map(|refusal| CliError::refused(*refusal, "lead: ", &Untrusted::from_remote("x"))),
         );
         variants
     }
@@ -578,7 +593,8 @@ mod tests {
         .into_iter()
         .chain(
             Refusal::ALL
-                .map(|refusal| CliError::refused(refusal, "", &Untrusted::from_remote("x"))),
+                .iter()
+                .map(|refusal| CliError::refused(*refusal, "", &Untrusted::from_remote("x"))),
         );
         for err in hinted {
             assert!(err.hint().is_some(), "{err:?}");
@@ -605,25 +621,51 @@ mod tests {
     }
 
     #[test]
-    fn every_variant_reports_a_cataloged_spec() {
+    fn the_address_limit_text_is_owned_by_its_spec_alone() {
+        let plain = CliError::rate_limited();
+        let address = CliError::AddressRateLimited(Untrusted::from_remote("x"));
+        assert_eq!(plain.reason(), address.reason());
+        assert_eq!(plain.exit_code(), address.exit_code());
+        assert_eq!(plain.hint(), None);
+        let hint = address.hint().expect("the address limit has a hint");
+        assert!(
+            !spec::RATE_LIMITED
+                .agent_action
+                .contains("reserveRequestWeight"),
+            "the rate-limit agent action points at data.hint instead of repeating it"
+        );
+        assert!(hint.contains("0.0005 USDC per request"));
+    }
+
+    #[test]
+    fn every_variant_reports_a_cataloged_reason() {
+        let catalog = spec::catalog_specs();
         for err in every_variant() {
-            assert!(spec::ALL.contains(&err.spec()), "{err:?}");
+            assert!(
+                catalog.iter().any(|spec| spec.reason == err.reason()),
+                "{err:?}"
+            );
         }
     }
 
     #[test]
     fn catalog_lists_each_reason_once_and_every_listed_spec_is_reachable() {
-        let mut reasons = spec::ALL.iter().map(|spec| spec.reason).collect::<Vec<_>>();
+        let catalog = spec::catalog_specs();
+        let mut reasons = catalog.iter().map(|spec| spec.reason).collect::<Vec<_>>();
         reasons.sort_unstable();
         let listed = reasons.len();
         reasons.dedup();
-        assert_eq!(reasons.len(), listed, "a reason appears twice in spec::ALL");
+        assert_eq!(
+            reasons.len(),
+            listed,
+            "a reason appears twice in the catalog"
+        );
 
         let usage = [&spec::INVALID_ARGUMENTS, &spec::UNKNOWN_COMMAND];
         let variants = every_variant();
-        for spec in spec::ALL {
+        for spec in spec::catalog_specs() {
             assert!(
-                usage.contains(spec) || variants.iter().any(|err| err.spec() == *spec),
+                usage.contains(&spec) || variants.iter().any(|err| err.spec() == spec),
                 "no error reports {}",
                 spec.reason
             );
@@ -662,7 +704,7 @@ mod tests {
 
     #[test]
     fn skill_files_document_the_catalog_exit_codes_and_reasons() {
-        let mut exit_codes = spec::ALL
+        let mut exit_codes = spec::catalog_specs()
             .iter()
             .map(|spec| spec.exit_code)
             .collect::<Vec<_>>();
@@ -687,7 +729,9 @@ mod tests {
             for reason in examples.split(", ") {
                 let reason = reason.trim_matches('`');
                 assert!(
-                    spec::ALL.iter().any(|spec| spec.reason == reason),
+                    spec::catalog_specs()
+                        .iter()
+                        .any(|spec| spec.reason == reason),
                     "{skill} names unknown reason {reason}"
                 );
             }

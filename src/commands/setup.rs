@@ -8,7 +8,9 @@ use clap::Args;
 use serde::Serialize;
 
 use crate::builder_fee::{self, MaxFeeRate};
-use crate::command_spec::{CliCommand, CommandSpec, InputKind, Lifecycle, OwsSupport, Risk, arg};
+use crate::command_spec::{
+    CliCommand, CommandSpec, InputKind, Lifecycle, NetworkUse, OwsSupport, Risk, arg,
+};
 use crate::commands::{builder, wallet};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -539,6 +541,7 @@ impl CliCommand for Setup {
     \n\
     Generated or imported private keys are never printed.")
     .lifecycle(Lifecycle::InteractiveLocal)
+    .network(NetworkUse::Optional)
     .risk(Risk::LocalSecret)
     .ows(OwsSupport::NotApplicable).dangerous()
     .prompt()

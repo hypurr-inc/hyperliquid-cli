@@ -9,6 +9,7 @@ use std::sync::LazyLock;
 use clap::builder::ValueParser;
 use clap::{Arg, ArgAction, Command};
 use serde::Serialize;
+use serde_json::{Value, json};
 
 use crate::command_spec::{
     ArgSpec, CommandSpec, ConfirmationPolicy, DryRunPolicy, GroupSpec, InputKind, Lifecycle,
@@ -16,6 +17,7 @@ use crate::command_spec::{
     Transport, YES_ARG,
 };
 use crate::commands;
+use crate::output::serialize_row;
 
 /// The order `schema`, the MCP tool list and the contract fixtures list commands
 /// in. Every registered command appears exactly once; a test fails when one does not.
@@ -228,7 +230,7 @@ impl CommandRegistry {
 
 /// What the schema says about one command. Serializing it yields the entry
 /// `hyperliquid schema` prints, except `json_schema`, which
-/// [`crate::commands::schema`] derives from the same value.
+/// [`CommandContract::json_schema`] derives from the same value.
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandContract {
     pub command: String,
@@ -404,6 +406,74 @@ impl CommandContract {
     pub fn input(&self, id: &str) -> Option<&InputContract> {
         self.inputs.iter().find(|input| input.id == id)
     }
+
+    /// The name the MCP server offers the command under: the path joined with
+    /// `_`, dashes spelled `_` too. Discovery and calls both use it; a test
+    /// keeps the names unique.
+    pub fn mcp_tool_name(&self) -> String {
+        self.command_path.join("_").replace('-', "_")
+    }
+
+    /// The JSON schema of the command's inputs, with the contract's policy as
+    /// the `x-hyperliquid` extension. `schema` prints it beside the contract
+    /// and MCP offers it as the tool's input schema.
+    pub fn json_schema(&self) -> Value {
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+
+        for input in &self.inputs {
+            let scalar = match input.arg_type {
+                ArgType::Boolean => "boolean",
+                ArgType::Integer => "number",
+                ArgType::String => "string",
+            };
+            let mut prop = serde_json::Map::new();
+            if input.multiple {
+                prop.insert("type".into(), json!("array"));
+                prop.insert("items".into(), json!({"type": scalar}));
+            } else {
+                prop.insert("type".into(), json!(scalar));
+            }
+            if !input.enum_values.is_empty() {
+                prop.insert("enum".into(), json!(input.enum_values));
+            }
+            if let Some(description) = &input.description {
+                prop.insert("description".into(), json!(description));
+            }
+            if let Some(default) = &input.default {
+                prop.insert("default".into(), json!(default));
+            }
+            if let Some(kind) = input.kind {
+                prop.insert("input_kind".into(), serialize_row(&kind));
+            }
+            properties.insert(input.id.clone(), Value::Object(prop));
+            if input.required {
+                required.push(json!(input.id));
+            }
+        }
+
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".into(), json!("object"));
+        schema.insert("properties".into(), Value::Object(properties));
+        if !required.is_empty() {
+            schema.insert("required".into(), Value::Array(required));
+        }
+        if !self.spec.one_of_required.is_empty() {
+            schema.insert(
+                "oneOf".into(),
+                Value::Array(
+                    self.spec
+                        .one_of_required
+                        .iter()
+                        .map(|required| json!({ "required": required }))
+                        .collect(),
+                ),
+            );
+        }
+        schema.insert("x-hyperliquid".into(), serialize_row(&self.policy));
+        schema.insert("additionalProperties".into(), json!(false));
+        Value::Object(schema)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -518,6 +588,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::command_spec::NetworkUse;
 
     #[test]
     fn schema_order_lists_every_registered_command_exactly_once() {
@@ -535,14 +606,20 @@ mod tests {
             .iter()
             .filter(|key| !listed.contains(key.as_str()))
             .collect::<Vec<_>>();
-        assert!(missing.is_empty(), "not in SCHEMA_ORDER: {missing:?}");
+        assert!(
+            missing.is_empty(),
+            "not in SCHEMA_ORDER: {missing:?}. A command is registered twice on purpose: \
+             in commands::entries (the order `--help` lists commands) and here (the order \
+             `schema` and the contract fixtures list them); both orders are public and pinned."
+        );
         let unknown = listed
             .iter()
             .filter(|key| !registered.contains(**key))
             .collect::<Vec<_>>();
         assert!(
             unknown.is_empty(),
-            "SCHEMA_ORDER names no command: {unknown:?}"
+            "SCHEMA_ORDER names no registered command: {unknown:?}. Remove it here, or \
+             register the command in commands::entries."
         );
     }
 
@@ -555,5 +632,93 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(contracts.len(), commands::entries().len());
         assert_eq!(paths.len(), contracts.len(), "two contracts share a path");
+    }
+
+    /// The command words after each `hyperliquid ` in `text`, up to the first
+    /// flag, placeholder or closing punctuation.
+    fn advised_commands(text: &str) -> Vec<Vec<String>> {
+        text.match_indices("hyperliquid ")
+            .map(|(at, found)| {
+                let mut words = Vec::new();
+                for token in text[at + found.len()..].split_whitespace() {
+                    let word = token.trim_end_matches(['`', ',', ';', '.', ')', ':']);
+                    let plain = !word.is_empty()
+                        && !word.starts_with('-')
+                        && word
+                            .chars()
+                            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-');
+                    if !plain {
+                        break;
+                    }
+                    words.push(word.to_string());
+                    if word.len() != token.len() {
+                        break;
+                    }
+                }
+                words
+            })
+            .filter(|words| !words.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn every_command_the_error_advice_names_is_registered() {
+        let advice = crate::errors::command_advice();
+        let advised = advice
+            .iter()
+            .flat_map(|text| advised_commands(text))
+            .collect::<Vec<_>>();
+        assert!(advised.len() >= 10, "found only {advised:?}");
+        for words in advised {
+            assert!(
+                commands::entries().iter().any(|entry| {
+                    words.len() >= entry.spec.path.len()
+                        && entry.spec.path.iter().zip(&words).all(|(a, b)| a == b)
+                }),
+                "error advice names `hyperliquid {}`, which is not a command",
+                words.join(" ")
+            );
+        }
+    }
+
+    #[test]
+    fn advice_extraction_stops_at_flags_placeholders_and_punctuation() {
+        assert_eq!(
+            advised_commands("see `hyperliquid account rate-limit`; or `hyperliquid --help`"),
+            [["account", "rate-limit"]]
+        );
+        assert_eq!(
+            advised_commands("run hyperliquid orders create --dry-run, then hyperliquid book."),
+            [vec!["orders", "create"], vec!["book"]]
+        );
+        assert_eq!(
+            advised_commands("use `hyperliquid outcomes get #1` now"),
+            [["outcomes", "get"]]
+        );
+    }
+
+    #[test]
+    fn a_command_that_needs_no_network_is_not_a_live_or_signed_one() {
+        let mut probed_locals = Vec::new();
+        let mut networkless_live = Vec::new();
+        for contract in CommandRegistry::get().commands() {
+            let spec = contract.spec;
+            if spec.mutability() == Mutability::LocalOnly && spec.network == NetworkUse::Required {
+                probed_locals.push(contract.command_key());
+            }
+            if spec.network == NetworkUse::None
+                && (spec.auth_required || spec.signs.is_some() || spec.stream.is_some())
+            {
+                networkless_live.push(contract.command_key());
+            }
+        }
+        assert!(
+            probed_locals.is_empty(),
+            "these change local state only, so they must not probe the API override: {probed_locals:?}"
+        );
+        assert!(
+            networkless_live.is_empty(),
+            "these name no network but sign or stream: {networkless_live:?}"
+        );
     }
 }

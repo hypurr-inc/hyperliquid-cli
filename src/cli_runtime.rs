@@ -5,8 +5,8 @@
 use clap::ArgMatches;
 use clap::parser::MatchesError;
 use hyperliquid_cli::command_spec::{
-    CommandSpec, ConfirmationPolicy, DryRunPolicy, RawPayloadPolicy, YES_ARG, check_args,
-    supplied_secrets,
+    CommandSpec, ConfirmationPolicy, DryRunPolicy, NetworkUse, RawPayloadPolicy, YES_ARG,
+    check_args, supplied_secrets,
 };
 use hyperliquid_cli::errors::CliError;
 use hyperliquid_cli::input_hardening::{validate_input_path, validate_resource_id};
@@ -29,7 +29,12 @@ pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyho
     if mode.machine_context()
         && let Some(bound) = spec.stream
     {
-        require_bound(bound, &selected.matches, inv.settings().env())?;
+        require_bound(
+            spec.key().as_str(),
+            bound,
+            &selected.matches,
+            inv.settings().env(),
+        )?;
     }
 
     if inv.flags().has_payload() {
@@ -43,7 +48,7 @@ pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyho
         ))
         .into());
     }
-    if spec.local {
+    if spec.network == NetworkUse::None {
         return selected.bound.run(&inv).await;
     }
 
@@ -57,7 +62,7 @@ pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyho
     }
 
     let api = inv.remote()?.api();
-    if spec.uses_api() {
+    if spec.network == NetworkUse::Required {
         api.probe_override().await?;
     }
 

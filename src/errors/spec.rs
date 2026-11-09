@@ -39,10 +39,16 @@ pub(super) struct Spec {
     pub stdout: StdoutDocument,
     /// What an agent should do next.
     pub agent_action: &'static str,
+    /// What to do about this specific failure, when it has a specific answer.
+    /// The JSON envelope carries it as `data.hint`.
+    pub hint: Option<&'static str>,
+    /// A fixed wait before the next try, for a failure that names one. A
+    /// `Retry-After` header comes from the error itself.
+    pub retry_after_secs: Option<u64>,
 }
 
 impl Spec {
-    const fn new(
+    pub(super) const fn new(
         exit_code: i32,
         category: &'static str,
         reason: &'static str,
@@ -55,6 +61,8 @@ impl Spec {
             retry: Retry::Unknown,
             stdout: StdoutDocument::Envelope,
             agent_action,
+            hint: None,
+            retry_after_secs: None,
         }
     }
 
@@ -65,6 +73,23 @@ impl Spec {
 
     const fn command_owns_stdout(mut self) -> Self {
         self.stdout = StdoutDocument::CommandResult;
+        self
+    }
+
+    /// The agent action is also this failure's `data.hint`.
+    pub(super) const fn hinted(mut self) -> Self {
+        self.hint = Some(self.agent_action);
+        self
+    }
+
+    /// A `data.hint` that is more specific than the agent action.
+    const fn with_hint(mut self, hint: &'static str) -> Self {
+        self.hint = Some(hint);
+        self
+    }
+
+    const fn retry_after_secs(mut self, secs: u64) -> Self {
+        self.retry_after_secs = Some(secs);
         self
     }
 }
@@ -134,16 +159,30 @@ pub(super) const SIGNER_NOT_REGISTERED: Spec = Spec::new(
     "auth",
     "signer_not_registered",
     "The signature recovered to an address the exchange doesn't know as a user or API wallet (the address is in the remote message). Likely causes: the API wallet was never approved, expired or was pruned (approving a new unnamed API wallet replaces the old one), or the wrong key signed. Check `hyperliquid api-wallet list`; the master account approves a wallet with `hyperliquid api-wallet approve`. If the named address is not your signer's, the signed payload differs from what the exchange hashed.",
-);
+)
+.hinted();
 pub(super) const RATE_LIMITED: Spec = Spec::new(
     11,
     "rate_limited",
     "rate_limited",
-    "Back off for `retry_after` seconds when present; prefer streaming over REST polling. The address-based limit (`Too many cumulative requests`) only grows with trading volume or the `reserveRequestWeight` action; meanwhile the address may send one request every 10 seconds. `hyperliquid account rate-limit` shows its usage.",
+    "Back off for `retry_after` seconds when present; prefer streaming over REST polling. When `data.hint` is present the address's request budget is spent: follow it.",
 )
 .retry(Retry::Sometimes(
     "reads only; a rate-limited mutation is never marked retryable",
 ));
+/// The address-based limit (`Too many cumulative requests`): the exchange
+/// answers it with HTTP 200 and its own counts. It reports the reason
+/// `rate_limited` like any rate limit, so the catalog lists the two as one.
+/// A spent address may send one request every 10 seconds, and nothing says a
+/// resend is safe.
+pub(super) const ADDRESS_RATE_LIMITED: Spec = Spec::new(
+    11,
+    "rate_limited",
+    "rate_limited",
+    RATE_LIMITED.agent_action,
+)
+.with_hint("Each address earns 1 request per USDC of cumulative volume traded, on top of a 10000-request starting buffer. Once that is spent it may send one request every 10 seconds; cancels have a higher cap, so open orders can still be canceled. Trade (taker fills) to free requests, or buy capacity with the `reserveRequestWeight` action (0.0005 USDC per request). `hyperliquid account rate-limit` shows the address's usage.")
+.retry_after_secs(10);
 pub(super) const NETWORK_ERROR: Spec = Spec::new(
     12,
     "unavailable",
@@ -176,66 +215,6 @@ pub(super) const UNSUPPORTED_INPUT: Spec = Spec::new(
     "unsupported_input",
     "Correct the asset, DEX, address, or value the message names.",
 );
-pub(super) const MIN_ORDER_VALUE: Spec = Spec::new(
-    13,
-    "unsupported",
-    "order_below_minimum_value",
-    "Raise the size or price until the order's notional value is at least $10 (spot: 10 units of the quote token).",
-);
-pub(super) const REDUCE_ONLY_VIOLATION: Spec = Spec::new(
-    13,
-    "unsupported",
-    "reduce_only_violation",
-    "A reduce-only order may only shrink an existing position on the same market. Check the side and size in `hyperliquid positions list`, or drop --reduce-only.",
-);
-pub(super) const POST_ONLY_WOULD_CROSS: Spec = Spec::new(
-    13,
-    "unsupported",
-    "post_only_would_cross",
-    "A post-only (--tif alo) order may not match on entry. Price it behind the best bid or ask (`hyperliquid book`), or use --tif gtc.",
-);
-pub(super) const IOC_NO_MATCH: Spec = Spec::new(
-    13,
-    "unsupported",
-    "ioc_no_match",
-    "An IOC order found nothing to match and was canceled. Move the limit price across the book (`hyperliquid book`) or reduce the size.",
-);
-pub(super) const BAD_PRICE: Spec = Spec::new(
-    13,
-    "unsupported",
-    "bad_price",
-    "Round the price to the market's tick: at most 5 significant figures and at most (6 for perps, 8 for spot) minus szDecimals decimal places; integer prices are always allowed.",
-);
-pub(super) const PRICE_OUT_OF_BAND: Spec = Spec::new(
-    13,
-    "unsupported",
-    "price_out_of_band",
-    "The price is too far from the oracle or reference price. Price closer to the current mark (`hyperliquid book`, `hyperliquid perps get`).",
-);
-pub(super) const ZERO_SIZE: Spec = Spec::new(
-    13,
-    "unsupported",
-    "zero_size",
-    "The size is zero after rounding to the market's size decimals. Use a larger --size.",
-);
-pub(super) const OPEN_INTEREST_CAP: Spec = Spec::new(
-    13,
-    "unsupported",
-    "open_interest_cap",
-    "The market is at or growing toward its open-interest cap, so orders that increase open interest are refused. Reduce or close a position, trade another market, or retry later.",
-);
-pub(super) const INVALID_TRIGGER_PRICE: Spec = Spec::new(
-    13,
-    "unsupported",
-    "invalid_trigger_price",
-    "The TP/SL trigger price is not valid for this order against the current market (for example a trigger on the wrong side of the mark price). Check the trigger price and side.",
-);
-pub(super) const NO_MARKET_LIQUIDITY: Spec = Spec::new(
-    13,
-    "unsupported",
-    "no_market_liquidity",
-    "The book has nothing to fill a market order against. Place a limit order, or retry when the book has depth (`hyperliquid book`).",
-);
 pub(super) const CONFIRMATION_REQUIRED: Spec = Spec::new(
     13,
     "unsupported",
@@ -256,40 +235,45 @@ pub(super) const PARTIAL_FAILURE: Spec = Spec::new(
 )
 .command_owns_stdout();
 
-/// Every spec a failure can report, in exit-code order. The catalog lists these.
+/// Every spec a failure can report, in exit-code order, with the refusals
+/// (one row each in [`Refusal`]'s table) listed under `unsupported_input`. The
+/// catalog lists these. Variants that share a reason with another (the address
+/// rate limit) are not listed twice.
 #[cfg(test)]
-pub(super) const ALL: &[&Spec] = &[
-    &INTERNAL,
-    &EXCHANGE_REJECTED,
-    &INVALID_CONFIG,
-    &MISSING_INPUT,
-    &INVALID_ARGUMENTS,
-    &UNKNOWN_COMMAND,
-    &AUTH_REQUIRED,
-    &INVALID_AUTH,
-    &WALLET_NOT_FOUND,
-    &WALLET_ACCOUNT_MISSING,
-    &SIGNER_NOT_REGISTERED,
-    &RATE_LIMITED,
-    &NETWORK_ERROR,
-    &API_ERROR,
-    &TIMEOUT,
-    &UNKNOWN_OUTCOME,
-    &UNSUPPORTED_INPUT,
-    &MIN_ORDER_VALUE,
-    &REDUCE_ONLY_VIOLATION,
-    &POST_ONLY_WOULD_CROSS,
-    &IOC_NO_MATCH,
-    &BAD_PRICE,
-    &PRICE_OUT_OF_BAND,
-    &ZERO_SIZE,
-    &OPEN_INTEREST_CAP,
-    &INVALID_TRIGGER_PRICE,
-    &NO_MARKET_LIQUIDITY,
-    &CONFIRMATION_REQUIRED,
-    &ASSET_NOT_FOUND,
-    &PARTIAL_FAILURE,
-];
+pub(super) fn catalog_specs() -> Vec<&'static Spec> {
+    let mut specs: Vec<&'static Spec> = vec![
+        &INTERNAL,
+        &EXCHANGE_REJECTED,
+        &INVALID_CONFIG,
+        &MISSING_INPUT,
+        &INVALID_ARGUMENTS,
+        &UNKNOWN_COMMAND,
+        &AUTH_REQUIRED,
+        &INVALID_AUTH,
+        &WALLET_NOT_FOUND,
+        &WALLET_ACCOUNT_MISSING,
+        &SIGNER_NOT_REGISTERED,
+        &RATE_LIMITED,
+        &NETWORK_ERROR,
+        &API_ERROR,
+        &TIMEOUT,
+        &UNKNOWN_OUTCOME,
+        &UNSUPPORTED_INPUT,
+        &CONFIRMATION_REQUIRED,
+        &ASSET_NOT_FOUND,
+        &PARTIAL_FAILURE,
+    ];
+    let after_unsupported = specs
+        .iter()
+        .position(|spec| *spec == &UNSUPPORTED_INPUT)
+        .expect("listed above")
+        + 1;
+    specs.splice(
+        after_unsupported..after_unsupported,
+        super::Refusal::ALL.iter().map(|refusal| refusal.spec()),
+    );
+    specs
+}
 
 /// The agent-facing catalog of every exit code, category and reason: the exact
 /// contents of `.claude/error-catalog.json`.
@@ -312,8 +296,8 @@ pub(super) fn catalog_json() -> String {
         errors: Vec<Entry>,
     }
 
-    let errors = ALL
-        .iter()
+    let errors = catalog_specs()
+        .into_iter()
         .map(|spec| Entry {
             exit_code: spec.exit_code,
             category: spec.category,

@@ -58,3 +58,35 @@ fn stdio_initialize_list_and_call() {
     assert_eq!(responses[4]["error"]["code"], -32602);
     assert_eq!(responses[5]["error"]["code"], -32601);
 }
+
+#[test]
+fn an_unreadable_mcp_environment_exits_2_before_the_server_starts() {
+    let home = tempfile::tempdir().unwrap();
+    for (name, value) in [
+        ("HYPERLIQUID_MCP_TIMEOUT_MS", "soon"),
+        ("HYPERLIQUID_MCP_TIMEOUT_MS", "0"),
+        ("HYPERLIQUID_MCP_ALLOW_UNSAFE", "maybe"),
+    ] {
+        let output = Command::cargo_bin("hyperliquid")
+            .unwrap()
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("XDG_DATA_HOME", home.path())
+            .env("HYPERLIQUID_NO_UPDATE_CHECK", "1")
+            .env_remove("HYPERLIQUID_MCP_ALLOW_UNSAFE")
+            .env_remove("HYPERLIQUID_MCP_TIMEOUT_MS")
+            .env(name, value)
+            .args(["--format", "json", "mcp"])
+            .write_stdin(json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string() + "\n")
+            .assert()
+            .code(2)
+            .get_output()
+            .clone();
+        let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(envelope["reason"], "invalid_config", "{name}={value}");
+        assert!(
+            envelope["error"].as_str().unwrap().contains(name),
+            "{envelope}"
+        );
+    }
+}

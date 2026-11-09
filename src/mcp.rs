@@ -3,17 +3,22 @@
 //! Defaults to commands with read-only lifecycle and no risk. Set
 //! HYPERLIQUID_MCP_ALLOW_UNSAFE=1 to expose other commands (except mcp).
 //! Confirmation bypass arguments remain forbidden. HYPERLIQUID_MCP_TIMEOUT_MS
-//! sets a positive execution deadline in milliseconds (default 30000).
+//! sets a positive execution deadline in milliseconds (default 30000). A value
+//! of either variable the server cannot read is a configuration error (exit
+//! 2), never a silent default.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
 use crate::command_registry::{ArgType, CommandContract, CommandRegistry};
 use crate::command_spec::YES_ARG;
-use crate::commands::schema::schema_query;
-use crate::output::TableData;
+use crate::errors::CliError;
+use crate::mode::env_enabled;
 use crate::settings::{EnvSource, env};
+
+const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -44,214 +49,195 @@ struct JsonRpcError {
     data: Option<Value>,
 }
 
+impl JsonRpcResponse {
+    fn result(id: Option<Value>, result: Value) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    fn error(id: Option<Value>, code: i64, message: impl Into<String>) -> Self {
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data: None,
+            }),
+        }
+    }
+
+    /// A tool call's outcome: text content, flagged when the call failed.
+    fn tool_text(id: Option<Value>, text: String, is_error: bool) -> Self {
+        Self::result(
+            id,
+            json!({
+                "content": [{ "type": "text", "text": text }],
+                "isError": is_error
+            }),
+        )
+    }
+}
+
+/// What the operator configured for this server, read once at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct McpSettings {
+    allow_unsafe: bool,
+    deadline: Duration,
+}
+
+impl McpSettings {
+    fn from_env(source: &EnvSource) -> Result<Self, CliError> {
+        Ok(Self {
+            allow_unsafe: env_enabled(source, env::MCP_ALLOW_UNSAFE)?,
+            deadline: match source.get(env::MCP_TIMEOUT_MS) {
+                None => DEFAULT_DEADLINE,
+                Some(raw) => parse_deadline(&raw)?,
+            },
+        })
+    }
+}
+
+fn parse_deadline(raw: &str) -> Result<Duration, CliError> {
+    let invalid = |why: String| {
+        CliError::Configuration(format!(
+            "{} must be a positive number of milliseconds: {why}",
+            env::MCP_TIMEOUT_MS
+        ))
+    };
+    match raw.trim().parse::<u64>() {
+        Ok(0) => Err(invalid("0 would end every call at once".to_string())),
+        Ok(millis) => Ok(Duration::from_millis(millis)),
+        Err(err) => Err(invalid(err.to_string())),
+    }
+}
+
+/// Write one response line. `Ok(false)` when the client closed its end, which
+/// ends the server; any other write failure is an error.
+fn write_response(out: &mut impl Write, response: &JsonRpcResponse) -> Result<bool, anyhow::Error> {
+    let line = serde_json::to_string(response)?;
+    match writeln!(out, "{line}").and_then(|()| out.flush()) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(false),
+        Err(err) => Err(err.into()),
+    }
+}
+
 pub fn run_stdio_server(source: &EnvSource) -> Result<(), anyhow::Error> {
-    let allow_unsafe = crate::output::terminal::env_flag(source, env::MCP_ALLOW_UNSAFE)
-        == crate::output::terminal::EnvFlag::On;
+    let settings = McpSettings::from_env(source)?;
     let exe = std::env::current_exe()?;
-    let deadline = source
-        .get(env::MCP_TIMEOUT_MS)
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|n| *n > 0)
-        .map(std::time::Duration::from_millis)
-        .unwrap_or(std::time::Duration::from_secs(30));
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
     for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
-        };
+        let Ok(line) = line else { break };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let req: JsonRpcRequest = match serde_json::from_str(trimmed) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = JsonRpcResponse {
-                    jsonrpc: "2.0",
-                    id: None,
-                    result: None,
-                    error: Some(JsonRpcError {
-                        code: -32700,
-                        message: format!("Parse error: {e}"),
-                        data: None,
-                    }),
-                };
-                let _ = writeln!(stdout, "{}", serde_json::to_string(&resp)?);
-                let _ = stdout.flush();
-                continue;
-            }
+        let response = match serde_json::from_str::<JsonRpcRequest>(trimmed) {
+            Ok(request) => handle(&request, &settings, &exe),
+            Err(err) => Some(JsonRpcResponse::error(
+                None,
+                -32700,
+                format!("Parse error: {err}"),
+            )),
         };
-
-        if req.id.is_none() {
-            continue;
+        if let Some(response) = response
+            && !write_response(&mut stdout, &response)?
+        {
+            break;
         }
-        let id = req.id.clone();
-        let resp = match req.method.as_str() {
-            "initialize" => JsonRpcResponse {
-                jsonrpc: "2.0",
-                id,
-                result: Some(json!({
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {
-                        "name": "hyperliquid-mcp",
-                        "version": env!("CARGO_PKG_VERSION")
-                    },
-                    "capabilities": {
-                        "tools": { "listChanged": false }
-                    }
-                })),
-                error: None,
-            },
-            "notifications/initialized" | "initialized" => {
-                // Notifications have no response
-                continue;
-            }
-            "ping" => JsonRpcResponse {
-                jsonrpc: "2.0",
-                id,
-                result: Some(json!({})),
-                error: None,
-            },
-            "tools/list" => {
-                let registry = CommandRegistry::get();
-                let tools = registry
-                    .commands()
-                    .iter()
-                    .filter(|cmd| exposed(cmd, allow_unsafe))
-                    .map(|cmd| {
-                        let tool_name = cmd.command_path.join("_").replace('-', "_");
-                        let schema = schema_query(&cmd.command_path)
-                            .ok()
-                            .map(|s| s.to_json_value())
-                            .unwrap_or(Value::Null);
-
-                        let input_schema = schema
-                            .get("json_schema")
-                            .cloned()
-                            .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
-
-                        json!({
-                            "name": tool_name,
-                            "description": cmd.description,
-                            "inputSchema": input_schema
-                        })
-                    })
-                    .collect::<Vec<_>>();
-
-                JsonRpcResponse {
-                    jsonrpc: "2.0",
-                    id,
-                    result: Some(json!({ "tools": tools })),
-                    error: None,
-                }
-            }
-            "tools/call" => {
-                let tool_name = req.params.get("name").and_then(Value::as_str).unwrap_or("");
-                let args_obj = req.params.get("arguments").cloned().unwrap_or(json!({}));
-
-                let registry = CommandRegistry::get();
-                let matched = registry.commands().iter().find(|cmd| {
-                    let name = cmd.command_path.join("_").replace('-', "_");
-                    name == tool_name && exposed(cmd, allow_unsafe)
-                });
-
-                match matched {
-                    Some(cmd) => {
-                        let cli_args = match command_args(cmd, &args_obj) {
-                            Ok(args) => args,
-                            Err(message) => {
-                                let resp = JsonRpcResponse {
-                                    jsonrpc: "2.0",
-                                    id,
-                                    result: None,
-                                    error: Some(JsonRpcError {
-                                        code: -32602,
-                                        message,
-                                        data: None,
-                                    }),
-                                };
-                                writeln!(stdout, "{}", serde_json::to_string(&resp)?)?;
-                                stdout.flush()?;
-                                continue;
-                            }
-                        };
-                        let output = execute(&exe, &cli_args, deadline);
-
-                        match output {
-                            Ok(out) => {
-                                let stdout_str = String::from_utf8_lossy(&out.stdout).to_string();
-                                let stderr_str = String::from_utf8_lossy(&out.stderr).to_string();
-                                let is_error = !out.status.success();
-                                let content_text = if stdout_str.trim().is_empty() {
-                                    stderr_str
-                                } else {
-                                    stdout_str
-                                };
-
-                                JsonRpcResponse {
-                                    jsonrpc: "2.0",
-                                    id,
-                                    result: Some(json!({
-                                        "content": [
-                                            {
-                                                "type": "text",
-                                                "text": content_text
-                                            }
-                                        ],
-                                        "isError": is_error
-                                    })),
-                                    error: None,
-                                }
-                            }
-                            Err(e) => JsonRpcResponse {
-                                jsonrpc: "2.0",
-                                id,
-                                result: Some(json!({
-                                    "content": [{ "type": "text", "text": format!("Execution error: {e}") }],
-                                    "isError": true
-                                })),
-                                error: None,
-                            },
-                        }
-                    }
-                    None => JsonRpcResponse {
-                        jsonrpc: "2.0",
-                        id,
-                        result: None,
-                        error: Some(JsonRpcError {
-                            code: -32602,
-                            message: format!("Unknown tool: {tool_name}"),
-                            data: None,
-                        }),
-                    },
-                }
-            }
-            other => JsonRpcResponse {
-                jsonrpc: "2.0",
-                id,
-                result: None,
-                error: Some(JsonRpcError {
-                    code: -32601,
-                    message: format!("Method not found: {other}"),
-                    data: None,
-                }),
-            },
-        };
-
-        let _ = writeln!(stdout, "{}", serde_json::to_string(&resp)?);
-        let _ = stdout.flush();
     }
 
     Ok(())
 }
 
-// Keep discovery and invocation behind the same policy.
-fn exposed(cmd: &CommandContract, allow_unsafe: bool) -> bool {
-    cmd.command_path != ["mcp"] && (allow_unsafe || cmd.spec.is_public_read())
+/// The reply to one request, `None` for a notification.
+fn handle(
+    request: &JsonRpcRequest,
+    settings: &McpSettings,
+    exe: &std::path::Path,
+) -> Option<JsonRpcResponse> {
+    request.id.as_ref()?;
+    let id = request.id.clone();
+    Some(match request.method.as_str() {
+        "initialize" => JsonRpcResponse::result(
+            id,
+            json!({
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {
+                    "name": "hyperliquid-mcp",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {
+                    "tools": { "listChanged": false }
+                }
+            }),
+        ),
+        "notifications/initialized" | "initialized" => return None,
+        "ping" => JsonRpcResponse::result(id, json!({})),
+        "tools/list" => {
+            let tools = exposed(settings)
+                .map(|cmd| {
+                    json!({
+                        "name": cmd.mcp_tool_name(),
+                        "description": cmd.description,
+                        "inputSchema": cmd.json_schema()
+                    })
+                })
+                .collect::<Vec<_>>();
+            JsonRpcResponse::result(id, json!({ "tools": tools }))
+        }
+        "tools/call" => call_tool(id, &request.params, settings, exe),
+        other => JsonRpcResponse::error(id, -32601, format!("Method not found: {other}")),
+    })
+}
+
+fn call_tool(
+    id: Option<Value>,
+    params: &Value,
+    settings: &McpSettings,
+    exe: &std::path::Path,
+) -> JsonRpcResponse {
+    let tool_name = params.get("name").and_then(Value::as_str).unwrap_or("");
+    let args_obj = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    let Some(cmd) = exposed(settings).find(|cmd| cmd.mcp_tool_name() == tool_name) else {
+        return JsonRpcResponse::error(id, -32602, format!("Unknown tool: {tool_name}"));
+    };
+    let cli_args = match command_args(cmd, &args_obj) {
+        Ok(args) => args,
+        Err(message) => return JsonRpcResponse::error(id, -32602, message),
+    };
+    match execute(exe, &cli_args, settings.deadline) {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let text = if stdout.trim().is_empty() {
+                String::from_utf8_lossy(&out.stderr).to_string()
+            } else {
+                stdout
+            };
+            JsonRpcResponse::tool_text(id, text, !out.status.success())
+        }
+        Err(err) => JsonRpcResponse::tool_text(id, format!("Execution error: {err}"), true),
+    }
+}
+
+/// The commands this server offers. Discovery and invocation both read this,
+/// so they cannot disagree.
+fn exposed(settings: &McpSettings) -> impl Iterator<Item = &'static CommandContract> {
+    let allow_unsafe = settings.allow_unsafe;
+    CommandRegistry::get()
+        .commands()
+        .iter()
+        .filter(move |cmd| cmd.spec.exposed_to_mcp(allow_unsafe))
 }
 
 fn command_args(cmd: &CommandContract, args: &Value) -> Result<Vec<String>, String> {
@@ -413,25 +399,118 @@ mod tests {
         assert!(command_args(cmd, &json!([])).is_err());
     }
 
+    fn exposed_to(cmd: &CommandContract, allow_unsafe: bool) -> bool {
+        cmd.spec.exposed_to_mcp(allow_unsafe)
+    }
+
     #[test]
     fn default_exposure_is_public_reads_only() {
         for cmd in CommandRegistry::get().commands() {
-            if exposed(cmd, false) {
+            if exposed_to(cmd, false) {
                 assert!(!cmd.spec.changes_state(), "{}", cmd.command_key());
                 assert!(!cmd.dangerous, "{}", cmd.command_key());
             }
         }
-        assert!(exposed(contract(&["mids"]), false));
+        assert!(exposed_to(contract(&["mids"]), false));
         for path in [
             &["orders", "create"][..],
             &["wallet", "show"],
             &["positions", "list"],
         ] {
-            assert!(!exposed(contract(path), false), "{path:?}");
-            assert!(exposed(contract(path), true), "{path:?}");
+            assert!(!exposed_to(contract(path), false), "{path:?}");
+            assert!(exposed_to(contract(path), true), "{path:?}");
         }
         let mcp = contract(&["mcp"]);
-        assert!(!exposed(mcp, false) && !exposed(mcp, true));
+        assert!(!exposed_to(mcp, false) && !exposed_to(mcp, true));
+    }
+
+    #[test]
+    fn tool_names_are_unique_across_every_command_that_can_be_offered() {
+        let mut seen = std::collections::BTreeMap::new();
+        for cmd in CommandRegistry::get()
+            .commands()
+            .iter()
+            .filter(|cmd| exposed_to(cmd, true))
+        {
+            let previous = seen.insert(cmd.mcp_tool_name(), cmd.command_key());
+            assert!(
+                previous.is_none(),
+                "`{}` and `{}` are both the tool {}",
+                previous.unwrap_or_default(),
+                cmd.command_key(),
+                cmd.mcp_tool_name()
+            );
+        }
+        assert_eq!(
+            contract(&["report-incident"]).mcp_tool_name(),
+            "report_incident"
+        );
+        assert_eq!(
+            contract(&["orders", "create"]).mcp_tool_name(),
+            "orders_create"
+        );
+    }
+
+    #[test]
+    fn the_tool_list_offers_exactly_what_a_call_accepts() {
+        for allow_unsafe in [false, true] {
+            let settings = McpSettings {
+                allow_unsafe,
+                deadline: DEFAULT_DEADLINE,
+            };
+            for cmd in exposed(&settings) {
+                assert!(exposed_to(cmd, allow_unsafe), "{}", cmd.command_key());
+            }
+            assert_eq!(
+                exposed(&settings).count(),
+                CommandRegistry::get()
+                    .commands()
+                    .iter()
+                    .filter(|cmd| exposed_to(cmd, allow_unsafe))
+                    .count()
+            );
+        }
+    }
+
+    fn settings_from(pairs: &[(&'static str, &'static str)]) -> Result<McpSettings, CliError> {
+        McpSettings::from_env(&EnvSource::fixed(pairs.iter().copied()))
+    }
+
+    #[test]
+    fn unset_environment_means_safe_defaults() {
+        assert_eq!(
+            settings_from(&[]).unwrap(),
+            McpSettings {
+                allow_unsafe: false,
+                deadline: Duration::from_secs(30),
+            }
+        );
+    }
+
+    #[test]
+    fn valid_environment_is_applied() {
+        let settings = settings_from(&[
+            ("HYPERLIQUID_MCP_ALLOW_UNSAFE", "yes"),
+            ("HYPERLIQUID_MCP_TIMEOUT_MS", " 250 "),
+        ])
+        .unwrap();
+        assert!(settings.allow_unsafe);
+        assert_eq!(settings.deadline, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn an_unreadable_environment_is_a_configuration_error_not_a_default() {
+        for (name, value) in [
+            ("HYPERLIQUID_MCP_TIMEOUT_MS", "soon"),
+            ("HYPERLIQUID_MCP_TIMEOUT_MS", "0"),
+            ("HYPERLIQUID_MCP_TIMEOUT_MS", "-5"),
+            ("HYPERLIQUID_MCP_TIMEOUT_MS", ""),
+            ("HYPERLIQUID_MCP_ALLOW_UNSAFE", "maybe"),
+        ] {
+            let err = settings_from(&[(name, value)]).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{name}={value:?}");
+            assert!(err.to_string().contains(name), "{err}");
+        }
     }
 
     #[cfg(unix)]
