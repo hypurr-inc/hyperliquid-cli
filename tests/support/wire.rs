@@ -288,3 +288,28 @@ pub fn outcome_meta(ids: &[u64]) -> Value {
         .collect();
     json!({"outcomes": outcomes, "questions": []})
 }
+
+/// One vault of the stats dataset `vault list` reads. `kind` is the
+/// relationship type: `normal`, `parent` or `child`.
+pub fn stats_vault(
+    name: &str,
+    address: &str,
+    leader: &str,
+    tvl: &str,
+    apr: Value,
+    kind: &str,
+) -> Value {
+    json!({
+        "apr": apr,
+        "pnls": [["day", ["0.0"]]],
+        "summary": {
+            "name": name,
+            "vaultAddress": address,
+            "leader": leader,
+            "tvl": tvl,
+            "isClosed": false,
+            "relationship": {"type": kind},
+            "createTimeMillis": 1_700_000_000_000_i64
+        }
+    })
+}

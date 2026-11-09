@@ -90,6 +90,18 @@ impl ExchangeFixture {
         fixture
     }
 
+    /// Only the override probe is answered. Every other read gets the mock's
+    /// 404, for a command that must cope with unavailable metadata.
+    pub async fn probe_only() -> Self {
+        let fixture = Self {
+            server: MockServer::start().await,
+        };
+        fixture
+            .mount_info(json!({"type": "allMids"}), wire::all_mids())
+            .await;
+        fixture
+    }
+
     /// Answer the `/info` request whose body is exactly `request`.
     pub async fn mount_info(&self, request: Value, response: Value) {
         Mock::given(method("POST"))
@@ -120,6 +132,28 @@ impl ExchangeFixture {
             .and(body_json(request))
             .respond_with(ResponseTemplate::new(200).set_body_json(response))
             .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Answer the `/info` request whose body is exactly `request` with an HTTP
+    /// error `status`, for a read the exchange does not serve.
+    pub async fn mount_info_error(&self, request: Value, status: u16, body: Value) {
+        Mock::given(method("POST"))
+            .and(path("/info"))
+            .and(body_json(request))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Serve the stats dataset `vault list` and `vault search` read, which is
+    /// a `GET` beside `/info`: `/info` `vaultSummaries` answers `[]` on the
+    /// live exchange. `network` is `Mainnet` or `Testnet`.
+    pub async fn mount_vault_stats(&self, network: &str, vaults: Vec<Value>) {
+        Mock::given(method("GET"))
+            .and(path(format!("/stats-data/{network}/vaults")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Value::Array(vaults)))
             .mount(&self.server)
             .await;
     }
@@ -161,6 +195,12 @@ impl ExchangeFixture {
     pub async fn exchange_bodies(&self) -> Vec<Value> {
         super::exchange_bodies(&self.server).await
     }
+}
+
+/// The `/exchange` reply to an action that returns nothing (transfers,
+/// vault and outcome conversions).
+pub fn default_reply() -> Value {
+    json!({"status": "ok", "response": {"type": "default"}})
 }
 
 /// An `/exchange` order reply carrying `statuses`.
