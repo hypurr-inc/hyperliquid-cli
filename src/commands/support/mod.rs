@@ -18,9 +18,10 @@ pub fn parse_address(raw: &str) -> Result<Address, CliError> {
         .map_err(|_| CliError::Unsupported(format!("Invalid address: {}", raw.trim())))
 }
 
-/// URL encode a UTF-8 string for query parameters.
-/// A `--dex` value, or `None` for the default dex. The exchange treats the empty
-/// dex name as the first perp dex, so a blank flag must behave like no flag.
+/// A `--dex` value, or `None` for the default dex.
+///
+/// The exchange treats the empty dex name as the first perp dex, so a blank
+/// flag must behave like no flag.
 #[must_use]
 pub(crate) fn normalize_dex(dex: Option<&str>) -> Option<&str> {
     dex.map(str::trim).filter(|dex| !dex.is_empty())
@@ -46,6 +47,7 @@ pub(crate) async fn canonical_dex(
     }
 }
 
+/// URL encode a UTF-8 string for query parameters.
 pub fn urlencoding(input: &str) -> String {
     let mut out = String::new();
     for b in input.bytes() {

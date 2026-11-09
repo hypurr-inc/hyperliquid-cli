@@ -49,6 +49,7 @@ async fn mount_resolver_metadata(server: &MockServer) {
         .await;
 }
 
+/// `mids --dex` sends `allMids` with the dex.
 #[tokio::test]
 async fn mids_scopes_all_mids_to_a_dex() {
     let env = IsolatedHome::new();
@@ -91,6 +92,7 @@ async fn mids_scopes_all_mids_to_a_dex() {
     server.verify().await;
 }
 
+/// `positions list --dex` scopes `clearinghouseState`.
 #[tokio::test]
 async fn positions_list_scopes_clearinghouse_state_to_a_dex() {
     let env = IsolatedHome::new();
@@ -143,6 +145,7 @@ async fn positions_list_scopes_clearinghouse_state_to_a_dex() {
     server.verify().await;
 }
 
+/// `orders open --dex` scopes `frontendOpenOrders`.
 #[tokio::test]
 async fn orders_open_scopes_frontend_open_orders_to_a_dex() {
     let env = IsolatedHome::new();
@@ -177,6 +180,7 @@ async fn orders_open_scopes_frontend_open_orders_to_a_dex() {
     server.verify().await;
 }
 
+/// A dex portfolio view omits account-wide spot and vault reads.
 #[tokio::test]
 async fn portfolio_dex_view_skips_account_wide_reads() {
     let env = IsolatedHome::new();
@@ -252,6 +256,7 @@ async fn portfolio_dex_view_skips_account_wide_reads() {
     server.verify().await;
 }
 
+/// A blank `--dex` sends no dex field.
 #[tokio::test]
 async fn blank_dex_is_the_default_dex() {
     let env = IsolatedHome::new();
@@ -279,6 +284,7 @@ async fn blank_dex_is_the_default_dex() {
     server.verify().await;
 }
 
+/// A blank `--dex` portfolio keeps spot balances.
 #[tokio::test]
 async fn blank_dex_keeps_account_wide_portfolio_rows() {
     let env = IsolatedHome::new();
@@ -356,6 +362,7 @@ async fn blank_dex_keeps_account_wide_portfolio_rows() {
     server.verify().await;
 }
 
+/// An unknown `--dex` fails before any scoped read.
 #[tokio::test]
 async fn unknown_dex_fails_before_reading() {
     let env = IsolatedHome::new();
@@ -372,6 +379,7 @@ async fn unknown_dex_fails_before_reading() {
     server.verify().await;
 }
 
+/// `--dex` is canonicalised before it is sent.
 #[tokio::test]
 async fn dex_is_sent_in_its_canonical_spelling() {
     let env = IsolatedHome::new();
@@ -408,6 +416,7 @@ async fn dex_is_sent_in_its_canonical_spelling() {
     server.verify().await;
 }
 
+/// An unknown `--dex` fails before a watch starts.
 #[tokio::test]
 async fn unknown_dex_fails_before_a_watch_starts() {
     let env = IsolatedHome::new();
@@ -452,6 +461,64 @@ async fn unknown_dex_fails_before_a_watch_starts() {
         .assert()
         .code(13)
         .stdout(predicate::str::contains("Unknown DEX"));
+
+    server.verify().await;
+}
+
+/// `positions list --watch` sends `clearinghouseState` with the canonical dex.
+#[tokio::test]
+async fn positions_watch_sends_the_canonical_dex() {
+    let env = IsolatedHome::new();
+    let server = MockServer::start().await;
+    mount_override_healthcheck(&server).await;
+    mount_resolver_metadata(&server).await;
+    // Only the canonical spelling may reach the snapshot read; max_ticks bounds
+    // the watch to that single tick, so no websocket event is awaited.
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
+            json!({ "type": "clearinghouseState", "user": USER, "dex": "xyz" }),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "marginSummary": {
+                "accountValue": "10",
+                "totalNtlPos": "0",
+                "totalRawUsd": "10",
+                "totalMarginUsed": "0"
+            },
+            "crossMarginSummary": {
+                "accountValue": "10",
+                "totalNtlPos": "0",
+                "totalRawUsd": "10",
+                "totalMarginUsed": "0"
+            },
+            "crossMaintenanceMarginUsed": "0",
+            "withdrawable": "10",
+            "assetPositions": [],
+            "time": 1_700_000_000_000_u64
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    env.command_with_server(&server)
+        .args([
+            "--format",
+            "json",
+            "--non-interactive",
+            "--ows-signer",
+            USER,
+            "positions",
+            "list",
+            "--watch",
+            "--max-ticks",
+            "1",
+            "--dex",
+            "XYZ",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[]"));
 
     server.verify().await;
 }
