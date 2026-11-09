@@ -12,7 +12,6 @@ use super::{EVM_CAIP2, HYPERLIQUID_CAIP2, HYPERLIQUID_CHAIN_ALIAS, map_ows_error
 use crate::errors::CliError;
 use crate::settings::{Settings, env};
 
-/// Printed with errors that need the user to pick a default wallet.
 const SET_DEFAULT_HINT: &str = "hyperliquid account set-default <WALLET>";
 
 #[derive(Clone, Default)]
@@ -33,7 +32,6 @@ impl std::fmt::Debug for Vault {
     }
 }
 
-/// A wallet's account on the chain used for Hyperliquid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HyperliquidAccount {
     /// The address exactly as the vault stores it.
@@ -51,7 +49,6 @@ impl Vault {
         }
     }
 
-    /// A vault at an explicit directory with no passphrase.
     #[cfg(test)]
     #[must_use]
     pub fn at(path: impl Into<PathBuf>) -> Self {
@@ -123,7 +120,6 @@ impl Vault {
         ows_lib::list_wallets(self.path()).map_err(map_ows_error)
     }
 
-    /// One wallet by id or name.
     pub fn get(&self, name_or_id: &str) -> Result<WalletInfo, CliError> {
         self.require_existing(name_or_id)?;
         ows_lib::get_wallet(name_or_id, self.path()).map_err(map_ows_error)
@@ -201,7 +197,6 @@ impl Vault {
         })
     }
 
-    /// Whether the config's `default_wallet_id` (an id or a name) names `wallet`.
     #[must_use]
     fn is_configured_default(configured: &str, wallet: &WalletInfo) -> bool {
         configured == wallet.id || configured == wallet.name
@@ -223,7 +218,6 @@ impl Vault {
         }
     }
 
-    /// For each of the Hyperliquid-capable `wallets`, whether it is the default.
     #[must_use]
     pub fn default_markers(wallets: &[WalletInfo], configured: Option<&str>) -> Vec<bool> {
         let defaults = Self::default_indices(wallets, configured);
@@ -232,7 +226,6 @@ impl Vault {
             .collect()
     }
 
-    /// Whether `wallet` is the wallet the config names as its default.
     #[must_use]
     pub fn is_default(configured: Option<&str>, wallet: &WalletInfo) -> bool {
         configured.is_some_and(|id| Self::is_configured_default(id, wallet))
@@ -272,7 +265,6 @@ impl Vault {
         }
     }
 
-    /// Wallets that have a Hyperliquid account.
     pub fn hyperliquid_wallets(&self) -> Result<Vec<WalletInfo>, CliError> {
         Ok(self
             .list()?

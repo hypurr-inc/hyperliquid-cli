@@ -36,10 +36,8 @@ pub struct SignerFlags {
     pub ows_signer: Option<String>,
 }
 
-/// The signer inputs of one run.
 #[derive(Debug, Clone, Default)]
 pub struct SignerSelection {
-    /// `--bankr`: sign with the wallet linked to the stored Bankr API key.
     pub bankr: bool,
     pub ows: Option<String>,
     pub private_key: Option<String>,
@@ -76,19 +74,16 @@ impl SignerSelection {
     }
 }
 
-/// Parse a 0x-prefixed 32-byte private key into a signer.
 pub fn parse_private_key(private_key: &str) -> Result<PrivateKeySigner, CliError> {
     private_key.parse::<PrivateKeySigner>().map_err(|_| {
         CliError::InvalidAuth("private key must be a 32-byte 0x-prefixed hex string".to_string())
     })
 }
 
-/// The 0x-prefixed hex form of `signer`'s key.
 pub fn signer_private_key_hex(signer: &PrivateKeySigner) -> String {
     format!("0x{}", hex::encode(signer.to_bytes()))
 }
 
-/// Resolve the run's signer inputs into one signer, first match wins.
 pub fn resolve_signer(
     selection: &SignerSelection,
     settings: &Settings,
@@ -170,7 +165,6 @@ fn resolve_ows_flag(selector: &str, settings: &Settings) -> Result<SelectedSigne
     ))
 }
 
-/// The wallet account an account selector or default resolved to.
 enum Found {
     Vault {
         wallet: WalletInfo,
@@ -184,7 +178,6 @@ enum Found {
 }
 
 impl Found {
-    /// The address account data is queried for.
     fn query_address(&self) -> Result<Address, CliError> {
         match self {
             Self::Vault { account, .. } => Ok(account.address),
@@ -258,8 +251,6 @@ fn find_vault_account(
     }
 }
 
-/// Ask on the terminal for the passphrase of pre-OWS stored accounts when the OS
-/// keychain can't unlock them, if this run may prompt at all.
 fn prompt_account_passphrase(
     mode: &Mode,
     keychain_error: &anyhow::Error,
@@ -298,7 +289,6 @@ fn legacy_account(
     Ok(Found::Legacy { store, account })
 }
 
-/// The account `selector` names: a vault wallet, else a pre-OWS stored account.
 fn find_account(selector: &str, settings: &Settings, mode: &Mode) -> Result<Found, anyhow::Error> {
     let selector = selector.trim();
     let vault = Vault::from_settings(settings);
@@ -637,7 +627,6 @@ mod tests {
         .unwrap_err();
         assert!(ambiguous(&signed), "signing: {signed}");
 
-        // Data lookups used to read any vault failure as "not in the vault".
         let lookup = lookup_account_address("main", &settings, &Mode::default()).unwrap_err();
         assert!(ambiguous(&lookup), "lookup: {lookup}");
 

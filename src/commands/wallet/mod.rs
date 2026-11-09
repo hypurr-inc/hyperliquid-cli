@@ -39,7 +39,6 @@ pub(crate) fn prompt_private_key(mode: &Mode) -> Result<String, CliError> {
     prompt::read_secret(mode, "Private key: ", "a private key on stdin")
 }
 
-/// Fail with missing input naming `input` when this run can't ask a question.
 fn require_promptable(input: &str, format: OutputFormat, mode: &Mode) -> Result<(), CliError> {
     if format == OutputFormat::Json {
         return Err(CliError::MissingInput(format!(
@@ -55,8 +54,6 @@ fn no_stored_accounts_error() -> CliError {
     )
 }
 
-/// Apply packaged builder/referral defaults when the config does not already define them.
-///
 /// Resolution failures are ignored: a bad default must not block wallet creation.
 fn apply_setup_defaults(config: &mut Config, settings: &Settings) {
     if !config.has_builder_default()
@@ -323,7 +320,6 @@ pub fn logout(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// `wallet show`: describe the resolved signer.
 pub fn show(inv: &Invocation, signer: &SelectedSigner) {
     let description = signer.describe();
     let receipt = Receipt::new(
@@ -335,7 +331,6 @@ pub fn show(inv: &Invocation, signer: &SelectedSigner) {
     print_receipt(inv, receipt);
 }
 
-/// Print the selected signer's address.
 pub fn address(inv: &Invocation, signer: &SelectedSigner) {
     print_wallet_address(inv, &signer.address().to_string());
 }
@@ -369,7 +364,6 @@ pub fn reset(inv: &Invocation, yes: bool) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Add a signing wallet, prompted or from an explicit key.
 pub fn account_add(
     inv: &Invocation,
     private_key: Option<&str>,
@@ -437,7 +431,6 @@ fn signing_wallets(
     Ok(listed)
 }
 
-/// List the vault wallets that can sign for Hyperliquid.
 pub fn account_ls(inv: &Invocation) -> Result<(), anyhow::Error> {
     let store = WalletStore::new(inv.settings());
     let listed = signing_wallets(&store)?;
@@ -481,7 +474,6 @@ fn choose_wallet(
     Ok(WalletStore::find(wallets, &selector)?)
 }
 
-/// Make one stored wallet the default signer.
 pub fn account_set_default(inv: &Invocation, selector: Option<&str>) -> Result<(), anyhow::Error> {
     let store = WalletStore::new(inv.settings());
     let wallet = choose_wallet(inv, &store, selector)?;
@@ -546,7 +538,6 @@ pub fn account_remove(
     Ok(())
 }
 
-/// Rename a stored wallet.
 pub fn rename(inv: &Invocation, selector: &str, new_name: &str) -> Result<(), anyhow::Error> {
     let store = WalletStore::new(inv.settings());
     let wallet = store.rename(selector, new_name)?;
@@ -588,7 +579,6 @@ pub fn export(inv: &Invocation, selector: &str, yes: bool) -> Result<(), anyhow:
     Ok(())
 }
 
-/// Print the Hyperliquid-capable wallets to choose from.
 fn print_wallet_choices(choices: &[(WalletInfo, HyperliquidAccount)]) -> Result<(), anyhow::Error> {
     if choices.is_empty() {
         return Err(no_stored_accounts_error().into());

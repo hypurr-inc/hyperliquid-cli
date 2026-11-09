@@ -1,5 +1,3 @@
-//! API/agent wallet approval and management commands.
-
 use clap::Args;
 use hypersdk::Address;
 use hypersdk::hypercore::types::api::ApproveAgent;
@@ -57,7 +55,6 @@ impl Operation {
     }
 }
 
-/// The inputs `create` and `approve` share.
 #[derive(Debug, Clone, Copy)]
 struct ApprovalInput<'a> {
     name: Option<&'a str>,

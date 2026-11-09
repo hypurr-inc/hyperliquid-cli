@@ -140,7 +140,6 @@ fn wallet_import_show_address_and_reset_flow() {
         .success()
         .stdout(predicate::str::contains(&address));
 
-    // Clean up: actually delete the wallet from the vault.
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .args(["wallet", "delete", "imported", "--yes"])
         .assert()
@@ -247,7 +246,6 @@ fn wallet_reset_yes_removes_configuration_without_prompt() {
         .success()
         .stdout(predicate::str::contains(expected_address(IMPORT_KEY)));
 
-    // Clean up: delete the wallet from the vault.
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .args(["wallet", "delete", "imported", "--yes"])
         .assert()

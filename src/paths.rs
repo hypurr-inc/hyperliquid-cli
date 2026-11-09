@@ -8,7 +8,6 @@ use crate::settings::{EnvSource, env};
 
 const APP_DIR: &str = "hyperliquid";
 
-/// The OWS vault's directory name under the home directory.
 pub const DEFAULT_VAULT_DIR: &str = ".hyperliquid";
 
 /// Config directory, overridden by `HYPERLIQUID_CONFIG_DIR` when nonempty:
@@ -26,7 +25,6 @@ pub fn config_file(env: &EnvSource) -> Option<PathBuf> {
     config_dir(env).map(|dir| dir.join("config.json"))
 }
 
-/// Cached release info for the update notice. Lives beside the config file.
 #[must_use]
 pub fn version_cache_file(env: &EnvSource) -> Option<PathBuf> {
     config_dir(env).map(|dir| dir.join("version.json"))
@@ -47,7 +45,6 @@ fn directory_override(env: &EnvSource, name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Data directory, overridden by `HYPERLIQUID_DATA_DIR` when nonempty.
 fn data_dir(env: &EnvSource) -> Option<PathBuf> {
     directory_override(env, env::DATA_DIR).or_else(|| dirs::data_dir().map(|dir| dir.join(APP_DIR)))
 }

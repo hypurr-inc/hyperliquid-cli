@@ -235,7 +235,6 @@ impl LegacyAccounts {
         )
     }
 
-    /// The account marked default, else the oldest account.
     pub fn default_or_first_account(&self) -> Result<Option<LegacyAccount>, anyhow::Error> {
         match self.query_one("WHERE is_default = 1 ORDER BY id LIMIT 1", [])? {
             Some(account) => Ok(Some(account)),

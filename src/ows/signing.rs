@@ -40,7 +40,6 @@ pub struct OwsSigningConfig {
 }
 
 impl OwsSigningConfig {
-    /// A vault wallet that can sign as `address`.
     #[must_use]
     pub fn for_wallet(wallet: &WalletInfo, address: Address, vault: Vault) -> Self {
         Self {
@@ -91,7 +90,6 @@ impl OwsSigningConfig {
     }
 }
 
-/// The error for live signing with an address-only OWS selector.
 fn unsupported_live_signing(selector: &str) -> CliError {
     CliError::Unsupported(format!(
         "OWS signer '{selector}' does not have a resolved wallet for live signing; use a stored wallet name/id, or select a local signing account, keystore, or private key for live submission"

@@ -44,14 +44,12 @@ pub enum Signs {
 }
 
 impl Signs {
-    /// The user-signed action whose EIP-712 struct is `T`.
     #[must_use]
     pub const fn user_signed<T: SolStruct>() -> Self {
         Self::UserSigned(T::NAME)
     }
 }
 
-/// What one signature covers.
 pub(crate) enum Payload<'a> {
     /// An L1 action: its msgpack hash wrapped in the `Agent` struct.
     Agent { chain: Chain, connection_id: B256 },
@@ -101,7 +99,6 @@ enum SignerBackend {
     Bankr(BankrSigner),
 }
 
-/// How a signer describes itself to the user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignerDescription {
     pub alias: Option<String>,
@@ -144,7 +141,6 @@ impl SelectedSigner {
         }
     }
 
-    /// A wallet stored in the OWS vault, signing as `address`.
     #[must_use]
     pub fn vault_wallet(wallet: &WalletInfo, address: Address, vault: Vault) -> Self {
         Self::ows(OwsSigningConfig::for_wallet(wallet, address, vault))
@@ -170,7 +166,6 @@ impl SelectedSigner {
         }
     }
 
-    /// The address whose key signs.
     #[must_use]
     pub fn address(&self) -> Address {
         match &self.backend {
@@ -230,7 +225,6 @@ impl SelectedSigner {
         }
     }
 
-    /// Sign `payload`, or say why this provider cannot.
     fn sign(&self, payload: &Payload<'_>) -> Result<Signature, CliError> {
         match &self.backend {
             SignerBackend::Local { signer, .. } => signer
@@ -242,7 +236,6 @@ impl SelectedSigner {
         }
     }
 
-    /// Sign an [`Action`] and encode the exchange request carrying it.
     pub fn sign_l1_action_sync(
         &self,
         action: Action,
@@ -277,7 +270,6 @@ impl SelectedSigner {
         })
     }
 
-    /// Sign a user-signed action's EIP-712 document.
     pub fn sign_typed_data(&self, typed_data: &TypedData) -> Result<Signature, CliError> {
         self.sign(&Payload::UserSigned(typed_data))
     }
