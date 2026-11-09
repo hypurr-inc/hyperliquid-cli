@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 
 use hypersdk::hypercore::types::{ClearinghouseState, LeverageType};
 use hypersdk::{Address, Decimal};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use crate::assets::load_raw_perp_dexes;
+use crate::assets::{DexMeta, PerpDexList};
 use crate::commands::rows::Row;
 use crate::commands::spot_balances::RawSpotBalance;
 use crate::errors::CliError;
@@ -115,32 +115,19 @@ pub struct DexCollateral {
 
 /// The collateral token of the default dex and of every HIP-3 dex.
 pub async fn load_dex_collateral(api: &ApiClient) -> Result<Vec<DexCollateral>, CliError> {
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Meta {
-        collateral_token: Option<u32>,
-    }
-
-    let default = api
-        .info::<Meta>(&InfoRequest::new("meta"), "loading perpetual metadata")
-        .await?;
-    let mut dexes = vec![DexCollateral {
+    let default = DexMeta::load(api, None).await?;
+    let dexes = PerpDexList::load(api).await?;
+    let mut collateral = vec![DexCollateral {
         dex: None,
-        token: default.collateral_token.unwrap_or_default(),
+        token: default.collateral_token,
     }];
-    for dex in load_raw_perp_dexes(api).await?.into_iter().flatten() {
-        let meta = api
-            .info::<Meta>(
-                &InfoRequest::new("meta").field("dex", dex.name.clone()),
-                "loading HIP-3 perpetual metadata",
-            )
-            .await?;
-        dexes.push(DexCollateral {
-            dex: Some(dex.name),
-            token: meta.collateral_token.unwrap_or_default(),
+    for (dex, meta) in dexes.metas(api).await? {
+        collateral.push(DexCollateral {
+            dex: Some(dex.name.clone()),
+            token: meta.collateral_token,
         });
     }
-    Ok(dexes)
+    Ok(collateral)
 }
 
 /// How close a unified account is to liquidation, per the account-abstraction

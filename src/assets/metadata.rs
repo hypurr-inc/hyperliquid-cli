@@ -1,8 +1,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use hypersdk::Decimal;
-use hypersdk::hypercore::{Chain, Dex, HttpClient, PerpMarket, SpotMarket, SpotToken};
+use hypersdk::hypercore::{Chain, HttpClient, PerpMarket, SpotMarket, SpotToken};
 use serde::Deserialize;
 
 use crate::errors::CliError;
@@ -11,8 +10,9 @@ use crate::http_api::ApiClient;
 use crate::wire::InfoRequest;
 
 use super::asset_id;
+use super::dexes::{DexMeta, PerpDex, PerpDexList, USDC_NAME};
 use super::market::{MarginRule, PerpAsset, SpotAsset};
-use super::query::{eq_asset_name, normalize_dex, strip_dex_prefix};
+use super::query::{eq_asset_name, strip_dex_prefix};
 
 const METADATA_TTL: Duration = Duration::from_secs(60);
 
@@ -35,20 +35,23 @@ impl AssetMetadata {
 
     /// HIP-3 markets are not loaded here; they are looked up live on demand.
     pub async fn load(api: &ApiClient) -> Result<Self, CliError> {
-        let default_perps = api.sdk().perps().await.map_err(from_sdk)?;
-        let spots = load_spot_markets(api)
-            .await?
-            .into_iter()
-            .map(spot_asset_from_listing)
-            .collect::<Result<Vec<_>, _>>()?;
-        let perps = default_perps
-            .into_iter()
-            .map(|market| perp_asset_from_market(market, None))
-            .collect::<Result<Vec<_>, _>>()?;
+        let perps = api.sdk().perps().await.map_err(from_sdk)?;
+        let spots = load_spot_markets(api).await?;
+        Self::from_listings(&perps, spots)
+    }
 
+    /// The metadata of markets a command already loaded, so it resolves a name
+    /// against them without reading them again.
+    pub fn from_listings(perps: &[PerpMarket], spots: Vec<SpotListing>) -> Result<Self, CliError> {
         Ok(Self {
-            perps,
-            spots,
+            perps: perps
+                .iter()
+                .map(|market| perp_asset_from_market(market, None))
+                .collect::<Result<_, _>>()?,
+            spots: spots
+                .into_iter()
+                .map(spot_asset_from_listing)
+                .collect::<Result<_, _>>()?,
             unavailable_dexes: Vec::new(),
         })
     }
@@ -61,75 +64,22 @@ impl AssetMetadata {
     /// its markets reports that failure instead of "asset not found". A failed
     /// `perpDexs` listing fails the load.
     pub async fn load_raw(api: &ApiClient) -> Result<Self, CliError> {
-        #[derive(Deserialize)]
-        struct MetaResponse {
-            universe: Vec<MetaPerp>,
-            #[serde(rename = "collateralToken")]
-            collateral_token: Option<usize>,
-        }
-
-        #[derive(Deserialize)]
-        struct MetaPerp {
-            name: String,
-            #[serde(rename = "szDecimals")]
-            sz_decimals: u32,
-            #[serde(rename = "onlyIsolated", default)]
-            only_isolated: bool,
-            #[serde(rename = "marginMode", default)]
-            margin_mode: Option<String>,
-        }
-
-        impl MetaPerp {
-            fn margin_rule(&self) -> MarginRule {
-                MarginRule::from_wire(self.only_isolated, self.margin_mode.as_deref())
-            }
-        }
-
-        let meta = api
-            .info::<MetaResponse>(&InfoRequest::new("meta"), "loading perpetual metadata")
-            .await?;
+        let default_meta = DexMeta::load(api, None).await?;
         let spot_meta = load_raw_spot_meta(api).await?;
 
-        let default_collateral = spot_meta.collateral_name(meta.collateral_token);
-        let mut perps = meta
-            .universe
-            .into_iter()
-            .enumerate()
-            .map(|(index, perp)| PerpAsset {
-                margin_rule: perp.margin_rule(),
-                name: perp.name,
-                index,
-                dex: None,
-                sz_decimals: perp.sz_decimals,
-                collateral: default_collateral.clone(),
-            })
-            .collect::<Vec<_>>();
+        let default_collateral = spot_meta.collateral_name(default_meta.collateral_token);
+        let mut perps = default_meta.into_assets(None, &default_collateral);
 
         let mut unavailable_dexes = Vec::new();
-        for (dex_slot, dex) in load_raw_perp_dexes(api).await?.into_iter().enumerate() {
-            let Some(dex) = dex else { continue };
-            let Ok(meta) = api
-                .info::<MetaResponse>(
-                    &InfoRequest::new("meta").field("dex", dex.name.clone()),
-                    "loading HIP-3 perpetual metadata",
-                )
-                .await
-            else {
-                unavailable_dexes.push(dex.name);
-                continue;
-            };
-            let collateral = spot_meta.collateral_name(meta.collateral_token);
-            perps.extend(meta.universe.into_iter().enumerate().map(|(index, perp)| {
-                let name = strip_dex_prefix(&perp.name, &dex.name).to_string();
-                PerpAsset {
-                    margin_rule: perp.margin_rule(),
-                    name,
-                    index: asset_id::hip3_asset_index(dex_slot, index),
-                    dex: Some(dex.name.clone()),
-                    sz_decimals: perp.sz_decimals,
-                    collateral: collateral.clone(),
+        let dexes = PerpDexList::load(api).await?;
+        for (dex, meta) in dexes.iter().zip(dexes.read_metas(api).await) {
+            match meta {
+                Ok(meta) => {
+                    let collateral = spot_meta.collateral_name(meta.collateral_token);
+                    perps.extend(meta.into_assets(Some(dex), &collateral));
                 }
-            }));
+                Err(_) => unavailable_dexes.push(dex.name.clone()),
+            }
         }
 
         let spots = spot_meta
@@ -172,7 +122,7 @@ fn sz_decimals(value: i64, market: &str) -> Result<u32, CliError> {
 
 /// Convert an SDK perp market, dropping the `dex:` prefix HIP-3 names carry.
 pub(super) fn perp_asset_from_market(
-    market: PerpMarket,
+    market: &PerpMarket,
     dex: Option<String>,
 ) -> Result<PerpAsset, CliError> {
     let name = match dex.as_deref() {
@@ -181,11 +131,11 @@ pub(super) fn perp_asset_from_market(
     };
     Ok(PerpAsset {
         sz_decimals: sz_decimals(market.sz_decimals, &market.name)?,
-        margin_rule: MarginRule::of_market(&market),
+        margin_rule: MarginRule::of_market(market),
         name,
         index: market.index,
         dex,
-        collateral: market.collateral.name,
+        collateral: market.collateral.name.clone(),
     })
 }
 
@@ -265,17 +215,11 @@ impl RawSpotMeta {
         self.tokens.iter().find(|token| token.index == token_ref)
     }
 
-    /// Name of a perp collateral token, defaulting to USDC when the exchange
-    /// names none or it is unknown.
-    fn collateral_name(&self, collateral_token: Option<usize>) -> String {
-        collateral_token
-            .and_then(|position| {
-                u32::try_from(position)
-                    .ok()
-                    .and_then(|index| self.token(index))
-                    .or_else(|| self.tokens.get(position))
-            })
-            .map_or_else(|| "USDC".to_string(), |token| token.name.clone())
+    /// Name of a perp collateral token, defaulting to USDC when it is unknown.
+    fn collateral_name(&self, collateral_token: u32) -> String {
+        self.token(collateral_token)
+            .or_else(|| self.tokens.get(collateral_token as usize))
+            .map_or_else(|| USDC_NAME.to_string(), |token| token.name.clone())
     }
 
     fn into_listings(self) -> Vec<SpotListing> {
@@ -302,81 +246,6 @@ async fn load_raw_spot_meta(api: &ApiClient) -> Result<RawSpotMeta, CliError> {
         .await
 }
 
-/// One `perpDexs` entry. The dex carries no deployer fee scale: it is a
-/// property of each market in the dex's own `meta` (see
-/// [`load_deployer_fee_scales`]).
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RawPerpDex {
-    pub name: String,
-}
-
-/// The deployer fee scale of each market of one HIP-3 dex that states one.
-/// Markets of the same dex can differ.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct DeployerFeeScales {
-    markets: Vec<(String, Decimal)>,
-}
-
-impl DeployerFeeScales {
-    /// The scale every market shares; `None` when the dex lists no scale or its
-    /// markets disagree.
-    pub(crate) fn uniform(&self) -> Option<Decimal> {
-        let (_, first) = self.markets.first()?;
-        self.markets
-            .iter()
-            .all(|(_, scale)| scale == first)
-            .then_some(*first)
-    }
-
-    /// Each market's scale, as `(coin, scale)`.
-    pub(crate) fn by_market(&self) -> &[(String, Decimal)] {
-        &self.markets
-    }
-}
-
-/// Read the deployer fee scales from `meta{dex}.universe[].deployerFeeScale`.
-pub(crate) async fn load_deployer_fee_scales(
-    api: &ApiClient,
-    dex: &str,
-) -> Result<DeployerFeeScales, CliError> {
-    #[derive(Deserialize)]
-    struct DexMeta {
-        universe: Vec<DexMarket>,
-    }
-
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct DexMarket {
-        name: String,
-        #[serde(default, with = "rust_decimal::serde::str_option")]
-        deployer_fee_scale: Option<Decimal>,
-    }
-
-    let meta: DexMeta = api
-        .info(
-            &InfoRequest::new("meta").field("dex", dex),
-            "loading perp DEX markets",
-        )
-        .await?;
-    Ok(DeployerFeeScales {
-        markets: meta
-            .universe
-            .into_iter()
-            .filter_map(|market| Some((market.name, market.deployer_fee_scale?)))
-            .collect(),
-    })
-}
-
-/// The raw `perpDexs` list. Slot `n` is the dex at protocol position `n`, so a
-/// removed dex stays in the list as `None`.
-pub(crate) async fn load_raw_perp_dexes(
-    api: &ApiClient,
-) -> Result<Vec<Option<RawPerpDex>>, CliError> {
-    api.info(&InfoRequest::new("perpDexs"), "loading perp DEX metadata")
-        .await
-}
-
 /// The spot token called `name`, ignoring case and surrounding whitespace.
 pub async fn require_spot_token(client: &HttpClient, name: &str) -> Result<SpotToken, CliError> {
     let name = name.trim();
@@ -389,52 +258,23 @@ pub async fn require_spot_token(client: &HttpClient, name: &str) -> Result<SpotT
         .ok_or_else(|| CliError::Unsupported(format!("spot token \"{name}\" not found")))
 }
 
-/// Find a HIP-3 DEX by name, case-insensitively.
-pub(crate) async fn find_perp_dex(client: &HttpClient, dex_name: &str) -> Result<Dex, CliError> {
-    client
-        .perp_dexes()
-        .await
-        .map_err(from_sdk)?
-        .into_iter()
-        .find(|dex| dex.name().eq_ignore_ascii_case(dex_name))
-        .ok_or_else(|| CliError::Unsupported(format!("Unknown DEX: {dex_name}")))
-}
-
-/// Validate a `--dex` value against the exchange and return its canonical name.
-///
-/// A blank value is the default dex. An unknown DEX is explicit invalid input:
-/// it fails here instead of reading an empty account or an empty mid map, and
-/// the canonical spelling is what every later request uses.
-pub async fn canonical_dex(
-    client: &HttpClient,
-    dex: Option<&str>,
-) -> Result<Option<String>, CliError> {
-    match normalize_dex(dex) {
-        Some(dex) => Ok(Some(find_perp_dex(client, dex).await?.name().to_string())),
-        None => Ok(None),
-    }
-}
-
-/// Look up one HIP-3 market live, returning the DEX's canonical name with it.
+/// Look up one market of `dex` live through the SDK client.
 ///
 /// `Ok(None)` means the DEX exists but lists no such market.
 pub(crate) async fn load_hip3_market(
     client: &HttpClient,
-    dex_name: &str,
+    dex: &PerpDex,
     token: &str,
-) -> Result<Option<(String, PerpMarket)>, CliError> {
-    let dex = find_perp_dex(client, dex_name).await?;
-    let canonical_dex_name = dex.name().to_string();
-    let market = client
-        .perps_from(dex)
+) -> Result<Option<PerpMarket>, CliError> {
+    Ok(client
+        .perps_from(dex.sdk())
         .await
         .map_err(from_sdk)?
         .into_iter()
         .find(|market| {
-            let display_token = strip_dex_prefix(&market.name, &canonical_dex_name);
+            let display_token = strip_dex_prefix(&market.name, &dex.name);
             display_token.eq_ignore_ascii_case(token) || market.name.eq_ignore_ascii_case(token)
-        });
-    Ok(market.map(|market| (canonical_dex_name, market)))
+        }))
 }
 
 #[derive(Debug, Clone)]
@@ -540,10 +380,9 @@ mod tests {
             "universe": []
         }));
 
-        assert_eq!(raw.collateral_name(Some(360)), "USDH");
-        assert_eq!(raw.collateral_name(Some(1)), "USDH");
-        assert_eq!(raw.collateral_name(Some(999)), "USDC");
-        assert_eq!(raw.collateral_name(None), "USDC");
+        assert_eq!(raw.collateral_name(360), "USDH");
+        assert_eq!(raw.collateral_name(1), "USDH");
+        assert_eq!(raw.collateral_name(999), "USDC");
     }
 
     #[test]

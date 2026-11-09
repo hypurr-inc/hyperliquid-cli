@@ -1,7 +1,7 @@
 use clap::Args;
 use hypersdk::hypercore::CandleInterval;
 
-use crate::assets::canonical_dex;
+use crate::assets::{self, canonical_dex};
 use crate::command_spec::{
     ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, Lifecycle, OwsSupport, Risk,
     StreamBound, arg,
@@ -545,12 +545,8 @@ async fn canonical_dexs(
     inv: &Invocation,
     requested: &[String],
 ) -> Result<Vec<Option<String>>, anyhow::Error> {
-    let client = inv.remote()?.api().sdk();
-    let mut dexs = Vec::with_capacity(requested.len());
-    for dex in requested {
-        dexs.push(canonical_dex(client, Some(dex)).await?);
-    }
-    Ok(dexs)
+    let requested: Vec<Option<&str>> = requested.iter().map(|dex| Some(dex.as_str())).collect();
+    Ok(assets::canonical_dexs(inv.remote()?.api().sdk(), &requested).await?)
 }
 
 async fn stream(

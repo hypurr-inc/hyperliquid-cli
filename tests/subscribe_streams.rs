@@ -800,6 +800,21 @@ async fn dex_and_hip3_names_are_resolved_before_subscribing() {
 }
 
 #[tokio::test]
+async fn repeated_dex_flags_are_validated_against_one_dex_listing() {
+    let exchange = ExchangeFixture::start_with(vec![Hip3Dex::xyz()]).await;
+    let home = IsolatedHome::new();
+
+    home.command_with_server(&exchange)
+        .args(["subscribe", "clearinghouse-state", "--user", USER])
+        .args(["--dex", "xyz", "--dex", "XYZ", "--dex", "xyz"])
+        .args(["--max-events", "0"])
+        .assert()
+        .success();
+
+    assert_eq!(exchange.info_requests("perpDexs").await.len(), 1);
+}
+
+#[tokio::test]
 async fn active_asset_data_is_for_perpetuals_only() {
     let exchange = ExchangeFixture::start().await;
     exchange
