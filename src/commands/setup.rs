@@ -17,7 +17,6 @@ use crate::invocation::Invocation;
 use crate::mode::Mode;
 use crate::network::Network;
 use crate::output::{OutputFormat, TableData};
-use crate::ows::signing::OwsSigningConfig;
 use crate::ows::vault::Vault;
 use crate::prompt;
 use crate::settings::{Settings, env};
@@ -90,13 +89,6 @@ impl TableData for SetupSummary {
     }
 }
 
-/// How the wallet is obtained.
-enum WalletSource {
-    Create,
-    /// A private key read at the masked prompt or from stdin. Never printed.
-    Import(String),
-}
-
 /// Fail before asking anything when this run can't answer prompts and `--yes` wasn't given.
 fn ensure_setup_can_run(
     args: &SetupArgs,
@@ -124,8 +116,8 @@ pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error
     let mode = inv.mode();
     let default_network = inv.remote()?.network();
     ensure_setup_can_run(args, inv.format(), mode)?;
-    let store = WalletStore::new(Settings::from_process());
-    let settings = store.settings();
+    let settings = inv.remote()?.settings();
+    let store = WalletStore::new(settings);
     // A broken config is an error before any question is asked.
     settings.config()?;
 
@@ -177,17 +169,23 @@ pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error
     } else {
         prompt_referral_default(mode, settings, network)?
     };
-    let wallet_source = if import_wallet {
-        WalletSource::Import(wallet::prompt_private_key(mode)?.trim().to_string())
+    // A private key read at the masked prompt or from stdin. Never printed.
+    let imported_key = if import_wallet {
+        Some(wallet::prompt_private_key(mode)?.trim().to_string())
     } else {
-        WalletSource::Create
+        None
+    };
+    let new_wallet = match &imported_key {
+        Some(private_key) => NewWallet::ImportPrivateKey(private_key),
+        None => NewWallet::Create,
     };
     let approve_builder = resolve_builder_approval(mode, args, builder_defaults.as_ref())?;
 
-    let wallet_name = match wallet_source {
-        WalletSource::Create => store.next_name("setup")?,
-        WalletSource::Import(_) => store.next_name("setup-imported")?,
-    };
+    let wallet_name = store.next_name(if import_wallet {
+        "setup-imported"
+    } else {
+        "setup"
+    })?;
     let config_path = settings
         .config_file()
         .map(|file| file.path().display().to_string())
@@ -199,9 +197,10 @@ pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error
         .map(|(address, fee)| format!("{address} at {fee}"))
         .unwrap_or_else(|| "not configured".to_string());
     print_answers_summary(&AnswersSummary {
-        wallet: match wallet_source {
-            WalletSource::Create => format!("create a new wallet named {wallet_name}"),
-            WalletSource::Import(_) => format!("import a private key as wallet {wallet_name}"),
+        wallet: if import_wallet {
+            format!("import a private key as wallet {wallet_name}")
+        } else {
+            format!("create a new wallet named {wallet_name}")
         },
         network,
         config_path: &config_path,
@@ -218,7 +217,6 @@ pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error
     });
 
     let record_setup: ConfigEdit<'_> = Box::new(|config, wallet, _| {
-        let mut keys_written = vec!["network".to_string(), "default_wallet_id".to_string()];
         config.network = network;
         config.default_wallet_id = Some(wallet.id.clone());
         config.default_builder_address = builder_defaults
@@ -226,19 +224,7 @@ pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error
             .map(|(address, _)| address.clone());
         config.default_builder_fee_rate = builder_defaults.as_ref().map(|(_, fee)| fee.clone());
         config.default_referral_code = referral_code.clone();
-        if builder_defaults.is_some() {
-            keys_written.push("default_builder_address".to_string());
-            keys_written.push("default_builder_fee_rate".to_string());
-        }
-        if referral_code.is_some() {
-            keys_written.push("default_referral_code".to_string());
-        }
-        keys_written
     });
-    let new_wallet = match &wallet_source {
-        WalletSource::Create => NewWallet::Create,
-        WalletSource::Import(private_key) => NewWallet::ImportPrivateKey(private_key),
-    };
     let stored = store.add(
         &new_wallet,
         &WalletName::Exact(&wallet_name),
@@ -275,7 +261,7 @@ pub async fn run(inv: &Invocation, args: &SetupArgs) -> Result<(), anyhow::Error
     };
     inv.print_untimed(&output);
 
-    let replayable = matches!(wallet_source, WalletSource::Create)
+    let replayable = !import_wallet
         && builder_defaults == builder_suggestion
         && referral_code == referral_suggestion;
     if !args.yes {
@@ -458,12 +444,7 @@ async fn maybe_approve_default_builder(
 
     let builder_address = builder::parse_builder_address(builder_text)?;
     builder::validate_max_fee_rate(fee)?;
-    let signer = SelectedSigner::ows(OwsSigningConfig::for_wallet(
-        wallet.id.clone(),
-        wallet,
-        signer_address,
-        vault.clone(),
-    ));
+    let signer = SelectedSigner::vault_wallet(wallet, signer_address, vault.clone());
     let approval = builder::submit_approval(api, &signer, builder_address, fee).await;
     match approval {
         Ok(max_fee_tenths_bps) => {

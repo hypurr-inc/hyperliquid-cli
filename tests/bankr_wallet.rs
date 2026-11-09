@@ -7,7 +7,7 @@ use alloy::signers::SignerSync;
 use hyperliquid_cli::bankr::{BankrClient, BankrTypedData};
 use predicates::prelude::*;
 use serde_json::Value;
-use support::IsolatedHome;
+use support::{IsolatedHome, mock_all_mids_server};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -396,4 +396,43 @@ async fn logout_declares_the_confirmation_it_asks_for() {
         .args(["--format", "json", "wallet", "logout"])
         .assert()
         .code(13);
+}
+
+/// Bankr signs trading actions and spot-to-perp moves; an approval is a
+/// user-signed action, so it fails with exit 13 before Bankr or the exchange
+/// is asked for anything (and before the generated agent key is shown).
+#[tokio::test]
+async fn api_wallet_approval_under_bankr_is_refused_before_any_signing_request() {
+    let env = IsolatedHome::new();
+    let bankr = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wallet/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
+        .mount(&bankr)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/wallet/sign"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&bankr)
+        .await;
+    let exchange = mock_all_mids_server().await;
+    Mock::given(method("POST"))
+        .and(path("/exchange"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&exchange)
+        .await;
+
+    env.command_with_server(&exchange)
+        .env("BANKR_API_KEY", BANKR_KEY)
+        .env("BANKR_API_URL", bankr.uri())
+        .args(["--bankr", "api-wallet", "create", "--name", "bot"])
+        .assert()
+        .code(13)
+        .stdout(predicate::str::contains("private_key").not())
+        .stderr(predicate::str::contains("Bankr signs trading actions"));
+
+    bankr.verify().await;
+    exchange.verify().await;
 }

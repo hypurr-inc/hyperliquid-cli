@@ -13,18 +13,12 @@ use crate::ows::vault::{HyperliquidAccount, Vault};
 const OWS_WALLET_TYPE: &str = "ows-wallet";
 
 /// One `account ls` row. The shape predates the vault: `id` is a 1-based
-/// display index and the agent columns are always empty.
+/// display index.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AccountRow {
     pub id: i64,
     pub alias: String,
     pub address: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub master_address: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub agent_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<u64>,
     #[serde(rename = "type")]
     pub account_type: String,
     pub is_default: bool,
@@ -42,9 +36,6 @@ impl AccountRow {
             id: display_index as i64,
             alias: wallet.name,
             address: account.address_text.clone(),
-            master_address: None,
-            agent_name: None,
-            expires_at: None,
             account_type: OWS_WALLET_TYPE.to_string(),
             is_default,
             created_at: wallet.created_at,
@@ -74,21 +65,10 @@ fn account_type_label(account_type: &str) -> &str {
 
 impl TableData for AccountsOutput {
     fn headers(&self) -> Vec<&str> {
-        vec![
-            "ID",
-            "Alias",
-            "Address",
-            "Master",
-            "Agent Name",
-            "Expires At",
-            "Type",
-            "Default",
-            "Created At",
-        ]
+        vec!["ID", "Alias", "Address", "Type", "Default", "Created At"]
     }
 
     fn rows(&self) -> Vec<Vec<String>> {
-        let or_na = |value: Option<String>| value.unwrap_or_else(|| "n/a".to_string());
         self.accounts
             .iter()
             .map(|account| {
@@ -96,9 +76,6 @@ impl TableData for AccountsOutput {
                     account.id.to_string(),
                     account.alias.clone(),
                     account.address.clone(),
-                    or_na(account.master_address.clone()),
-                    or_na(account.agent_name.clone()),
-                    or_na(account.expires_at.map(|value| value.to_string())),
                     account_type_label(&account.account_type).to_string(),
                     if account.is_default { "yes" } else { "no" }.to_string(),
                     account.created_at.clone(),
@@ -229,26 +206,25 @@ impl Receipt {
     }
 }
 
-pub(super) fn print_receipt(
-    inv: &Invocation,
-    settings: &Settings,
-    vault: &Vault,
-    receipt: Receipt,
-) {
+pub(super) fn print_receipt(inv: &Invocation, settings: &Settings, receipt: Receipt) {
     let info = WalletReceipt {
         message: receipt.message,
         address: receipt.address,
         alias: receipt.alias,
         source: receipt.source,
         is_default: receipt.is_default,
-        config_path: settings.config_file().map_or_else(
-            || "unavailable".to_string(),
-            |file| file.path().display().to_string(),
-        ),
-        vault_path: vault.display_path(),
+        config_path: config_path(settings),
+        vault_path: Vault::from_settings(settings).display_path(),
         config_keys_written: receipt.config_keys_written,
     };
     inv.print_untimed(&info);
+}
+
+fn config_path(settings: &Settings) -> String {
+    settings.config_file().map_or_else(
+        || "unavailable".to_string(),
+        |file| file.path().display().to_string(),
+    )
 }
 
 pub(super) fn print_wallet_address(inv: &Invocation, address: &str) {
@@ -287,7 +263,6 @@ pub(super) struct BankrReceipt {
     pub message: String,
     pub address: Option<String>,
     pub api_url: Option<String>,
-    pub config_path: String,
     pub config_keys_written: Vec<String>,
 }
 
@@ -335,13 +310,13 @@ impl TableData for BankrStatusOutput {
     }
 }
 
-pub(super) fn print_bankr_receipt(inv: &Invocation, receipt: BankrReceipt) {
+pub(super) fn print_bankr_receipt(inv: &Invocation, settings: &Settings, receipt: BankrReceipt) {
     inv.print_untimed(&BankrStatusOutput {
         status: receipt.status.to_string(),
         message: receipt.message,
         address: receipt.address,
         api_url: receipt.api_url,
-        config_path: receipt.config_path,
+        config_path: config_path(settings),
         config_keys_written: receipt.config_keys_written,
     });
 }
@@ -369,9 +344,6 @@ mod tests {
             id: 1,
             alias: "main".to_string(),
             address: "0xabc".to_string(),
-            master_address: None,
-            agent_name: None,
-            expires_at: None,
             account_type: OWS_WALLET_TYPE.to_string(),
             is_default: true,
             created_at: "now".to_string(),
@@ -382,7 +354,7 @@ mod tests {
         assert!(rendered.contains("\"type\":\"ows-wallet\""));
         assert!(!rendered.contains("private_key"));
         assert!(!rendered.contains("encrypted"));
-        assert_eq!(output.rows()[0][6], "OWS wallet");
+        assert_eq!(output.rows()[0][3], "OWS wallet");
     }
 
     #[test]

@@ -1316,3 +1316,92 @@ fn experimental_ows_conflicts_with_existing_signer_sources() {
         .stderr(predicate::str::contains("--ows-signer"))
         .stderr(predicate::str::contains("--keystore-password"));
 }
+
+#[test]
+fn wallet_show_describes_a_vault_wallet_by_name_however_it_was_selected() {
+    let env = IsolatedHome::new();
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args(["account", "add", IMPORT_KEY, "--alias", "main", "--default"])
+        .assert()
+        .success();
+
+    for selector in [
+        &[][..],
+        &["--account", "main"][..],
+        &["--ows-signer", "main"][..],
+    ] {
+        let output = env
+            .account_command(TEST_ACCOUNT_PASSPHRASE)
+            .args(["--format", "json"])
+            .args(selector)
+            .args(["wallet", "show"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let json: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["alias"], "main", "{selector:?}");
+        assert_eq!(json["source"], "OWS wallet (main)", "{selector:?}");
+    }
+}
+
+#[test]
+fn account_ls_json_and_table_carry_no_always_empty_agent_columns() {
+    let env = IsolatedHome::new();
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args(["account", "add", IMPORT_KEY, "--alias", "main"])
+        .assert()
+        .success();
+
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args(["account", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Created At"))
+        .stdout(predicate::str::contains("Agent Name").not())
+        .stdout(predicate::str::contains("n/a").not());
+
+    let output = env
+        .account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args(["--format", "json", "account", "ls"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    let row = json[0].as_object().unwrap();
+    for key in ["master_address", "agent_name", "expires_at"] {
+        assert!(!row.contains_key(key), "{key}");
+    }
+}
+
+#[test]
+fn receipts_list_exactly_the_config_keys_the_command_changed() {
+    let env = IsolatedHome::new();
+
+    for key in [IMPORT_KEY, SECOND_KEY] {
+        // The second import changes the default again, and only that.
+        let stdout = env
+            .account_command(TEST_ACCOUNT_PASSPHRASE)
+            .args(["wallet", "import", key])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let stdout = String::from_utf8(stdout).unwrap();
+        let written: Vec<&str> = stdout
+            .lines()
+            .filter(|line| line.contains("Config keys written"))
+            .collect();
+        assert_eq!(written.len(), 1, "{stdout}");
+        let keys = written[0].replace("Config keys written", "");
+        assert_eq!(
+            keys.trim().trim_matches('│').trim(),
+            "default_wallet_id",
+            "{stdout}"
+        );
+    }
+}

@@ -13,6 +13,13 @@
 - `watch risk` declares its stream bound like `subscribe`: in JSON or agent contexts it needs `--max-events` or `--idle-timeout-ms` (checked before the run, exit `2`), and `hyperliquid schema watch risk` reports `stream_bounds` and `bounded_ndjson_stream`. An explicit `--format pretty` on a pipe no longer forces the bound; an explicit `--format json` on a terminal now does.
 - `feedback`, `mcp` and `report-incident` no longer carry a `Notes:` block saying they change live exchange state; they change no state.
 - The watch view refreshes only on its timer, a socket message, or `r`; other keys no longer trigger a refresh.
+- Bankr now refuses every user-signed action it does not cover (withdrawals, spot/asset sends, staking, builder approvals, `setAbstraction`) with exit `13` before a request is sent, on the typed-data path as well as the L1 path; only trading actions and spot-to-perp USDC moves reach Bankr, as documented.
+- A signature whose recovery byte names no public key is refused as `<provider>_malformed_response` (exit `10`) instead of panicking, for Bankr and OWS alike.
+- `--keystore` is no longer overridden by an ambient `HYPERLIQUID_PRIVATE_KEY` or a legacy config key; a private key given on the command line still wins.
+- Account selectors fail with the vault's own error when the vault can't be read or a name is ambiguous, for data lookups (`--user`, `--account`) as for signing, instead of reporting the account as not found. An address selector now matches a pre-vault stored account in any letter case, as it does a vault wallet.
+- `HYPERLIQUID_API_BASE_URL` (and its network variants) accept an IPv6 loopback host such as `http://[::1]:8080`, like the Bankr endpoint does.
+- `wallet show --account <vault wallet>` describes the wallet by name like the default wallet does. `account ls` no longer prints the always-empty Master, Agent Name and Expires At columns (JSON is unchanged).
+- `Config keys written` in wallet and setup receipts lists the keys the command changed, read from the config diff, and the root help lists every environment variable the CLI reads.
 
 ## 0.17.0 - 2026-11-09
 
