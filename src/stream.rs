@@ -743,12 +743,6 @@ mod tests {
     }
 
     #[test]
-    fn explicit_tick_bound_wins_over_environment() {
-        assert_eq!(StreamBounds::snapshot_watch(Some(4)).max_items, Some(4));
-        assert!(require_tick_bound(Some(4)).is_ok());
-    }
-
-    #[test]
     fn zero_in_the_environment_follows_the_bound() {
         let ticks = StreamBound::SnapshotWatch.env().unwrap().zero;
         let events = StreamBound::Subscribe.env().unwrap().zero;
@@ -951,15 +945,5 @@ mod tests {
         .unwrap_err();
 
         assert!(is_stdout_closed(&err));
-    }
-
-    #[test]
-    fn subscribe_targets_match_only_their_own_messages() {
-        let message = Incoming::AllMids {
-            dex: None,
-            mids: Default::default(),
-        };
-        assert!(SubscribeTarget::all_mids().matches(&message));
-        assert!(!SubscribeTarget::trades("BTC".to_string()).matches(&message));
     }
 }

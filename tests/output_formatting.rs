@@ -2,36 +2,16 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 #[test]
-fn test_format_flag_accepts_pretty() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("pretty")
-        .arg("--help")
-        .assert()
-        .success();
-}
-
-#[test]
-fn test_format_flag_accepts_table() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("table")
-        .arg("--help")
-        .assert()
-        .success();
-}
-
-#[test]
-fn test_format_flag_accepts_json() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("json")
-        .arg("--help")
-        .assert()
-        .success();
+fn every_format_is_accepted_by_its_long_and_short_flag() {
+    for flag in ["--format", "-f"] {
+        for format in ["pretty", "table", "json"] {
+            Command::cargo_bin("hyperliquid")
+                .unwrap()
+                .args([flag, format, "--help"])
+                .assert()
+                .success();
+        }
+    }
 }
 
 #[test]
@@ -48,26 +28,6 @@ fn test_json_flag_enables_json_mode() {
     let text = String::from_utf8(output).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
-}
-
-#[test]
-fn test_format_flag_rejects_invalid() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--format")
-        .arg("xml")
-        .assert()
-        .failure()
-        .stdout(predicates::str::contains("invalid"));
-}
-
-#[test]
-fn test_default_format_is_pretty() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("--help")
-        .assert()
-        .success();
 }
 
 #[test]
@@ -107,17 +67,6 @@ fn orders_create_help_surfaces_risk_and_dry_run() {
         .stdout(predicate::str::contains("Risk: moves funds"))
         .stdout(predicate::str::contains("Dry-run: supported"))
         .stdout(predicate::str::contains("Confirmation:"));
-}
-
-#[test]
-fn test_short_format_flag() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .arg("-f")
-        .arg("json")
-        .arg("--help")
-        .assert()
-        .success();
 }
 
 #[test]

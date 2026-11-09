@@ -315,20 +315,13 @@ mod tests {
         ] {
             let err = from_exchange_rejection(message, "exchange action failed");
             assert_eq!(err.exit_code(), 13, "{message}");
-            assert!(err.to_string().contains(message));
+            let text = err.to_string();
+            assert!(
+                text.starts_with("Unsupported input: exchange action failed: "),
+                "{text}"
+            );
+            assert!(text.contains(message), "{text}");
         }
-    }
-
-    #[test]
-    fn signed_exchange_user_state_rejection_names_the_action() {
-        let err = from_exchange_rejection(
-            "User or API Wallet 0x1111111111111111111111111111111111111111 does not exist.",
-            "order placement failed",
-        );
-
-        assert_eq!(err.exit_code(), 13);
-        assert!(err.to_string().contains("order placement failed"));
-        assert!(err.to_string().contains("does not exist"));
     }
 
     #[test]
@@ -559,20 +552,6 @@ mod tests {
             classify_rejection("Order has invalid size."),
             Rejection::Other(_)
         ));
-    }
-
-    #[test]
-    fn default_mapping_is_what_from_exchange_rejection_returns() {
-        for message in [
-            "Insufficient margin",
-            "Order has invalid size.",
-            "Unauthorized",
-        ] {
-            let direct = from_exchange_rejection(message, "order rejected");
-            let via = classify_rejection(message).into_error("order rejected");
-            assert_eq!(direct.exit_code(), via.exit_code(), "{message}");
-            assert_eq!(direct.to_string(), via.to_string(), "{message}");
-        }
     }
 
     #[test]

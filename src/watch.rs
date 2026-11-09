@@ -358,112 +358,68 @@ mod tests {
     };
 
     #[test]
-    fn snapshot_watch_render_mode_keeps_tui_for_interactive_terminals() {
-        assert_eq!(
-            snapshot_watch_render_mode(OutputFormat::Pretty, None, true, true).unwrap(),
-            SnapshotWatchRenderMode::Tui(OutputFormat::Pretty)
-        );
-        assert_eq!(
-            snapshot_watch_render_mode(OutputFormat::Table, Some(1), true, true).unwrap(),
-            SnapshotWatchRenderMode::Tui(OutputFormat::Table)
-        );
-    }
-
-    #[test]
-    fn snapshot_watch_render_mode_uses_ndjson_for_json_format() {
-        assert_eq!(
-            snapshot_watch_render_mode(OutputFormat::Json, None, false, false).unwrap(),
-            SnapshotWatchRenderMode::Ndjson
-        );
-    }
-
-    #[test]
-    fn snapshot_watch_render_mode_uses_ndjson_for_bounded_non_tty_watch() {
-        assert_eq!(
-            snapshot_watch_render_mode(OutputFormat::Pretty, Some(1), false, false).unwrap(),
-            SnapshotWatchRenderMode::Ndjson
-        );
-        assert_eq!(
-            snapshot_watch_render_mode(OutputFormat::Table, Some(1), true, false).unwrap(),
-            SnapshotWatchRenderMode::Ndjson
-        );
-    }
-
-    #[test]
-    fn snapshot_watch_render_mode_rejects_unbounded_non_tty_tui() {
-        let error =
-            snapshot_watch_render_mode(OutputFormat::Pretty, None, false, true).unwrap_err();
-
-        assert_eq!(error.exit_code(), 13);
-        let message = error.to_string();
-        assert!(message.contains("Non-TTY"));
-        assert!(message.contains("--format json"));
-        assert!(message.contains("--max-ticks"));
-    }
-
-    #[test]
-    fn watch_key_ctrl_d_and_esc_quit() {
-        for key in [
-            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
-            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+    fn render_mode_is_tui_only_for_interactive_terminals_and_ndjson_when_bounded_or_json() {
+        use OutputFormat::{Json, Pretty, Table};
+        use SnapshotWatchRenderMode::{Ndjson, Tui};
+        for (format, max_ticks, stdin_tty, stdout_tty, expected) in [
+            (Pretty, None, true, true, Tui(Pretty)),
+            (Table, Some(1), true, true, Tui(Table)),
+            (Json, None, false, false, Ndjson),
+            (Pretty, Some(1), false, false, Ndjson),
+            (Table, Some(1), true, false, Ndjson),
+            (Pretty, Some(1), false, true, Ndjson),
         ] {
-            assert_eq!(watch_key_event_action(key), Some(WatchEvent::Quit));
-        }
-    }
-
-    #[test]
-    fn watch_key_ctrl_c_interrupts() {
-        for code in ['c', 'C'] {
             assert_eq!(
-                watch_key_event_action(KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL)),
-                Some(WatchEvent::Interrupt)
+                snapshot_watch_render_mode(format, max_ticks, stdin_tty, stdout_tty).unwrap(),
+                expected,
+                "{format:?} ticks={max_ticks:?} stdin={stdin_tty} stdout={stdout_tty}"
             );
         }
     }
 
     #[test]
-    fn watch_key_q_and_shift_q_still_quit() {
-        for key in [
-            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
-            KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT),
-        ] {
-            assert_eq!(watch_key_event_action(key), Some(WatchEvent::Quit));
+    fn unbounded_watch_without_both_terminals_is_refused_with_the_json_alternative() {
+        for (stdin_tty, stdout_tty) in [(false, true), (true, false), (false, false)] {
+            let error =
+                snapshot_watch_render_mode(OutputFormat::Pretty, None, stdin_tty, stdout_tty)
+                    .unwrap_err();
+            assert_eq!(
+                error.exit_code(),
+                13,
+                "stdin={stdin_tty} stdout={stdout_tty}"
+            );
+            let message = error.to_string();
+            assert!(message.contains("--format json"), "{message}");
+            assert!(message.contains("--max-ticks"), "{message}");
         }
     }
 
     #[test]
-    fn watch_key_preserves_modifiers_for_control_chords() {
-        assert_eq!(
-            watch_key_event_action(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)),
-            None
-        );
-        assert_eq!(
-            watch_key_event_action(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)),
-            None
-        );
-        assert_eq!(
-            watch_key_event_action(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)),
-            None
-        );
-        assert_eq!(
-            watch_key_event_action(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
-            Some(WatchEvent::Refresh)
-        );
-    }
-
-    #[test]
-    fn keys_the_view_does_not_use_do_not_refresh() {
-        for code in [
-            KeyCode::Char('x'),
-            KeyCode::Enter,
-            KeyCode::Up,
-            KeyCode::Tab,
+    fn watch_keys_quit_interrupt_refresh_and_ignore_everything_else() {
+        let key = |code, modifiers| watch_key_event_action(KeyEvent::new(code, modifiers));
+        let none = KeyModifiers::NONE;
+        let ctrl = KeyModifiers::CONTROL;
+        for (code, modifiers, expected) in [
+            (KeyCode::Esc, none, Some(WatchEvent::Quit)),
+            (KeyCode::Char('d'), ctrl, Some(WatchEvent::Quit)),
+            (KeyCode::Char('q'), none, Some(WatchEvent::Quit)),
+            (
+                KeyCode::Char('Q'),
+                KeyModifiers::SHIFT,
+                Some(WatchEvent::Quit),
+            ),
+            (KeyCode::Char('c'), ctrl, Some(WatchEvent::Interrupt)),
+            (KeyCode::Char('C'), ctrl, Some(WatchEvent::Interrupt)),
+            (KeyCode::Char('r'), none, Some(WatchEvent::Refresh)),
+            (KeyCode::Char('c'), none, None),
+            (KeyCode::Char('d'), none, None),
+            (KeyCode::Char('r'), ctrl, None),
+            (KeyCode::Char('x'), none, None),
+            (KeyCode::Enter, none, None),
+            (KeyCode::Up, none, None),
+            (KeyCode::Tab, none, None),
         ] {
-            assert_eq!(
-                watch_key_event_action(KeyEvent::new(code, KeyModifiers::NONE)),
-                None,
-                "{code:?}"
-            );
+            assert_eq!(key(code, modifiers), expected, "{code:?} {modifiers:?}");
         }
     }
 
@@ -514,6 +470,7 @@ mod tests {
         title: String,
         format: OutputFormat,
         rows: Vec<Vec<String>>,
+        connection_lost: bool,
     }
 
     impl WatchOutput for CapturingOutput {
@@ -528,12 +485,13 @@ mod tests {
             title: &str,
             data: &dyn TableData,
             format: OutputFormat,
-            _connection_lost: bool,
+            connection_lost: bool,
         ) -> Result<(), anyhow::Error> {
             self.tui_renders.push(TuiRender {
                 title: title.to_string(),
                 format,
                 rows: data.rows(),
+                connection_lost,
             });
             Ok(())
         }
@@ -572,7 +530,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_tui_render_path_is_test_covered() {
+    async fn human_formats_render_to_the_screen_and_not_as_json_lines() {
         let counter = Arc::new(AtomicUsize::new(0));
         let mut input = ScriptedInput::new([]);
         let mut output = CapturingOutput::default();
@@ -699,7 +657,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn watch_connection_events_keep_refreshing() {
+    async fn connection_notice_follows_lost_and_restored_events_without_stopping() {
         let counter = Arc::new(AtomicUsize::new(0));
         let mut input =
             ScriptedInput::new([WatchEvent::ConnectionLost, WatchEvent::ConnectionRestored]);
@@ -718,6 +676,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(end, StreamEnd::Finished);
-        assert_eq!(counter.load(Ordering::SeqCst), 3);
+        let lost: Vec<bool> = output
+            .tui_renders
+            .iter()
+            .map(|render| render.connection_lost)
+            .collect();
+        assert_eq!(lost, [false, true, false]);
     }
 }

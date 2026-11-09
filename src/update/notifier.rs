@@ -470,6 +470,22 @@ mod tests {
         assert!(update_notice(&cache_with("", None), "0.11.1-rc.1", 0, "x").is_none());
     }
 
+    /// `claim_auto_update_attempt` never waits for the cache lock, and a
+    /// concurrently forked child can briefly keep a just-released lock held, so
+    /// calls that are not asserting contention retry while the lock is busy.
+    fn claim_when_unlocked(path: &Path, now: i64) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match claim_auto_update_attempt(path, now) {
+                Ok(claimed) => return claimed,
+                Err(err) if std::time::Instant::now() >= deadline => {
+                    panic!("cache lock stayed busy: {err}")
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+    }
+
     #[test]
     fn auto_update_attempt_is_persisted_and_throttles_other_invocations() {
         let tmpdir = TempDir::new().unwrap();
@@ -480,27 +496,15 @@ mod tests {
         })
         .unwrap();
         let now = 1_000_000;
-        assert!(claim_auto_update_attempt(&path, now).unwrap());
+        assert!(claim_when_unlocked(&path, now));
         let cache = read_version_cache(&path).unwrap();
         assert_eq!(cache.last_notified_at, Some(now));
         assert_eq!(cache.latest_version, "v99.0.0");
         assert_eq!(cache.last_checked_at, 123);
-        assert!(!claim_auto_update_attempt(&path, now + 1).unwrap());
-        let lock = crate::private_fs::FileLock::acquire(&path, Duration::ZERO).unwrap();
+        assert!(!claim_when_unlocked(&path, now + 1));
+        let lock = crate::private_fs::FileLock::acquire(&path, Duration::from_secs(5)).unwrap();
         assert!(claim_auto_update_attempt(&path, now + 86400).is_err());
         drop(lock);
-        assert!(claim_auto_update_attempt(&path, now + 86400).unwrap());
-    }
-
-    #[test]
-    fn auto_update_honors_retry_interval() {
-        let now = 10 * 24 * 60 * 60;
-        let cache_recent = cache_with("v0.12.0", Some(now - 60));
-        let elapsed = now.saturating_sub(cache_recent.last_notified_at.unwrap());
-        assert!(elapsed < NOTICE_INTERVAL.as_secs() as i64);
-
-        let cache_old = cache_with("v0.12.0", Some(now - 25 * 3600));
-        let elapsed_old = now.saturating_sub(cache_old.last_notified_at.unwrap());
-        assert!(elapsed_old >= NOTICE_INTERVAL.as_secs() as i64);
+        assert!(claim_when_unlocked(&path, now + 86400));
     }
 }
