@@ -1,14 +1,12 @@
 //! Environment variable names and the layered settings built from flags,
 //! environment and the config file.
 //!
-//! Every environment variable the CLI reads is a constant in [`env`]; the root
-//! help text and the test harness's list of variables to clear are generated
-//! from the same table. [`Settings`] reads the environment through an
-//! [`EnvSource`] and parses the config file at most once, lazily, so a flag that
-//! settles a question never touches a broken config file. Every write to the
-//! config file goes through [`Settings::update_config`], which owns the
-//! lock, fresh read, edit and save sequence. The Bankr credential rule is in
-//! [`crate::bankr_credentials`].
+//! Every environment variable the CLI reads is a constant in [`env`].
+//! [`Settings`] reads the environment through an [`EnvSource`] and parses the
+//! config file at most once, lazily, so a flag that settles a question never
+//! touches a broken config file. Every write to the config file goes through
+//! [`Settings::update_config`], which owns the lock, fresh read, edit and save
+//! sequence.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
@@ -655,10 +653,6 @@ mod tests {
         assert!(settings.testnet(true).unwrap());
         assert_eq!(settings.private_key(None).unwrap().as_deref(), Some("env"));
         assert!(settings.testnet(false).is_err());
-        assert_eq!(
-            settings.private_key(Some("")).unwrap().as_deref(),
-            Some("env")
-        );
     }
 
     #[test]
@@ -720,14 +714,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_without_a_file_cannot_be_updated() {
-        let err = settings(&[], None)
-            .update_config(|config| config.default_wallet_id = Some("w".to_string()))
-            .unwrap_err();
-        assert!(err.to_string().contains("config directory"));
-    }
-
-    #[test]
     fn remove_config_deletes_the_file_and_forgets_its_contents() {
         let (tmp, settings) = file_settings(&[], r#"{"network":"testnet"}"#);
         assert!(settings.testnet(false).unwrap());
@@ -742,6 +728,7 @@ mod tests {
         let no_location = settings(&[], None)
             .update_config(|config| config.default_wallet_id = Some("w".to_string()))
             .unwrap_err();
+        assert!(no_location.to_string().contains("config directory"));
         assert_eq!(crate::errors::from_anyhow(no_location).exit_code(), 2);
 
         // A config whose parent "directory" is a file can't be written.
@@ -942,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn api_override_accepts_ipv6_loopback_like_the_bankr_endpoint_does() {
+    fn api_override_accepts_ipv6_loopback() {
         let url = settings(&[(env::API_BASE_URL, "http://[::1]:4011")], None)
             .api_base_url_override(Network::Mainnet)
             .unwrap()

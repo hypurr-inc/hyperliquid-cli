@@ -639,7 +639,6 @@ mod tests {
         let mut codes: Vec<i32> = signals.signals.iter().map(|(_, code)| *code).collect();
         codes.sort_unstable();
         assert_eq!(codes, [129, 130, 143], "SIGHUP, SIGINT and SIGTERM");
-        assert_eq!(EXIT_SIGINT, 130);
     }
 
     struct CountingTicker {

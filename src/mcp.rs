@@ -484,7 +484,7 @@ mod tests {
             settings_from(&[]).unwrap(),
             McpSettings {
                 allow_unsafe: false,
-                deadline: Duration::from_secs(30),
+                deadline: DEFAULT_DEADLINE,
             }
         );
     }

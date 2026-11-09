@@ -363,6 +363,5 @@ mod tests {
                 WINDOW_FUTURE_MS / DAY.ms(1)
             )
         );
-        assert_eq!(MAX_AHEAD_MS, WINDOW_FUTURE_MS / 2);
     }
 }

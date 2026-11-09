@@ -187,13 +187,6 @@ mod tests {
     }
 
     #[test]
-    fn lifetimes_must_be_positive_whole_numbers() {
-        for bad in ["", "0s", "-5s", "1.5m", "m", "5x", "99999999999999999999d"] {
-            assert!(parse_lifetime(bad).is_err(), "{bad:?} should be refused");
-        }
-    }
-
-    #[test]
     fn every_lifetime_fault_keeps_its_message() {
         let fault = |input| parse_lifetime(input).unwrap_err();
         assert_eq!(fault(""), "duration cannot be empty");

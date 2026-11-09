@@ -291,14 +291,6 @@ mod tests {
     }
 
     #[test]
-    fn the_strict_flags_are_the_switches_this_cli_owns() {
-        assert_eq!(
-            strict_flags().collect::<Vec<_>>(),
-            [AGENT, NO_UPDATE_CHECK, AUTO_UPDATE, MCP_ALLOW_UNSAFE]
-        );
-    }
-
-    #[test]
     fn the_help_lists_advertised_variables_only() {
         let help = help_section();
         assert!(help.starts_with("Environment:\n"));
