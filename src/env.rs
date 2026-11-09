@@ -274,18 +274,12 @@ mod tests {
     }
 
     #[test]
-    fn every_variable_is_listed_once_and_the_vault_default_is_spelled_as_it_is_resolved() {
+    fn every_variable_is_listed_once() {
         let mut names: Vec<&str> = ALL.to_vec();
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), ALL.len(), "duplicate variable name");
 
-        let vault_help = TABLE
-            .iter()
-            .find(|var| var.name == OWS_VAULT_PATH)
-            .unwrap()
-            .help;
-        assert!(vault_help.contains(&format!("~/{}", crate::paths::DEFAULT_VAULT_DIR)));
         assert_eq!(kind(AGENT), Some(Kind::StrictFlag));
         assert_eq!(kind("NOT_A_VARIABLE"), None);
     }

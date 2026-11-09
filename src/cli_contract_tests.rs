@@ -4,7 +4,6 @@
 //! names, flags and defaults cannot drift. What can still go wrong is policy that
 //! contradicts itself or names args the command does not have.
 
-use hyperliquid_cli::command_registry::CommandRegistry;
 use hyperliquid_cli::command_spec::{ConfirmationPolicy, YES_ARG};
 use hyperliquid_cli::commands;
 
@@ -19,7 +18,7 @@ fn problems_or_pass(title: &str, problems: Vec<String>) {
 
 #[test]
 fn every_schema_input_has_a_description() {
-    let problems = CommandRegistry::get()
+    let problems = commands::registry()
         .commands()
         .iter()
         .flat_map(|contract| {
@@ -46,7 +45,7 @@ fn every_schema_input_has_a_description() {
 
 #[test]
 fn testnet_unprompted_commands_prompt_on_mainnet() {
-    let problems = CommandRegistry::get()
+    let problems = commands::registry()
         .commands()
         .iter()
         .filter(|contract| {
@@ -67,7 +66,7 @@ fn testnet_unprompted_commands_prompt_on_mainnet() {
 #[test]
 fn bounded_commands_define_the_args_that_bound_them() {
     let mut problems = Vec::new();
-    for contract in CommandRegistry::get().commands() {
+    for contract in commands::registry().commands() {
         let Some(bound) = contract.spec.stream else {
             continue;
         };
@@ -88,7 +87,7 @@ fn bounded_commands_define_the_args_that_bound_them() {
 #[test]
 fn policy_args_are_args_of_their_command() {
     let mut problems = Vec::new();
-    for contract in CommandRegistry::get().commands() {
+    for contract in commands::registry().commands() {
         if let Some(id) = contract.spec.confirms_with_arg
             && contract.input(id).is_none()
         {
@@ -127,7 +126,7 @@ fn policy_args_are_args_of_their_command() {
 /// declare that secret.
 #[test]
 fn prompting_commands_without_yes_prompt_for_a_secret() {
-    let problems = CommandRegistry::get()
+    let problems = commands::registry()
         .commands()
         .iter()
         .filter(|contract| {
@@ -149,7 +148,7 @@ fn prompting_commands_without_yes_prompt_for_a_secret() {
 /// One that does not would accept a flag that does nothing.
 #[test]
 fn yes_belongs_to_commands_that_prompt() {
-    let problems = CommandRegistry::get()
+    let problems = commands::registry()
         .commands()
         .iter()
         .filter(|contract| {

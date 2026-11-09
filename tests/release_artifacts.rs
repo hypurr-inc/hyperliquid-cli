@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use hyperliquid_cli::command_registry::CommandRegistry;
+use hyperliquid_cli::commands;
 
 fn repo_file(path: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -78,7 +78,7 @@ fn top_level_help_lists_every_registered_command_group() {
         .filter_map(|line| line.split_whitespace().next())
         .collect::<BTreeSet<_>>();
 
-    let missing = CommandRegistry::get()
+    let missing = commands::registry()
         .commands()
         .iter()
         .map(|command| command.command_path[0].as_str())

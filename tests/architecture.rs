@@ -8,10 +8,11 @@
 //!    registry wiring that names every command) imports another command's
 //!    module; what two commands share lives in `commands/common/`,
 //!    `exchange/` or a domain module under the crate root;
-//! 2. no file outside `src/commands/` imports `commands`, except the one
-//!    module that builds the registry out of it (`command_registry.rs`) and the
-//!    binary crate (`main.rs` and the modules it declares), which is the
-//!    application edge and reaches the library as `hyperliquid_cli`.
+//! 2. no file outside `src/commands/` imports `commands`, except the binary
+//!    crate (`main.rs` and the modules it declares), which is the application
+//!    edge and reaches the library as `hyperliquid_cli`. The contract registry
+//!    (`command_registry.rs`) is plain data: `commands::registry` builds it out
+//!    of the entries, and `schema` and `mcp` receive it from there.
 //!
 //! The command list is derived from the `impl CliCommand for` blocks in source,
 //! and every path is resolved (`crate::`, `super::`, `self::`, `use` groups),
@@ -24,10 +25,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use support::rust_files;
-
-/// The one library module allowed to name `commands`: it builds the command
-/// registry from `commands::entries` and `commands::groups`.
-const REGISTRY_ROOT: &str = "command_registry.rs";
 
 fn src_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -418,8 +415,7 @@ fn nothing_outside_commands_imports_commands() {
     let mut found = Vec::new();
     for file in files {
         let relative = file.strip_prefix(src_dir()).unwrap().display().to_string();
-        if relative.starts_with("commands/") || relative == REGISTRY_ROOT || binary.contains(&file)
-        {
+        if relative.starts_with("commands/") || binary.contains(&file) {
             continue;
         }
         let source = fs::read_to_string(&file).unwrap();
@@ -435,17 +431,6 @@ fn nothing_outside_commands_imports_commands() {
         "a module outside `commands` imports it; the dependency points the wrong way \
          (move the shared item out of `commands`):\n{}",
         found.join("\n")
-    );
-}
-
-#[test]
-fn the_registry_root_really_is_the_one_library_module_naming_commands() {
-    let source = fs::read_to_string(src_dir().join(REGISTRY_ROOT)).unwrap();
-    assert!(
-        paths_in(&src_dir().join(REGISTRY_ROOT), &source)
-            .iter()
-            .any(|path| path.get(1).is_some_and(|segment| segment == "commands")),
-        "{REGISTRY_ROOT} no longer imports commands: drop the exemption"
     );
 }
 

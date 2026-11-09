@@ -83,3 +83,18 @@ pub fn bankr_cli_config(env: &EnvSource) -> Option<PathBuf> {
 pub fn home_dir(env: &EnvSource) -> Option<PathBuf> {
     directory_override(env, env::HOME_DIR).or_else(dirs::home_dir)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_vault_default_is_spelled_in_the_env_help_as_it_is_resolved() {
+        let vault_help = env::TABLE
+            .iter()
+            .find(|var| var.name == env::OWS_VAULT_PATH)
+            .unwrap()
+            .help;
+        assert!(vault_help.contains(&format!("~/{DEFAULT_VAULT_DIR}")));
+    }
+}

@@ -3,8 +3,9 @@
 //! in [`entries`].
 //!
 //! Layer rule: a command module never imports another command module, and no
-//! module outside `commands` imports `commands` but the registry that builds
-//! itself from [`entries`]. What two commands share lives in [`common`]
+//! library module outside `commands` imports `commands`: the contract registry
+//! ([`crate::command_registry`]) is plain data, built here by [`registry`] and
+//! handed to the commands that read it. What two commands share lives in [`common`]
 //! (presentation and reads), [`crate::exchange`] (sending actions) or a domain
 //! module below `commands`; `tests/architecture.rs` enforces this.
 
@@ -42,9 +43,13 @@ pub mod vaults;
 pub mod wallet;
 pub mod watch_risk;
 
+#[cfg(test)]
+mod registry_tests;
+
 use std::sync::LazyLock;
 
 use crate::cli_command::Entry;
+use crate::command_registry::CommandRegistry;
 use crate::command_spec::GroupSpec;
 
 /// Every command, in help order. Registering a command is one line here.
@@ -221,6 +226,14 @@ pub fn command_tree() -> &'static clap::Command {
     static TREE: LazyLock<clap::Command> =
         LazyLock::new(|| crate::cli_command::command_tree(entries(), groups()));
     &TREE
+}
+
+/// The contract of every command, built once on first use from [`entries`],
+/// [`groups`] and [`command_tree`]. `schema`, `mcp` and the contract tests read it.
+pub fn registry() -> &'static CommandRegistry {
+    static REGISTRY: LazyLock<CommandRegistry> =
+        LazyLock::new(|| CommandRegistry::build(entries(), groups(), command_tree()));
+    &REGISTRY
 }
 
 /// The command groups: names with children and no behavior of their own.
