@@ -9,8 +9,8 @@ use hypersdk::hypercore::{
 use serde::Serialize;
 
 use crate::assets::{AssetResolver, Market};
+use crate::clock;
 use crate::command_spec::{CliCommand, CommandSpec, InputKind, StreamBound, arg};
-use crate::commands::actions;
 use crate::commands::support::canonical_dex;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
@@ -404,7 +404,7 @@ async fn candles_snapshot_for(
     limit: usize,
 ) -> Result<CandlesOutput, anyhow::Error> {
     let coin = coin.to_string();
-    let end_time = actions::nonce_now();
+    let end_time = clock::now_ms();
     let interval_ms = interval.to_duration().as_millis() as u64;
     let lookback = interval_ms.saturating_mul(limit.saturating_add(2) as u64);
     let start_time = end_time.saturating_sub(lookback);
@@ -440,7 +440,7 @@ async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
     let coin = resolve_perp_coin_or_fetch(remote.api().sdk(), &resolver, coin).await?;
-    let end_time = actions::nonce_now();
+    let end_time = clock::now_ms();
     let start_time = end_time.saturating_sub(FUNDING_LOOKBACK.as_millis() as u64);
 
     let latest_history = remote
@@ -813,7 +813,7 @@ async fn watch_book(
     let subscription_coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
 
     crate::watch::run_snapshot_watch(
-        inv.session(),
+        inv,
         &format!("Live order book: {subscription_coin}"),
         chain,
         vec![Subscription::L2Book {
@@ -842,7 +842,7 @@ async fn watch_mids(
     let dex = canonical_dex(client, dex).await?;
 
     crate::watch::run_snapshot_watch(
-        inv.session(),
+        inv,
         "Live mid prices",
         remote.chain(),
         vec![Subscription::AllMids { dex: dex.clone() }],
@@ -868,7 +868,7 @@ async fn watch_candles(
     let subscription_coin = resolve_market_coin(client, &resolver, coin).await?;
 
     crate::watch::run_snapshot_watch(
-        inv.session(),
+        inv,
         &format!("Live candles: {subscription_coin} {interval}"),
         remote.chain(),
         vec![Subscription::Candle {

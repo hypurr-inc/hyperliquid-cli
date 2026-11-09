@@ -12,6 +12,7 @@ use hypersdk::hypercore::{Cloid, HttpClient};
 use hypersdk::{Address, Decimal};
 
 use super::{OrderSubmissionContext, parse_cloid};
+use crate::clock;
 use crate::commands::actions;
 use crate::errors::{CliError, from_sdk};
 
@@ -28,7 +29,7 @@ pub(crate) const DEFAULT_TRACKING_TIMEOUT: Duration = Duration::from_secs(300);
 /// Unique client order ID for an order a command tracks (a chase quote, a
 /// bracket entry): nonce-derived high bits plus a per-run sequence.
 pub(crate) fn generated_cloid(seq: u64) -> Result<Cloid, CliError> {
-    parse_cloid(&format!("0x{:016x}{:016x}", actions::nonce_now(), seq))
+    parse_cloid(&format!("0x{:016x}{:016x}", clock::now_ms(), seq))
 }
 
 pub(crate) fn elapsed_ms(started: Instant) -> u64 {

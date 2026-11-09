@@ -255,7 +255,7 @@ fn prompt_account_passphrase(
     mode: &Mode,
     keychain_error: &anyhow::Error,
 ) -> Result<String, anyhow::Error> {
-    if !mode.can_prompt() || !crate::output::terminal::stdin_is_terminal() {
+    if !mode.can_prompt() || !mode.terminal.stdin {
         return Err(CliError::MissingInput(format!(
             "Can't unlock account encryption keys because the OS keychain is unavailable ({keychain_error}). Set {} to use a passphrase instead.",
             env::ACCOUNT_KEY_PASSPHRASE
