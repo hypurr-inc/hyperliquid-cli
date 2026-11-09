@@ -1,18 +1,14 @@
 mod support;
 
-use assert_cmd::Command;
+use support::exchange::ExchangeFixture;
+
 use predicates::prelude::*;
-use serde_json::Value;
 use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, mock_market_server,
-    mount_override_healthcheck,
+    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, mount_override_healthcheck,
+    stdout_json,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-fn stdout_json(output: &[u8]) -> Value {
-    serde_json::from_slice(output).expect("stdout should be one JSON document")
-}
 
 async fn exchange_server(response: ResponseTemplate) -> MockServer {
     let server = MockServer::start().await;
@@ -130,7 +126,7 @@ async fn exchange_rejection_with_network_words_is_not_unavailable() {
 #[tokio::test]
 async fn funding_unknown_asset_suggests_one_close_match_in_data() {
     let env = IsolatedHome::new();
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
 
     let output = env
         .command()
@@ -160,7 +156,7 @@ async fn funding_unknown_asset_suggests_one_close_match_in_data() {
 #[tokio::test]
 async fn funding_unknown_asset_without_close_match_has_no_suggestion() {
     let env = IsolatedHome::new();
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
 
     let output = env
         .command()
@@ -180,8 +176,7 @@ async fn funding_unknown_asset_without_close_match_has_no_suggestion() {
 
 #[test]
 fn usage_error_envelope_moves_usage_block_into_data() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .args(["--format", "json", "wallet", "show", "--bogus"])
         .assert()
         .code(2)
@@ -207,8 +202,7 @@ fn usage_error_envelope_moves_usage_block_into_data() {
 
 #[test]
 fn unknown_subcommand_envelope_has_reason_and_suggestion() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .args(["--format", "json", "ordres"])
         .assert()
         .code(2)

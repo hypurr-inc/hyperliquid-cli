@@ -1,11 +1,10 @@
 mod support;
 
+use support::exchange::ExchangeFixture;
+
 use predicates::prelude::*;
 use serde_json::{Value, json};
-use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY,
-    mount_common_public_endpoints,
-};
+use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, json_stdout};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -18,9 +17,8 @@ fn trailing_stop_ok(oid: u64) -> Value {
     })
 }
 
-async fn trading_server(exchange_response: Value) -> MockServer {
-    let server = MockServer::start().await;
-    mount_common_public_endpoints(&server).await;
+async fn trading_server(exchange_response: Value) -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
     Mock::given(method("POST"))
         .and(path("/exchange"))
         .respond_with(ResponseTemplate::new(200).set_body_json(exchange_response))
@@ -67,10 +65,6 @@ fn is_hex_scalar(value: &Value, max_digits: usize) -> bool {
             (1..=max_digits).contains(&hex.len()) && hex.chars().all(|ch| ch.is_ascii_hexdigit())
         })
     })
-}
-
-fn json_stdout(output: &assert_cmd::assert::Assert) -> Value {
-    serde_json::from_slice(&output.get_output().stdout).unwrap()
 }
 
 #[tokio::test]
@@ -624,8 +618,7 @@ async fn exchange_answering_ok_without_an_oid_is_an_unknown_outcome() {
 #[tokio::test]
 async fn open_orders_and_history_render_trailing_stop_markets() {
     let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-    mount_common_public_endpoints(&server).await;
+    let server = ExchangeFixture::start().await;
     let order = json!({
         "timestamp": 1_700_000_000_000_u64,
         "coin": "BTC",

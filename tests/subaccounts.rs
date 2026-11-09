@@ -1,11 +1,12 @@
 mod support;
 
+use support::exchange::ExchangeFixture;
+
 use predicates::prelude::*;
 use serde_json::Value;
 use support::{
     API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, TEST_ACCOUNT_PASSPHRASE, VALID_PRIVATE_KEY,
-    expected_address, fixture_order_success_response, mount_all_mids,
-    mount_common_public_endpoints, mount_successful_exchange_actions,
+    expected_address, mount_all_mids, mount_successful_exchange_actions, wire,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -246,8 +247,7 @@ fn subaccount_transfer_rejects_short_hex_address_with_precise_wording() {
 #[tokio::test]
 async fn orders_create_dry_run_on_behalf_includes_vault_context() {
     let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-    mount_common_public_endpoints(&server).await;
+    let server = ExchangeFixture::start().await;
 
     let output = env
         .command()
@@ -289,9 +289,8 @@ async fn orders_create_dry_run_on_behalf_includes_vault_context() {
 #[tokio::test]
 async fn orders_create_on_behalf_sets_vault_address_on_exchange_request() {
     let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-    mount_common_public_endpoints(&server).await;
-    mount_successful_exchange_actions(&server, fixture_order_success_response(12345)).await;
+    let server = ExchangeFixture::start().await;
+    mount_successful_exchange_actions(&server, wire::order_success_response(12345)).await;
 
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())

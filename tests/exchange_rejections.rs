@@ -6,29 +6,11 @@ mod support;
 
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, order_reply};
-use support::{IsolatedHome, fixture_basic_order, json_stdout};
+use support::{IsolatedHome, json_stdout, wire};
 
 const CUMULATIVE_LIMIT: &str = "Too many cumulative requests sent (37986 > 10436) for cumulative volume traded $437.92. Place taker orders to free up 1 request per USDC traded.";
 const UNREGISTERED_SIGNER: &str =
     "L1 error: User or API Wallet 0x1111111111111111111111111111111111111111 does not exist.";
-
-/// A signing command against `server` on testnet, JSON output.
-fn live(env: &IsolatedHome, server: &ExchangeFixture, args: &[&str]) -> assert_cmd::Command {
-    let mut command = env.live_command(server);
-    command.args(["--format", "json", "--testnet"]).args(args);
-    command
-}
-
-fn order_status_reply(oid: u64) -> Value {
-    json!({
-        "status": "order",
-        "order": {
-            "status": "open",
-            "statusTimestamp": 1_700_000_000_001_u64,
-            "order": fixture_basic_order("BTC", oid)
-        }
-    })
-}
 
 /// The JSON error document and exit code of `orders cancel 12345` whose
 /// `/exchange` answer is `reply`.
@@ -36,11 +18,17 @@ async fn cancel_with(reply: Value) -> (i32, Value) {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server
-        .mount_info_containing(json!({"type": "orderStatus"}), order_status_reply(12345))
+        .mount_info_containing(
+            json!({"type": "orderStatus"}),
+            wire::order_status_reply(wire::basic_order("BTC", 12345)),
+        )
         .await;
     server.mount_exchange(reply).await;
 
-    let assert = live(&env, &server, &["orders", "cancel", "12345"]).assert();
+    let assert = env
+        .live_json(&server)
+        .args(["orders", "cancel", "12345"])
+        .assert();
     let code = assert.get_output().status.code().expect("exit code");
     assert_eq!(
         server.exchange_actions().await.len(),
@@ -190,7 +178,7 @@ async fn tpsl_with(statuses: Vec<Value>) -> (i32, Value) {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
     server.mount_exchange(order_reply(statuses)).await;
-    let assert = live(&env, &server, TPSL).assert();
+    let assert = env.live_json(&server).args(TPSL).assert();
     (
         assert.get_output().status.code().expect("exit code"),
         json_stdout(&assert),

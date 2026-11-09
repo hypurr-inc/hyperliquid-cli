@@ -1,12 +1,13 @@
 mod support;
 
 use serde_json::{Value, json};
-use support::{API_OVERRIDE_ENV, IsolatedHome, mock_market_server, mount_perp_dexs};
+use support::API_OVERRIDE_ENV;
+use support::IsolatedHome;
+use support::exchange::ExchangeFixture;
 
 #[tokio::test]
 async fn search_matches_the_query_and_the_type_filter_restricts_the_venue() {
-    let server = mock_market_server().await;
-    mount_perp_dexs(&server, json!([null])).await;
+    let server = ExchangeFixture::start().await;
     let home = IsolatedHome::new();
     let search = |venue: &str| -> Value {
         let output = home

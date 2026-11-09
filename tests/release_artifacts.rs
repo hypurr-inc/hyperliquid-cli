@@ -1,4 +1,5 @@
-use assert_cmd::Command;
+mod support;
+
 use hyperliquid_cli::command_registry::CommandRegistry;
 use std::collections::BTreeSet;
 use std::fs;
@@ -94,8 +95,7 @@ fn ci_and_task_gates_name_only_existing_test_targets() {
 
 #[test]
 fn top_level_help_lists_every_registered_command_group() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .arg("--help")
         .assert()
         .success()

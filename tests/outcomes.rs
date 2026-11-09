@@ -1,8 +1,11 @@
 mod support;
 
+use support::stdout_json;
+
 use predicates::prelude::*;
-use serde_json::Value;
 use support::IsolatedHome;
+use support::exchange::ExchangeFixture;
+use support::wire;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -71,10 +74,6 @@ async fn outcome_server() -> MockServer {
     server
 }
 
-fn json_stdout(output: Vec<u8>) -> Value {
-    serde_json::from_slice(&output).expect("stdout should be valid JSON")
-}
-
 #[tokio::test]
 async fn outcomes_list_returns_encoded_side_rows() {
     let env = IsolatedHome::new();
@@ -97,7 +96,7 @@ async fn outcomes_list_returns_encoded_side_rows() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     let rows = json.as_array().unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["outcome"], 1);
@@ -125,7 +124,7 @@ async fn outcomes_get_accepts_coin_and_token_notation() {
             .stdout
             .clone();
 
-        let json = json_stdout(out);
+        let json = stdout_json(&out);
         assert_eq!(json["outcome"], 1);
         assert_eq!(json["side"], 0);
         assert_eq!(json["encoding"], 10);
@@ -195,7 +194,7 @@ async fn orders_live_outcome_trading_submits_encoded_asset_id() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     assert_eq!(json[0]["order_id"], 123);
     assert_eq!(json[0]["coin"], "#10");
 }
@@ -229,7 +228,7 @@ async fn orders_outcome_notation_trims_and_rejects_dex_with_specific_message() {
         .get_output()
         .stdout
         .clone();
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     assert_eq!(json["args"]["resolved_asset"], "#10");
 
     env.command_with_server(&server)
@@ -281,12 +280,19 @@ async fn orders_outcome_market_dry_run_is_rejected_until_decimals_are_verified()
         ));
 }
 
-#[test]
-fn orders_outcome_dry_run_exposes_verified_encoding() {
+#[tokio::test]
+async fn orders_outcome_dry_run_exposes_verified_encoding() {
     let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_info(
+            serde_json::json!({"type": "outcomeMeta"}),
+            wire::outcome_meta(&[10]),
+        )
+        .await;
 
     let out = env
-        .command()
+        .command_with_server(&server)
         .args([
             "--format",
             "json",
@@ -310,7 +316,7 @@ fn orders_outcome_dry_run_exposes_verified_encoding() {
         .stdout
         .clone();
 
-    let json = json_stdout(out);
+    let json = stdout_json(&out);
     assert_eq!(json["args"]["outcome"]["encoding"], 10);
     assert_eq!(json["args"]["outcome"]["asset_id"], 100000010);
     assert!(

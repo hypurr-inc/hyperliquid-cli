@@ -2,50 +2,15 @@ mod support;
 
 use predicates::prelude::*;
 use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, fixture_spot_meta_usdc_only,
+    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, exchange_actions,
+    unix_millis, wire,
 };
 use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-async fn exchange_actions(server: &MockServer) -> Vec<serde_json::Value> {
-    server
-        .received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .filter(|request| request.url.path() == "/exchange")
-        .map(|request| {
-            serde_json::from_slice::<serde_json::Value>(&request.body).unwrap()["action"].clone()
-        })
-        .collect()
-}
-
-fn unix_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
-}
-
-fn basic_order(coin: &str, oid: u64) -> serde_json::Value {
-    serde_json::json!({
-        "timestamp": 1700000000000_u64,
-        "coin": coin,
-        "side": "B",
-        "limitPx": "50000",
-        "sz": "0.1",
-        "oid": oid,
-        "origSz": "0.1",
-        "cloid": null,
-        "orderType": "Limit",
-        "tif": "Gtc",
-        "reduceOnly": false
-    })
-}
-
 fn historical_order_update(coin: &str, oid: u64) -> serde_json::Value {
     serde_json::json!({
-        "order": basic_order(coin, oid),
+        "order": wire::basic_order(coin, oid),
         "status": "filled",
         "statusTimestamp": 1700000000001_u64
     })
@@ -70,7 +35,7 @@ async fn mock_orders_server(
     Mock::given(method("POST"))
         .and(path("/info"))
         .and(body_partial_json(serde_json::json!({"type": "spotMeta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(fixture_spot_meta_usdc_only()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(wire::spot_meta_usdc_only()))
         .mount(&server)
         .await;
 
@@ -308,7 +273,7 @@ async fn orders_open_table_and_json_empty_state_are_uncolored() {
 #[tokio::test]
 async fn orders_open_shows_open_orders() {
     let env = IsolatedHome::new();
-    let server = mock_orders_server(vec![basic_order("BTC", 12345)], vec![]).await;
+    let server = mock_orders_server(vec![wire::basic_order("BTC", 12345)], vec![]).await;
 
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())
@@ -323,7 +288,7 @@ async fn orders_open_shows_open_orders() {
 #[tokio::test]
 async fn orders_open_selects_coin_price_and_size_json() {
     let env = IsolatedHome::new();
-    let server = mock_orders_server(vec![basic_order("BTC", 12345)], vec![]).await;
+    let server = mock_orders_server(vec![wire::basic_order("BTC", 12345)], vec![]).await;
 
     let output = env
         .command()
@@ -365,7 +330,7 @@ async fn orders_open_selects_coin_price_and_size_json() {
 #[tokio::test]
 async fn orders_history_shows_historical_orders() {
     let env = IsolatedHome::new();
-    let server = mock_orders_server(vec![], vec![basic_order("ETH", 54321)]).await;
+    let server = mock_orders_server(vec![], vec![wire::basic_order("ETH", 54321)]).await;
 
     env.command()
         .env(API_OVERRIDE_ENV, server.uri())

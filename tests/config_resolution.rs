@@ -5,6 +5,8 @@
 use assert_cmd::Command;
 mod support;
 
+use support::exchange::ExchangeFixture;
+
 use std::fs;
 use tempfile::TempDir;
 
@@ -66,7 +68,7 @@ impl ConfigHome {
     }
 
     async fn resolved_network(&self, command: &mut Command) -> String {
-        let server = support::mock_market_server().await;
+        let server = ExchangeFixture::start().await;
         let output = command
             .env("HYPERLIQUID_API_BASE_URL", server.uri())
             .args(["--no-update-check", "--format", "json", "status"])

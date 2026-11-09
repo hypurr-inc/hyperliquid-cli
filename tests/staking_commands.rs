@@ -1,7 +1,6 @@
 mod support;
 
 use alloy::dyn_abi::{Eip712Types, Resolver, TypedData};
-use alloy::primitives::keccak256;
 use alloy::signers::SignerSync;
 use alloy::sol;
 use alloy::sol_types::SolStruct;
@@ -12,9 +11,9 @@ use hypersdk::hypercore::signing::sign_l1_action;
 use predicates::prelude::*;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use support::signing::{assert_signed_by_test_key, raw_l1_hash};
 use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address,
-    mount_all_mids,
+    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, mount_override_healthcheck,
 };
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -22,12 +21,6 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const VALID_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const VALIDATOR_ADDRESS: &str = "0x0000000000000000000000000000000000000002";
 const HYPERLIQUID_EIP_PREFIX: &str = "HyperliquidTransaction:";
-
-fn assert_signed_by_test_key(json: &Value) {
-    let signer = expected_address(VALID_PRIVATE_KEY);
-    assert_eq!(json["signer"], signer);
-    assert_eq!(json["acting_as"], signer);
-}
 
 sol! {
     struct TokenDelegate {
@@ -101,10 +94,6 @@ struct ExpectedLinkStakingUserMessage {
 struct ExpectedClaimRewardsAction {
     #[serde(rename = "type")]
     action_type: &'static str,
-}
-
-async fn mount_override_healthcheck(server: &MockServer) {
-    mount_all_mids(server, "51000", "3000").await;
 }
 
 async fn mock_staking_public_server() -> MockServer {
@@ -260,16 +249,9 @@ fn expected_user_action_signature<T: SolStruct>(message: &impl Serialize, chain:
     serde_json::to_value(hypersdk::hypercore::types::Signature::from(signature)).unwrap()
 }
 
-fn raw_rmp_hash<T: Serialize>(value: &T, nonce: u64) -> alloy::primitives::B256 {
-    let mut bytes = rmp_serde::to_vec_named(value).unwrap();
-    bytes.extend(nonce.to_be_bytes());
-    bytes.push(0);
-    keccak256(bytes)
-}
-
 async fn expected_raw_l1_signature(action: &impl Serialize, nonce: u64, chain: Chain) -> Value {
     let signer = parse_private_key(VALID_PRIVATE_KEY).unwrap();
-    let signature = sign_l1_action(&signer, chain, raw_rmp_hash(action, nonce))
+    let signature = sign_l1_action(&signer, chain, raw_l1_hash(action, nonce))
         .await
         .unwrap();
     serde_json::to_value(signature).unwrap()

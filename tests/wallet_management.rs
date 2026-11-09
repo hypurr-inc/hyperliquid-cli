@@ -3,7 +3,7 @@ mod support;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use support::{
     ACCOUNT_KEY_STORE_DIR_ENV, IsolatedHome, TEST_ACCOUNT_PASSPHRASE, copy_dir_all,
@@ -34,7 +34,7 @@ fn assert_directory_bytes_do_not_contain(dir: &Path, needle: &[u8]) {
 }
 
 fn assert_config_defaults(env: &IsolatedHome) {
-    let config: Value = serde_json::from_slice(&fs::read(env.config_file_path()).unwrap()).unwrap();
+    let config: Value = serde_json::from_slice(&fs::read(env.config_file()).unwrap()).unwrap();
     assert_eq!(
         config["default_builder_address"],
         "0x00000000000000000000000000000000000000bb"
@@ -44,7 +44,7 @@ fn assert_config_defaults(env: &IsolatedHome) {
 }
 
 fn assert_config_skipped_invalid_packaged_defaults(env: &IsolatedHome) {
-    let config: Value = serde_json::from_slice(&fs::read(env.config_file_path()).unwrap()).unwrap();
+    let config: Value = serde_json::from_slice(&fs::read(env.config_file()).unwrap()).unwrap();
     assert!(config["default_wallet_id"].as_str().is_some());
     assert!(config.get("default_builder_address").is_none());
     assert!(config.get("default_builder_fee_rate").is_none());
@@ -53,26 +53,13 @@ fn assert_config_skipped_invalid_packaged_defaults(env: &IsolatedHome) {
 
 fn assert_no_raw_account_key_files(env: &IsolatedHome) {
     assert!(
-        !env.legacy_accounts_key_path().exists(),
+        !env.legacy_accounts_key().exists(),
         "accounts.key must not be stored in the application data directory"
     );
-    for path in env.deprecated_config_key_candidates() {
-        assert!(
-            !path.exists(),
-            "account-data.key raw fallback must not be stored in config directories"
-        );
-    }
-}
-
-fn legacy_key_candidates(env: &IsolatedHome) -> Vec<PathBuf> {
-    vec![
-        env.data.join("hyperliquid").join("accounts.key"),
-        env.home
-            .join("Library")
-            .join("Application Support")
-            .join("hyperliquid")
-            .join("accounts.key"),
-    ]
+    assert!(
+        !env.removed_account_data_key().exists(),
+        "account-data.key raw fallback must not be stored in config directories"
+    );
 }
 
 #[test]
@@ -89,7 +76,7 @@ fn wallet_import_show_address_and_reset_flow() {
         .stdout(predicate::str::contains("Default"))
         .stdout(predicate::str::contains("yes"));
 
-    let vault_path = env.ows_vault_path();
+    let vault_path = env.ows_vault();
     assert_directory_bytes_do_not_contain(&vault_path, IMPORT_KEY.as_bytes());
     assert_directory_bytes_do_not_contain(
         &vault_path,
@@ -260,7 +247,7 @@ fn wallet_import_without_argument_prompts_and_stores_wallet() {
         .stdout(predicate::str::contains(&address))
         .stdout(predicate::str::contains(IMPORT_KEY).not());
 
-    let vault_path = env.ows_vault_path();
+    let vault_path = env.ows_vault();
     assert_directory_bytes_do_not_contain(&vault_path, IMPORT_KEY.as_bytes());
     assert_directory_bytes_do_not_contain(
         &vault_path,
@@ -311,16 +298,10 @@ fn copied_data_directory_alone_cannot_decrypt_stored_wallet_key() {
 
     assert_no_raw_account_key_files(&env);
     assert_directory_bytes_do_not_contain(
-        env.data_dir_path().as_path(),
+        env.data_dir().as_path(),
         TEST_ACCOUNT_PASSPHRASE.as_bytes(),
     );
-    for config_dir in [
-        env.config.clone(),
-        env.home
-            .join("Library")
-            .join("Application Support")
-            .to_path_buf(),
-    ] {
+    for config_dir in [env.config.clone(), env.platform_config_dir()] {
         assert_directory_bytes_do_not_contain(&config_dir, TEST_ACCOUNT_PASSPHRASE.as_bytes());
     }
 
@@ -328,16 +309,9 @@ fn copied_data_directory_alone_cannot_decrypt_stored_wallet_key() {
     let copied_data_home = env.tmp_path().join("copied-xdg-data");
     fs::create_dir_all(&copied_home).unwrap();
     fs::create_dir_all(&copied_data_home).unwrap();
-    let data_dir = env.data_dir_path();
+    let data_dir = env.data_dir();
     if data_dir.exists() {
         copy_dir_all(data_dir.as_path(), &copied_data_home.join("hyperliquid"));
-        copy_dir_all(
-            data_dir.as_path(),
-            &copied_home
-                .join("Library")
-                .join("Application Support")
-                .join("hyperliquid"),
-        );
     }
     env.account_command_for_paths_without_passphrase(&copied_home, &copied_data_home)
         .args(["account", "ls"])
@@ -375,7 +349,7 @@ fn removed_raw_key_store_variable_does_not_change_where_wallet_keys_go() {
         !raw_key_store.exists(),
         "the removed variable must not make the CLI write key material there"
     );
-    assert_directory_bytes_do_not_contain(&env.ows_vault_path(), IMPORT_KEY.as_bytes());
+    assert_directory_bytes_do_not_contain(&env.ows_vault(), IMPORT_KEY.as_bytes());
 }
 
 #[test]
@@ -391,17 +365,13 @@ fn wallet_import_without_an_account_passphrase_creates_no_legacy_storage() {
         .stdout(predicate::str::contains(address));
 
     assert!(
-        env.accounts_db_candidates()
-            .iter()
-            .all(|path| !path.exists()),
+        !env.accounts_db().exists(),
         "OWS import path must not create accounts.db"
     );
-    for path in env.deprecated_config_key_candidates() {
-        assert!(
-            !path.exists(),
-            "OWS import path must not create account-data.key"
-        );
-    }
+    assert!(
+        !env.removed_account_data_key().exists(),
+        "OWS import path must not create account-data.key"
+    );
 }
 
 #[test]
@@ -414,47 +384,26 @@ fn schema_read_does_not_create_account_storage_without_keychain() {
         .success();
 
     assert!(
-        env.accounts_db_candidates()
-            .iter()
-            .all(|path| !path.exists()),
+        !env.accounts_db().exists(),
         "schema output must not create accounts.db"
     );
-    for path in legacy_key_candidates(&env) {
-        assert!(!path.exists(), "schema output must not create accounts.key");
-    }
-    for path in env.deprecated_config_key_candidates() {
-        assert!(
-            !path.exists(),
-            "schema output must not create account-data.key"
-        );
-    }
+    assert!(
+        !env.legacy_accounts_key().exists(),
+        "schema output must not create accounts.key"
+    );
+    assert!(
+        !env.removed_account_data_key().exists(),
+        "schema output must not create account-data.key"
+    );
 }
 
 #[test]
 fn read_only_legacy_wallet_lookup_does_not_migrate_key_storage() {
     let env = IsolatedHome::new();
     let address = expected_address(IMPORT_KEY);
-    let db_candidates = [
-        env.data.join("hyperliquid").join("accounts.db"),
-        env.home
-            .join("Library")
-            .join("Application Support")
-            .join("hyperliquid")
-            .join("accounts.db"),
-    ];
-    let mut legacy_key_snapshots = Vec::new();
-    for db in db_candidates {
-        let legacy_key = db.parent().unwrap().join("accounts.key");
-        support::legacy_accounts_fixture::create_accounts_db_with_key_file(
-            &db,
-            &legacy_key,
-            &[
-                support::legacy_accounts_fixture::Row::new("main", &address, IMPORT_KEY)
-                    .default_account(),
-            ],
-        );
-        legacy_key_snapshots.push((legacy_key.clone(), fs::read(&legacy_key).unwrap()));
-    }
+    let env = env.with_stored_account("main", IMPORT_KEY, None);
+    let legacy_key = env.legacy_accounts_key();
+    let legacy_key_before = fs::read(&legacy_key).unwrap();
 
     env.account_command_without_passphrase()
         .args(["wallet", "address"])
@@ -462,23 +411,15 @@ fn read_only_legacy_wallet_lookup_does_not_migrate_key_storage() {
         .success()
         .stdout(predicate::str::is_match(format!("^{address}\n$")).unwrap());
 
-    for (legacy_key, legacy_key_before) in legacy_key_snapshots {
-        assert_eq!(
-            fs::read(&legacy_key).unwrap(),
-            legacy_key_before,
-            "read-only wallet lookup must not rewrite or migrate the legacy key"
-        );
-        assert!(
-            legacy_key.exists(),
-            "read-only wallet lookup must not remove the legacy key"
-        );
-    }
-    for path in env.deprecated_config_key_candidates() {
-        assert!(
-            !path.exists(),
-            "read-only wallet lookup must not create deprecated account-data.key"
-        );
-    }
+    assert_eq!(
+        fs::read(&legacy_key).unwrap(),
+        legacy_key_before,
+        "read-only wallet lookup must not rewrite or migrate the legacy key"
+    );
+    assert!(
+        !env.removed_account_data_key().exists(),
+        "read-only wallet lookup must not create deprecated account-data.key"
+    );
 }
 
 #[test]
@@ -1214,10 +1155,8 @@ fn account_add_with_a_legacy_type_is_listed_as_an_ows_wallet() {
 #[test]
 fn wallet_reset_recovers_from_malformed_config() {
     let env = IsolatedHome::new();
-    for path in env.config_file_candidates() {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, "{not json").unwrap();
-    }
+    fs::create_dir_all(env.config_dir()).unwrap();
+    fs::write(env.config_file(), "{not json").unwrap();
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .args(["wallet", "reset"])

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use wiremock::matchers::{body_json, body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::{fixture_perp, fixture_perp_meta, fixture_spot_meta_usdc_only};
+use super::wire::{self, MarginRule};
 
 /// A builder-deployed perp DEX on the mock exchange.
 pub struct Hip3Dex {
@@ -22,7 +22,7 @@ impl Hip3Dex {
     pub fn xyz() -> Self {
         Self {
             name: "xyz",
-            universe: vec![fixture_perp("xyz:XYZ100", 2, 10)],
+            universe: vec![wire::perp("xyz:XYZ100", MarginRule::Either)],
             mids: json!({ "xyz:XYZ100": "123.5" }),
         }
     }
@@ -65,19 +65,13 @@ impl ExchangeFixture {
                 .map(|dex| json!({ "name": dex.name, "deployerFeeScale": "1" })),
         );
         fixture
-            .mount_info(
-                json!({"type": "allMids"}),
-                json!({"BTC": "50000", "ETH": "3000"}),
-            )
+            .mount_info(json!({"type": "allMids"}), wire::all_mids())
             .await;
         fixture
-            .mount_info(
-                json!({"type": "meta"}),
-                fixture_perp_meta(vec![fixture_perp("BTC", 5, 50), fixture_perp("ETH", 4, 25)]),
-            )
+            .mount_info(json!({"type": "meta"}), wire::perp_meta_btc_eth())
             .await;
         fixture
-            .mount_info(json!({"type": "spotMeta"}), fixture_spot_meta_usdc_only())
+            .mount_info(json!({"type": "spotMeta"}), wire::spot_meta_usdc_only())
             .await;
         fixture
             .mount_info(json!({"type": "perpDexs"}), Value::Array(listed))
@@ -86,7 +80,7 @@ impl ExchangeFixture {
             fixture
                 .mount_info(
                     json!({"type": "meta", "dex": dex.name}),
-                    fixture_perp_meta(dex.universe),
+                    wire::perp_meta(dex.universe),
                 )
                 .await;
             fixture

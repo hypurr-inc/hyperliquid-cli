@@ -1,17 +1,18 @@
 mod contract_support;
 mod support;
 
+use support::exchange::ExchangeFixture;
+
 use serde_json::{Value, json};
 
 use contract_support::assert_json_fixture;
 use support::{
     API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address,
-    mock_market_server,
 };
 
 #[tokio::test]
 async fn dry_run_outputs_match_characterization_fixture() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
 
     let outputs = json!({
@@ -376,7 +377,7 @@ fn transfer_action_plans_preserve_public_dry_run_envelopes() {
 
 #[tokio::test]
 async fn position_action_previews_bind_validated_intent() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let signer = expected_address(VALID_PRIVATE_KEY);
 
@@ -461,7 +462,7 @@ async fn position_action_previews_bind_validated_intent() {
 
 #[tokio::test]
 async fn staking_vault_and_borrowlend_action_plans_preserve_public_dry_run_envelopes() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
     let signer = expected_address(VALID_PRIVATE_KEY);
     let validator = "0x0000000000000000000000000000000000000002";
@@ -677,7 +678,7 @@ fn signed_previews_name_the_acting_account_and_warn_about_a_missing_signer() {
 /// `--dry-run` previews the command that ran, not the command a shortcut expands to.
 #[tokio::test]
 async fn shortcut_orders_preview_under_their_own_command_name() {
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let env = IsolatedHome::new();
 
     for (command, side) in [("buy", "buy"), ("sell", "sell")] {

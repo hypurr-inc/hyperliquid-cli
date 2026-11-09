@@ -7,20 +7,10 @@ mod support;
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, Hip3Dex};
-use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, fixture_perp_meta, json_stdout};
+use support::wire::{self, MarginRule};
+use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, json_stdout};
 
 const VAULT: &str = "0x0000000000000000000000000000000000000001";
-
-fn perp(name: &str, sz_decimals: u32, only_isolated: bool, margin_mode: Value) -> Value {
-    json!({
-        "name": name,
-        "szDecimals": sz_decimals,
-        "maxLeverage": 10,
-        "onlyIsolated": only_isolated,
-        "marginMode": margin_mode,
-        "growthMode": "disabled"
-    })
-}
 
 /// Default dex: BTC and ETH trade either way, PUMP is `strictIsolated`. Dex
 /// `xyz`: OPEN trades either way, HOOD is `noCross`.
@@ -28,8 +18,8 @@ async fn exchange() -> ExchangeFixture {
     let server = ExchangeFixture::start_with(vec![Hip3Dex {
         name: "xyz",
         universe: vec![
-            perp("xyz:OPEN", 2, false, Value::Null),
-            perp("xyz:HOOD", 2, true, json!("noCross")),
+            wire::perp_with("xyz:OPEN", 2, 10, MarginRule::Either),
+            wire::perp_with("xyz:HOOD", 2, 10, MarginRule::NoCross),
         ],
         mids: json!({"xyz:OPEN": "100", "xyz:HOOD": "50"}),
     }])
@@ -37,10 +27,10 @@ async fn exchange() -> ExchangeFixture {
     server
         .override_info(
             json!({"type": "meta"}),
-            fixture_perp_meta(vec![
-                perp("BTC", 5, false, Value::Null),
-                perp("ETH", 4, false, Value::Null),
-                perp("PUMP", 2, true, json!("strictIsolated")),
+            wire::perp_meta(vec![
+                wire::perp_with("BTC", 5, 10, MarginRule::Either),
+                wire::perp_with("ETH", 4, 10, MarginRule::Either),
+                wire::perp_with("PUMP", 2, 10, MarginRule::StrictIsolated),
             ]),
         )
         .await;

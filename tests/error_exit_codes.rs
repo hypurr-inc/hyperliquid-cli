@@ -1,15 +1,11 @@
 mod support;
 
 use predicates::prelude::*;
-use serde_json::Value;
-use support::{IsolatedHome, hermetic_command};
+use support::exchange::ExchangeFixture;
+use support::{IsolatedHome, hermetic_command, stdout_json};
 
 const OWS_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const OWS_FAIL_CLOSED: &str = "does not have a resolved wallet for live signing";
-
-fn stdout_json(output: &[u8]) -> Value {
-    serde_json::from_slice(output).expect("stdout should be one JSON document")
-}
 
 #[test]
 fn no_arguments_prints_usage_and_exits_zero() {
@@ -122,9 +118,10 @@ fn an_invalid_value_of_any_strict_flag_variable_is_a_configuration_error() {
     }
 }
 
-#[test]
-fn an_ows_signer_without_a_resolved_wallet_fails_closed_before_any_live_action() {
+#[tokio::test]
+async fn an_ows_signer_without_a_resolved_wallet_fails_closed_before_any_live_action() {
     let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
     let cases: [&[&str]; 3] = [
         &["orders", "cancel", "123"],
         &[
@@ -146,7 +143,7 @@ fn an_ows_signer_without_a_resolved_wallet_fails_closed_before_any_live_action()
     ];
     for command in cases {
         let output = env
-            .command()
+            .command_with_server(&server)
             .args(["--format", "json", "--ows-signer", OWS_ADDRESS])
             .args(command)
             .assert()

@@ -6,16 +6,16 @@
 mod contract_support;
 mod support;
 
-use assert_cmd::Command;
+use support::exchange::ExchangeFixture;
+
 use serde_json::{Value, json};
 
 use contract_support::assert_json_fixture;
-use support::{API_OVERRIDE_ENV, IsolatedHome, TEST_ACCOUNT_PASSPHRASE, mock_market_server};
+use support::{API_OVERRIDE_ENV, IsolatedHome, TEST_ACCOUNT_PASSPHRASE};
 
 #[test]
 fn json_error_envelope_matches_characterization_fixture() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .args(["--format", "json", "wallet", "show", "--bogus"])
         .assert()
         .failure()
@@ -38,7 +38,7 @@ fn json_error_envelope_matches_characterization_fixture() {
 #[tokio::test]
 async fn results_only_and_select_output_matches_characterization_fixture() {
     let env = IsolatedHome::new();
-    let server = mock_market_server().await;
+    let server = ExchangeFixture::start().await;
     let mut command = env.account_command(TEST_ACCOUNT_PASSPHRASE);
     let output = command
         .env(API_OVERRIDE_ENV, server.uri())

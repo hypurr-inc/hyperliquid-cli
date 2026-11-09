@@ -5,49 +5,19 @@ mod support;
 
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use hyperliquid_cli::env;
 use support::exchange::ExchangeFixture;
 use support::{
-    IsolatedHome, LOOPBACK_NO_PROXY, TEST_ACCOUNT_PASSPHRASE, VALID_PRIVATE_KEY, expected_address,
-    hermetic_command, json_stdout,
+    CLOSED_PROXY_URL, IsolatedHome, LOOPBACK_NO_PROXY, TEST_ACCOUNT_PASSPHRASE, VALID_PRIVATE_KEY,
+    expected_address, hermetic_command, json_stdout, rust_files,
 };
-
-/// Test files that still spawn the binary themselves. Each one skips the
-/// harness's environment clearing and its `IsolatedHome`; migrate it to
-/// `support::hermetic_command()` (or `IsolatedHome::command()`) and delete its
-/// entry. An entry whose file no longer spawns the binary fails the guard.
-const SPAWNS_THE_BINARY_ITSELF: &[&str] = &[
-    "cli_integration.rs",
-    "command_contracts.rs",
-    "contract_support/mod.rs",
-    "error_envelope.rs",
-    "mcp.rs",
-    "output_contracts.rs",
-    "output_formatting.rs",
-    "release_artifacts.rs",
-    "schema_contracts.rs",
-    "security_contracts.rs",
-];
-
-fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, found);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            found.push(path);
-        }
-    }
-}
 
 /// The test files, relative to `tests/`, whose code spawns the binary directly.
 fn files_that_spawn_the_binary(tests: &Path) -> Vec<String> {
     let needle = ["cargo", "_bin("].concat();
-    let mut files = Vec::new();
-    rust_files(tests, &mut files);
-    let mut spawning: Vec<String> = files
+    let mut spawning: Vec<String> = rust_files(tests)
         .iter()
         .map(|path| {
             path.strip_prefix(tests)
@@ -71,22 +41,9 @@ fn only_the_harness_spawns_the_binary() {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let spawning = files_that_spawn_the_binary(&tests);
 
-    let new_offenders: Vec<_> = spawning
-        .iter()
-        .filter(|name| !SPAWNS_THE_BINARY_ITSELF.contains(&name.as_str()))
-        .collect();
     assert!(
-        new_offenders.is_empty(),
-        "spawn the CLI with support::hermetic_command() or IsolatedHome::command(): {new_offenders:?}"
-    );
-
-    let stale: Vec<_> = SPAWNS_THE_BINARY_ITSELF
-        .iter()
-        .filter(|name| !spawning.iter().any(|spawning| spawning == *name))
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "these files were migrated; remove them from SPAWNS_THE_BINARY_ITSELF: {stale:?}"
+        spawning.is_empty(),
+        "spawn the CLI with support::hermetic_command() or IsolatedHome::command(): {spawning:?}"
     );
 }
 
@@ -101,13 +58,34 @@ fn the_hermetic_command_clears_every_setting_and_proxy_variable() {
             .1
     };
 
-    for name in env::ALL.iter().filter(|name| **name != "NO_PROXY") {
+    let proxy_variables = ["NO_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"];
+    for name in env::ALL
+        .iter()
+        .filter(|name| !proxy_variables.contains(name))
+    {
         assert!(value_of(name).is_none(), "{name} must be removed");
     }
     assert_eq!(
         value_of("NO_PROXY").unwrap(),
         std::ffi::OsStr::new(LOOPBACK_NO_PROXY)
     );
+    for name in &proxy_variables[1..] {
+        assert_eq!(
+            value_of(name).unwrap(),
+            std::ffi::OsStr::new(CLOSED_PROXY_URL)
+        );
+    }
+}
+
+/// A read no test mocked must fail on the closed proxy, not succeed against the
+/// public API: the suite stays offline.
+#[test]
+fn an_unmocked_read_fails_with_a_connection_error() {
+    hermetic_command()
+        .args(["--format", "json", "mids"])
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("\"error\""));
 }
 
 /// `reqwest` honors the proxy variables and does not bypass loopback on its

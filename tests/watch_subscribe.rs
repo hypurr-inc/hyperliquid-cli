@@ -14,10 +14,12 @@ use hypersdk::hypercore::{
 use predicates::prelude::*;
 use rust_decimal::Decimal;
 use std::time::Duration;
-use support::{API_OVERRIDE_ENV, FORMAT_ENV, IsolatedHome, mount_override_healthcheck};
+use support::{
+    API_OVERRIDE_ENV, FORMAT_ENV, IsolatedHome, WATCH_MAX_TICKS_ENV, mount_override_healthcheck,
+    std_command,
+};
 use wiremock::MockServer;
 
-const WATCH_MAX_TICKS_ENV: &str = "HYPERLIQUID_WATCH_MAX_TICKS";
 const SUBSCRIBE_MAX_EVENTS_ENV: &str = "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS";
 
 fn bounds(max_items: Option<usize>, idle: Option<Duration>) -> StreamBounds {
@@ -489,18 +491,6 @@ async fn fake_subscribe_stream_gap_warning_survives_select_projection() {
 
     let lines = ndjson_values(output);
     assert!(lines.iter().any(|line| line["reason"] == "stream_gap"));
-}
-
-fn std_command(command: &assert_cmd::Command) -> std::process::Command {
-    let mut std = std::process::Command::new(command.get_program());
-    std.args(command.get_args());
-    for (key, value) in command.get_envs() {
-        match value {
-            Some(value) => std.env(key, value),
-            None => std.env_remove(key),
-        };
-    }
-    std
 }
 
 #[tokio::test]

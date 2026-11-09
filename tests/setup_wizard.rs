@@ -61,7 +61,7 @@ async fn setup_create_wallet_saves_config_and_verifies_connection() {
         .expect("setup should print generated wallet address")
         .to_string();
 
-    let config_path = env.config_file_path();
+    let config_path = env.config_file();
     let config: Value = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(config["network"], "mainnet");
     assert!(config.get("private_key").is_none());
@@ -106,7 +106,7 @@ async fn setup_yes_creates_wallet_and_persists_default_builder_and_referral() {
         .stderr(predicate::str::contains("Default builder address").not())
         .stderr(predicate::str::contains("Default referral code").not());
 
-    let config: Value = serde_json::from_str(&fs::read_to_string(env.config_file_path()).unwrap())
+    let config: Value = serde_json::from_str(&fs::read_to_string(env.config_file()).unwrap())
         .expect("setup -y should write valid config JSON");
     assert_eq!(config["network"], "mainnet");
     assert!(config["default_wallet_id"].as_str().is_some());
@@ -146,7 +146,7 @@ async fn setup_yes_reports_builder_approval_failure_without_failing_setup() {
         .stdout(predicate::str::contains("Setup complete"))
         .stdout(predicate::str::contains("approval failed"));
 
-    let config: Value = serde_json::from_str(&fs::read_to_string(env.config_file_path()).unwrap())
+    let config: Value = serde_json::from_str(&fs::read_to_string(env.config_file()).unwrap())
         .expect("setup -y should keep valid config when approval fails");
     assert!(config["default_wallet_id"].as_str().is_some());
     assert_eq!(
@@ -173,16 +173,16 @@ async fn setup_import_wallet_uses_hidden_prompt_path_and_stores_key_encrypted() 
         .stdout(predicate::str::contains(IMPORT_KEY).not())
         .stderr(predicate::str::contains(IMPORT_KEY).not());
 
-    let config_path = env.config_file_path();
+    let config_path = env.config_file();
     let config: Value = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(config["network"], "testnet");
     assert!(config.get("private_key").is_none());
 
-    let vault_path = env.ows_vault_path();
+    let vault_path = env.ows_vault();
     assert_directory_does_not_contain(&vault_path, IMPORT_KEY);
     assert_directory_does_not_contain(&vault_path, IMPORT_KEY.trim_start_matches("0x"));
     assert!(
-        !env.legacy_accounts_key_path().exists(),
+        !env.legacy_accounts_key().exists(),
         "raw encryption key must not be stored next to accounts.db"
     );
 
@@ -215,13 +215,11 @@ async fn setup_connection_failure_has_clear_error_and_nonzero_exit() {
         .stderr(predicate::str::contains("Check your network connection").not());
 
     assert!(
-        env.config_file_candidates()
-            .iter()
-            .all(|path| !path.exists()),
+        !env.config_file().exists(),
         "failed verification must not leave config.json behind"
     );
     assert!(
-        env.ows_vault_candidates().iter().all(|path| !path.exists()),
+        !env.ows_vault().exists(),
         "failed verification must not leave OWS vault behind"
     );
 }

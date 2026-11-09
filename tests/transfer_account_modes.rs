@@ -5,28 +5,13 @@
 
 mod support;
 
-use serde_json::{Value, json};
+use support::wire;
+
+use serde_json::json;
 use support::exchange::ExchangeFixture;
 use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY};
 
 const RECIPIENT: &str = "0x0000000000000000000000000000000000000001";
-
-fn perp_state(withdrawable: &str) -> Value {
-    json!({
-        "marginSummary": {
-            "accountValue": "10000", "totalNtlPos": "0",
-            "totalRawUsd": "10000", "totalMarginUsed": "0"
-        },
-        "crossMarginSummary": {
-            "accountValue": "10000", "totalNtlPos": "0",
-            "totalRawUsd": "10000", "totalMarginUsed": "0"
-        },
-        "crossMaintenanceMarginUsed": "0",
-        "withdrawable": withdrawable,
-        "assetPositions": [],
-        "time": 1_700_000_000_000_u64
-    })
-}
 
 /// An account in the raw `userAbstraction` mode with the given perp
 /// `withdrawable` and spot USDC `total` and `hold`.
@@ -43,7 +28,7 @@ async fn account_server(
     server
         .mount_info_containing(
             json!({"type": "clearinghouseState"}),
-            perp_state(withdrawable),
+            wire::perp_state(withdrawable, vec![]),
         )
         .await;
     server

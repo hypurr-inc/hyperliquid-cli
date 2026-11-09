@@ -3,9 +3,9 @@
 //! These tests own unsafe local-file rejection and secret-redaction contracts
 //! before registry migration starts routing more inputs through shared metadata.
 
+mod contract_support;
 mod support;
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
 
@@ -621,15 +621,7 @@ fn position_margin_precision_is_validated_before_auth_or_network() {
 }
 
 fn assert_schema_input_kind(command: &str, arg: &str) {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["--format", "json", "schema"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let schemas: Vec<Value> = serde_json::from_slice(&output).unwrap();
+    let schemas = contract_support::schema_all();
     let command_prefix = format!("hyperliquid {command}");
     let schema = schemas
         .iter()

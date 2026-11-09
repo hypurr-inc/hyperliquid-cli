@@ -5,7 +5,7 @@ mod support;
 
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, Hip3Dex};
-use support::{IsolatedHome, fixture_perp, fixture_perp_meta};
+use support::{IsolatedHome, wire};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -25,16 +25,12 @@ fn json_of(server: &MockServer, args: &[&str]) -> Value {
     support::json_stdout(&run_args(server, args).success())
 }
 
-fn stderr_text(assert: &assert_cmd::assert::Assert) -> String {
-    String::from_utf8(assert.get_output().stderr.clone()).unwrap()
-}
-
 // ---- account orders --dex ------------------------------------------------
 
 #[tokio::test]
 async fn account_orders_reads_the_requested_hip3_dex() {
     let server = ExchangeFixture::start_with(vec![Hip3Dex::xyz()]).await;
-    let mut order = support::fixture_basic_order("xyz:XYZ100", 9);
+    let mut order = support::wire::basic_order("xyz:XYZ100", 9);
     order["limitPx"] = json!("123.5");
     server
         .mount_info(
@@ -175,12 +171,15 @@ async fn asset_data_qualifies_a_hip3_coin_with_its_dex() {
 #[tokio::test]
 async fn perps_list_flags_delisted_markets_and_hides_none() {
     let server = ExchangeFixture::start().await;
-    let mut gone = fixture_perp("OLD", 2, 10);
+    let mut gone = wire::perp_with("OLD", 2, 10, wire::MarginRule::Either);
     gone["isDelisted"] = json!(true);
     server
         .override_info(
             json!({"type": "meta"}),
-            fixture_perp_meta(vec![fixture_perp("BTC", 5, 50), gone]),
+            wire::perp_meta(vec![
+                wire::perp_with("BTC", 5, 50, wire::MarginRule::Either),
+                gone,
+            ]),
         )
         .await;
 
@@ -200,9 +199,9 @@ async fn listed_ticks_are_the_ticks_orders_truncate_to() {
     server
         .override_info(
             json!({"type": "meta"}),
-            fixture_perp_meta(vec![
-                fixture_perp("BTC", 5, 50),
-                fixture_perp("WIDE", 7, 10),
+            wire::perp_meta(vec![
+                wire::perp_with("BTC", 5, 50, wire::MarginRule::Either),
+                wire::perp_with("WIDE", 7, 10, wire::MarginRule::Either),
             ]),
         )
         .await;
@@ -251,7 +250,7 @@ async fn a_spot_pair_that_is_not_listed_is_diagnosed_from_the_list_the_command_r
 
 #[tokio::test]
 async fn hip3_markets_show_their_deployer_fee_scale() {
-    let mut market = fixture_perp("xyz:XYZ100", 2, 10);
+    let mut market = wire::perp_with("xyz:XYZ100", 2, 10, wire::MarginRule::Either);
     market["deployerFeeScale"] = json!("0.5");
     let server = ExchangeFixture::start_with(vec![Hip3Dex {
         name: "xyz",
@@ -283,7 +282,7 @@ fn dex_with_scales(scales: &[(&str, &str)]) -> Hip3Dex {
         universe: scales
             .iter()
             .map(|(name, scale)| {
-                let mut market = fixture_perp(name, 2, 10);
+                let mut market = wire::perp_with(name, 2, 10, wire::MarginRule::Either);
                 market["deployerFeeScale"] = json!(scale);
                 market
             })
@@ -517,7 +516,7 @@ async fn funding_history_lists_rates_and_announces_a_full_page() {
         rows[0],
         json!({"coin": "BTC", "funding_rate": "0.0000125", "premium": "0.0001", "time": START})
     );
-    let warning: Value = serde_json::from_str(stderr_text(&assert).trim()).unwrap();
+    let warning: Value = serde_json::from_str(support::stderr_text(&assert).trim()).unwrap();
     assert_eq!(warning["warning"]["cap"], 500);
     assert_eq!(warning["warning"]["next_start"], START + 499);
 }
@@ -549,7 +548,7 @@ async fn funding_history_all_pages_through_the_window() {
     .success();
 
     assert_eq!(support::json_stdout(&assert).as_array().unwrap().len(), 501);
-    assert_eq!(stderr_text(&assert), "");
+    assert_eq!(support::stderr_text(&assert), "");
 }
 
 #[tokio::test]
@@ -879,7 +878,7 @@ async fn vault_list_fails_loudly_when_the_stats_host_does() {
     // The failure is the JSON error envelope, never an empty array that reads
     // as "no vaults".
     let document: Value = serde_json::from_slice(&assert.get_output().stdout)
-        .unwrap_or_else(|_| serde_json::from_str(stderr_text(&assert).trim()).unwrap());
+        .unwrap_or_else(|_| serde_json::from_str(support::stderr_text(&assert).trim()).unwrap());
     assert!(document.is_object(), "{document}");
     assert_eq!(document["exit_code"], 12, "{document}");
     assert_eq!(document["data"]["http_status"], 404, "{document}");
@@ -977,20 +976,8 @@ async fn vault_get_with_a_user_sends_it_and_shows_their_stake() {
 
 #[tokio::test]
 async fn vault_get_resolves_a_stored_account_alias_for_its_user() {
-    let env = IsolatedHome::new();
+    let env = IsolatedHome::new().with_stored_account("trader", support::VALID_PRIVATE_KEY, None);
     let address = support::expected_address(support::VALID_PRIVATE_KEY);
-    for db in env.accounts_db_candidates() {
-        let key_file = db.parent().unwrap().join("accounts.key");
-        support::legacy_accounts_fixture::create_accounts_db_with_key_file(
-            &db,
-            &key_file,
-            &[support::legacy_accounts_fixture::Row::new(
-                "trader",
-                &address,
-                support::VALID_PRIVATE_KEY,
-            )],
-        );
-    }
     let server = ExchangeFixture::start().await;
     server
         .mount_info(
@@ -1065,7 +1052,7 @@ async fn portfolio_cumulative_funding_reports_each_horizon() {
     let server = MockServer::start().await;
     support::mount_override_healthcheck(&server).await;
     support::mount_account_state(&server, vec![], vec![], "9000", "100", 5).await;
-    let mut state = support::fixture_clearinghouse_state("9000", 5);
+    let mut state = support::wire::clearinghouse_state("9000", 5);
     state["assetPositions"][0]["position"]["cumFunding"] =
         json!({"allTime": "-12.5", "sinceOpen": "3.25", "sinceChange": "0.5"});
     Mock::given(method("POST"))
@@ -1114,7 +1101,7 @@ async fn spot_get_matches_a_pair_to_its_context_by_the_at_index_key() {
 #[tokio::test]
 async fn account_orders_lists_trigger_fields_and_children_like_orders_open() {
     let server = ExchangeFixture::start().await;
-    let mut trigger = support::fixture_basic_order("BTC", 11);
+    let mut trigger = support::wire::basic_order("BTC", 11);
     trigger["isTrigger"] = json!(true);
     trigger["triggerPx"] = json!("48000.0");
     trigger["triggerCondition"] = json!("Price below 48000");

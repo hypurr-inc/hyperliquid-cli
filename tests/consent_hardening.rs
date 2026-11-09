@@ -28,13 +28,11 @@ fn setup_with_empty_stdin_fails_without_writing_anything() {
         .stderr(predicate::str::contains("Stdin ended before an answer"));
 
     assert!(
-        env.config_file_candidates()
-            .iter()
-            .all(|path| !path.exists()),
+        !env.config_file().exists(),
         "setup must not write config when stdin ends"
     );
     assert!(
-        env.ows_vault_candidates().iter().all(|path| !path.exists()),
+        !env.ows_vault().exists(),
         "setup must not create a wallet when stdin ends"
     );
 }
@@ -65,7 +63,7 @@ fn config_is_written_owner_only_and_atomically() {
     let env = IsolatedHome::new();
     import_wallet(&env);
 
-    let config_path = env.config_file_path();
+    let config_path = env.config_file();
     let mode = fs::metadata(&config_path).unwrap().permissions().mode() & 0o777;
     let dir_mode = fs::metadata(config_path.parent().unwrap())
         .unwrap()
@@ -102,7 +100,7 @@ fn wallet_receipt_reports_config_keys_written() {
 fn stale_default_wallet_fails_naming_it_instead_of_picking_another() {
     let env = IsolatedHome::new();
     import_wallet(&env);
-    let config_path = env.config_file_path();
+    let config_path = env.config_file();
     let mut config: Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
     config["default_wallet_id"] = Value::from("ghost-wallet");
@@ -124,7 +122,7 @@ fn stale_default_wallet_fails_naming_it_instead_of_picking_another() {
 fn broken_config_is_an_error_for_wallet_list() {
     let env = IsolatedHome::new();
     import_wallet(&env);
-    fs::write(env.config_file_path(), "{not json").unwrap();
+    fs::write(env.config_file(), "{not json").unwrap();
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .args(["wallet", "list"])
@@ -147,7 +145,7 @@ fn read_only_wallet_commands_do_not_create_the_vault() {
         .code(10);
 
     assert!(
-        env.ows_vault_candidates().iter().all(|path| !path.exists()),
+        !env.ows_vault().exists(),
         "read-only commands must not create the OWS vault"
     );
 }
@@ -211,10 +209,12 @@ fn wallet_create_warns_when_vault_passphrase_is_unset() {
 #[test]
 fn plaintext_config_key_warns_once_on_stderr() {
     let env = IsolatedHome::new();
-    for path in env.config_file_candidates() {
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, format!(r#"{{"private_key":"{IMPORT_KEY}"}}"#)).unwrap();
-    }
+    fs::create_dir_all(env.config_dir()).unwrap();
+    fs::write(
+        env.config_file(),
+        format!(r#"{{"private_key":"{IMPORT_KEY}"}}"#),
+    )
+    .unwrap();
 
     let assert = env
         .account_command(TEST_ACCOUNT_PASSPHRASE)

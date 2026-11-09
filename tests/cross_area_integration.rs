@@ -1,15 +1,14 @@
 mod support;
 
+use support::exchange::ExchangeFixture;
+
 use predicates::prelude::*;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use support::{
     API_OVERRIDE_ENV, IsolatedHome, MAINNET_API_OVERRIDE_ENV, TEST_ACCOUNT_PASSPHRASE,
-    TESTNET_API_OVERRIDE_ENV, fixture_basic_order, fixture_fill, fixture_order_success_response,
-    mount_account_state, mount_common_public_endpoints, mount_market_meta,
-    mount_override_healthcheck, mount_perp_dexs, mount_spot_meta,
-    mount_successful_exchange_actions,
+    TESTNET_API_OVERRIDE_ENV, mount_account_state, mount_successful_exchange_actions, wire,
 };
 
 const IMPORT_PRIVATE_KEY: &str =
@@ -127,13 +126,12 @@ async fn mount_borrowlend_and_staking_public(server: &MockServer) {
         .await;
 }
 
-async fn mock_cross_area_server(order_response: serde_json::Value) -> MockServer {
-    let server = MockServer::start().await;
-    mount_common_public_endpoints(&server).await;
+async fn mock_cross_area_server(order_response: serde_json::Value) -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
     mount_account_state(
         &server,
-        vec![fixture_basic_order("BTC", 4242)],
-        vec![fixture_fill("BTC", 4242)],
+        vec![wire::basic_order("BTC", 4242)],
+        vec![wire::fill("BTC", 4242)],
         "1000",
         "1000",
         5,
@@ -148,7 +146,7 @@ async fn mock_cross_area_server(order_response: serde_json::Value) -> MockServer
 #[tokio::test]
 async fn first_visit_setup_then_query_and_first_order_succeed() {
     let env = IsolatedHome::new();
-    let server = mock_cross_area_server(fixture_order_success_response(4242)).await;
+    let server = mock_cross_area_server(wire::order_success_response(4242)).await;
 
     env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &server)
         .arg("setup")
@@ -179,7 +177,7 @@ async fn first_visit_setup_then_query_and_first_order_succeed() {
 #[tokio::test]
 async fn unauthenticated_read_only_commands_work_and_auth_commands_exit_10() {
     let env = IsolatedHome::new();
-    let server = mock_cross_area_server(fixture_order_success_response(4242)).await;
+    let server = mock_cross_area_server(wire::order_success_response(4242)).await;
 
     for args in [
         vec!["perps", "list"],
@@ -251,7 +249,7 @@ async fn unauthenticated_read_only_commands_work_and_auth_commands_exit_10() {
 #[tokio::test]
 async fn stored_account_aliases_resolve_for_public_user_lookup_commands() {
     let env = IsolatedHome::new();
-    let server = mock_cross_area_server(fixture_order_success_response(4242)).await;
+    let server = mock_cross_area_server(wire::order_success_response(4242)).await;
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .args([
@@ -345,31 +343,28 @@ async fn stored_account_aliases_resolve_for_public_user_lookup_commands() {
 #[tokio::test]
 async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
     let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-    mount_override_healthcheck(&server).await;
-    mount_market_meta(
-        &server,
-        serde_json::json!({
-            "universe": [
-                {"name": "BTC", "szDecimals": 5, "maxLeverage": 50, "onlyIsolated": false, "marginMode": null, "growthMode": "disabled"},
-                {"name": "kPEPE", "szDecimals": 0, "maxLeverage": 10, "onlyIsolated": false, "marginMode": null, "growthMode": "disabled"}
-            ],
-            "collateralToken": 0
-        }),
-    )
-    .await;
-    mount_perp_dexs(&server, serde_json::json!([])).await;
-    mount_spot_meta(
-        &server,
-        serde_json::json!({
-            "universe": [{"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}],
-            "tokens": [
-                {"name": "USDC", "index": 0, "tokenId": "0x00000000000000000000000000000000", "szDecimals": 6, "weiDecimals": 6, "evmContract": null},
-                {"name": "PURR", "index": 1, "tokenId": "0x00000000000000000000000000000001", "szDecimals": 0, "weiDecimals": 5, "evmContract": null}
-            ]
-        }),
-    )
-    .await;
+    let server = ExchangeFixture::start().await;
+    server
+        .override_info(
+            serde_json::json!({"type": "meta"}),
+            wire::perp_meta(vec![
+                wire::perp_with("BTC", 5, 50, wire::MarginRule::Either),
+                wire::perp_with("kPEPE", 0, 10, wire::MarginRule::Either),
+            ]),
+        )
+        .await;
+    server
+        .override_info(
+            serde_json::json!({"type": "spotMeta"}),
+            serde_json::json!({
+                "universe": [{"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}],
+                "tokens": [
+                    {"name": "USDC", "index": 0, "tokenId": "0x00000000000000000000000000000000", "szDecimals": 6, "weiDecimals": 6, "evmContract": null},
+                    {"name": "PURR", "index": 1, "tokenId": "0x00000000000000000000000000000001", "szDecimals": 0, "weiDecimals": 5, "evmContract": null}
+                ]
+            }),
+        )
+        .await;
 
     Mock::given(method("POST"))
         .and(path("/info"))
@@ -433,7 +428,7 @@ async fn market_lists_expose_sizes_and_price_ticks_for_agents() {
 async fn testnet_mode_uses_testnet_endpoint_override() {
     let env = IsolatedHome::new();
     let mainnet = MockServer::start().await;
-    let testnet = mock_cross_area_server(fixture_order_success_response(4242)).await;
+    let testnet = mock_cross_area_server(wire::order_success_response(4242)).await;
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .env(MAINNET_API_OVERRIDE_ENV, mainnet.uri())
@@ -445,9 +440,10 @@ async fn testnet_mode_uses_testnet_endpoint_override() {
         .stdout(predicate::str::contains(testnet.uri()));
 }
 
-#[test]
-fn network_and_auth_errors_include_recovery_suggestions() {
+#[tokio::test]
+async fn network_and_auth_errors_include_recovery_suggestions() {
     let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .env(API_OVERRIDE_ENV, "http://127.0.0.1:9")
@@ -457,6 +453,7 @@ fn network_and_auth_errors_include_recovery_suggestions() {
         .stderr(predicate::str::contains("127.0.0.1:9"));
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .env(API_OVERRIDE_ENV, server.uri())
         .args(["orders", "open"])
         .assert()
         .code(10)

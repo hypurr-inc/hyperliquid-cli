@@ -1,11 +1,11 @@
 mod contract_support;
 mod support;
 
-use assert_cmd::Command;
 use serde_json::Value;
 
 use contract_support::{command_path, schema_all};
 use support::IsolatedHome;
+use support::exchange::ExchangeFixture;
 
 #[test]
 fn every_registered_command_resolves_to_cli_help() {
@@ -15,11 +15,7 @@ fn every_registered_command_resolves_to_cli_help() {
             .split_whitespace()
             .chain(["--help"])
             .collect::<Vec<_>>();
-        Command::cargo_bin("hyperliquid")
-            .unwrap()
-            .args(args)
-            .assert()
-            .success();
+        support::hermetic_command().args(args).assert().success();
     }
 }
 
@@ -28,8 +24,13 @@ const ORDER: [&str; 11] = [
     "--size",
 ];
 
-fn orders_create(home: &IsolatedHome, network: Option<&str>, testnet_flag: bool) -> Value {
-    let mut command = home.command();
+fn orders_create(
+    home: &IsolatedHome,
+    server: &ExchangeFixture,
+    network: Option<&str>,
+    testnet_flag: bool,
+) -> Value {
+    let mut command = home.command_with_server(server);
     command.env("CI", "1");
     if let Some(network) = network {
         command.env("HYPERLIQUID_NETWORK", network);
@@ -41,19 +42,20 @@ fn orders_create(home: &IsolatedHome, network: Option<&str>, testnet_flag: bool)
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-#[test]
-fn testnet_runs_skip_the_confirmation_check_however_the_network_was_chosen() {
+#[tokio::test]
+async fn testnet_runs_skip_the_confirmation_check_however_the_network_was_chosen() {
     let home = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
     for (network, flag) in [(Some("testnet"), false), (None, true)] {
-        let error = orders_create(&home, network, flag);
+        let error = orders_create(&home, &server, network, flag);
         assert_eq!(
             error["reason"], "auth_required",
             "past the confirmation check on testnet ({network:?}, --testnet {flag}): {error}"
         );
     }
-    let mainnet = orders_create(&home, Some("mainnet"), false);
+    let mainnet = orders_create(&home, &server, Some("mainnet"), false);
     assert_eq!(mainnet["reason"], "confirmation_required", "{mainnet}");
-    let default = orders_create(&home, None, false);
+    let default = orders_create(&home, &server, None, false);
     assert_eq!(default["reason"], "confirmation_required", "{default}");
 }
 

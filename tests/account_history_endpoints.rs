@@ -1,6 +1,8 @@
 mod support;
 
-use support::{IsolatedHome, fixture_fill, mount_account_state, mount_common_public_endpoints};
+use support::exchange::ExchangeFixture;
+
+use support::{IsolatedHome, mount_account_state, stdout_json, wire};
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -28,10 +30,6 @@ async fn mount_info(server: &MockServer, expected: serde_json::Value, response: 
         .respond_with(ResponseTemplate::new(200).set_body_json(response))
         .mount(server)
         .await;
-}
-
-fn json_stdout(output: Vec<u8>) -> serde_json::Value {
-    serde_json::from_slice(&output).expect("stdout should be valid JSON")
 }
 
 #[tokio::test]
@@ -77,8 +75,8 @@ async fn account_history_endpoints_fees_rate_limit_and_portfolio_history_are_sna
     )
     .await;
 
-    let fees = json_stdout(
-        env.command_with_server(&server)
+    let fees = stdout_json(
+        &env.command_with_server(&server)
             .args(["--format", "json", "account", "fees", USER])
             .assert()
             .success()
@@ -89,8 +87,8 @@ async fn account_history_endpoints_fees_rate_limit_and_portfolio_history_are_sna
     assert_eq!(fees["daily_user_vlm"], "123.45");
     assert_eq!(fees["fee_schedule"]["cross"], "0.00035");
 
-    let rate_limit = json_stdout(
-        env.command_with_server(&server)
+    let rate_limit = stdout_json(
+        &env.command_with_server(&server)
             .args(["--format", "json", "account", "rate-limit", USER])
             .assert()
             .success()
@@ -101,8 +99,8 @@ async fn account_history_endpoints_fees_rate_limit_and_portfolio_history_are_sna
     assert_eq!(rate_limit["n_requests_used"], 7);
     assert_eq!(rate_limit["n_requests_cap"], 1000);
 
-    let portfolio = json_stdout(
-        env.command_with_server(&server)
+    let portfolio = stdout_json(
+        &env.command_with_server(&server)
             .args(["--format", "json", "account", "portfolio-history", USER])
             .assert()
             .success()
@@ -129,12 +127,12 @@ async fn account_history_endpoints_fills_by_time_parses_rfc3339_and_projects_jso
             "endTime": END_MS,
             "aggregateByTime": true
         }),
-        serde_json::json!([fixture_fill("BTC", 4242)]),
+        serde_json::json!([wire::fill("BTC", 4242)]),
     )
     .await;
 
-    let json = json_stdout(
-        env.command_with_server(&server)
+    let json = stdout_json(
+        &env.command_with_server(&server)
             .args([
                 "--format",
                 "json",
@@ -189,7 +187,7 @@ fn account_fills_aggregate_by_time_requires_start() {
         .get_output()
         .stdout
         .clone();
-    let usage = json_stdout(output);
+    let usage = stdout_json(&output);
 
     assert_eq!(usage["category"], "usage");
     assert_eq!(usage["exit_code"], 2);
@@ -268,14 +266,14 @@ async fn account_history_endpoints_ledger_funding_and_twap_payloads_are_time_bou
         serde_json::json!([
             {
                 "twapId": 55,
-                "fill": fixture_fill("BTC", 4242)
+                "fill": wire::fill("BTC", 4242)
             }
         ]),
     )
     .await;
 
-    let ledger = json_stdout(
-        env.command_with_server(&server)
+    let ledger = stdout_json(
+        &env.command_with_server(&server)
             .args([
                 "--format",
                 "json",
@@ -296,8 +294,8 @@ async fn account_history_endpoints_ledger_funding_and_twap_payloads_are_time_bou
     assert_eq!(ledger[0]["delta"]["type"], "deposit");
     assert_eq!(ledger[0]["delta"]["amount"], "100");
 
-    let funding = json_stdout(
-        env.command_with_server(&server)
+    let funding = stdout_json(
+        &env.command_with_server(&server)
             .args([
                 "--format",
                 "json",
@@ -317,8 +315,8 @@ async fn account_history_endpoints_ledger_funding_and_twap_payloads_are_time_bou
     );
     assert_eq!(funding[0]["funding_rate"], "0.0001");
 
-    let twap_history = json_stdout(
-        env.command_with_server(&server)
+    let twap_history = stdout_json(
+        &env.command_with_server(&server)
             .args(["--format", "json", "account", "twap-history", USER])
             .assert()
             .success()
@@ -328,8 +326,8 @@ async fn account_history_endpoints_ledger_funding_and_twap_payloads_are_time_bou
     );
     assert_eq!(twap_history[0]["state"]["twap_id"], 55);
 
-    let twap_fills = json_stdout(
-        env.command_with_server(&server)
+    let twap_fills = stdout_json(
+        &env.command_with_server(&server)
             .args([
                 "--format",
                 "json",
@@ -377,8 +375,8 @@ async fn account_history_endpoints_order_status_uses_public_order_status_payload
     )
     .await;
 
-    let status = json_stdout(
-        env.command_with_server(&server)
+    let status = stdout_json(
+        &env.command_with_server(&server)
             .args([
                 "--format", "json", "orders", "status", "--user", USER, "--oid", "123",
             ])
@@ -417,8 +415,8 @@ async fn account_history_endpoints_order_status_normalizes_cloid_payload() {
     )
     .await;
 
-    let status = json_stdout(
-        env.command_with_server(&server)
+    let status = stdout_json(
+        &env.command_with_server(&server)
             .args([
                 "--format", "json", "orders", "status", "--user", USER, "--cloid", "0xabc",
             ])
@@ -453,8 +451,8 @@ async fn account_history_endpoints_staking_history_is_exposed() {
     )
     .await;
 
-    let history = json_stdout(
-        env.command_with_server(&server)
+    let history = stdout_json(
+        &env.command_with_server(&server)
             .args(["--format", "json", "staking", "history", USER])
             .assert()
             .success()
@@ -473,12 +471,12 @@ async fn account_fills_json_exposes_public_fill_fields() {
     mount_info(
         &server,
         serde_json::json!({"type": "userFills", "user": USER}),
-        serde_json::json!([fixture_fill("BTC", 4242)]),
+        serde_json::json!([wire::fill("BTC", 4242)]),
     )
     .await;
 
-    let json = json_stdout(
-        env.command_with_server(&server)
+    let json = stdout_json(
+        &env.command_with_server(&server)
             .args(["--format", "json", "account", "fills", USER])
             .assert()
             .success()
@@ -510,8 +508,8 @@ async fn account_fills_with_no_rows_print_an_empty_json_array() {
     )
     .await;
 
-    let json = json_stdout(
-        env.command_with_server(&server)
+    let json = stdout_json(
+        &env.command_with_server(&server)
             .args(["--format", "json", "account", "fills", USER])
             .assert()
             .success()
@@ -533,7 +531,7 @@ async fn account_fills_colour_closed_pnl_only_in_pretty_output() {
     let env = IsolatedHome::new();
     let server = history_server().await;
     let fill = |oid: u64, closed_pnl: &str| {
-        let mut fill = fixture_fill("BTC", oid);
+        let mut fill = wire::fill("BTC", oid);
         fill["closedPnl"] = closed_pnl.into();
         fill
     };
@@ -567,8 +565,7 @@ async fn account_fills_colour_closed_pnl_only_in_pretty_output() {
 #[tokio::test]
 async fn account_portfolio_colours_position_pnl_only_in_pretty_output() {
     let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-    mount_common_public_endpoints(&server).await;
+    let server = ExchangeFixture::start().await;
     mount_account_state(&server, vec![], vec![], "1000", "1000", 5).await;
     let run = |format: &str| {
         stdout_of(

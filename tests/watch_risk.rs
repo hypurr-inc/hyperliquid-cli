@@ -158,50 +158,12 @@ mod margin_basis {
 
     use crate::support::IsolatedHome;
     use crate::support::exchange::{ExchangeFixture, Hip3Dex};
+    use crate::support::wire;
 
     const USER: &str = "0x0000000000000000000000000000000000000001";
 
-    fn position(coin: &str, leverage: Value, margin_used: &str) -> Value {
-        json!({
-            "type": "oneWay",
-            "position": {
-                "coin": coin,
-                "szi": "1",
-                "leverage": leverage,
-                "entryPx": "100",
-                "positionValue": "100",
-                "unrealizedPnl": "0",
-                "returnOnEquity": "0",
-                "liquidationPx": null,
-                "marginUsed": margin_used,
-                "maxLeverage": 50,
-                "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
-            }
-        })
-    }
-
-    fn perp_state(
-        account_value: &str,
-        margin_used: &str,
-        maintenance: &str,
-        positions: Vec<Value>,
-    ) -> Value {
-        let summary = json!({
-            "accountValue": account_value, "totalNtlPos": "100",
-            "totalRawUsd": account_value, "totalMarginUsed": margin_used
-        });
-        json!({
-            "marginSummary": summary,
-            "crossMarginSummary": summary,
-            "crossMaintenanceMarginUsed": maintenance,
-            "withdrawable": "0",
-            "assetPositions": positions,
-            "time": 1_700_000_000_000_u64
-        })
-    }
-
     fn cross_position() -> Value {
-        position("BTC", json!({"type": "cross", "value": 5}), "10")
+        wire::position_with("BTC", json!({"type": "cross", "value": 5}), "10", 50)
     }
 
     /// The default dex and `xyz`, both collateralised in USDC (token 0), for an
@@ -278,8 +240,8 @@ mod margin_basis {
         for raw_mode in ["disabled", "default", "dexAbstraction"] {
             let server = account(
                 raw_mode,
-                perp_state("100", "85", "5", vec![cross_position()]),
-                perp_state("0", "0", "0", vec![]),
+                wire::perp_state_with("100", "85", "5", "0", vec![cross_position()]),
+                wire::perp_state_with("0", "0", "0", "0", vec![]),
                 "0",
             )
             .await;
@@ -305,23 +267,25 @@ mod margin_basis {
         // Maintenance margin 500 on the default dex and 400 on xyz, over 1100 of
         // USDC less the 100 an isolated position holds: 900 / 1000. The default
         // dex's own summary says 1% used and would never alert.
-        let default_dex = perp_state(
+        let default_dex = wire::perp_state_with(
             "10000",
             "100",
             "500",
+            "0",
             vec![
                 cross_position(),
-                position(
+                wire::position_with(
                     "ETH",
                     json!({"type": "isolated", "value": 3, "rawUsd": "100"}),
                     "100",
+                    50,
                 ),
             ],
         );
         let server = account(
             "unifiedAccount",
             default_dex,
-            perp_state("0", "0", "400", vec![]),
+            wire::perp_state_with("0", "0", "400", "0", vec![]),
             "1100",
         )
         .await;
@@ -368,8 +332,8 @@ mod margin_basis {
         // to compute, which is the most dangerous state, not a quiet one.
         let server = account(
             "unifiedAccount",
-            perp_state("100", "1", "500", vec![cross_position()]),
-            perp_state("0", "0", "0", vec![]),
+            wire::perp_state_with("100", "1", "500", "0", vec![cross_position()]),
+            wire::perp_state_with("0", "0", "0", "0", vec![]),
             "0",
         )
         .await;
@@ -393,8 +357,8 @@ mod margin_basis {
         // The perp summary claims 95% used; the account has 10000 of USDC.
         let server = account(
             "unifiedAccount",
-            perp_state("100", "95", "50", vec![cross_position()]),
-            perp_state("0", "0", "0", vec![]),
+            wire::perp_state_with("100", "95", "50", "0", vec![cross_position()]),
+            wire::perp_state_with("0", "0", "0", "0", vec![]),
             "10000",
         )
         .await;
@@ -412,8 +376,8 @@ mod margin_basis {
     async fn a_portfolio_margin_account_alerts_on_the_health_it_reports() {
         let server = account(
             "portfolioMargin",
-            perp_state("100", "95", "50", vec![cross_position()]),
-            perp_state("0", "0", "0", vec![]),
+            wire::perp_state_with("100", "95", "50", "0", vec![cross_position()]),
+            wire::perp_state_with("0", "0", "0", "0", vec![]),
             "10000",
         )
         .await;
@@ -446,8 +410,8 @@ mod margin_basis {
     async fn a_healthy_portfolio_margin_account_stays_quiet_whatever_its_perp_summary_says() {
         let server = account(
             "portfolioMargin",
-            perp_state("100", "95", "50", vec![cross_position()]),
-            perp_state("0", "0", "0", vec![]),
+            wire::perp_state_with("100", "95", "50", "0", vec![cross_position()]),
+            wire::perp_state_with("0", "0", "0", "0", vec![]),
             "10000",
         )
         .await;

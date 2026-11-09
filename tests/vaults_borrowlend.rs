@@ -1,26 +1,18 @@
 mod support;
 
+use support::exchange::ExchangeFixture;
+
 use predicates::prelude::*;
 use serde_json::Value;
+use support::signing::assert_signed_by_test_key;
 use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address,
-    mount_all_mids,
+    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, mount_override_healthcheck,
 };
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const VALID_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const VAULT_ADDRESS: &str = "0x0000000000000000000000000000000000000002";
-
-fn assert_signed_by_test_key(json: &Value) {
-    let signer = expected_address(VALID_PRIVATE_KEY);
-    assert_eq!(json["signer"], signer);
-    assert_eq!(json["acting_as"], signer);
-}
-
-async fn mount_override_healthcheck(server: &MockServer) {
-    mount_all_mids(server, "51000", "3000").await;
-}
 
 async fn mount_numeric_override_healthcheck(server: &MockServer) {
     Mock::given(method("POST"))
@@ -491,9 +483,7 @@ async fn vault_get_json_accepts_scientific_notation_fields() {
 #[tokio::test]
 async fn vault_get_null_response_returns_clean_not_found_error() {
     let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-
-    support::mount_common_public_endpoints(&server).await;
+    let server = ExchangeFixture::start().await;
 
     Mock::given(method("POST"))
         .and(path("/info"))

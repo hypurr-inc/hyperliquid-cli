@@ -5,11 +5,12 @@
 mod support;
 
 use hypersdk::hypercore::Chain;
-use hypersdk::hypercore::types::{Action, Signature};
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use support::exchange::ExchangeFixture;
-use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, json_stdout};
+use support::signing::{recover_signer, test_signer};
+use support::wire::{self, MarginRule};
+use support::{IsolatedHome, json_stdout};
 
 const SUBACCOUNT: &str = "0x00000000000000000000000000000000000000cc";
 const VAULT: &str = "0x0000000000000000000000000000000000000001";
@@ -18,55 +19,7 @@ fn ok() -> Value {
     json!({"status": "ok", "response": {"type": "default"}})
 }
 
-fn run(env: &IsolatedHome, server: &ExchangeFixture, args: &[&str]) -> assert_cmd::Command {
-    let mut command = env.live_command(server);
-    command.args(["--format", "json", "--testnet"]).args(args);
-    command
-}
-
-/// The address that signed `body`, recovered from its signature over the
-/// hypersdk `Action` it carries.
-fn signer_of(body: &Value) -> String {
-    let action: Action = serde_json::from_value(body["action"].clone()).unwrap();
-    let signature: Signature = serde_json::from_value(body["signature"].clone()).unwrap();
-    let vault = body["vaultAddress"]
-        .as_str()
-        .map(|vault| vault.parse().unwrap());
-    action
-        .recover(
-            &signature,
-            body["nonce"].as_u64().unwrap(),
-            vault,
-            None,
-            Chain::Testnet,
-        )
-        .unwrap()
-        .to_string()
-        .to_lowercase()
-}
-
-fn test_signer() -> String {
-    expected_address(VALID_PRIVATE_KEY).to_lowercase()
-}
-
 // ---- transfer spot-to-perp / perp-to-spot --subaccount ----
-
-fn perp_state(withdrawable: &str) -> Value {
-    json!({
-        "marginSummary": {
-            "accountValue": "10000", "totalNtlPos": "0",
-            "totalRawUsd": "10000", "totalMarginUsed": "0"
-        },
-        "crossMarginSummary": {
-            "accountValue": "10000", "totalNtlPos": "0",
-            "totalRawUsd": "10000", "totalMarginUsed": "0"
-        },
-        "crossMaintenanceMarginUsed": "0",
-        "withdrawable": withdrawable,
-        "assetPositions": [],
-        "time": 1_700_000_000_000_u64
-    })
-}
 
 /// A subaccount holding `spot` USDC in spot and `perp` withdrawable in perp,
 /// in a standard account. Only reads about the subaccount are answered: a
@@ -90,7 +43,7 @@ async fn subaccount_server(spot: &str, perp: &str) -> ExchangeFixture {
     server
         .mount_info_containing(
             json!({"type": "clearinghouseState", "user": SUBACCOUNT}),
-            perp_state(perp),
+            wire::perp_state(perp, vec![]),
         )
         .await;
     server.mount_exchange(ok()).await;
@@ -103,10 +56,8 @@ async fn class_transfers_for_a_subaccount_sign_the_amount_with_its_suffix() {
         let env = IsolatedHome::new();
         let server = subaccount_server("10", "10").await;
 
-        run(
-            &env,
-            &server,
-            &[
+        env.live_json(&server)
+            .args([
                 "transfer",
                 direction,
                 "--amount",
@@ -114,10 +65,9 @@ async fn class_transfers_for_a_subaccount_sign_the_amount_with_its_suffix() {
                 "--subaccount",
                 SUBACCOUNT,
                 "--yes",
-            ],
-        )
-        .assert()
-        .success();
+            ])
+            .assert()
+            .success();
 
         let bodies = server.exchange_bodies().await;
         assert_eq!(bodies.len(), 1, "{direction}");
@@ -136,7 +86,11 @@ async fn class_transfers_for_a_subaccount_sign_the_amount_with_its_suffix() {
         );
         // The master signs the amount with its suffix: the signature only
         // verifies against that document.
-        assert_eq!(signer_of(&bodies[0]), test_signer(), "{direction}");
+        assert_eq!(
+            recover_signer(&bodies[0], Chain::Testnet),
+            test_signer(),
+            "{direction}"
+        );
     }
 }
 
@@ -146,10 +100,8 @@ async fn a_subaccount_transfer_is_checked_against_the_subaccounts_balance() {
     let server = subaccount_server("1", "1").await;
 
     for direction in ["spot-to-perp", "perp-to-spot"] {
-        run(
-            &env,
-            &server,
-            &[
+        env.live_json(&server)
+            .args([
                 "transfer",
                 direction,
                 "--amount",
@@ -157,11 +109,10 @@ async fn a_subaccount_transfer_is_checked_against_the_subaccounts_balance() {
                 "--subaccount",
                 SUBACCOUNT,
                 "--yes",
-            ],
-        )
-        .assert()
-        .code(13)
-        .stdout(predicate::str::contains("insufficient balance"));
+            ])
+            .assert()
+            .code(13)
+            .stdout(predicate::str::contains("insufficient balance"));
     }
     assert!(server.exchange_actions().await.is_empty());
 }
@@ -181,13 +132,10 @@ async fn a_class_transfer_without_a_subaccount_keeps_the_plain_amount() {
         .await;
     server.mount_exchange(ok()).await;
 
-    run(
-        &env,
-        &server,
-        &["transfer", "spot-to-perp", "--amount", "5", "--yes"],
-    )
-    .assert()
-    .success();
+    env.live_json(&server)
+        .args(["transfer", "spot-to-perp", "--amount", "5", "--yes"])
+        .assert()
+        .success();
 
     assert_eq!(server.exchange_actions().await[0]["amount"], "5");
 }
@@ -197,10 +145,9 @@ async fn subaccount_class_transfer_dry_run_shows_the_wire_amount() {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
 
-    let assert = run(
-        &env,
-        &server,
-        &[
+    let assert = env
+        .live_json(&server)
+        .args([
             "--dry-run",
             "transfer",
             "spot-to-perp",
@@ -208,10 +155,9 @@ async fn subaccount_class_transfer_dry_run_shows_the_wire_amount() {
             "5.50",
             "--subaccount",
             SUBACCOUNT,
-        ],
-    )
-    .assert()
-    .success();
+        ])
+        .assert()
+        .success();
     let preview = json_stdout(&assert);
     assert_eq!(preview["args"]["subaccount"], SUBACCOUNT);
     assert_eq!(
@@ -219,48 +165,16 @@ async fn subaccount_class_transfer_dry_run_shows_the_wire_amount() {
         format!("5.5 subaccount:{SUBACCOUNT}")
     );
 
-    let assert = run(
-        &env,
-        &server,
-        &["--dry-run", "transfer", "spot-to-perp", "--amount", "5"],
-    )
-    .assert()
-    .success();
+    let assert = env
+        .live_json(&server)
+        .args(["--dry-run", "transfer", "spot-to-perp", "--amount", "5"])
+        .assert()
+        .success();
     assert_eq!(json_stdout(&assert)["args"], json!({"amount": "5"}));
     assert!(server.exchange_actions().await.is_empty());
 }
 
 // ---- positions top-up-margin ----
-
-fn perp(name: &str, margin_mode: Value) -> Value {
-    json!({
-        "name": name,
-        "szDecimals": 2,
-        "maxLeverage": 10,
-        "onlyIsolated": !margin_mode.is_null(),
-        "marginMode": margin_mode,
-        "growthMode": "disabled"
-    })
-}
-
-fn position(coin: &str, leverage_type: &str) -> Value {
-    json!({
-        "type": "oneWay",
-        "position": {
-            "coin": coin,
-            "szi": "1",
-            "leverage": {"type": leverage_type, "value": 4},
-            "entryPx": "100",
-            "positionValue": "100",
-            "unrealizedPnl": "0",
-            "returnOnEquity": "0",
-            "liquidationPx": null,
-            "marginUsed": "25",
-            "maxLeverage": 10,
-            "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
-        }
-    })
-}
 
 /// BTC and ETH trade either way, PUMP is `strictIsolated`; `user`'s account
 /// holds `positions`.
@@ -269,10 +183,10 @@ async fn margin_server(user: &str, positions: Vec<Value>) -> ExchangeFixture {
     server
         .override_info(
             json!({"type": "meta"}),
-            support::fixture_perp_meta(vec![
-                perp("BTC", Value::Null),
-                perp("ETH", Value::Null),
-                perp("PUMP", json!("strictIsolated")),
+            support::wire::perp_meta(vec![
+                wire::perp("BTC", MarginRule::Either),
+                wire::perp("ETH", MarginRule::Either),
+                wire::perp("PUMP", MarginRule::StrictIsolated),
             ]),
         )
         .await;
@@ -302,23 +216,20 @@ async fn margin_server(user: &str, positions: Vec<Value>) -> ExchangeFixture {
 #[tokio::test]
 async fn top_up_margin_sends_the_target_leverage_as_a_float_string() {
     let env = IsolatedHome::new();
-    let server = margin_server(&test_signer(), vec![position("BTC", "isolated")]).await;
+    let server = margin_server(&test_signer(), vec![wire::position("BTC", "isolated")]).await;
 
-    run(
-        &env,
-        &server,
-        &[
+    env.live_json(&server)
+        .args([
             "positions",
             "top-up-margin",
             "--coin",
             "BTC",
             "--leverage",
             "12.50",
-        ],
-    )
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("\"target_leverage\":\"12.5\""));
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"target_leverage\":\"12.5\""));
 
     let bodies = server.exchange_bodies().await;
     assert_eq!(bodies.len(), 1);
@@ -327,18 +238,16 @@ async fn top_up_margin_sends_the_target_leverage_as_a_float_string() {
         json!({"type": "topUpIsolatedOnlyMargin", "asset": 0, "leverage": "12.5"})
     );
     assert!(bodies[0]["vaultAddress"].is_null());
-    assert_eq!(signer_of(&bodies[0]), test_signer());
+    assert_eq!(recover_signer(&bodies[0], Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
 async fn top_up_margin_for_a_vault_checks_and_signs_for_the_vault() {
     let env = IsolatedHome::new();
-    let server = margin_server(VAULT, vec![position("ETH", "isolated")]).await;
+    let server = margin_server(VAULT, vec![wire::position("ETH", "isolated")]).await;
 
-    run(
-        &env,
-        &server,
-        &[
+    env.live_json(&server)
+        .args([
             "positions",
             "top-up-margin",
             "--coin",
@@ -347,10 +256,9 @@ async fn top_up_margin_for_a_vault_checks_and_signs_for_the_vault() {
             "5",
             "--on-behalf-of",
             VAULT,
-        ],
-    )
-    .assert()
-    .success();
+        ])
+        .assert()
+        .success();
 
     let bodies = server.exchange_bodies().await;
     assert_eq!(bodies[0]["vaultAddress"], VAULT);
@@ -359,28 +267,25 @@ async fn top_up_margin_for_a_vault_checks_and_signs_for_the_vault() {
         json!({"type": "topUpIsolatedOnlyMargin", "asset": 1, "leverage": "5"})
     );
     // The vault is part of what the signature covers.
-    assert_eq!(signer_of(&bodies[0]), test_signer());
+    assert_eq!(recover_signer(&bodies[0], Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
 async fn top_up_margin_applies_to_a_strict_isolated_market_too() {
     let env = IsolatedHome::new();
-    let server = margin_server(&test_signer(), vec![position("PUMP", "isolated")]).await;
+    let server = margin_server(&test_signer(), vec![wire::position("PUMP", "isolated")]).await;
 
-    run(
-        &env,
-        &server,
-        &[
+    env.live_json(&server)
+        .args([
             "positions",
             "top-up-margin",
             "--coin",
             "PUMP",
             "--leverage",
             "3",
-        ],
-    )
-    .assert()
-    .success();
+        ])
+        .assert()
+        .success();
 
     assert_eq!(server.exchange_actions().await[0]["asset"], 2);
 }
@@ -390,62 +295,53 @@ async fn top_up_margin_needs_an_open_isolated_position() {
     let env = IsolatedHome::new();
 
     let flat = margin_server(&test_signer(), vec![]).await;
-    run(
-        &env,
-        &flat,
-        &[
+    env.live_json(&flat)
+        .args([
             "positions",
             "top-up-margin",
             "--coin",
             "BTC",
             "--leverage",
             "5",
-        ],
-    )
-    .assert()
-    .code(13)
-    .stdout(predicate::str::contains("has no open BTC position"));
+        ])
+        .assert()
+        .code(13)
+        .stdout(predicate::str::contains("has no open BTC position"));
     assert!(flat.exchange_actions().await.is_empty());
 
-    let cross = margin_server(&test_signer(), vec![position("BTC", "cross")]).await;
-    run(
-        &env,
-        &cross,
-        &[
+    let cross = margin_server(&test_signer(), vec![wire::position("BTC", "cross")]).await;
+    env.live_json(&cross)
+        .args([
             "positions",
             "top-up-margin",
             "--coin",
             "BTC",
             "--leverage",
             "5",
-        ],
-    )
-    .assert()
-    .code(13)
-    .stdout(predicate::str::contains("uses cross margin"));
+        ])
+        .assert()
+        .code(13)
+        .stdout(predicate::str::contains("uses cross margin"));
     assert!(cross.exchange_actions().await.is_empty());
 }
 
 #[tokio::test]
 async fn top_up_margin_refuses_a_leverage_that_is_not_positive() {
     let env = IsolatedHome::new();
-    let server = margin_server(&test_signer(), vec![position("BTC", "isolated")]).await;
+    let server = margin_server(&test_signer(), vec![wire::position("BTC", "isolated")]).await;
 
     for leverage in ["0", "-3"] {
-        run(
-            &env,
-            &server,
-            &[
+        env.live_json(&server)
+            .args([
                 "positions",
                 "top-up-margin",
                 "--coin",
                 "BTC",
                 "--leverage",
                 leverage,
-            ],
-        )
-        .assert()
-        .failure();
+            ])
+            .assert()
+            .failure();
     }
     assert!(server.exchange_actions().await.is_empty());
 }
@@ -455,10 +351,9 @@ async fn top_up_margin_dry_run_previews_without_signing_or_reading_the_position(
     let env = IsolatedHome::new();
     let server = margin_server(&test_signer(), vec![]).await;
 
-    let assert = run(
-        &env,
-        &server,
-        &[
+    let assert = env
+        .live_json(&server)
+        .args([
             "--dry-run",
             "positions",
             "top-up-margin",
@@ -468,10 +363,9 @@ async fn top_up_margin_dry_run_previews_without_signing_or_reading_the_position(
             "7",
             "--on-behalf-of",
             VAULT,
-        ],
-    )
-    .assert()
-    .success();
+        ])
+        .assert()
+        .success();
     let preview = json_stdout(&assert);
 
     assert_eq!(preview["would_execute"], "top_up_isolated_margin");
@@ -497,25 +391,20 @@ async fn repay_and_borrow_submit_their_operations() {
     let env = IsolatedHome::new();
     let server = borrowlend_server("unifiedAccount").await;
 
-    run(
-        &env,
-        &server,
-        &["borrowlend", "repay", "USDC", "--amount", "5"],
-    )
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("\"operation\":\"repay\""));
-    run(&env, &server, &["borrowlend", "repay", "USDC", "--max"])
+    env.live_json(&server)
+        .args(["borrowlend", "repay", "USDC", "--amount", "5"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"operation\":\"repay\""));
+    env.live_json(&server)
+        .args(["borrowlend", "repay", "USDC", "--max"])
         .assert()
         .success();
-    run(
-        &env,
-        &server,
-        &["borrowlend", "borrow", "USDC", "--amount", "7.5"],
-    )
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("\"operation\":\"borrow\""));
+    env.live_json(&server)
+        .args(["borrowlend", "borrow", "USDC", "--amount", "7.5"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"operation\":\"borrow\""));
 
     let actions = server.exchange_actions().await;
     assert_eq!(
@@ -533,14 +422,16 @@ async fn borrow_has_no_max_and_is_refused_before_any_request() {
     let env = IsolatedHome::new();
     let server = borrowlend_server("unifiedAccount").await;
 
-    run(&env, &server, &["borrowlend", "borrow", "USDC", "--max"])
+    env.live_json(&server)
+        .args(["borrowlend", "borrow", "USDC", "--max"])
         .assert()
         .code(13)
         .stdout(predicate::str::contains(
             "borrow/lend borrow requires --amount; --max is only supported for withdraw and repay",
         ));
     // The wording of the existing refusal follows the new operation.
-    run(&env, &server, &["borrowlend", "supply", "USDC", "--max"])
+    env.live_json(&server)
+        .args(["borrowlend", "supply", "USDC", "--max"])
         .assert()
         .code(13)
         .stdout(predicate::str::contains(
@@ -559,7 +450,8 @@ async fn manual_borrow_is_refused_under_portfolio_margin_live_and_dry_run() {
         if dry_run {
             args.insert(0, "--dry-run");
         }
-        run(&env, &server, &args)
+        env.live_json(&server)
+            .args(&args)
             .assert()
             .code(13)
             .stdout(predicate::str::contains("portfolio-margin account"))
@@ -575,13 +467,10 @@ async fn repay_is_not_gated_on_the_account_mode() {
     let env = IsolatedHome::new();
     let server = borrowlend_server("portfolioMargin").await;
 
-    run(
-        &env,
-        &server,
-        &["borrowlend", "repay", "USDC", "--amount", "1"],
-    )
-    .assert()
-    .success();
+    env.live_json(&server)
+        .args(["borrowlend", "repay", "USDC", "--amount", "1"])
+        .assert()
+        .success();
 
     assert_eq!(server.exchange_actions().await.len(), 1);
     assert!(server.info_requests("userAbstraction").await.is_empty());
@@ -593,20 +482,18 @@ async fn borrow_dry_run_does_not_invent_a_core_writer_encoding() {
     let server = borrowlend_server("default").await;
 
     for operation in ["borrow", "repay"] {
-        let assert = run(
-            &env,
-            &server,
-            &[
+        let assert = env
+            .live_json(&server)
+            .args([
                 "--dry-run",
                 "borrowlend",
                 operation,
                 "USDC",
                 "--amount",
                 "5",
-            ],
-        )
-        .assert()
-        .success();
+            ])
+            .assert()
+            .success();
         let preview = json_stdout(&assert);
         let args = &preview["args"];
         assert_eq!(args["operation"], operation);
@@ -615,13 +502,11 @@ async fn borrow_dry_run_does_not_invent_a_core_writer_encoding() {
         assert_eq!(args["exchange_action"]["operation"], operation);
     }
 
-    let assert = run(
-        &env,
-        &server,
-        &["--dry-run", "borrowlend", "supply", "USDC", "--amount", "5"],
-    )
-    .assert()
-    .success();
+    let assert = env
+        .live_json(&server)
+        .args(["--dry-run", "borrowlend", "supply", "USDC", "--amount", "5"])
+        .assert()
+        .success();
     let args = &json_stdout(&assert)["args"];
     assert_eq!(args["encoded_operation"], 0);
     assert_eq!(args["verified_shape"]["fields"]["encodedOperation"], 0);
@@ -635,11 +520,13 @@ async fn evm_big_blocks_sends_the_flag_in_both_directions() {
     let server = ExchangeFixture::start().await;
     server.mount_exchange(ok()).await;
 
-    run(&env, &server, &["account", "evm-big-blocks", "--enable"])
+    env.live_json(&server)
+        .args(["account", "evm-big-blocks", "--enable"])
         .assert()
         .success()
         .stdout(predicate::str::contains("\"using_big_blocks\":true"));
-    run(&env, &server, &["account", "evm-big-blocks", "--disable"])
+    env.live_json(&server)
+        .args(["account", "evm-big-blocks", "--disable"])
         .assert()
         .success();
 
@@ -653,7 +540,7 @@ async fn evm_big_blocks_sends_the_flag_in_both_directions() {
         json!({"type": "evmUserModify", "usingBigBlocks": false})
     );
     assert!(bodies[0]["vaultAddress"].is_null());
-    assert_eq!(signer_of(&bodies[0]), test_signer());
+    assert_eq!(recover_signer(&bodies[0], Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
@@ -665,7 +552,7 @@ async fn evm_big_blocks_needs_exactly_one_direction() {
         &["account", "evm-big-blocks"][..],
         &["account", "evm-big-blocks", "--enable", "--disable"],
     ] {
-        run(&env, &server, args).assert().code(2);
+        env.live_json(&server).args(args).assert().code(2);
     }
     assert!(server.exchange_actions().await.is_empty());
 }
@@ -675,13 +562,11 @@ async fn evm_big_blocks_dry_run_previews_the_action() {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
 
-    let assert = run(
-        &env,
-        &server,
-        &["--dry-run", "account", "evm-big-blocks", "--disable"],
-    )
-    .assert()
-    .success();
+    let assert = env
+        .live_json(&server)
+        .args(["--dry-run", "account", "evm-big-blocks", "--disable"])
+        .assert()
+        .success();
     let preview = json_stdout(&assert);
 
     assert_eq!(preview["would_execute"], "set_evm_big_blocks");
@@ -713,16 +598,16 @@ async fn prio_bid_slots_are_zero_to_two() {
         if dry_run {
             args.insert(0, "--dry-run");
         }
-        run(&env, &server, &args)
+        env.live_json(&server)
+            .args(&args)
             .assert()
             .code(2)
             .stdout(predicate::str::contains("3 is not in 0..=2"));
     }
 
-    let assert = run(
-        &env,
-        &server,
-        &[
+    let assert = env
+        .live_json(&server)
+        .args([
             "--dry-run",
             "prio",
             "bid",
@@ -732,10 +617,9 @@ async fn prio_bid_slots_are_zero_to_two() {
             "203.0.113.10",
             "--slot",
             "2",
-        ],
-    )
-    .assert()
-    .success();
+        ])
+        .assert()
+        .success();
     assert_eq!(json_stdout(&assert)["args"]["slot"], 2);
     assert!(server.exchange_actions().await.is_empty());
 

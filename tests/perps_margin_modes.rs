@@ -5,26 +5,16 @@ mod support;
 
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, Hip3Dex};
-use support::{IsolatedHome, fixture_perp_meta, json_stdout};
-
-fn perp(name: &str, only_isolated: bool, margin_mode: Value) -> Value {
-    json!({
-        "name": name,
-        "szDecimals": 2,
-        "maxLeverage": 10,
-        "onlyIsolated": only_isolated,
-        "marginMode": margin_mode,
-        "growthMode": "disabled"
-    })
-}
+use support::wire::{self, MarginRule};
+use support::{IsolatedHome, json_stdout};
 
 async fn exchange() -> ExchangeFixture {
     let server = ExchangeFixture::start_with(vec![Hip3Dex {
         name: "xyz",
         universe: vec![
-            perp("xyz:HOOD", true, json!("noCross")),
-            perp("xyz:STRICT", true, json!("strictIsolated")),
-            perp("xyz:OPEN", false, Value::Null),
+            wire::perp("xyz:HOOD", MarginRule::NoCross),
+            wire::perp("xyz:STRICT", MarginRule::StrictIsolated),
+            wire::perp("xyz:OPEN", MarginRule::Either),
         ],
         mids: json!({}),
     }])
@@ -32,9 +22,9 @@ async fn exchange() -> ExchangeFixture {
     server
         .override_info(
             json!({"type": "meta"}),
-            fixture_perp_meta(vec![
-                perp("BTC", false, Value::Null),
-                perp("PUMP", true, json!("strictIsolated")),
+            wire::perp_meta(vec![
+                wire::perp("BTC", MarginRule::Either),
+                wire::perp("PUMP", MarginRule::StrictIsolated),
                 // `marginMode` absent: only the deprecated flag says anything.
                 json!({
                     "name": "OLD",
