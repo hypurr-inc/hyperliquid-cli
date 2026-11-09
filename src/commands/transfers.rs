@@ -1,6 +1,8 @@
 use alloy::sol;
 use clap::Args;
-use hypersdk::hypercore::types::{Action, AssetTarget, SendAsset, SendToken, SpotSend, UsdSend};
+use hypersdk::hypercore::types::{
+    Action, AgentSendAsset, AssetTarget, SendAsset, SendToken, SpotSend, UsdSend,
+};
 use hypersdk::hypercore::{Chain, SpotToken};
 
 use crate::assets::require_spot_token;
@@ -56,6 +58,10 @@ pub struct ClassTransferArgs {
     /// Amount of USDC to transfer
     #[arg(long, allow_hyphen_values = true)]
     pub amount: Decimal,
+
+    /// Move the USDC of this subaccount instead of the signer's own account: subaccount address, stored account alias, or stored account id
+    #[arg(long)]
+    pub subaccount: Option<String>,
 
     /// Confirm live execution without prompting
     #[arg(short = 'y', long)]
@@ -154,6 +160,8 @@ struct TransferConfirmation {
     amount: Decimal,
     asset: String,
     destination: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subaccount: Option<String>,
 }
 
 impl Row for TransferConfirmation {
@@ -420,6 +428,10 @@ async fn submit_send_asset(
         dest,
     } = route;
     let (api, chain) = (remote.api(), remote.chain());
+    let agent_signed = signer.is_stored_agent();
+    if agent_signed {
+        ensure_agent_send_target(destination, signer.query_address(), args)?;
+    }
     confirm_transfer(
         mode,
         args.yes,
@@ -442,19 +454,56 @@ async fn submit_send_asset(
     )?;
 
     let nonce = actions::nonce_now();
-    let send_asset = SendAsset {
-        destination,
-        source_dex: source.target,
-        destination_dex: dest.target,
-        token: SendToken(token.clone()),
-        amount: args.amount,
-        from_sub_account: args.from_subaccount.clone().unwrap_or_default(),
-        nonce,
-    }
-    .into_action(chain);
-    let action = Action::SendAsset(send_asset);
+    let from_sub_account = args.from_subaccount.clone().unwrap_or_default();
+    let action = if agent_signed {
+        Action::AgentSendAsset(
+            AgentSendAsset {
+                destination,
+                source_dex: source.target,
+                destination_dex: dest.target,
+                token: SendToken(token.clone()),
+                amount: args.amount,
+                from_sub_account,
+                nonce,
+            }
+            .into_action(),
+        )
+    } else {
+        Action::SendAsset(
+            SendAsset {
+                destination,
+                source_dex: source.target,
+                destination_dex: dest.target,
+                token: SendToken(token.clone()),
+                amount: args.amount,
+                from_sub_account,
+                nonce,
+            }
+            .into_action(chain),
+        )
+    };
     actions::send_l1_action(api, signer, action, nonce).await?;
     Ok(token.name)
+}
+
+/// An API wallet cannot sign `sendAsset`; it signs `agentSendAsset`, which the
+/// exchange only accepts when the destination is the account the funds leave:
+/// the master it signs for, or the subaccount named as the source.
+fn ensure_agent_send_target(
+    destination: Address,
+    master: Address,
+    args: &SendAssetArgs,
+) -> Result<(), CliError> {
+    let source = match args.from_subaccount.as_deref() {
+        Some(raw) => address(raw, AddressRole::Explicit(Some("--from-subaccount")))?,
+        None => master,
+    };
+    if destination != source {
+        return Err(CliError::Unsupported(format!(
+            "an API wallet can only send an asset to the account it leaves ({source}): --to is {destination}; move funds to another address with the master wallet"
+        )));
+    }
+    Ok(())
 }
 
 async fn withdraw(
@@ -518,10 +567,11 @@ async fn class_transfer(
     signer: &SelectedSigner,
     args: &ClassTransferArgs,
     kind: TransferActionKind,
+    subaccount: Option<Address>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let api = remote.api();
-    let balance_user = signer.query_address();
+    let balance_user = subaccount.unwrap_or_else(|| signer.query_address());
     let to_perp = kind == TransferActionKind::SpotToPerp;
     let amount = args.amount;
     if to_perp {
@@ -530,17 +580,24 @@ async fn class_transfer(
         ensure_usdc_available(api, balance_user, amount).await?;
     }
 
-    let question = if to_perp {
-        format!("Transfer {amount} USDC from spot to perp?")
+    let direction = if to_perp {
+        "from spot to perp"
     } else {
-        format!("Transfer {amount} USDC from perp to spot?")
+        "from perp to spot"
+    };
+    let question = match subaccount {
+        Some(subaccount) => {
+            format!("Transfer {amount} USDC {direction} for subaccount {subaccount}?")
+        }
+        None => format!("Transfer {amount} USDC {direction}?"),
     };
     confirm::unless_yes(args.yes, inv.mode(), "", &question, "transfer aborted")?;
 
     let amount = amount.normalize();
+    let wire_amount = class_transfer_amount(amount, subaccount);
     user_signed::submit(api, signer, |hyperliquid_chain, nonce| UsdClassTransfer {
         hyperliquidChain: hyperliquid_chain,
-        amount: amount.to_string(),
+        amount: wire_amount,
         toPerp: to_perp,
         nonce,
     })
@@ -551,8 +608,25 @@ async fn class_transfer(
     } else {
         "perp-to-spot"
     };
-    print_transfer(inv, label, amount, "USDC".to_string(), None);
+    print_transfer_for(
+        inv,
+        label,
+        amount,
+        "USDC".to_string(),
+        None,
+        subaccount.map(|subaccount| subaccount.to_string()),
+    );
     Ok(())
+}
+
+/// The `amount` of a `usdClassTransfer`. For a subaccount the exchange reads
+/// the target from a ` subaccount:<address>` suffix on the amount, which is
+/// part of what the master signs.
+fn class_transfer_amount(amount: Decimal, subaccount: Option<Address>) -> String {
+    match subaccount {
+        Some(subaccount) => format!("{amount} subaccount:{subaccount:#x}"),
+        None => amount.to_string(),
+    }
 }
 
 /// `transfer spot-to-perp` and `transfer perp-to-spot`.
@@ -562,15 +636,22 @@ async fn run_class_transfer(
     kind: TransferActionKind,
 ) -> Result<(), anyhow::Error> {
     quantity::require_positive(args.amount, "amount")?;
+    let subaccount = args
+        .subaccount
+        .as_deref()
+        .map(|selector| inv.resolve_account(selector))
+        .transpose()?;
     if inv.dry_run() {
-        return print_dry_run(
-            inv,
-            kind.would_execute(),
-            serde_json::json!({"amount": args.amount.to_string()}),
-        );
+        let mut preview = serde_json::json!({"amount": args.amount.to_string()});
+        if let Some(subaccount) = subaccount {
+            preview["subaccount"] = subaccount.to_string().into();
+            preview["wire_amount"] =
+                class_transfer_amount(args.amount.normalize(), Some(subaccount)).into();
+        }
+        return print_dry_run(inv, kind.would_execute(), preview);
     }
     let signer = inv.resolve_signer()?;
-    class_transfer(inv, &signer, args, kind).await
+    class_transfer(inv, &signer, args, kind, subaccount).await
 }
 
 #[derive(Debug)]
@@ -683,12 +764,24 @@ fn print_transfer(
     asset: String,
     destination: Option<String>,
 ) {
+    print_transfer_for(inv, action, amount, asset, destination, None);
+}
+
+fn print_transfer_for(
+    inv: &Invocation,
+    action: &str,
+    amount: Decimal,
+    asset: String,
+    destination: Option<String>,
+    subaccount: Option<String>,
+) {
     inv.print(&Rows::new(vec![TransferConfirmation {
         action: action.to_string(),
         status: "confirmed".to_string(),
         amount,
         asset,
         destination,
+        subaccount,
     }]));
 }
 
@@ -711,11 +804,16 @@ impl CliCommand for TransferSpotToPerp {
         "Transfer USDC from spot to perp.",
     )
     .signs(Signs::user_signed::<UsdClassTransfer>())
+    .master_only("usdClassTransfer")
     .prompt()
     .args(&[
         arg("amount")
             .kind(InputKind::Amount)
             .describe("USDC amount."),
+        arg("subaccount")
+            .kind(InputKind::ActingAccountSelector)
+            .describe("Move the USDC of this subaccount instead of the signer's own account: subaccount address, wallet name, or wallet id.")
+            .resource_id("subaccount selector"),
         arg("yes")
             .kind(InputKind::Boolean)
             .describe("Skip confirmation prompt for deliberate automation."),
@@ -738,11 +836,16 @@ impl CliCommand for TransferPerpToSpot {
         "Transfer USDC from perp to spot.",
     )
     .signs(Signs::user_signed::<UsdClassTransfer>())
+    .master_only("usdClassTransfer")
     .prompt()
     .args(&[
         arg("amount")
             .kind(InputKind::Amount)
             .describe("USDC amount."),
+        arg("subaccount")
+            .kind(InputKind::ActingAccountSelector)
+            .describe("Move the USDC of this subaccount instead of the signer's own account: subaccount address, wallet name, or wallet id.")
+            .resource_id("subaccount selector"),
         arg("yes")
             .kind(InputKind::Boolean)
             .describe("Skip confirmation prompt for deliberate automation."),
@@ -765,6 +868,7 @@ impl CliCommand for TransferSend {
         "Send USDC to another Hyperliquid address.",
     )
     .signs(Signs::Digest)
+    .master_only("usdSend")
     .prompt()
     .args(&[
         arg("to")
@@ -806,6 +910,7 @@ impl CliCommand for TransferSpotSend {
         "Send a spot token to another Hyperliquid address.",
     )
     .signs(Signs::Digest)
+    .master_only("spotSend")
     .prompt()
     .args(&[
         arg("to")
@@ -854,7 +959,7 @@ impl CliCommand for TransferSendAsset {
         &["transfer", "send-asset"],
         "transfer",
         "Send an asset between spot, perp, or DEX contexts",
-        "Send an asset between accounts, spot, perp, or DEX contexts.",
+        "Send an asset between accounts, spot, perp, or DEX contexts. An API wallet signs agentSendAsset instead, which only sends to the account the funds leave (the master, or --from-subaccount).",
     )
     .signs(Signs::Digest)
     .prompt()
@@ -889,21 +994,29 @@ impl CliCommand for TransferSendAsset {
         let token = require_spot_token(remote.api().sdk(), &args.token).await?;
         if inv.dry_run() {
             let kind = TransferActionKind::SendAsset;
-            return print_dry_run(
-                inv,
-                kind.would_execute(),
-                serde_json::json!({
-                    "to": route.destination.to_string(),
-                    "source": route.source.display,
-                    "source_wire": route.source.wire,
-                    "dest": route.dest.display,
-                    "dest_wire": route.dest.wire,
-                    "token": token.name,
-                    "token_index": token.index,
-                    "amount": args.amount.normalize().to_string(),
-                    "from_subaccount": args.from_subaccount.clone(),
-                }),
-            );
+            let mut preview = serde_json::json!({
+                "to": route.destination.to_string(),
+                "source": route.source.display,
+                "source_wire": route.source.wire,
+                "dest": route.dest.display,
+                "dest_wire": route.dest.wire,
+                "token": token.name,
+                "token_index": token.index,
+                "amount": args.amount.normalize().to_string(),
+                "from_subaccount": args.from_subaccount.clone(),
+            });
+            // An API wallet previews the action it would sign, and the
+            // refusal the live run would give.
+            if let Some(master) = inv
+                .preview_signer()?
+                .ok()
+                .filter(|signer| signer.is_stored_agent())
+                .map(SelectedSigner::query_address)
+            {
+                ensure_agent_send_target(route.destination, master, args)?;
+                preview["action_type"] = "agentSendAsset".into();
+            }
+            return print_dry_run(inv, kind.would_execute(), preview);
         }
         let resolved = inv.resolve_signer()?;
         let token_name =
@@ -931,6 +1044,7 @@ impl CliCommand for TransferWithdraw {
         "Withdraw USDC to Arbitrum.",
     )
     .signs(Signs::user_signed::<Withdraw>())
+    .master_only("withdraw3")
     .prompt()
     .args(&[
         arg("to")
@@ -1025,5 +1139,45 @@ mod tests {
                 "Reversibility"
             ]
         );
+    }
+
+    #[test]
+    fn a_subaccount_class_transfer_signs_the_amount_with_its_suffix() {
+        let subaccount = Address::repeat_byte(0xcc);
+
+        assert_eq!(
+            class_transfer_amount(Decimal::new(55, 1), Some(subaccount)),
+            "5.5 subaccount:0xcccccccccccccccccccccccccccccccccccccccc"
+        );
+        assert_eq!(class_transfer_amount(Decimal::new(55, 1), None), "5.5");
+    }
+
+    fn send_asset_args(from_subaccount: Option<&str>) -> SendAssetArgs {
+        SendAssetArgs {
+            to: String::new(),
+            source: "spot".to_string(),
+            dest: "perp".to_string(),
+            token: "USDC".to_string(),
+            amount: Decimal::ONE,
+            from_subaccount: from_subaccount.map(str::to_string),
+            yes: true,
+        }
+    }
+
+    #[test]
+    fn an_api_wallet_may_only_send_an_asset_to_the_account_it_leaves() {
+        let master = Address::repeat_byte(1);
+        let subaccount = Address::repeat_byte(2);
+        let sub = format!("{subaccount:#x}");
+
+        assert!(ensure_agent_send_target(master, master, &send_asset_args(None)).is_ok());
+        assert!(ensure_agent_send_target(subaccount, master, &send_asset_args(Some(&sub))).is_ok());
+        // The master is not the source once a subaccount is named, and a
+        // stranger is never the source.
+        for (destination, from) in [(master, Some(sub.as_str())), (subaccount, None)] {
+            let err =
+                ensure_agent_send_target(destination, master, &send_asset_args(from)).unwrap_err();
+            assert_eq!(err.exit_code(), 13);
+        }
     }
 }

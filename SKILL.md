@@ -494,7 +494,7 @@ hyperliquid --format json --dry-run builder approve --builder BUILDER_ADDRESS --
 
 Account-stateful outcomes are normal:
 
-- `staking claim-rewards` may return no rewards.
+- `staking claim-rewards` claims referral and builder rewards (staking rewards are redelegated automatically) and may return no rewards.
 - `vault withdraw` may be blocked by lockup.
 - `referral set` and `referral register` are one-time stateful actions.
 

@@ -23,7 +23,7 @@ pub struct OptionalAddressArgs {
 
 impl OptionalAddressArgs {
     /// The address this selector names, or the selected signer's.
-    pub fn resolve(&self, inv: &Invocation) -> Result<Address, anyhow::Error> {
-        inv.resolve_user(self.address.as_deref())
+    pub async fn resolve(&self, inv: &Invocation) -> Result<Address, anyhow::Error> {
+        inv.resolve_user(self.address.as_deref()).await
     }
 }
