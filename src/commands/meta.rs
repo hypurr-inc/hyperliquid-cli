@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::assets::{DeployerFeeScales, SpotAsset, load_spot_markets};
-use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, NoArgs};
 use crate::commands::common::rows::MISSING;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;

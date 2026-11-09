@@ -89,6 +89,7 @@
 - `orders create` on a HIP-3 market, when the read of the dex balance for the margin helper fails, exits with the API's error class (`11` for a rate limit, `12` for a 5xx) instead of exit `1` with the SDK's raw text.
 - Market-data reads make fewer requests. A run reads `perpDexs` at most once (`orders cancel-all --dex X --coin Y` read it twice), `perps list`/`perps get` read the spot metadata only to name a collateral other than USDC, and `spot get` reads `spotMetaAndAssetCtxs` alone instead of `spotMeta` followed by it.
 - `asset search` and `asset decode` add the reason a HIP-3 dex's metadata could not be read to their `HIP-3 dex <name> metadata unavailable, results are limited` stderr notice. A spot market whose token reports a negative or oversized `szDecimals` is an internal error in `spot list` and `meta` as it already was in every command that resolves a market, instead of printing the raw number.
+- `referral status` refuses a bare API-wallet key with the master it signs for (exit `13`), like the other signer-derived reads, instead of showing the agent's own empty referral data.
 
 ## 0.18.0 - 2026-11-09
 

@@ -11,9 +11,8 @@ use hypersdk::{Address, Decimal};
 use crate::assets::{SpotTokenListing, require_spot_token};
 use crate::errors::CliError;
 use crate::exchange::actions;
-use crate::exchange::user_signed::AgentForm;
-use crate::invocation::{Invocation, Remote};
-use crate::signing::SelectedSigner;
+use crate::http_api::ApiClient;
+use crate::signing::{AgentForm, SelectedSigner};
 use crate::wire::{AddressRole, address};
 
 #[derive(Debug)]
@@ -82,7 +81,7 @@ pub struct AssetMove {
 
 impl AssetMove {
     /// The agent form this move is signed in, given how the signer signs
-    /// ([`AgentForm::of`]): `None` when it signs the master's `sendAsset`; an
+    /// ([`SelectedSigner::agent_form`]): `None` when it signs the master's `sendAsset`; an
     /// error when the exchange would refuse the agent form for this move.
     pub(crate) fn agent_form(
         &self,
@@ -105,19 +104,19 @@ pub(crate) struct ResolvedMove {
 }
 
 impl ResolvedMove {
-    pub(crate) async fn resolve(remote: &Remote, mv: AssetMove) -> Result<Self, anyhow::Error> {
-        let token = require_spot_token(remote.api(), &mv.token).await?;
+    pub(crate) async fn resolve(api: &ApiClient, mv: AssetMove) -> Result<Self, anyhow::Error> {
+        let token = require_spot_token(api, &mv.token).await?;
         Ok(Self { mv, token })
     }
 
     pub(crate) async fn send(
         &self,
-        remote: &Remote,
+        api: &ApiClient,
         signer: &SelectedSigner,
         form: Option<AgentForm>,
     ) -> Result<(), anyhow::Error> {
-        let chain = remote.chain();
-        let nonce = remote.api().nonces().next();
+        let chain = api.chain();
+        let nonce = api.nonces().next();
         let AssetMove {
             to,
             source,
@@ -156,21 +155,20 @@ impl ResolvedMove {
                 .into_action(chain),
             )
         };
-        actions::send_default_l1_action_with_nonce(remote.api(), signer, action, nonce).await?;
+        actions::send_default_l1_action_with_nonce(api, signer, action, nonce).await?;
         Ok(())
     }
 }
 
 /// Sign and submit a `sendAsset` without asking or printing a receipt.
 pub async fn send_asset(
-    inv: &Invocation,
+    api: &ApiClient,
     signer: &SelectedSigner,
     mv: AssetMove,
 ) -> Result<(), anyhow::Error> {
-    let remote = inv.remote()?;
-    let resolved = ResolvedMove::resolve(remote, mv).await?;
-    let form = resolved.mv.agent_form(AgentForm::of(inv))?;
-    resolved.send(remote, signer, form).await
+    let resolved = ResolvedMove::resolve(api, mv).await?;
+    let form = resolved.mv.agent_form(signer.agent_form())?;
+    resolved.send(api, signer, form).await
 }
 
 /// An API wallet cannot sign `sendAsset`; it signs `agentSendAsset`, which the

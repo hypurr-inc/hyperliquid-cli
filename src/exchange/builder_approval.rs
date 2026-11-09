@@ -7,8 +7,9 @@ use serde::Serialize;
 
 use crate::builder_fee::MaxFeeRate;
 use crate::errors::CliError;
-use crate::exchange::user_signed::{self, UserSigned};
+use crate::exchange::user_signed;
 use crate::http_api::ApiClient;
+use crate::signable::UserSigned;
 use crate::signing::SelectedSigner;
 
 sol! {

@@ -2,8 +2,9 @@ use clap::Args;
 use hypersdk::hypercore::CandleInterval;
 
 use crate::assets::DexArg;
+use crate::cli_command::CliCommand;
 use crate::command_spec::{
-    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, Lifecycle, OwsSupport, Risk, arg,
+    ArgSpec, CommandSpec, GroupSpec, InputKind, Lifecycle, OwsSupport, Risk, arg,
 };
 use crate::commands::common::market_input::{market_coin, parse_candle_interval, perp_coin};
 use crate::errors::CliError;

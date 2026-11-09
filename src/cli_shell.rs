@@ -11,8 +11,9 @@ use std::sync::OnceLock;
 
 use clap::parser::ValueSource;
 use clap::{ArgMatches, CommandFactory, FromArgMatches, ValueEnum};
+use hyperliquid_cli::cli_command::Entry;
 use hyperliquid_cli::command_spec::{
-    CommandSpec, ConfirmationPolicy, DryRunPolicy, Entry, Risk, YES_ARG, YES_FLAG, supplied_secrets,
+    CommandSpec, ConfirmationPolicy, DryRunPolicy, Risk, YES_ARG, YES_FLAG, supplied_secrets,
 };
 use hyperliquid_cli::commands;
 use hyperliquid_cli::env::{self, EnvSource};
@@ -27,7 +28,7 @@ use crate::{Cli, GLOBAL_OPTIONS, SECRET_GLOBALS};
 pub(super) struct Selected {
     pub(super) entry: &'static Entry,
     pub(super) matches: ArgMatches,
-    pub(super) bound: Box<dyn hyperliquid_cli::command_spec::Bound>,
+    pub(super) bound: Box<dyn hyperliquid_cli::cli_command::Bound>,
     /// The command line after the program name, as typed.
     pub(super) args: Vec<String>,
     pub(super) redactions: Redactions,

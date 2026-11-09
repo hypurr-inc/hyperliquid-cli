@@ -4,7 +4,8 @@ use crate::assets::{
     Names, OutcomeCatalog, OutcomeQuestionRow, OutcomeSideRow, OutcomeTemplate, QuestionState,
     SettledOutcomeRow, load_outcome_templates, load_settled_outcome, parse_outcome_notation,
 };
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, NoArgs, arg};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
 use crate::invocation::Invocation;

@@ -9,8 +9,9 @@ use hypersdk::hypercore::{
 use serde::Serialize;
 
 use crate::assets::DexArg;
+use crate::cli_command::CliCommand;
 use crate::clock;
-use crate::command_spec::{CliCommand, CommandSpec, InputKind, arg};
+use crate::command_spec::{CommandSpec, InputKind, arg};
 use crate::commands::common::market_input::{market_coin, parse_candle_interval, perp_coin};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;

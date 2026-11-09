@@ -8,9 +8,8 @@ use hypersdk::hypercore::types::{Action, LeverageType};
 use serde::Serialize;
 
 use crate::assets::{DexArg, PerpAsset};
-use crate::command_spec::{
-    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg,
-};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{ArgSpec, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
 use crate::commands::common::market_input::resolve_perp;
 use crate::commands::common::position::{PositionRow, find_position};
 use crate::commands::common::rows::{ListRow, Row, Rows};

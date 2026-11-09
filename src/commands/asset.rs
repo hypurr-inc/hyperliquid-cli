@@ -10,7 +10,8 @@ use crate::assets::{
     OutcomeDescription, OutcomeSideRow, PerpAsset, SpotAsset, classify, normalize_asset_name,
     outcome_coin, outcome_token, split_outcome_encoding,
 };
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::rows::or_missing;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;

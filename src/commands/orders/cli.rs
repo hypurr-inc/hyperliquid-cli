@@ -31,10 +31,10 @@ use super::{
     twap_cancel, twap_create,
 };
 use crate::assets::DexArg;
+use crate::cli_command::CliCommand;
 use crate::clock;
 use crate::command_spec::{
-    ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk,
-    YES_FOR_AUTOMATION, arg,
+    ArgSpec, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk, YES_FOR_AUTOMATION, arg,
 };
 use crate::commands::common::order_list::open_orders_output;
 use crate::errors::CliError;

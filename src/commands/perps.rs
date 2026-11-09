@@ -6,7 +6,8 @@ use crate::assets::{
     AssetMetadata, AssetQuery, CoinDecimal, DeployerFeeScales, DexArg, PerpAsset, eq_asset_name,
     load_perp_markets, parse_asset_query, qualify_dex_asset,
 };
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::market_input::resolve_perp;
 use crate::commands::common::paging;
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};

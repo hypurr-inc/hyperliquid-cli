@@ -1,5 +1,5 @@
 //! The commands: one module per command domain, each implementing
-//! [`CliCommand`](crate::command_spec::CliCommand) for its types and registered
+//! [`CliCommand`](crate::cli_command::CliCommand) for its types and registered
 //! in [`entries`].
 //!
 //! Layer rule: a command module never imports another command module, and no
@@ -44,7 +44,8 @@ pub mod watch_risk;
 
 use std::sync::LazyLock;
 
-use crate::command_spec::{Entry, GroupSpec};
+use crate::cli_command::Entry;
+use crate::command_spec::GroupSpec;
 
 /// Every command, in help order. Registering a command is one line here.
 pub fn entries() -> &'static [Entry] {
@@ -218,7 +219,7 @@ pub fn entries() -> &'static [Entry] {
 /// consumers clone it to decorate or `build()` their copy.
 pub fn command_tree() -> &'static clap::Command {
     static TREE: LazyLock<clap::Command> =
-        LazyLock::new(|| crate::command_spec::command_tree(entries(), groups()));
+        LazyLock::new(|| crate::cli_command::command_tree(entries(), groups()));
     &TREE
 }
 

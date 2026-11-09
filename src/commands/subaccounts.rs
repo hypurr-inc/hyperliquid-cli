@@ -4,7 +4,8 @@ use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
 use crate::assets::USDC_NAME;
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, YES, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, YES, arg};
 use crate::commands::common::direction::TransferDirection;
 use crate::commands::common::rows::{ListRow, Row, Rows};
 use crate::commands::common::subaccount_list;

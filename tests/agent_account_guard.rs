@@ -42,6 +42,7 @@ async fn a_bare_api_wallet_key_is_refused_with_its_master_by_every_signer_derive
         &["orders", "history"],
         &["api-wallet", "list"],
         &["subaccount", "list"],
+        &["referral", "status"],
         &["watch", "risk", "--max-events", "1"],
     ] {
         let output = env
