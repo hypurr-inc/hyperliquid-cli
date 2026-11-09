@@ -5,7 +5,8 @@ use hyperliquid_cli::bankr::BankrClient;
 use hyperliquid_cli::signing::SelectedSigner;
 use predicates::prelude::*;
 use serde_json::Value;
-use support::{IsolatedHome, mock_all_mids_server};
+use support::exchange::ExchangeFixture;
+use support::{IsolatedHome, run_json, stdout_json};
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -25,6 +26,29 @@ fn wallet_me_body() -> serde_json::Value {
     })
 }
 
+/// A Bankr API that knows [`BANKR_KEY`] and answers `/wallet/me` with `body`.
+async fn bankr_server(body: Value) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/wallet/me"))
+        .and(header("X-API-Key", BANKR_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// How many times `server` was asked to sign something.
+async fn sign_requests(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.path() == "/wallet/sign")
+        .count()
+}
+
 fn config_json(env: &IsolatedHome) -> Value {
     let text = std::fs::read_to_string(env.config_file()).unwrap();
     serde_json::from_str(&text).unwrap()
@@ -33,13 +57,7 @@ fn config_json(env: &IsolatedHome) -> Value {
 #[tokio::test]
 async fn wallet_login_stores_the_key_and_address_and_logout_removes_them() {
     let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/wallet/me"))
-        .and(header("X-API-Key", BANKR_KEY))
-        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
-        .mount(&server)
-        .await;
+    let server = bankr_server(wallet_me_body()).await;
 
     env.command()
         // The CLI override must win over platform environment discovery.
@@ -88,14 +106,7 @@ async fn wallet_login_stores_the_key_and_address_and_logout_removes_them() {
 #[tokio::test]
 async fn bankr_cli_credentials_are_read_from_the_isolated_home() {
     let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/wallet/me"))
-        .and(header("X-API-Key", BANKR_KEY))
-        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
-        .expect(1)
-        .mount(&server)
-        .await;
+    let server = bankr_server(wallet_me_body()).await;
 
     let bankr_dir = env.home.join(".bankr");
     std::fs::create_dir_all(&bankr_dir).unwrap();
@@ -113,6 +124,11 @@ async fn bankr_cli_credentials_are_read_from_the_isolated_home() {
         .assert()
         .success()
         .stdout(predicate::str::contains(BANKR_ADDRESS));
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        1,
+        "the address is resolved by one /wallet/me call authenticated with the key read from ~/.bankr"
+    );
 }
 
 #[tokio::test]
@@ -181,7 +197,7 @@ fn bankr_flag_without_credentials_names_wallet_login() {
         .get_output()
         .stdout
         .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = stdout_json(&output);
     assert_eq!(json["reason"], "auth_required");
     assert!(
         json["next"]
@@ -276,6 +292,7 @@ async fn the_right_key_signs_and_is_accepted() {
             .unwrap(),
         signer.address()
     );
+    assert_eq!(sign_requests(&server).await, 1);
 }
 
 #[test]
@@ -332,13 +349,7 @@ fn wallet_me_body_with_address(address: &str) -> Value {
 #[tokio::test]
 async fn a_cached_address_survives_only_for_the_login_endpoint() {
     let env = IsolatedHome::new();
-    let login_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/wallet/me"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
-        .expect(1)
-        .mount(&login_server)
-        .await;
+    let login_server = bankr_server(wallet_me_body()).await;
 
     env.command()
         .args([
@@ -359,19 +370,17 @@ async fn a_cached_address_survives_only_for_the_login_endpoint() {
         .assert()
         .success()
         .stdout(predicate::str::contains(BANKR_ADDRESS));
-    login_server.verify().await;
+    assert_eq!(
+        login_server.received_requests().await.unwrap().len(),
+        1,
+        "the login call only"
+    );
 
     // A different endpoint can hold a different wallet, so the address is
     // re-resolved instead of reusing the cached one.
     let other = "0x00000000000000000000000000000000000000aa";
     let other_display = "0x00000000000000000000000000000000000000AA";
-    let other_server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/wallet/me"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body_with_address(other)))
-        .expect(1)
-        .mount(&other_server)
-        .await;
+    let other_server = bankr_server(wallet_me_body_with_address(other)).await;
 
     env.command()
         .args(["--bankr", "wallet", "show"])
@@ -379,7 +388,7 @@ async fn a_cached_address_survives_only_for_the_login_endpoint() {
         .assert()
         .success()
         .stdout(predicate::str::contains(other_display));
-    other_server.verify().await;
+    assert_eq!(other_server.received_requests().await.unwrap().len(), 1);
 }
 
 #[test]
@@ -392,18 +401,13 @@ fn wallet_logout_without_a_config_file_is_a_noop() {
         .stdout(predicate::str::contains("No Bankr login is stored"));
 }
 
-#[tokio::test]
-async fn logout_declares_the_confirmation_it_asks_for() {
+#[test]
+fn logout_declares_the_confirmation_it_asks_for() {
     let env = IsolatedHome::new();
-    let schema = env
-        .command()
-        .args(["--format", "json", "schema", "wallet", "logout"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let schema: Value = serde_json::from_slice(&schema).unwrap();
+    let schema = run_json(
+        env.command()
+            .args(["--format", "json", "schema", "wallet", "logout"]),
+    );
     assert_eq!(schema["confirmation"], "prompt");
 
     // A machine run without --yes is the same blocked command the schema names.
@@ -419,24 +423,10 @@ async fn logout_declares_the_confirmation_it_asks_for() {
 #[tokio::test]
 async fn api_wallet_approval_under_bankr_is_refused_before_any_signing_request() {
     let env = IsolatedHome::new();
-    let bankr = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/wallet/me"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
-        .mount(&bankr)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/wallet/sign"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&bankr)
-        .await;
-    let exchange = mock_all_mids_server().await;
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&exchange)
+    let bankr = bankr_server(wallet_me_body()).await;
+    let exchange = ExchangeFixture::start().await;
+    exchange
+        .mount_exchange(serde_json::json!({"status": "ok", "response": {"type": "default"}}))
         .await;
 
     env.command_with_server(&exchange)
@@ -448,8 +438,8 @@ async fn api_wallet_approval_under_bankr_is_refused_before_any_signing_request()
         .stdout(predicate::str::contains("private_key").not())
         .stderr(predicate::str::contains("Bankr signs trading actions"));
 
-    bankr.verify().await;
-    exchange.verify().await;
+    assert_eq!(sign_requests(&bankr).await, 0);
+    assert!(exchange.exchange_actions().await.is_empty());
 }
 
 /// The signer is asked what the command signs as soon as it resolves, so a
@@ -459,19 +449,8 @@ async fn api_wallet_approval_under_bankr_is_refused_before_any_signing_request()
 async fn bankr_is_asked_what_a_command_signs_before_the_command_starts() {
     const ADDRESS: &str = "0x0000000000000000000000000000000000000001";
     let env = IsolatedHome::new();
-    let bankr = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/wallet/me"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
-        .mount(&bankr)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/wallet/sign"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&bankr)
-        .await;
-    let exchange = mock_all_mids_server().await;
+    let bankr = bankr_server(wallet_me_body()).await;
+    let exchange = ExchangeFixture::start().await;
 
     for args in [
         vec![
@@ -508,13 +487,14 @@ async fn bankr_is_asked_what_a_command_signs_before_the_command_starts() {
             .stdout(predicate::str::contains("Bankr signs trading actions"));
     }
 
-    bankr.verify().await;
+    assert_eq!(sign_requests(&bankr).await, 0);
     // Only the endpoint probe every run starts with reached the API: no
     // lookup, no confirmation read, no exchange post.
     let requests = exchange.received_requests().await.unwrap();
     assert_eq!(requests.len(), 4, "{requests:?}");
     assert!(requests.iter().all(|request| {
-        request.url.path() == "/info" && request.body.ends_with(br#""allMids"}"#)
+        request.url.path() == "/info"
+            && stdout_json(&request.body) == serde_json::json!({"type": "allMids"})
     }));
 }
 
@@ -525,19 +505,8 @@ async fn bankr_is_asked_what_a_command_signs_before_the_command_starts() {
 async fn a_dry_run_is_refused_for_what_bankr_would_refuse_live() {
     const ADDRESS: &str = "0x0000000000000000000000000000000000000001";
     let env = IsolatedHome::new();
-    let bankr = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/wallet/me"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(wallet_me_body()))
-        .mount(&bankr)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/wallet/sign"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&bankr)
-        .await;
-    let exchange = mock_all_mids_server().await;
+    let bankr = bankr_server(wallet_me_body()).await;
+    let exchange = ExchangeFixture::start().await;
 
     for args in [
         vec!["transfer", "withdraw", "--to", ADDRESS, "--amount", "1"],
@@ -570,29 +539,24 @@ async fn a_dry_run_is_refused_for_what_bankr_would_refuse_live() {
             .stdout(predicate::str::contains("Bankr signs trading actions"));
     }
 
-    let output = env
-        .command_with_server(&exchange)
-        .env("BANKR_API_KEY", BANKR_KEY)
-        .env("BANKR_API_URL", bankr.uri())
-        .args([
-            "--bankr",
-            "--dry-run",
-            "--format",
-            "json",
-            "transfer",
-            "spot-to-perp",
-            "--amount",
-            "1",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let preview: Value = serde_json::from_slice(&output).unwrap();
+    let preview = run_json(
+        env.command_with_server(&exchange)
+            .env("BANKR_API_KEY", BANKR_KEY)
+            .env("BANKR_API_URL", bankr.uri())
+            .args([
+                "--bankr",
+                "--dry-run",
+                "--format",
+                "json",
+                "transfer",
+                "spot-to-perp",
+                "--amount",
+                "1",
+            ]),
+    );
     assert_eq!(preview["signer"], BANKR_ADDRESS);
 
-    bankr.verify().await;
+    assert_eq!(sign_requests(&bankr).await, 0);
 }
 
 /// A dry run with no signer at all still previews, naming none.
@@ -600,25 +564,17 @@ async fn a_dry_run_is_refused_for_what_bankr_would_refuse_live() {
 fn a_dry_run_without_any_signer_previews_with_a_null_signer() {
     const ADDRESS: &str = "0x0000000000000000000000000000000000000001";
     let env = IsolatedHome::new();
-    let output = env
-        .command()
-        .args([
-            "--dry-run",
-            "--format",
-            "json",
-            "transfer",
-            "withdraw",
-            "--to",
-            ADDRESS,
-            "--amount",
-            "1",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let preview: Value = serde_json::from_slice(&output).unwrap();
+    let preview = run_json(env.command().args([
+        "--dry-run",
+        "--format",
+        "json",
+        "transfer",
+        "withdraw",
+        "--to",
+        ADDRESS,
+        "--amount",
+        "1",
+    ]));
     assert!(preview["signer"].is_null());
-    assert!(preview["signer_warning"].is_string());
+    assert_eq!(preview["signer_warning"], "Authentication required.");
 }

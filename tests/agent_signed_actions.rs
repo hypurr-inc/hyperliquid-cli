@@ -6,25 +6,17 @@
 
 mod support;
 
-use alloy::primitives::Address;
 use hypersdk::hypercore::Chain;
-use hypersdk::hypercore::signing::agent_signing_hash;
-use hypersdk::hypercore::types::Signature;
 use predicates::prelude::*;
 use serde::Serialize;
 use serde_json::{Value, json};
 use support::exchange::ExchangeFixture;
-use support::signing::{raw_l1_hash, recover_signer, test_signer};
-use support::{API_OVERRIDE_ENV, IsolatedHome, VALID_PRIVATE_KEY, expected_address};
+use support::signing::{recover_raw_l1_signer, recover_signer, test_signer};
+use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address};
 
 const MASTER: &str = "0x00000000000000000000000000000000000000aa";
 const OTHER: &str = "0x00000000000000000000000000000000000000bb";
 const SUBACCOUNT: &str = "0x00000000000000000000000000000000000000cc";
-
-/// A home whose default signer is an API wallet of [`MASTER`].
-fn home_with_agent() -> IsolatedHome {
-    IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER))
-}
 
 async fn server() -> ExchangeFixture {
     let server = ExchangeFixture::start().await;
@@ -34,22 +26,13 @@ async fn server() -> ExchangeFixture {
     server
 }
 
-/// A command signed by the stored API wallet.
-fn as_agent(env: &IsolatedHome, server: &ExchangeFixture) -> assert_cmd::Command {
-    let mut command = env.account_command_without_passphrase();
-    command
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args(["--format", "json", "--testnet"]);
-    command
-}
-
 fn lower(address: &str) -> String {
     address.to_lowercase()
 }
 
 #[tokio::test]
 async fn user_signed_actions_refuse_a_stored_api_wallet_before_any_request() {
-    let env = home_with_agent();
+    let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
     let server = server().await;
 
     // (arguments, the exchange action the refusal names, takes --yes)
@@ -142,7 +125,7 @@ async fn user_signed_actions_refuse_a_stored_api_wallet_before_any_request() {
             } else if takes_yes {
                 args.push("--yes");
             }
-            as_agent(&env, &server)
+            env.stored_json(&server)
                 .args(&args)
                 .assert()
                 .code(13)
@@ -156,10 +139,10 @@ async fn user_signed_actions_refuse_a_stored_api_wallet_before_any_request() {
 
 #[tokio::test]
 async fn an_api_wallet_signs_agent_send_asset_to_the_account_it_signs_for() {
-    let env = home_with_agent();
+    let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
     let server = server().await;
 
-    as_agent(&env, &server)
+    env.stored_json(&server)
         .args([
             "transfer",
             "send-asset",
@@ -209,10 +192,10 @@ async fn an_api_wallet_signs_agent_send_asset_to_the_account_it_signs_for() {
 
 #[tokio::test]
 async fn an_api_wallet_may_send_asset_out_of_a_subaccount_to_that_subaccount() {
-    let env = home_with_agent();
+    let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
     let server = server().await;
 
-    as_agent(&env, &server)
+    env.stored_json(&server)
         .args([
             "transfer",
             "send-asset",
@@ -240,11 +223,11 @@ async fn an_api_wallet_may_send_asset_out_of_a_subaccount_to_that_subaccount() {
 
 #[tokio::test]
 async fn an_api_wallet_cannot_send_asset_to_another_address_live_or_dry_run() {
-    let env = home_with_agent();
+    let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
     let server = server().await;
 
     for dry_run in [true, false] {
-        let mut command = as_agent(&env, &server);
+        let mut command = env.stored_json(&server);
         if dry_run {
             command.arg("--dry-run");
         }
@@ -275,7 +258,7 @@ async fn an_api_wallet_cannot_send_asset_to_another_address_live_or_dry_run() {
 
 #[tokio::test]
 async fn send_asset_dry_run_names_the_agent_action_only_for_an_api_wallet() {
-    let env = home_with_agent();
+    let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
     let server = server().await;
     let args = [
         "--dry-run",
@@ -293,7 +276,7 @@ async fn send_asset_dry_run_names_the_agent_action_only_for_an_api_wallet() {
         "1",
     ];
 
-    let output = as_agent(&env, &server).args(args).output().unwrap();
+    let output = env.stored_json(&server).args(args).output().unwrap();
     let preview: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(preview["args"]["action_type"], "agentSendAsset");
 
@@ -337,21 +320,12 @@ struct CDeposit2 {
     wei: u64,
 }
 
-/// The signer of an L1 action hypersdk does not model, from its msgpack hash.
-fn raw_l1_signer(action: &impl Serialize, nonce: u64, signature: &Value) -> Address {
-    let prehash = agent_signing_hash(Chain::Testnet, raw_l1_hash(action, nonce));
-    let signature: Signature = serde_json::from_value(signature.clone()).unwrap();
-    alloy::signers::Signature::new(signature.r, signature.s, signature.v == 28)
-        .recover_address_from_prehash(&prehash)
-        .unwrap()
-}
-
 #[tokio::test]
 async fn an_api_wallet_deposits_to_staking_with_the_agent_action() {
-    let env = home_with_agent();
+    let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
     let server = server().await;
 
-    as_agent(&env, &server)
+    env.stored_json(&server)
         .args(["staking", "deposit", "--amount", "1.5"])
         .assert()
         .success();
@@ -362,16 +336,17 @@ async fn an_api_wallet_deposits_to_staking_with_the_agent_action() {
         bodies[0]["action"],
         json!({"type": "cDeposit2", "wei": 150_000_000_u64})
     );
-    let nonce = bodies[0]["nonce"].as_u64().unwrap();
-    let recovered = raw_l1_signer(
-        &CDeposit2 {
-            r#type: "cDeposit2",
-            wei: 150_000_000,
-        },
-        nonce,
-        &bodies[0]["signature"],
+    assert_eq!(
+        recover_raw_l1_signer(
+            &bodies[0],
+            &CDeposit2 {
+                r#type: "cDeposit2",
+                wei: 150_000_000,
+            },
+            Chain::Testnet,
+        ),
+        test_signer()
     );
-    assert_eq!(recovered.to_string().to_lowercase(), test_signer());
 }
 
 #[tokio::test]
@@ -392,10 +367,11 @@ async fn a_master_key_deposits_to_staking_with_the_user_signed_action() {
 
 #[tokio::test]
 async fn staking_deposit_dry_run_names_the_agent_action_only_for_an_api_wallet() {
-    let env = home_with_agent();
+    let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
     let server = server().await;
 
-    let output = as_agent(&env, &server)
+    let output = env
+        .stored_json(&server)
         .args(["--dry-run", "staking", "deposit", "--amount", "1"])
         .output()
         .unwrap();
@@ -410,10 +386,10 @@ async fn an_api_wallet_sets_its_masters_abstraction_with_the_agent_action() {
         ("unified-account", "u"),
         ("portfolio-margin", "p"),
     ] {
-        let env = home_with_agent();
+        let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
         let server = server().await;
 
-        as_agent(&env, &server)
+        env.stored_json(&server)
             .args(["account", "abstraction", "set", "--mode", mode, "--yes"])
             .assert()
             .success();
@@ -430,10 +406,10 @@ async fn an_api_wallet_sets_its_masters_abstraction_with_the_agent_action() {
 
 #[tokio::test]
 async fn an_api_wallet_may_name_its_master_but_no_other_account() {
-    let env = home_with_agent();
+    let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
     let server = server().await;
 
-    as_agent(&env, &server)
+    env.stored_json(&server)
         .args([
             "account",
             "abstraction",
@@ -449,7 +425,7 @@ async fn an_api_wallet_may_name_its_master_but_no_other_account() {
     assert_eq!(server.exchange_actions().await.len(), 1);
 
     for dry_run in [true, false] {
-        let mut command = as_agent(&env, &server);
+        let mut command = env.stored_json(&server);
         if dry_run {
             command.arg("--dry-run");
         }
@@ -479,10 +455,11 @@ async fn an_api_wallet_may_name_its_master_but_no_other_account() {
 
 #[tokio::test]
 async fn abstraction_dry_run_previews_the_agent_action_for_an_api_wallet() {
-    let env = home_with_agent();
+    let env = IsolatedHome::new().with_stored_account("bot", VALID_PRIVATE_KEY, Some(MASTER));
     let server = server().await;
 
-    let output = as_agent(&env, &server)
+    let output = env
+        .stored_json(&server)
         .args([
             "--dry-run",
             "account",

@@ -271,6 +271,17 @@ impl IsolatedHome {
         command
     }
 
+    /// A command against `server` signed by this home's stored default account,
+    /// on the testnet with JSON output: what a test of a stored wallet
+    /// starts from, as [`Self::live_json`] is for a bare key.
+    pub fn stored_json(&self, server: &MockServer) -> Command {
+        let mut command = self.account_command_without_passphrase();
+        command
+            .env(API_OVERRIDE_ENV, server.uri())
+            .args(["--format", "json", "--testnet"]);
+        command
+    }
+
     /// This home with `alias` stored as its default account, holding
     /// `private_key`: a plain wallet, or an API wallet of `master` when one is
     /// given. Run it with [`Self::account_command_without_passphrase`].

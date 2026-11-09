@@ -77,8 +77,10 @@ impl ConfigHome {
             .get_output()
             .stdout
             .clone();
-        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-        json["network"].as_str().unwrap().to_string()
+        support::stdout_json(&output)["network"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 }
 
@@ -222,27 +224,88 @@ fn invalid_network_in_config_file_returns_configuration_error() {
         .stdout(predicates::str::contains("bogus"));
 }
 
-mod settings_tests {
-    use hyperliquid_cli::env::EnvSource;
-    use hyperliquid_cli::network::Network;
+/// A proxy that refuses every connection and remembers what it was asked to
+/// connect to, to see where a command with no API override sends its reads.
+struct RecordingProxy {
+    address: std::net::SocketAddr,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
 
-    #[test]
-    fn default_config_path_is_config_json_in_a_hyperliquid_directory() {
-        let path =
-            hyperliquid_cli::paths::config_file(&EnvSource::fixed::<&str, &str>([])).unwrap();
-        assert_eq!(path.file_name().unwrap(), "config.json");
-        assert_eq!(path.parent().unwrap().file_name().unwrap(), "hyperliquid");
+impl RecordingProxy {
+    fn start() -> Self {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::atomic::Ordering;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let thread = {
+            let (stop, seen) = (stop.clone(), seen.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    let mut request_line = String::new();
+                    BufReader::new(&stream)
+                        .read_line(&mut request_line)
+                        .unwrap();
+                    seen.lock().unwrap().push(request_line.trim().to_string());
+                    let _ =
+                        stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
+                }
+            })
+        };
+        Self {
+            address,
+            stop,
+            seen,
+            thread: Some(thread),
+        }
     }
 
-    #[test]
-    fn api_base_urls_default_to_the_public_endpoints() {
-        assert_eq!(
-            Network::Mainnet.api_base_url(),
-            "https://api.hyperliquid.xyz"
-        );
-        assert_eq!(
-            Network::Testnet.api_base_url(),
-            "https://api.hyperliquid-testnet.xyz"
-        );
+    /// The request lines the proxy received, after stopping it.
+    fn finish(mut self) -> Vec<String> {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.thread.take().unwrap().join().unwrap();
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+#[test]
+fn public_reads_go_to_each_networks_documented_api_host() {
+    for (args, host) in [
+        (
+            &["--no-update-check", "mids"][..],
+            "api.hyperliquid.xyz:443",
+        ),
+        (
+            &["--no-update-check", "--testnet", "mids"],
+            "api.hyperliquid-testnet.xyz:443",
+        ),
+    ] {
+        let home = ConfigHome::new();
+        let proxy = RecordingProxy::start();
+        let url = format!("http://{}", proxy.address);
+
+        home.command()
+            .env("HTTPS_PROXY", &url)
+            .env("HTTP_PROXY", &url)
+            .env("ALL_PROXY", &url)
+            .args(args)
+            .assert()
+            .failure();
+
+        let seen = proxy.finish();
+        assert!(!seen.is_empty(), "{args:?} reached no host");
+        for line in &seen {
+            assert_eq!(line, &format!("CONNECT {host} HTTP/1.1"), "{args:?}");
+        }
     }
 }

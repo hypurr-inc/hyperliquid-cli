@@ -124,6 +124,17 @@ impl ExchangeFixture {
             .await;
     }
 
+    /// Answer the `/info` request whose body contains `fields` with an HTTP
+    /// error `status` and no body, for a read that fails.
+    pub async fn mount_info_failure(&self, fields: Value, status: u16) {
+        Mock::given(method("POST"))
+            .and(path("/info"))
+            .and(body_partial_json(fields))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&self.server)
+            .await;
+    }
+
     /// Like [`Self::mount_info`], but outranking every mount made without it,
     /// to change an answer the fixture already gave.
     pub async fn override_info(&self, request: Value, response: Value) {
@@ -185,6 +196,16 @@ impl ExchangeFixture {
             .and(path("/exchange"))
             .respond_with(ResponseTemplate::new(200).set_body_json(response))
             .up_to_n_times(1)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Answer every `/exchange` request with an HTTP `status` and a plain-text
+    /// `body`, for a transport failure rather than an exchange reply.
+    pub async fn mount_exchange_failure(&self, status: u16, body: &str) {
+        Mock::given(method("POST"))
+            .and(path("/exchange"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
             .mount(&self.server)
             .await;
     }

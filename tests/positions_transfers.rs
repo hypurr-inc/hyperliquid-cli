@@ -1,266 +1,112 @@
 mod support;
 
+use hypersdk::hypercore::Chain;
 use predicates::prelude::*;
-use serde_json::Value;
-use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, TEST_ACCOUNT_PASSPHRASE, VALID_PRIVATE_KEY,
-    expected_address,
+use serde_json::{Value, json};
+use support::exchange::{ExchangeFixture, Hip3Dex};
+use support::signing::user_signed::{
+    SEND_ASSET, SPOT_SEND, USD_CLASS_TRANSFER, USD_SEND, WITHDRAW,
 };
-use wiremock::matchers::{body_partial_json, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use support::signing::{recover_signer, recover_user_signer, test_signer};
+use support::{IsolatedHome, TEST_ACCOUNT_PASSPHRASE, VALID_PRIVATE_KEY, expected_address, wire};
 
 const VALID_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 
-fn clearinghouse_state(withdrawable: &str) -> serde_json::Value {
-    serde_json::json!({
-        "marginSummary": {
-            "accountValue": "10000",
-            "totalNtlPos": "4000",
-            "totalRawUsd": "10000",
-            "totalMarginUsed": "1000"
-        },
-        "crossMarginSummary": {
-            "accountValue": "10000",
-            "totalNtlPos": "4000",
-            "totalRawUsd": "10000",
-            "totalMarginUsed": "1000"
-        },
-        "crossMaintenanceMarginUsed": "100",
-        "withdrawable": withdrawable,
-        "assetPositions": [
-            {
-                "type": "oneWay",
-                "position": {
-                    "coin": "BTC",
-                    "szi": "0.1",
-                    "leverage": {"type": "cross", "value": 5},
-                    "entryPx": "50000",
-                    "positionValue": "5100",
-                    "unrealizedPnl": "100",
-                    "returnOnEquity": "0.1",
-                    "liquidationPx": null,
-                    "marginUsed": "1000",
-                    "maxLeverage": 50,
-                    "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
-                }
-            },
-            {
-                "type": "oneWay",
-                "position": {
-                    "coin": "ETH",
-                    "szi": "-1",
-                    "leverage": {"type": "isolated", "value": 3, "rawUsd": "1000"},
-                    "entryPx": "3200",
-                    "positionValue": "3000",
-                    "unrealizedPnl": "-200",
-                    "returnOnEquity": "-0.2",
-                    "liquidationPx": "6000",
-                    "marginUsed": "1000",
-                    "maxLeverage": 50,
-                    "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
-                }
-            }
-        ],
-        "time": 1700000000000_u64
-    })
+/// An account with a winning BTC cross position and a losing ETH isolated one.
+fn positions_state(withdrawable: &str) -> Value {
+    let mut btc = wire::position_with("BTC", json!({"type": "cross", "value": 5}), "1000", 50);
+    btc["position"]["unrealizedPnl"] = json!("100");
+    let mut eth = wire::position_with(
+        "ETH",
+        json!({"type": "isolated", "value": 3, "rawUsd": "1000"}),
+        "1000",
+        50,
+    );
+    eth["position"]["unrealizedPnl"] = json!("-200");
+    wire::perp_state(withdrawable, vec![btc, eth])
 }
 
-async fn mock_positions_transfer_server(withdrawable: &str, spot_usdc_total: &str) -> MockServer {
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "BTC": "51000",
-            "ETH": "3000"
-        })))
-        .mount(&server)
+/// An exchange where the account holds `withdrawable` on the perp side and
+/// `spot_usdc_total` USDC on the spot side, and accepts every action.
+async fn exchange(withdrawable: &str, spot_usdc_total: &str) -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_info_containing(
+            json!({"type": "clearinghouseState"}),
+            positions_state(withdrawable),
+        )
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "meta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [
-                {
-                    "name": "BTC",
-                    "szDecimals": 5,
-                    "maxLeverage": 50,
-                    "onlyIsolated": false,
-                    "marginMode": null,
-                    "growthMode": "disabled"
-                },
-                {
-                    "name": "ETH",
-                    "szDecimals": 4,
-                    "maxLeverage": 50,
-                    "onlyIsolated": false,
-                    "marginMode": null,
-                    "growthMode": "disabled"
-                }
-            ],
-            "collateralToken": 0
-        })))
-        .mount(&server)
+    server
+        .mount_info_containing(
+            json!({"type": "spotClearinghouseState"}),
+            json!({"balances": [
+                {"coin": "USDC", "token": 0, "hold": "0", "total": spot_usdc_total, "entryNtl": "0"}
+            ]}),
+        )
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "spotMeta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [],
-            "tokens": [
-                {
-                    "name": "USDC",
-                    "index": 0,
-                    "tokenId": "0x00000000000000000000000000000000",
-                    "szDecimals": 6,
-                    "weiDecimals": 6,
-                    "evmContract": null
-                }
-            ]
-        })))
-        .mount(&server)
+    server
+        .mount_info_containing(json!({"type": "userAbstraction"}), json!("disabled"))
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "perpDexs"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-        .mount(&server)
+    server
+        .mount_exchange(json!({"status": "ok", "response": {"type": "default"}}))
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "clearinghouseState"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(clearinghouse_state(withdrawable)))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "spotClearinghouseState"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "balances": [
-                {
-                    "coin": "USDC",
-                    "token": 0,
-                    "hold": "0",
-                    "total": spot_usdc_total,
-                    "entryNtl": "0"
-                },
-                {
-                    "coin": "+100",
-                    "hold": "0.0",
-                    "total": "0.0",
-                    "entryNtl": "0.0"
-                }
-            ]
-        })))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "userAbstraction"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("disabled")))
-        .mount(&server)
-        .await;
-
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {"type": "default"}
-        })))
-        .mount(&server)
-        .await;
-
     server
 }
 
-async fn mock_spot_token_transfer_server() -> MockServer {
-    let server = MockServer::start().await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "allMids"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "BTC": "50000"
-        })))
-        .mount(&server)
+/// An exchange that lists the token HYPE (index 150) and accepts every action.
+async fn spot_token_exchange() -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
+    server
+        .override_info(
+            json!({"type": "spotMeta"}),
+            json!({
+                "universe": [],
+                "tokens": [
+                    {
+                        "name": "USDC", "index": 0,
+                        "tokenId": "0x00000000000000000000000000000000",
+                        "szDecimals": 6, "weiDecimals": 6, "evmContract": null
+                    },
+                    {
+                        "name": "HYPE", "index": 150,
+                        "tokenId": "0x11111111111111111111111111111111",
+                        "szDecimals": 2, "weiDecimals": 8, "evmContract": null
+                    }
+                ]
+            }),
+        )
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(serde_json::json!({"type": "spotMeta"})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "universe": [],
-            "tokens": [
-                {
-                    "name": "USDC",
-                    "index": 0,
-                    "tokenId": "0x00000000000000000000000000000000",
-                    "szDecimals": 6,
-                    "weiDecimals": 6,
-                    "evmContract": null,
-                    "fullName": null,
-                    "deployerTradingFeeShare": "0",
-                    "evmExtraWeiDecimals": 0
-                },
-                {
-                    "name": "HYPE",
-                    "index": 150,
-                    "tokenId": "0x11111111111111111111111111111111",
-                    "szDecimals": 2,
-                    "weiDecimals": 8,
-                    "evmContract": null,
-                    "fullName": null,
-                    "deployerTradingFeeShare": "0",
-                    "evmExtraWeiDecimals": 0
-                }
-            ]
-        })))
-        .mount(&server)
+    server
+        .mount_exchange(json!({"status": "ok", "response": {"type": "default"}}))
         .await;
-
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {"type": "default"}
-        })))
-        .mount(&server)
-        .await;
-
     server
 }
 
-async fn exchange_body(server: &MockServer) -> Value {
-    let requests = server.received_requests().await.unwrap();
-    let exchange_request = requests
-        .iter()
-        .find(|request| request.url.path() == "/exchange")
-        .expect("expected /exchange request");
-    serde_json::from_slice(&exchange_request.body).unwrap()
+/// The one `/exchange` request `server` received.
+async fn only_exchange_body(server: &ExchangeFixture) -> Value {
+    let mut bodies = server.exchange_bodies().await;
+    assert_eq!(bodies.len(), 1, "{bodies:?}");
+    bodies.remove(0)
+}
+
+/// The one request, checked to be a user-signed action of `type_string` that
+/// the test key signed on the testnet, with the nonce the action carries.
+async fn user_signed_action(server: &ExchangeFixture, type_string: &str) -> Value {
+    let body = only_exchange_body(server).await;
+    assert_eq!(recover_user_signer(&body, type_string), test_signer());
+    assert_eq!(body["action"]["hyperliquidChain"], "Testnet");
+    assert_eq!(body["action"]["signatureChainId"], "0x66eee");
+    assert!(body["vaultAddress"].is_null());
+    body
 }
 
 #[tokio::test]
 async fn positions_list_shows_positions_with_pnl_coloring() {
     let env = IsolatedHome::new();
-    let server = mock_positions_transfer_server("1000", "1000").await;
+    let server = exchange("1000", "1000").await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .env("FORCE_COLOR", "1")
         .args(["positions", "list"])
         .assert()
@@ -277,11 +123,9 @@ async fn positions_list_shows_positions_with_pnl_coloring() {
 #[tokio::test]
 async fn positions_list_table_and_json_keep_pnl_uncolored() {
     let env = IsolatedHome::new();
-    let server = mock_positions_transfer_server("1000", "1000").await;
+    let server = exchange("1000", "1000").await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .env("FORCE_COLOR", "1")
         .args(["--format", "table", "positions", "list"])
         .assert()
@@ -290,9 +134,7 @@ async fn positions_list_table_and_json_keep_pnl_uncolored() {
         .stdout(predicate::str::contains("-200"))
         .stdout(predicate::str::contains("\u{1b}[").not());
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .env("FORCE_COLOR", "1")
         .args(["--format", "json", "positions", "list"])
         .assert()
@@ -306,11 +148,9 @@ async fn positions_list_table_and_json_keep_pnl_uncolored() {
 #[tokio::test]
 async fn transfer_confirmation_prompts_are_yellow_only_in_pretty() {
     let env = IsolatedHome::new();
-    let server = mock_positions_transfer_server("1000", "1000").await;
+    let server = exchange("1000", "1000").await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .env("FORCE_COLOR", "1")
         .write_stdin("n\n")
         .args(["transfer", "spot-to-perp", "--amount", "100", "--testnet"])
@@ -320,36 +160,25 @@ async fn transfer_confirmation_prompts_are_yellow_only_in_pretty() {
             "\u{1b}[33mTransfer 100 USDC from spot to perp?\u{1b}[0m [y/N]: ",
         ));
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_json(&server)
         .env("FORCE_COLOR", "1")
         .write_stdin("n\n")
-        .args([
-            "--format",
-            "json",
-            "transfer",
-            "spot-to-perp",
-            "--amount",
-            "100",
-            "--testnet",
-        ])
+        .args(["transfer", "spot-to-perp", "--amount", "100"])
         .assert()
         .code(13)
         .stdout(predicate::str::contains(
             "without confirmation in non-interactive mode",
         ))
         .stdout(predicate::str::contains("\u{1b}[").not());
+    assert!(server.exchange_actions().await.is_empty());
 }
 
 #[tokio::test]
 async fn positions_update_leverage_validates_and_outputs_confirmation() {
     let env = IsolatedHome::new();
-    let server = mock_positions_transfer_server("1000", "1000").await;
+    let server = exchange("1000", "1000").await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .args([
             "positions",
             "update-leverage",
@@ -365,12 +194,12 @@ async fn positions_update_leverage_validates_and_outputs_confirmation() {
         .stdout(predicate::str::contains("5"))
         .stdout(predicate::str::contains("updated"));
 
-    let body = exchange_body(&server).await;
-    assert_eq!(body["action"]["type"], "updateLeverage");
-    assert_eq!(body["action"]["asset"], 0);
-    assert_eq!(body["action"]["isCross"], true);
-    assert_eq!(body["action"]["leverage"], 5);
-    assert!(body["signature"].is_object());
+    let body = only_exchange_body(&server).await;
+    assert_eq!(
+        body["action"],
+        json!({"type": "updateLeverage", "asset": 0, "isCross": true, "leverage": 5})
+    );
+    assert_eq!(recover_signer(&body, Chain::Testnet), test_signer());
 }
 
 #[test]
@@ -394,11 +223,9 @@ fn positions_update_leverage_rejects_zero() {
 #[tokio::test]
 async fn positions_update_margin_outputs_confirmation() {
     let env = IsolatedHome::new();
-    let server = mock_positions_transfer_server("1000", "1000").await;
+    let server = exchange("1000", "1000").await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .args([
             "positions",
             "update-margin",
@@ -414,182 +241,20 @@ async fn positions_update_margin_outputs_confirmation() {
         .stdout(predicate::str::contains("1000"))
         .stdout(predicate::str::contains("updated"));
 
-    let body = exchange_body(&server).await;
-    assert_eq!(body["action"]["type"], "updateIsolatedMargin");
-    assert_eq!(body["action"]["asset"], 1);
-    assert_eq!(body["action"]["isBuy"], true);
-    assert_eq!(body["action"]["ntli"], 1_000_000_000_u64);
-    assert!(body["signature"].is_object());
-}
-
-async fn mount_info(server: &MockServer, request: Value, response: Value) {
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(request))
-        .respond_with(ResponseTemplate::new(200).set_body_json(response))
-        .mount(server)
-        .await;
-}
-
-/// A server where `xyz:XYZ100` is the second market of the HIP-3 dex `xyz`
-/// (dex slot 1). The default dex lists only BTC, so only a live HIP-3 lookup
-/// can find it.
-async fn hip3_positions_server() -> MockServer {
-    let server = MockServer::start().await;
-    mount_info(
-        &server,
-        serde_json::json!({"type": "allMids"}),
-        serde_json::json!({"BTC": "1"}),
-    )
-    .await;
-    mount_info(
-        &server,
-        serde_json::json!({"type": "perpDexs"}),
-        serde_json::json!([null, {"name": "xyz", "deployerFeeScale": "1"}]),
-    )
-    .await;
-    mount_info(
-        &server,
-        serde_json::json!({"type": "spotMeta"}),
-        serde_json::json!({
-            "universe": [],
-            "tokens": [{
-                "name": "USDC", "index": 0,
-                "tokenId": "0x00000000000000000000000000000000",
-                "szDecimals": 6, "weiDecimals": 6, "evmContract": null
-            }]
-        }),
-    )
-    .await;
-    let market = |name: &str| {
-        serde_json::json!({
-            "name": name, "szDecimals": 2, "maxLeverage": 10,
-            "onlyIsolated": false, "marginMode": null, "growthMode": "disabled"
-        })
-    };
-    mount_info(
-        &server,
-        serde_json::json!({"type": "meta", "dex": "xyz"}),
-        serde_json::json!({
-            "universe": [market("xyz:XYZ50"), market("xyz:XYZ100")],
-            "collateralToken": 0
-        }),
-    )
-    .await;
-    mount_info(
-        &server,
-        serde_json::json!({"type": "meta"}),
-        serde_json::json!({"universe": [market("BTC")], "collateralToken": 0}),
-    )
-    .await;
-    mount_info(
-        &server,
-        serde_json::json!({"type": "clearinghouseState"}),
-        serde_json::json!({
-            "marginSummary": {
-                "accountValue": "100", "totalNtlPos": "10",
-                "totalRawUsd": "100", "totalMarginUsed": "1"
-            },
-            "crossMarginSummary": {
-                "accountValue": "100", "totalNtlPos": "10",
-                "totalRawUsd": "100", "totalMarginUsed": "1"
-            },
-            "crossMaintenanceMarginUsed": "1",
-            "withdrawable": "99",
-            "assetPositions": [{
-                "type": "oneWay",
-                "position": {
-                    "coin": "xyz:XYZ100",
-                    "szi": "1",
-                    "leverage": {"type": "isolated", "value": 3, "rawUsd": "10"},
-                    "entryPx": "10",
-                    "positionValue": "10",
-                    "unrealizedPnl": "0",
-                    "returnOnEquity": "0",
-                    "liquidationPx": null,
-                    "marginUsed": "1",
-                    "maxLeverage": 10,
-                    "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
-                }
-            }],
-            "time": 1700000000000_u64
-        }),
-    )
-    .await;
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {"type": "default"}
-        })))
-        .mount(&server)
-        .await;
-    server
-}
-
-#[tokio::test]
-async fn positions_update_leverage_targets_a_hip3_market_by_its_protocol_asset_id() {
-    let env = IsolatedHome::new();
-    let server = hip3_positions_server().await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "positions",
-            "update-leverage",
-            "--coin",
-            "xyz:XYZ100",
-            "--leverage",
-            "3",
-            "--isolated",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("xyz:XYZ100"));
-
-    let body = exchange_body(&server).await;
-    assert_eq!(body["action"]["type"], "updateLeverage");
-    assert_eq!(body["action"]["asset"], 110_001);
-    assert_eq!(body["action"]["isCross"], false);
-}
-
-#[tokio::test]
-async fn positions_update_margin_targets_a_hip3_market_by_its_protocol_asset_id() {
-    let env = IsolatedHome::new();
-    let server = hip3_positions_server().await;
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "positions",
-            "update-margin",
-            "--coin",
-            "xyz:XYZ100",
-            "--amount",
-            "5",
-            "--testnet",
-        ])
-        .assert()
-        .success();
-
-    let body = exchange_body(&server).await;
-    assert_eq!(body["action"]["type"], "updateIsolatedMargin");
-    assert_eq!(body["action"]["asset"], 110_001);
+    let body = only_exchange_body(&server).await;
+    assert_eq!(
+        body["action"],
+        json!({"type": "updateIsolatedMargin", "asset": 1, "isBuy": true, "ntli": 1_000_000_000_u64})
+    );
+    assert_eq!(recover_signer(&body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
 async fn positions_update_leverage_reports_an_unknown_hip3_market_as_not_found() {
     let env = IsolatedHome::new();
-    let server = hip3_positions_server().await;
+    let server = ExchangeFixture::start_with(vec![Hip3Dex::xyz()]).await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_json(&server)
         .args([
             "positions",
             "update-leverage",
@@ -597,21 +262,19 @@ async fn positions_update_leverage_reports_an_unknown_hip3_market_as_not_found()
             "xyz:NOPE",
             "--leverage",
             "3",
-            "--testnet",
         ])
         .assert()
         .code(13)
-        .stderr(predicate::str::contains("xyz:NOPE"));
+        .stdout(predicate::str::contains("xyz:NOPE"));
+    assert!(server.exchange_actions().await.is_empty());
 }
 
 #[tokio::test]
 async fn transfer_spot_to_perp_prompts_and_confirms() {
     let env = IsolatedHome::new();
-    let server = mock_positions_transfer_server("1000", "1000").await;
+    let server = exchange("1000", "1000").await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .write_stdin("y\n")
         .args(["transfer", "spot-to-perp", "--amount", "100", "--testnet"])
         .assert()
@@ -622,22 +285,26 @@ async fn transfer_spot_to_perp_prompts_and_confirms() {
             "Transfer 100 USDC from spot to perp?",
         ));
 
-    let body = exchange_body(&server).await;
-    assert_eq!(body["action"]["type"], "usdClassTransfer");
-    assert_eq!(body["action"]["amount"], "100");
-    assert_eq!(body["action"]["toPerp"], true);
-    assert!(body["action"]["nonce"].is_u64());
-    assert!(body["signature"].is_object());
+    let body = user_signed_action(&server, USD_CLASS_TRANSFER).await;
+    assert_eq!(
+        body["action"],
+        json!({
+            "type": "usdClassTransfer",
+            "signatureChainId": "0x66eee",
+            "hyperliquidChain": "Testnet",
+            "amount": "100",
+            "toPerp": true,
+            "nonce": body["nonce"],
+        })
+    );
 }
 
 #[tokio::test]
 async fn transfer_perp_to_spot_prompts_and_confirms() {
     let env = IsolatedHome::new();
-    let server = mock_positions_transfer_server("1000", "1000").await;
+    let server = exchange("1000", "1000").await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .write_stdin("y\n")
         .args(["transfer", "perp-to-spot", "--amount", "100", "--testnet"])
         .assert()
@@ -647,23 +314,27 @@ async fn transfer_perp_to_spot_prompts_and_confirms() {
             "Transfer 100 USDC from perp to spot?",
         ));
 
-    let body = exchange_body(&server).await;
-    assert_eq!(body["action"]["type"], "usdClassTransfer");
-    assert_eq!(body["action"]["amount"], "100");
-    assert_eq!(body["action"]["toPerp"], false);
-    assert!(body["action"]["nonce"].is_u64());
-    assert!(body["signature"].is_object());
+    let body = user_signed_action(&server, USD_CLASS_TRANSFER).await;
+    assert_eq!(
+        body["action"],
+        json!({
+            "type": "usdClassTransfer",
+            "signatureChainId": "0x66eee",
+            "hyperliquidChain": "Testnet",
+            "amount": "100",
+            "toPerp": false,
+            "nonce": body["nonce"],
+        })
+    );
 }
 
 #[tokio::test]
 async fn transfer_send_prompts_and_confirms() {
     let env = IsolatedHome::new();
-    let server = mock_positions_transfer_server("1000", "1000").await;
+    let server = exchange("1000", "1000").await;
     let signer = expected_address(VALID_PRIVATE_KEY);
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .write_stdin("yes\n")
         .args([
             "transfer",
@@ -699,49 +370,40 @@ async fn transfer_send_prompts_and_confirms() {
             "Send 100 USDC to {VALID_ADDRESS}?"
         )));
 
-    let body = exchange_body(&server).await;
-    assert_eq!(body["action"]["type"], "usdSend");
+    let body = user_signed_action(&server, USD_SEND).await;
     assert_eq!(
-        body["action"]["destination"]
-            .as_str()
-            .unwrap()
-            .to_ascii_lowercase(),
-        VALID_ADDRESS.to_ascii_lowercase()
+        body["action"],
+        json!({
+            "type": "usdSend",
+            "signatureChainId": "0x66eee",
+            "hyperliquidChain": "Testnet",
+            "destination": VALID_ADDRESS,
+            "amount": "100",
+            "time": body["nonce"],
+        })
     );
-    assert_eq!(body["action"]["amount"], "100");
-    assert!(body["action"]["time"].is_u64());
-    assert!(body["signature"].is_object());
 }
 
 #[tokio::test]
 async fn transfer_spot_send_dry_run_includes_token_and_destination() {
     let env = IsolatedHome::new();
-    let server = mock_spot_token_transfer_server().await;
+    let server = spot_token_exchange().await;
 
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "transfer",
-            "spot-send",
-            "--to",
-            VALID_ADDRESS,
-            "--token",
-            "HYPE",
-            "--amount",
-            "1.23",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let json = support::run_json(env.command_with_server(&server).args([
+        "--format",
+        "json",
+        "--dry-run",
+        "transfer",
+        "spot-send",
+        "--to",
+        VALID_ADDRESS,
+        "--token",
+        "HYPE",
+        "--amount",
+        "1.23",
+        "--testnet",
+    ]));
 
-    let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["command"], "transfer spot-send");
     assert_eq!(json["would_execute"], "spot_send");
     assert_eq!(json["args"]["to"], VALID_ADDRESS);
@@ -753,36 +415,27 @@ async fn transfer_spot_send_dry_run_includes_token_and_destination() {
 #[tokio::test]
 async fn transfer_send_asset_dry_run_normalizes_asset_targets() {
     let env = IsolatedHome::new();
-    let server = mock_spot_token_transfer_server().await;
+    let server = spot_token_exchange().await;
 
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "transfer",
-            "send-asset",
-            "--to",
-            VALID_ADDRESS,
-            "--source",
-            "spot",
-            "--dest",
-            "dex:test",
-            "--token",
-            "USDC",
-            "--amount",
-            "4.5",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let json = support::run_json(env.command_with_server(&server).args([
+        "--format",
+        "json",
+        "--dry-run",
+        "transfer",
+        "send-asset",
+        "--to",
+        VALID_ADDRESS,
+        "--source",
+        "spot",
+        "--dest",
+        "dex:test",
+        "--token",
+        "USDC",
+        "--amount",
+        "4.5",
+        "--testnet",
+    ]));
 
-    let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["command"], "transfer send-asset");
     assert_eq!(json["would_execute"], "send_asset");
     assert_eq!(json["args"]["source"], "spot");
@@ -824,12 +477,10 @@ fn transfer_send_asset_invalid_target_exits_before_auth() {
 #[tokio::test]
 async fn transfer_spot_send_submits_expected_exchange_payload() {
     let env = IsolatedHome::new();
-    let server = mock_spot_token_transfer_server().await;
+    let server = spot_token_exchange().await;
     let signer = expected_address(VALID_PRIVATE_KEY);
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .write_stdin("yes\n")
         .args([
             "transfer",
@@ -865,33 +516,28 @@ async fn transfer_spot_send_submits_expected_exchange_payload() {
             "Send 1.23 HYPE spot token to {VALID_ADDRESS}?"
         )));
 
-    let body = exchange_body(&server).await;
-    assert_eq!(body["action"]["type"], "spotSend");
+    let body = user_signed_action(&server, SPOT_SEND).await;
     assert_eq!(
-        body["action"]["destination"]
-            .as_str()
-            .unwrap()
-            .to_ascii_lowercase(),
-        VALID_ADDRESS.to_ascii_lowercase()
+        body["action"],
+        json!({
+            "type": "spotSend",
+            "signatureChainId": "0x66eee",
+            "hyperliquidChain": "Testnet",
+            "destination": VALID_ADDRESS,
+            "token": "HYPE:0x11111111111111111111111111111111",
+            "amount": "1.23",
+            "time": body["nonce"],
+        })
     );
-    assert_eq!(
-        body["action"]["token"],
-        "HYPE:0x11111111111111111111111111111111"
-    );
-    assert_eq!(body["action"]["amount"], "1.23");
-    assert!(body["action"]["time"].is_u64());
-    assert!(body["signature"].is_object());
 }
 
 #[tokio::test]
 async fn transfer_send_asset_submits_expected_exchange_payload() {
     let env = IsolatedHome::new();
-    let server = mock_spot_token_transfer_server().await;
+    let server = spot_token_exchange().await;
     let signer = expected_address(VALID_PRIVATE_KEY);
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .write_stdin("yes\n")
         .args([
             "transfer",
@@ -931,36 +577,31 @@ async fn transfer_send_asset_submits_expected_exchange_payload() {
             "Send 4.5 USDC from spot to dex:test for {VALID_ADDRESS}?"
         )));
 
-    let body = exchange_body(&server).await;
-    assert_eq!(body["action"]["type"], "sendAsset");
+    let body = user_signed_action(&server, SEND_ASSET).await;
     assert_eq!(
-        body["action"]["destination"]
-            .as_str()
-            .unwrap()
-            .to_ascii_lowercase(),
-        VALID_ADDRESS.to_ascii_lowercase()
+        body["action"],
+        json!({
+            "type": "sendAsset",
+            "signatureChainId": "0x66eee",
+            "hyperliquidChain": "Testnet",
+            "destination": VALID_ADDRESS,
+            "sourceDex": "spot",
+            "destinationDex": "test",
+            "token": "USDC:0x00000000000000000000000000000000",
+            "amount": "4.5",
+            "fromSubAccount": "",
+            "nonce": body["nonce"],
+        })
     );
-    assert_eq!(body["action"]["sourceDex"], "spot");
-    assert_eq!(body["action"]["destinationDex"], "test");
-    assert_eq!(
-        body["action"]["token"],
-        "USDC:0x00000000000000000000000000000000"
-    );
-    assert_eq!(body["action"]["amount"], "4.5");
-    assert_eq!(body["action"]["fromSubAccount"], "");
-    assert!(body["action"]["nonce"].is_u64());
-    assert!(body["signature"].is_object());
 }
 
 #[tokio::test]
 async fn transfer_withdraw_prompts_and_confirms() {
     let env = IsolatedHome::new();
-    let server = mock_positions_transfer_server("1000", "1000").await;
+    let server = exchange("1000", "1000").await;
     let signer = expected_address(VALID_PRIVATE_KEY);
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .write_stdin("y\n")
         .args([
             "transfer",
@@ -996,33 +637,32 @@ async fn transfer_withdraw_prompts_and_confirms() {
             "Withdraw 100 USDC to Arbitrum address {VALID_ADDRESS}?"
         )));
 
-    let body = exchange_body(&server).await;
-    assert_eq!(body["action"]["type"], "withdraw3");
+    let body = user_signed_action(&server, WITHDRAW).await;
     assert_eq!(
-        body["action"]["destination"]
-            .as_str()
-            .unwrap()
-            .to_ascii_lowercase(),
-        VALID_ADDRESS.to_ascii_lowercase()
+        body["action"],
+        json!({
+            "type": "withdraw3",
+            "signatureChainId": "0x66eee",
+            "hyperliquidChain": "Testnet",
+            "destination": VALID_ADDRESS,
+            "amount": "100",
+            "time": body["nonce"],
+        })
     );
-    assert_eq!(body["action"]["amount"], "100");
-    assert!(body["action"]["time"].is_u64());
-    assert!(body["signature"].is_object());
 }
 
 #[tokio::test]
 async fn transfer_insufficient_balance_exits_13_with_context() {
     let env = IsolatedHome::new();
-    let server = mock_positions_transfer_server("1000", "5").await;
+    let server = exchange("1000", "5").await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .args(["transfer", "spot-to-perp", "--amount", "100", "--testnet"])
         .assert()
         .code(13)
         .stderr(predicate::str::contains("insufficient balance"))
         .stderr(predicate::str::contains("available spot USDC"));
+    assert!(server.exchange_actions().await.is_empty());
 }
 
 #[test]
@@ -1097,13 +737,16 @@ fn transfer_send_recipient_does_not_resolve_stored_account_alias() {
             "1",
         ])
         .assert()
-        .failure()
         .code(2)
         .get_output()
         .stdout
         .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert!(json["error"].as_str().unwrap().contains("0x-prefixed"));
+    assert!(
+        support::stdout_json(&output)["error"]
+            .as_str()
+            .unwrap()
+            .contains("0x-prefixed")
+    );
 }
 
 #[test]
