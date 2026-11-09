@@ -1,4 +1,3 @@
-use chrono::Utc;
 use clap::Args;
 use hypersdk::hypercore::Subscription;
 
@@ -32,6 +31,7 @@ use super::{
     twap_cancel, twap_create,
 };
 use crate::assets::DexArg;
+use crate::clock;
 use crate::command_spec::{
     ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk,
     YES_FOR_AUTOMATION, arg,
@@ -835,7 +835,7 @@ impl CliCommand for OrdersScheduleCancel {
         let plan = prepare_schedule_cancel_plan(args)?;
         let run = OrderRun::new(inv, args.on_behalf_of.as_deref(), args.yes)?;
         if inv.dry_run() {
-            return run.preview(schedule_cancel_dry_run_plan(&plan, Utc::now()));
+            return run.preview(schedule_cancel_dry_run_plan(&plan, clock::now_utc()));
         }
         let signer = inv.resolve_signer()?;
         schedule_cancel(run.context(&signer)?, plan).await

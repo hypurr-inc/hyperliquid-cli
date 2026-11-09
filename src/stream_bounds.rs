@@ -13,6 +13,7 @@ use clap::{ArgMatches, Args};
 
 use crate::env::{self, EnvSource};
 use crate::errors::CliError;
+use crate::quantity::parse_positive_usize;
 
 /// How a command bounds its output in machine contexts. One definition: the
 /// schema, the pipeline's check and the environment fallback all read it.
@@ -125,18 +126,7 @@ fn join_alternatives(mut ways: Vec<String>) -> String {
 }
 
 /// A polling stream with no explicit idle bound ends after this long without output.
-const POLL_DEFAULT_IDLE: Duration = Duration::from_secs(60 * 60);
-
-/// A count of at least 1.
-pub fn parse_positive_usize(raw: &str) -> Result<usize, String> {
-    let value = raw
-        .parse::<usize>()
-        .map_err(|err| format!("invalid positive integer: {err}"))?;
-    if value == 0 {
-        return Err("value must be at least 1".to_string());
-    }
-    Ok(value)
-}
+const POLL_DEFAULT_IDLE: Duration = crate::clock::HOUR.of(1);
 
 /// `--watch` / `--max-ticks`, shared by every snapshot command.
 #[derive(Args, Debug, Clone, Default)]

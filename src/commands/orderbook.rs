@@ -24,7 +24,7 @@ use crate::stream_bounds::StreamBound;
 use crate::ws::{Awaited, BookAggregationArgs, first_matching_message};
 
 const WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(15);
-const FUNDING_LOOKBACK: Duration = Duration::from_secs(24 * 60 * 60);
+const FUNDING_LOOKBACK: Duration = clock::DAY.of(1);
 
 pub fn parse_candle_limit(input: &str) -> Result<usize, String> {
     let limit = input

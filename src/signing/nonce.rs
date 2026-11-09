@@ -26,18 +26,17 @@ use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::clock::DAY;
 use crate::private_fs::{self, FileLock, LockError};
-
-const DAY_MS: u64 = 24 * 60 * 60 * 1000;
 
 /// The exchange accepts a nonce within `(T - 2 days, T + 1 day)` of its block
 /// time `T`: this many milliseconds back...
-pub(crate) const WINDOW_PAST_MS: u64 = 2 * DAY_MS;
+pub(crate) const WINDOW_PAST_MS: u64 = DAY.ms(2);
 
 /// ... and this many ahead. `account invalidate-nonce` refuses a nonce outside
 /// the window, and the mark below is held to half of it. The window in words,
 /// where a message must say it in a `const` context, is [`window_phrase!`].
-pub(crate) const WINDOW_FUTURE_MS: u64 = DAY_MS;
+pub(crate) const WINDOW_FUTURE_MS: u64 = DAY.ms(1);
 
 /// The window as prose. A macro so `concat!` can splice it into the `const`
 /// text of a command's description; a test ties it to the two constants.
@@ -360,8 +359,8 @@ mod tests {
             window_phrase!(),
             format!(
                 "{} days before to {} day after",
-                WINDOW_PAST_MS / DAY_MS,
-                WINDOW_FUTURE_MS / DAY_MS
+                WINDOW_PAST_MS / DAY.ms(1),
+                WINDOW_FUTURE_MS / DAY.ms(1)
             )
         );
         assert_eq!(MAX_AHEAD_MS, WINDOW_FUTURE_MS / 2);

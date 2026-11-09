@@ -72,10 +72,10 @@ const MARGIN_USED_LIMIT_PERCENT: i64 = 80;
 const LIQ_CRITICAL_DISTANCE: Decimal = Decimal::from_parts(5, 0, 0, false, 2);
 const LIQ_WARNING_DISTANCE: Decimal = Decimal::from_parts(1, 0, 0, false, 1);
 const NO_TPSL_AFTER_MINUTES: u64 = 15;
-const NO_TPSL_AFTER: Duration = Duration::from_secs(NO_TPSL_AFTER_MINUTES * 60);
-const FUNDING_BLEED_WINDOW: Duration = Duration::from_secs(60 * 60);
+const NO_TPSL_AFTER: Duration = clock::MINUTE.of(NO_TPSL_AFTER_MINUTES);
+const FUNDING_BLEED_WINDOW: Duration = clock::HOUR.of(1);
 /// A resting order at least this old and this far from the mid (a fraction) is stale.
-const STALE_ORDER_AGE: Duration = Duration::from_secs(12 * 60 * 60);
+const STALE_ORDER_AGE: Duration = clock::HOUR.of(12);
 const STALE_ORDER_MID_DISTANCE: Decimal = Decimal::from_parts(3, 0, 0, false, 2);
 
 #[derive(Args, Debug, Clone)]

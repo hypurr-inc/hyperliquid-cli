@@ -12,6 +12,7 @@ use crate::assets::DexArg;
 use crate::clock::parse_lifetime;
 use crate::errors::CliError;
 use crate::margin::MarginModeArg;
+use crate::quantity::not_positive;
 
 pub(super) const DEFAULT_TRACKING_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -691,7 +692,7 @@ pub fn parse_trigger_price_spec(raw: &str) -> Result<TriggerPriceSpec, String> {
     }
     let price = Decimal::from_str(trimmed).map_err(|_| format!("invalid trigger price '{raw}'"))?;
     if price <= Decimal::ZERO {
-        return Err("trigger price must be greater than zero".to_string());
+        return Err(not_positive("trigger price"));
     }
     Ok(TriggerPriceSpec::Absolute(price))
 }

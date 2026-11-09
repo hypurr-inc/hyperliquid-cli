@@ -25,7 +25,7 @@ const TESTNET_REFERRAL_FALLBACK: &str = "TESTNET";
 /// A builder address/fee pair from one settings layer, not yet validated.
 /// The labels name the layer's fields in validation errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderDefaultSetting {
+pub(crate) struct BuilderDefaultSetting {
     pub address: Option<String>,
     pub fee_rate: Option<String>,
     pub address_label: &'static str,
@@ -34,6 +34,7 @@ pub struct BuilderDefaultSetting {
 
 enum ConfigSource {
     File(ConfigFile),
+    #[cfg(test)]
     Preloaded(Option<Arc<Config>>),
     Absent,
 }
@@ -69,7 +70,7 @@ struct PrivateKeyOnly {
 /// A locked read-modify-write of the config file, begun by
 /// [`Settings::begin_config_update`]. Holding it holds the lock; the file is
 /// written only by [`Self::commit`].
-pub struct ConfigTransaction<'a> {
+pub(crate) struct ConfigTransaction<'a> {
     settings: &'a Settings,
     file: &'a ConfigFile,
     lock: FileLock,
@@ -79,7 +80,10 @@ pub struct ConfigTransaction<'a> {
 impl ConfigTransaction<'_> {
     /// Apply `edit`, save when it changed anything, and return the config keys
     /// it changed (set, changed or cleared).
-    pub fn commit(self, edit: impl FnOnce(&mut Config)) -> Result<Vec<String>, anyhow::Error> {
+    pub(crate) fn commit(
+        self,
+        edit: impl FnOnce(&mut Config),
+    ) -> Result<Vec<String>, anyhow::Error> {
         let mut after = self.before.clone();
         edit(&mut after);
         let changed = changed_keys(&self.before, &after);
@@ -127,8 +131,9 @@ impl Settings {
     }
 
     /// Settings over `env` and an optional config file. Never prints hygiene warnings.
+    #[cfg(test)]
     #[must_use]
-    pub fn new(env: EnvSource, file: Option<ConfigFile>) -> Self {
+    pub(crate) fn new(env: EnvSource, file: Option<ConfigFile>) -> Self {
         Self::build(
             env,
             file.map_or(ConfigSource::Absent, ConfigSource::File),
@@ -137,8 +142,9 @@ impl Settings {
     }
 
     /// Settings over `env` with an in-memory config and no file.
+    #[cfg(test)]
     #[must_use]
-    pub fn detached(env: EnvSource, config: Option<Config>) -> Self {
+    pub(crate) fn detached(env: EnvSource, config: Option<Config>) -> Self {
         Self::build(env, ConfigSource::Preloaded(config.map(Arc::new)), false)
     }
 
@@ -168,7 +174,9 @@ impl Settings {
     pub fn config_file(&self) -> Option<&ConfigFile> {
         match &self.source {
             ConfigSource::File(file) => Some(file),
-            ConfigSource::Preloaded(_) | ConfigSource::Absent => None,
+            #[cfg(test)]
+            ConfigSource::Preloaded(_) => None,
+            ConfigSource::Absent => None,
         }
     }
 
@@ -180,7 +188,7 @@ impl Settings {
     /// The config file when it exists on disk. `Ok(None)` for a run with no
     /// config location and for a file that is genuinely absent; a file that
     /// can't be inspected is an error, never "absent".
-    pub fn existing_config_file(&self) -> Result<Option<&ConfigFile>, CliError> {
+    pub(crate) fn existing_config_file(&self) -> Result<Option<&ConfigFile>, CliError> {
         match self.config_file() {
             Some(file) if file.exists()? => Ok(Some(file)),
             _ => Ok(None),
@@ -189,7 +197,7 @@ impl Settings {
 
     /// Where the config file is, for messages.
     #[must_use]
-    pub fn config_path_display(&self) -> String {
+    pub(crate) fn config_path_display(&self) -> String {
         self.config_file().map_or_else(
             || "unavailable".to_string(),
             |file| file.path().display().to_string(),
@@ -198,7 +206,7 @@ impl Settings {
 
     /// Lock the config file and read it fresh, for an edit that another process
     /// may race.
-    pub fn begin_config_update(&self) -> Result<ConfigTransaction<'_>, anyhow::Error> {
+    pub(crate) fn begin_config_update(&self) -> Result<ConfigTransaction<'_>, anyhow::Error> {
         let file = self.require_config_file()?;
         let lock = file.lock()?;
         let before = file.read()?;
@@ -215,7 +223,7 @@ impl Settings {
 
     /// Edit the config under its lock. Returns the keys the edit changed; the
     /// file is untouched when it changed none.
-    pub fn update_config(
+    pub(crate) fn update_config(
         &self,
         edit: impl FnOnce(&mut Config),
     ) -> Result<Vec<String>, anyhow::Error> {
@@ -223,7 +231,7 @@ impl Settings {
     }
 
     /// Delete the config file under its lock. A file that is already gone is success.
-    pub fn remove_config(&self) -> Result<(), anyhow::Error> {
+    pub(crate) fn remove_config(&self) -> Result<(), anyhow::Error> {
         let file = self.require_config_file()?;
         let lock = file.lock()?;
         file.remove(&lock)?;
@@ -258,6 +266,7 @@ impl Settings {
     pub fn config(&self) -> Result<Option<Arc<Config>>, CliError> {
         let file = match &self.source {
             ConfigSource::File(file) => file,
+            #[cfg(test)]
             ConfigSource::Preloaded(config) => return Ok(config.clone()),
             ConfigSource::Absent => return Ok(None),
         };
@@ -290,6 +299,7 @@ impl Settings {
     fn file_private_key(&self) -> Result<Option<String>, CliError> {
         let file = match &self.source {
             ConfigSource::File(file) => file,
+            #[cfg(test)]
             ConfigSource::Preloaded(config) => {
                 return Ok(config
                     .as_ref()
@@ -341,7 +351,7 @@ impl Settings {
 
     /// The loopback-only API endpoint override for `network`. The network-specific
     /// variable wins over `HYPERLIQUID_API_BASE_URL`.
-    pub fn api_base_url_override(
+    pub(crate) fn api_base_url_override(
         &self,
         network: Network,
     ) -> Result<Option<reqwest::Url>, CliError> {
@@ -363,14 +373,14 @@ impl Settings {
             .and_then(|config| config.default_wallet_id.clone()))
     }
 
-    pub fn ows_vault_path(&self) -> Option<PathBuf> {
+    pub(crate) fn ows_vault_path(&self) -> Option<PathBuf> {
         self.env
             .get_non_empty(env::OWS_VAULT_PATH)
             .map(PathBuf::from)
             .or_else(|| crate::paths::default_vault_dir(&self.env))
     }
 
-    pub fn ows_passphrase(&self) -> Option<String> {
+    pub(crate) fn ows_passphrase(&self) -> Option<String> {
         self.env.get_non_empty(env::OWS_PASSPHRASE)
     }
 
@@ -379,7 +389,7 @@ impl Settings {
     }
 
     /// What `wallet login` stored for Bankr; empty when nothing is stored.
-    pub fn bankr_login(&self) -> Result<BankrLogin, CliError> {
+    pub(crate) fn bankr_login(&self) -> Result<BankrLogin, CliError> {
         Ok(self
             .config()?
             .map(|config| config.bankr.clone())
@@ -434,7 +444,7 @@ impl Settings {
 
     /// The default builder pair: environment, then config file, then the build-time default.
     /// The config file is only read when the environment sets neither value.
-    pub fn default_builder(&self) -> Result<Option<BuilderDefaultSetting>, CliError> {
+    pub(crate) fn default_builder(&self) -> Result<Option<BuilderDefaultSetting>, CliError> {
         if let Some(setting) = self.env_builder_default() {
             return Ok(Some(setting));
         }
@@ -445,7 +455,7 @@ impl Settings {
     /// The builder pair setup and wallet creation would offer: environment, then
     /// the build-time default. The config file is the thing being filled in, so it is skipped.
     #[must_use]
-    pub fn suggested_default_builder(&self) -> Option<BuilderDefaultSetting> {
+    pub(crate) fn suggested_default_builder(&self) -> Option<BuilderDefaultSetting> {
         self.layered_builder_default(None)
     }
 
@@ -469,7 +479,7 @@ impl Settings {
 
     /// The referral code setup and wallet creation would offer, without the config file.
     #[must_use]
-    pub fn suggested_default_referral_code(&self, is_testnet: bool) -> Option<String> {
+    pub(crate) fn suggested_default_referral_code(&self, is_testnet: bool) -> Option<String> {
         self.layered_referral_code(is_testnet, None)
     }
 }
