@@ -14,9 +14,10 @@
 
 - `src/main.rs` — global options and process boot. The commands are not declared here.
 - `src/command_spec.rs` — the one definition of a command: `CliCommand` (clap `Args`, `CommandSpec` policy, `run`), `ArgSpec`, `GroupSpec`, and `Entry`, which erases the type for the clap tree builder.
-- `src/command_registry.rs` — `CommandRegistry`, generated from the clap tree plus each command's `CommandSpec`. `hyperliquid schema`, help notes and the contract fixtures read it; nothing in it is written by hand per command.
+- `src/command_registry.rs` — `CommandRegistry`, generated from the clap tree plus each command's `CommandSpec`. A `CommandContract` serialized is the schema entry `hyperliquid schema` prints (plus its derived `json_schema`); help notes and the contract fixtures read the same value. Nothing in it is written by hand per command except `SCHEMA_ORDER`, which a test keeps complete.
+- `src/mode.rs` — `Mode`, the one reader of agent/CI/TTY state: one named predicate per question (`can_prompt`, `machine_context`, `person_on_stderr`, `person_at_terminal`, `live_display`). Do not probe `HYPERLIQUID_AGENT`, `CI` or a TTY elsewhere to decide how to behave.
 - `src/cli_runtime.rs` — the one pipeline every command runs through: validate, bound streams, payload, dry-run, confirmation, API override, run.
-- `src/cli_shell.rs` — clap tree decoration (registry-derived option help and `Notes:`), usage-error and help rendering, panic hook, output-format resolution.
+- `src/cli_shell.rs` — clap tree decoration (spec-derived option help and `Notes:`), usage-error and help rendering, panic hook, the one output-format precedence rule (`resolve_output_format`).
 - `src/errors/` — `CliError` and its one variant spec table (exit code, category, reason, retryability), the remote-text classifier (`classify`), transport failure naming, JSON envelope and human rendering.
 - `src/output/` — pretty/table/JSON rendering, color theme, JSON projection.
 - `src/commands/` — one module per command domain. A command is a type implementing `CliCommand` next to its `Args`; `commands::entries` (help order) registers it with one line, `commands::groups` lists group names such as `orders`.
@@ -99,10 +100,10 @@ hyperliquid --format json --max-results 5 perps list
 hyperliquid --format json schema orders create
 ```
 
-Adding a command: implement `CliCommand` in its domain module (`Args`, `SPEC` with risk, dry-run, confirmation, input kinds and schema descriptions, `run`), add one `Entry::of::<..>()` line to `commands::entries`, and regenerate the contract fixtures with `HYPERLIQUID_UPDATE_CONTRACTS=1 cargo test --test contract_fixtures`.
+Adding a command: implement `CliCommand` in its domain module (`Args`, `SPEC` with risk, dry-run, confirmation, input kinds and schema descriptions, `run`), add one `Entry::of::<..>()` line to `commands::entries`, add its path to `SCHEMA_ORDER` in `src/command_registry.rs` (a test fails when it is missing), and regenerate the contract fixtures with `HYPERLIQUID_UPDATE_CONTRACTS=1 cargo test --test contract_fixtures`. Dry-run previews take the command name from `inv.command_key()`.
 When adding or changing commands, ensure `--select` filters JSON output and `--results-only` remains harmless for commands that already return bare arrays or objects.
 Use `--dry-run` for mutating-command validation when side effects are not intended.
 Effective output format precedence is: explicit `--json` or `--format pretty|table|json`, then `HYPERLIQUID_FORMAT=pretty|table|json`, then agent/non-TTY defaults. `HYPERLIQUID_AGENT=1` and non-TTY stdout default one-shot commands to JSON so agents can parse output even when `--format json` is omitted.
-Watch output in JSON/agent contexts must be bounded with `--max-ticks` or `HYPERLIQUID_WATCH_MAX_TICKS`; subscribe streams should use `--max-events` and/or `--idle-timeout-ms`.
+Watch output in JSON/agent contexts must be bounded with `--max-ticks` or `HYPERLIQUID_WATCH_MAX_TICKS`; subscribe streams should use `--max-events` and/or `--idle-timeout-ms`; `watch risk` takes `--max-events` or `--idle-timeout-ms` only. A command declares its bound once with `.stream(StreamBound::..)`; the pipeline enforces it and the schema reports it as `stream_bounds`.
 Raw payload metadata is exposed as `raw_payload` in schema `x-hyperliquid` metadata. Treat `dry_run_only` as fail-closed for live execution until a command is explicitly allowlisted and tested.
 Remote API/protocol strings surfaced in errors are untrusted data. Keep the `[untrusted remote data]` label and sanitization boundary intact when adding new exchange or HTTP error paths.
