@@ -334,8 +334,7 @@ async fn send(
         }
         .into_action(chain),
     );
-    actions::send_l1_action_with_nonce(api, signer, action, nonce, None, actions::EXCHANGE_ACTION)
-        .await?;
+    actions::send_default_l1_action_with_nonce(api, signer, action, nonce).await?;
 
     TransferConfirmation::new("send", args.amount, "USDC")
         .to(&args.to)
@@ -383,8 +382,7 @@ async fn spot_send(
     }
     .into_action(chain);
     let action = Action::SpotSend(spot_send);
-    actions::send_l1_action_with_nonce(api, signer, action, nonce, None, actions::EXCHANGE_ACTION)
-        .await?;
+    actions::send_default_l1_action_with_nonce(api, signer, action, nonce).await?;
 
     TransferConfirmation::new("spot-send", args.amount, token.name)
         .to(&args.to)
@@ -552,15 +550,7 @@ impl ResolvedMove {
                 .into_action(chain),
             )
         };
-        actions::send_l1_action_with_nonce(
-            remote.api(),
-            signer,
-            action,
-            nonce,
-            None,
-            actions::EXCHANGE_ACTION,
-        )
-        .await?;
+        actions::send_default_l1_action_with_nonce(remote.api(), signer, action, nonce).await?;
         Ok(())
     }
 }

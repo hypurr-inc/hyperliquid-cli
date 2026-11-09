@@ -221,14 +221,12 @@ async fn set_abstraction(
     )?;
     let protocol_mode = args.mode.protocol_value();
     if plan.agent_signed {
-        actions::send_l1_action(
+        actions::send_default_l1_action(
             remote.api(),
             signer,
             Action::AgentSetAbstraction {
                 abstraction: args.mode.sdk_mode(),
             },
-            None,
-            actions::EXCHANGE_ACTION,
         )
         .await?;
     } else {
@@ -395,12 +393,10 @@ impl CliCommand for AccountEvmBigBlocks {
         }
         let signer = inv.resolve_signer()?;
         let remote = inv.remote()?;
-        actions::send_l1_action(
+        actions::send_default_l1_action(
             remote.api(),
             &signer,
             Action::EvmUserModify { using_big_blocks },
-            None,
-            actions::EXCHANGE_ACTION,
         )
         .await?;
         inv.print(&One::new(EvmBigBlocksRow {

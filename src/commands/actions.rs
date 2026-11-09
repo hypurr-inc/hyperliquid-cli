@@ -56,10 +56,10 @@ fn expires_after_now(api: &ApiClient) -> Option<u64> {
 }
 
 /// Sign and send an L1 action supported by hypersdk, returning the ok response
-/// payload. The sender takes the nonce (the current time in milliseconds,
-/// raised above every nonce this machine already signed with, see [`nonce`])
-/// and the expiry at the moment it signs, so a caller that returns early, as a
-/// dry run does, spends neither.
+/// payload as the exchange sent it. The sender takes the nonce (the current
+/// time in milliseconds, raised above every nonce this machine already signed
+/// with, see [`nonce`]) and the expiry at the moment it signs, so a caller that
+/// returns early, as a dry run does, spends neither.
 pub(crate) async fn send_l1_action(
     api: &ApiClient,
     signer: &SelectedSigner,
@@ -71,8 +71,8 @@ pub(crate) async fn send_l1_action(
 }
 
 /// [`send_l1_action`] with a nonce the caller owns: one the person supplied
-/// (`account invalidate-nonce`) or one the signed document embeds (`usdSend`,
-/// `spotSend`, `sendAsset`, `approveAgent`).
+/// (`account invalidate-nonce`) or one the signed document embeds
+/// (`approveAgent`).
 pub(crate) async fn send_l1_action_with_nonce(
     api: &ApiClient,
     signer: &SelectedSigner,
@@ -81,6 +81,43 @@ pub(crate) async fn send_l1_action_with_nonce(
     vault_address: Option<Address>,
     context: &'static str,
 ) -> Result<serde_json::Value, CliError> {
+    let parsed =
+        sign_and_post::<serde_json::Value>(api, signer, action, nonce, vault_address).await?;
+    ensure_ok_raw_response(parsed, context)
+}
+
+/// Sign and send an L1 action that the exchange answers with the `default`
+/// payload, which any other reply is an error for: the unit-returning
+/// counterpart of [`send_l1_action`], for an action with nothing to report.
+pub(crate) async fn send_default_l1_action(
+    api: &ApiClient,
+    signer: &SelectedSigner,
+    action: Action,
+) -> Result<(), CliError> {
+    send_default_l1_action_with_nonce(api, signer, action, nonce::next()).await
+}
+
+/// [`send_default_l1_action`] with a nonce the signed document embeds
+/// (`usdSend`, `spotSend`, `sendAsset`) or the person supplied
+/// (`account invalidate-nonce`).
+pub(crate) async fn send_default_l1_action_with_nonce(
+    api: &ApiClient,
+    signer: &SelectedSigner,
+    action: Action,
+    nonce: u64,
+) -> Result<(), CliError> {
+    let parsed = sign_and_post::<Response>(api, signer, action, nonce, None).await?;
+    ensure_default_response(parsed, EXCHANGE_ACTION)
+}
+
+/// Sign `action` and post it, decoding the reply as `T`.
+async fn sign_and_post<T: DeserializeOwned>(
+    api: &ApiClient,
+    signer: &SelectedSigner,
+    action: Action,
+    nonce: u64,
+    vault_address: Option<Address>,
+) -> Result<T, CliError> {
     let expires_after = expires_after_now(api);
     let request =
         signer.sign_l1_action_sync(action, nonce, vault_address, expires_after, api.chain())?;
@@ -88,7 +125,7 @@ pub(crate) async fn send_l1_action_with_nonce(
         nonce,
         expires_after,
     };
-    post_json_raw(api, &request, sent, context).await
+    post(api, &request, sent).await
 }
 
 pub(crate) fn sign_user_action<T: SolStruct>(

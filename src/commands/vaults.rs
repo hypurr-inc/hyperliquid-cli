@@ -524,7 +524,7 @@ async fn run_transfer(
     }
     let signer = inv.resolve_signer()?;
     let remote = inv.remote()?;
-    actions::send_l1_action(
+    actions::send_default_l1_action(
         remote.api(),
         &signer,
         Action::VaultTransfer(VaultTransfer {
@@ -532,8 +532,6 @@ async fn run_transfer(
             is_deposit: action_kind.is_deposit(),
             usd,
         }),
-        None,
-        actions::EXCHANGE_ACTION,
     )
     .await?;
 
@@ -785,11 +783,15 @@ impl RawVaultDetails {
 }
 
 fn decimal_field(value: &Value, field: &'static str) -> Result<Decimal, CliError> {
-    wire_decimal::from_value(value).map_err(|err| {
+    let failed = |reason: &dyn std::fmt::Display| {
         CliError::Internal(anyhow::anyhow!(
-            "decode failed while reading {field}: {err}"
+            "decode failed while reading {field}: {reason}"
         ))
-    })
+    };
+    if !matches!(value, Value::String(_) | Value::Number(_)) {
+        return Err(failed(&"expected string or number"));
+    }
+    wire_decimal::from_value(value).map_err(|err| failed(&err))
 }
 
 fn raw_portfolio_summary(portfolio: &Value) -> Result<(Vec<String>, Option<Decimal>), CliError> {
@@ -1002,5 +1004,24 @@ mod tests {
         assert!(usd("-1").is_err());
         assert!(usd("0.0000001").is_err());
         assert_eq!(usd("1.5").unwrap(), 1_500_000);
+    }
+
+    #[test]
+    fn a_wire_decimal_reads_strings_numbers_and_scientific_notation_and_names_the_field() {
+        let read =
+            |value: serde_json::Value| decimal_field(&value, "apr").map_err(|e| e.to_string());
+        assert_eq!(read(serde_json::json!("1.5")), Ok(Decimal::new(15, 1)));
+        assert_eq!(read(serde_json::json!(2)), Ok(Decimal::from(2)));
+        assert_eq!(read(serde_json::json!("1e-7")), Ok(Decimal::new(1, 7)));
+        assert!(
+            read(serde_json::json!(null))
+                .unwrap_err()
+                .ends_with("decode failed while reading apr: expected string or number")
+        );
+        assert!(
+            read(serde_json::json!("abc"))
+                .unwrap_err()
+                .contains("decode failed while reading apr: ")
+        );
     }
 }

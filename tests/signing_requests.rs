@@ -599,6 +599,38 @@ async fn invalidate_nonce_refuses_a_nonce_the_exchange_could_not_hold() {
     assert!(server.exchange_bodies().await.is_empty());
 }
 
+// ---- what an ok reply must be ---------------------------------------------
+
+/// An ok reply whose `type` is not `default`.
+fn cancel_reply() -> Value {
+    json!({"status": "ok", "response": {"type": "cancel", "data": {"statuses": ["success"]}}})
+}
+
+#[tokio::test]
+async fn an_action_with_nothing_to_report_refuses_an_ok_reply_that_is_not_default() {
+    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server.mount_exchange(cancel_reply()).await;
+
+    signed(&env, &server, &["account", "evm-big-blocks", "--enable"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "exchange action: unexpected response type: [untrusted remote data] Ok(Cancel { statuses: [Success] })",
+        ));
+    assert_eq!(server.exchange_bodies().await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_action_that_returns_its_payload_does_not_check_the_reply_type() {
+    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server.mount_exchange(cancel_reply()).await;
+
+    signed(&env, &server, &RESERVE_ONE).assert().success();
+    assert_eq!(server.exchange_bodies().await.len(), 1);
+}
+
 // ---- account reserve-weight ---------------------------------------------
 
 #[tokio::test]
