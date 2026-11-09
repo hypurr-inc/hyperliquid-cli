@@ -14,14 +14,10 @@ use crate::http_api::ApiClient;
 use crate::mode::Mode;
 use crate::prompt;
 
-/// What the exchange says about a builder fee the account is asked to pay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BuilderApproval {
-    /// The approved maximum covers the fee.
     Covered { approved_tenths_bps: u64 },
-    /// The approved maximum is below the fee.
     Short { approved_tenths_bps: u64 },
-    /// The maximum could not be read: the request failed.
     Unread { reason: String },
 }
 
@@ -38,7 +34,6 @@ impl BuilderApproval {
         }
     }
 
-    /// The check as a dry-run preview reports it.
     pub(super) fn to_json(&self, user: Address, fee: &BuilderFee) -> serde_json::Value {
         let (status, approved, reason) = match self {
             Self::Covered {
@@ -84,7 +79,6 @@ pub(super) fn approver(vault_address: Option<Address>, signer_account: Address) 
     vault_address.is_none().then_some(signer_account)
 }
 
-/// Read what `user` approved for the builder and judge `fee` against it.
 pub(super) async fn check(api: &ApiClient, user: Address, fee: &BuilderFee) -> BuilderApproval {
     match max_builder_fee(api, user, fee.address()).await {
         Ok(approved_tenths_bps) => BuilderApproval::judge(fee, approved_tenths_bps),

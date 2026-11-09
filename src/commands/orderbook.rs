@@ -26,7 +26,6 @@ use crate::stream_bounds::StreamBound;
 use crate::ws::{Awaited, BookAggregationArgs, first_matching_message};
 
 const WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(15);
-/// How far back `funding` looks for the latest paid funding rate.
 const FUNDING_LOOKBACK: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub fn parse_candle_limit(input: &str) -> Result<usize, String> {
@@ -338,7 +337,6 @@ async fn book(
     Ok(())
 }
 
-/// One L2 book snapshot for an already-resolved info coin.
 async fn book_snapshot_for(
     chain: Chain,
     coin: &str,
@@ -348,7 +346,6 @@ async fn book_snapshot_for(
     Ok(BookSnapshot::from(book))
 }
 
-/// Resolve and render candle history for a perpetual or spot market.
 async fn candles(
     inv: &Invocation,
     coin: &str,
@@ -362,7 +359,6 @@ async fn candles(
     Ok(())
 }
 
-/// Candle history for an already-resolved info coin.
 async fn candles_snapshot_for(
     client: &ApiClient,
     coin: &str,
@@ -392,7 +388,6 @@ async fn candles_snapshot_for(
     Ok(CandlesOutput::new(rows))
 }
 
-/// Resolve and render the best bid/ask spread for a perpetual or spot market.
 async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
@@ -402,7 +397,6 @@ async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Resolve and render current plus predicted funding for a perpetual market.
 async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let resolver = inv.asset_resolver().await?;
@@ -436,8 +430,8 @@ async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Error> 
     Ok(())
 }
 
-/// Fetch all mid prices without printing them. `selected` is `--select`: it
-/// switches the JSON from a name-to-mid map to rows of the named fields.
+/// `selected` is `--select`: it switches the JSON from a name-to-mid map to rows of the
+/// named fields.
 async fn mids_snapshot(
     client: &ApiClient,
     dex: Option<&str>,

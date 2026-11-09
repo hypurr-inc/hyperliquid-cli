@@ -108,7 +108,6 @@ pub async fn get(inv: &Invocation, pair: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// A spot market with the live prices and volume of its asset context.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SpotMarketDetailRow {
     #[serde(flatten)]

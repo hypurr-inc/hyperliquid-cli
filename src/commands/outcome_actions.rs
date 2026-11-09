@@ -30,7 +30,6 @@ const YES_MAINNET: ArgSpec = YES.describe(
     "Skip the mainnet confirmation prompt for deliberate automation. Testnet runs never prompt.",
 );
 
-/// The sentence every outcome conversion's description ends with.
 macro_rules! prompts_unless_yes {
     () => {
         concat!(
@@ -127,7 +126,6 @@ pub struct OutcomeNegateArgs {
     pub yes: bool,
 }
 
-/// One `userOutcome` operation with its validated arguments.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Conversion {
     Split {
@@ -196,7 +194,6 @@ impl Conversion {
         }
     }
 
-    /// The name a dry-run preview and the confirmation row give the action.
     fn name(&self) -> &'static str {
         match self {
             Self::Split { .. } => "split-outcome",
@@ -234,7 +231,6 @@ impl Conversion {
             .map_or_else(|| "max".to_string(), |amount| amount.to_string())
     }
 
-    /// What the exchange will do, for the confirmation prompt.
     fn describe(&self, quote: &str) -> String {
         let amount = self.amount().map_or_else(
             || "the maximum available".to_string(),
@@ -258,9 +254,8 @@ impl Conversion {
         }
     }
 
-    /// Check the ids against `outcomeMeta` and name the quote tokens involved.
-    /// A listed outcome or question is the only one the exchange can convert:
-    /// settled outcomes pay out on their own.
+    /// A listed outcome or question is the only one the exchange can convert: settled
+    /// outcomes pay out on their own.
     fn preflight(&self, catalog: &OutcomeCatalog) -> Result<BTreeSet<String>, CliError> {
         let listed = |outcome: u32| {
             catalog
@@ -357,7 +352,6 @@ impl ListRow for OutcomeActionConfirmation {
     const EMPTY: &'static str = "No results.";
 }
 
-/// The shared run: check the ids, preview or sign and send, confirm on mainnet.
 async fn convert(inv: &Invocation, conversion: Conversion, yes: bool) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let catalog = OutcomeCatalog::load(remote.api(), Names::Raw).await?;

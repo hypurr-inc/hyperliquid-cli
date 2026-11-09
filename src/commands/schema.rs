@@ -1,5 +1,3 @@
-//! Machine-readable command schema output for agents.
-//!
 //! The entries are the registry's [`CommandContract`]s serialized, plus the JSON
 //! schema derived from each one.
 
@@ -12,8 +10,6 @@ use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::output::{TableData, serialize_row};
 
-/// The schema entries asked for: the JSON they print, and the table rows built
-/// from the same contracts.
 #[derive(Debug, Clone)]
 pub struct SchemaOutput {
     json: Value,
@@ -21,7 +17,6 @@ pub struct SchemaOutput {
 }
 
 impl SchemaOutput {
-    /// The entry of the one command named by its exact path.
     fn one(contract: &CommandContract) -> Self {
         Self {
             json: schema_entry(contract),
@@ -29,7 +24,6 @@ impl SchemaOutput {
         }
     }
 
-    /// A list of entries, in registry order.
     fn many<'a>(contracts: impl Iterator<Item = &'a CommandContract>) -> Self {
         let contracts: Vec<_> = contracts.collect();
         Self {
@@ -75,7 +69,6 @@ pub fn show(inv: &Invocation, command_path: &[String]) -> Result<(), anyhow::Err
     Ok(())
 }
 
-/// One command's entry: its contract plus the JSON schema of its inputs.
 fn schema_entry(contract: &CommandContract) -> Value {
     #[derive(serde::Serialize)]
     struct Entry<'a> {

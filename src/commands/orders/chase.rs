@@ -28,15 +28,14 @@ use super::validation::OrderSpec;
 /// minimum order value.
 const MIN_NOTIONAL_USDC: i64 = 10;
 
-/// The command a person reruns to try a chase, in the flags the help shows.
 const EXAMPLE: &str = "orders chase --coin ETH --side buy --size 0.5 --timeout 60s";
 
 fn dry_run_example() -> String {
     format!("hyperliquid --format json --dry-run {EXAMPLE}")
 }
 
-/// The ALO quote a chase rests at `price`. The dry run and every live requote
-/// plan it through here, so the preview shows the price and size that are sent.
+/// The dry run and every live requote plan it through here, so the preview shows the
+/// price and size that are sent.
 fn quote_spec(
     args: &ChaseArgs,
     price: Decimal,
@@ -140,7 +139,6 @@ pub(super) async fn chase(
     let mut working: Option<LiveOrder> = None;
     let mut seq: u64 = 0;
     let user = context.account();
-    // The timeout bounds the chase itself, not the lookups before it.
     let deadline = Instant::now() + timeout;
 
     let outcome: Result<(), CliError> = async {
@@ -159,8 +157,6 @@ pub(super) async fn chase(
                 break;
             }
 
-            // Requote: cancel only the quote this chase placed, never other
-            // orders resting on the same market.
             if let Some(quote) = working.take() {
                 cancel_working_quote(context, &quote).await?;
             }
@@ -188,8 +184,6 @@ pub(super) async fn chase(
 
             tokio::time::sleep(args.interval).await;
 
-            // Reconcile the working quote against open orders so partial fills
-            // shrink the next quote and a vanished quote counts as filled.
             if let Some(quote) = working.as_mut() {
                 let filled = quote.refresh(client, user, dex.clone()).await?;
                 remaining = (remaining - filled).max(Decimal::ZERO);
@@ -202,8 +196,6 @@ pub(super) async fn chase(
     }
     .await;
 
-    // Final cleanup: never leave a live chase quote behind on timeout, bound
-    // breaks, or errors. Cleanup failures are propagated, not swallowed.
     if let Some(quote) = working.take()
         && let Err(cleanup) = cancel_working_quote(context, &quote).await
     {
@@ -227,7 +219,6 @@ pub(super) async fn chase(
     Ok(())
 }
 
-/// Check the flags and return how long the chase may run.
 pub(super) fn chase_timeout(inv: &Invocation, args: &ChaseArgs) -> Result<Duration, CliError> {
     validate_chase_args(args)?;
     effective_timeout(args, requires_explicit_timeout(inv))
@@ -268,7 +259,6 @@ fn quote_price(mid: Decimal, side: OrderSide, offset_bps: u32) -> Decimal {
     }
 }
 
-/// Cancel one chase quote by cloid; unrelated orders are untouched.
 async fn cancel_working_quote(
     context: OrderSubmissionContext<'_>,
     quote: &LiveOrder,

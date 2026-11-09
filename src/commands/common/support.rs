@@ -3,9 +3,6 @@ use hypersdk::Address;
 use crate::dry_run::{DryRunEnvelope, DryRunSigning};
 use crate::invocation::Invocation;
 
-/// Print the `--dry-run` preview of a command: its name from the invocation,
-/// what it `would_execute`, and its `args`.
-///
 /// A signing command's preview also names the signer, once resolved here and
 /// without prompting. A signer that cannot be resolved prints as `null` with a
 /// `signer_warning`; one that resolves but doesn't fit the command fails the

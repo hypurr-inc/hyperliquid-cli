@@ -16,19 +16,17 @@ use crate::signing::SelectedSigner;
 
 /// The leverage an order is assumed to run at when sizing its margin.
 const DEFAULT_HIP3_LEVERAGE: i64 = 10;
-/// The margin kept above the estimate, in basis points of it (120%).
+/// The margin kept, in basis points of the estimate: 12,000 is 120% of it.
 const MARGIN_BUFFER_BPS: i64 = 12_000;
 
 #[derive(Debug, Clone)]
 pub(super) struct Hip3MarginPlan {
     pub(super) dest_dex: String,
-    /// The dex's collateral token, which is what the transfer moves.
     pub(super) token: String,
     pub(super) amount: Decimal,
 }
 
 impl Hip3MarginPlan {
-    /// The transfer's destination, as `send-asset` names it.
     fn dest(&self) -> String {
         format!("dex:{}", self.dest_dex)
     }

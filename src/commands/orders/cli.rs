@@ -1,5 +1,3 @@
-//! The `orders ...` commands, `buy`, `sell`, `outcome-buy` and `outcome-sell`.
-
 use chrono::Utc;
 use clap::Args;
 use hypersdk::hypercore::Subscription;
@@ -48,7 +46,6 @@ use crate::stream_bounds::StreamBound;
 
 pub const GROUP: GroupSpec = GroupSpec::new(&["orders"], "Manage orders").aliases(&["order"]);
 
-/// The sentence every prompting order command's description ends with.
 macro_rules! prompts_unless_yes {
     ($orders:literal) => {
         concat!(
@@ -101,7 +98,6 @@ const MAX_SLIPPAGE_BPS: ArgSpec = arg("max_slippage_bps").describe(
     "Maximum slippage bound in basis points for market orders. Default 500; allowed range 1-1000.",
 );
 
-/// `--margin-mode`'s description, for the kind of order that takes it.
 macro_rules! margin_mode_help {
     ($orders:literal) => {
         concat!(
@@ -113,7 +109,6 @@ macro_rules! margin_mode_help {
 }
 const MARGIN_MODE: ArgSpec = arg("margin_mode").describe(margin_mode_help!("orders"));
 
-/// `--priority-rate`'s description up to what each command requires of it.
 macro_rules! priority_rate_help {
     ($rest:literal) => {
         concat!(
@@ -1097,7 +1092,6 @@ mod tests {
     use super::*;
     use crate::command_spec::Check;
 
-    /// Every command that places or changes orders, by spec.
     fn order_specs() -> Vec<CommandSpec> {
         vec![
             OrdersCreate::SPEC,

@@ -124,8 +124,6 @@ pub(super) async fn bracket_dry_run_plan(
     .await?;
     let entry = prepare_order_in(client, &Market::Perp(perp.clone()), settings, &spec).await?;
     let entry_margin = entry.margin;
-    // The entry previews the flags that made it; it carries no builder flags,
-    // margin mode or cloid of its own.
     let echo = OrderEcho {
         coin: &args.coin,
         dex: args.dex.as_deref(),
@@ -166,7 +164,6 @@ pub(super) async fn bracket_dry_run_plan(
     ))
 }
 
-/// The entry order of a bracket as the user can name it in a command.
 #[derive(Clone, Copy)]
 struct EntryRef {
     oid: Option<u64>,
@@ -195,24 +192,17 @@ impl EntryRef {
     }
 }
 
-/// What the entry order is doing while no TP/SL protects it.
 #[derive(Clone, Copy)]
 enum Exposure {
-    /// Still resting on the book: it can fill later.
     Resting,
-    /// Filled: a position exists.
     Filled,
 }
 
-/// Commands that say what to do after a bracket ended with work left on the
-/// exchange, led by the sentence that introduces them.
 struct Followup {
     lead: &'static str,
     commands: Vec<String>,
 }
 
-/// A bracket in flight: what each step needs to arm protection or to report
-/// how it ended.
 struct Bracket<'a> {
     context: OrderSubmissionContext<'a>,
     args: &'a BracketArgs,
@@ -248,8 +238,6 @@ pub(super) async fn bracket(
     let asset = CloidAsset::new(prepared.request.asset)?;
     let requested_size = prepared.size();
 
-    // Fail fast before the entry executes: the protection legs must be
-    // constructible and correctly ordered for the position side.
     TpslSpec::protecting(args, Some(requested_size)).validate()?;
     let (est_tp, est_sl) = resolve_trigger_prices(
         Some(&args.take_profit),
@@ -275,7 +263,6 @@ pub(super) async fn bracket(
             };
             return run.arm_protection(&entry, total_sz, Status::Armed).await;
         }
-        // Accepted without an oid is tracked by cloid and polled like a resting entry.
         Placement::Open { oid, .. } => LiveOrder {
             oid,
             cloid,
@@ -291,9 +278,8 @@ pub(super) async fn bracket(
         }
     };
 
-    // Poll the entry order itself (not position presence) so pre-existing
-    // exposure cannot falsely complete the bracket. The timeout is how long to
-    // wait for the fill, so it counts from the moment the entry is resting.
+    // The timeout is how long to wait for the fill, so it counts from the moment the
+    // entry is resting.
     let user = context.account();
     let dex = market_dex(&market);
     let deadline = Instant::now() + args.entry_timeout;
@@ -314,8 +300,6 @@ pub(super) async fn bracket(
         }
     }
 
-    // Entry timed out: cancel the remainder so it cannot fill unprotected,
-    // then protect whatever already filled.
     if let Err(err) = run.cancel_entry(&tracking).await {
         return Err(run.report_unprotected(
             &EntryRef::of(&tracking),
@@ -343,8 +327,6 @@ pub(super) async fn bracket(
 }
 
 impl Bracket<'_> {
-    /// Place the TP/SL for the `filled` size of the entry, or report that
-    /// nothing filled.
     async fn arm_protection(
         &self,
         entry: &EntryRef,
@@ -385,8 +367,6 @@ impl Bracket<'_> {
         Ok(())
     }
 
-    /// Cancel the remaining entry order so a timed-out bracket cannot fill
-    /// unprotected later.
     async fn cancel_entry(&self, tracking: &LiveOrder) -> Result<(), CliError> {
         send_tracked_action(
             self.context,
@@ -444,9 +424,8 @@ impl Bracket<'_> {
         )
     }
 
-    /// Print the bracket result for an entry that ended without protection or
-    /// without a position, and return the error (exit 15) that tells the user
-    /// how to recover. In JSON the printed result is the only document.
+    /// Returns the error (exit 15) that tells the user how to recover. In JSON the
+    /// printed result is the only document.
     fn report(
         &self,
         status: Status,
@@ -492,7 +471,6 @@ struct BracketOutput {
     problem: Option<BracketProblem>,
 }
 
-/// What went wrong after the entry order was placed, and what to run next.
 struct BracketProblem {
     entry_order_id: Option<u64>,
     headline: String,
@@ -630,8 +608,6 @@ mod tests {
 
     #[test]
     fn amount_entry_protection_uses_filled_size() {
-        // --amount entries have no --size; protection must be built from the
-        // confirmed filled size, not the (absent) size flag.
         let mut args = sample_args();
         args.size = None;
         args.amount = Some(Decimal::from(100));
@@ -655,7 +631,6 @@ mod tests {
 
     #[test]
     fn short_bracket_percent_triggers_resolve_favorably() {
-        // Short entry at 100: +10% TP resolves to 90, -5% SL to 105.
         let mut args = sample_args();
         args.side = OrderSide::Sell;
         let (tp, sl) = resolve_trigger_prices(

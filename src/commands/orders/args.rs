@@ -12,16 +12,13 @@ use crate::clock::parse_lifetime;
 use crate::errors::CliError;
 use crate::margin::MarginModeArg;
 
-/// Default maximum time to track a resting order or ALO chase quote (5 minutes).
 pub(super) const DEFAULT_TRACKING_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// [`DEFAULT_TRACKING_TIMEOUT`] as a clap default value.
 const DEFAULT_TRACKING_TIMEOUT_TEXT: &str = "300s";
 
 /// The largest order write priority rate, in 1/100,000,000 of notional: 100%.
 const MAX_PRIORITY_RATE: u32 = 100_000_000;
 
-/// `--priority-rate`: a whole rate from 1 to [`MAX_PRIORITY_RATE`].
 fn priority_rate_parser() -> clap::builder::RangedI64ValueParser<u32> {
     clap::value_parser!(u32).range(1..=i64::from(MAX_PRIORITY_RATE))
 }
@@ -30,7 +27,6 @@ pub(super) const DEFAULT_MARKET_ORDER_SLIPPAGE_BPS: u16 = 500;
 pub(super) const MIN_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1;
 pub(super) const MAX_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1_000;
 
-/// Basis points in one whole: a rate of 10,000 bps is 100%.
 pub(super) const BPS_DENOMINATOR: i64 = 10_000;
 
 /// Arguments for `orders create`.
@@ -620,7 +616,6 @@ impl fmt::Display for TpslGroupingArg {
     }
 }
 
-/// One leg of `orders batch-create`, read from the orders file by `parse_batch_leg`.
 #[derive(Debug, Clone)]
 pub struct BatchCreateOrder {
     pub(super) coin: String,
@@ -642,8 +637,6 @@ pub enum TriggerPriceSpec {
 }
 
 impl TriggerPriceSpec {
-    /// Resolve a trigger spec against a position entry price.
-    ///
     /// `position_side` is the direction of the position being protected (the
     /// entry side), not the close side. Percent specs are directional: `+N%`
     /// always means N% in the position's favor and `-N%` N% against it, so a
@@ -752,14 +745,12 @@ mod trigger_price_spec_tests {
     #[test]
     fn resolve_percent_inverts_for_short_entry() {
         let entry = Decimal::from(100);
-        // +10% take-profit on a short resolves below entry (favorable move).
         assert_eq!(
             TriggerPriceSpec::Percent(Decimal::from(10))
                 .resolve(entry, OrderSide::Sell)
                 .unwrap(),
             Decimal::from(90)
         );
-        // -5% stop-loss on a short resolves above entry (adverse move).
         assert_eq!(
             TriggerPriceSpec::Percent(Decimal::from(-5))
                 .resolve(entry, OrderSide::Sell)

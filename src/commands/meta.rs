@@ -11,7 +11,6 @@ use crate::output::TableData;
 use crate::output::format::thousands;
 use crate::wire::InfoRequest;
 
-/// How many names a section's sample lists.
 const SAMPLE_LEN: usize = 5;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

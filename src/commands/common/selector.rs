@@ -1,5 +1,3 @@
-//! The account selector the public read commands take first.
-
 use clap::Args;
 use hypersdk::Address;
 

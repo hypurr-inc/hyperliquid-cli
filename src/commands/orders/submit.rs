@@ -172,7 +172,6 @@ async fn verify_margin_mode(
     Ok(())
 }
 
-/// The error label an order placement carries when the exchange refuses it.
 pub(super) const PLACEMENT_FAILED: &str = "order placement failed";
 
 /// The action a builder fee travels in: `{ type: "order", orders, grouping,
@@ -186,10 +185,10 @@ struct BuilderOrderAction {
     builder: BuilderFee,
 }
 
-/// Send `batch` and return one status per order. The builder fee in `cleared`
-/// goes in the raw action, because the SDK's `BatchOrder.builder` carries only
-/// `{ b, f }`, which cannot express sub-builders; without a builder fee the SDK
-/// action is sent. `label` names the placement in the error.
+/// The builder fee in `cleared` goes in the raw action, because the SDK's
+/// `BatchOrder.builder` carries only `{ b, f }`, which cannot express sub-builders;
+/// without a builder fee the SDK action is sent. `label` names the placement in the
+/// error.
 pub(super) async fn submit_orders(
     context: OrderSubmissionContext<'_>,
     cleared: &Cleared<'_>,

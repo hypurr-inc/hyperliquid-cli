@@ -255,7 +255,6 @@ struct VaultDetailsRow {
 /// exchange for a vault with thousands).
 const FOLLOWERS_LIST_CAP: usize = 100;
 
-/// One user's stake in a vault.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
 struct FollowerStateRow {
@@ -507,7 +506,6 @@ fn validate_search_args(args: &VaultSearchArgs) -> Result<Option<Address>, CliEr
     parse_optional_user(args.user.as_deref())
 }
 
-/// Deposit USDC to a vault or withdraw it, previewing instead under `--dry-run`.
 async fn run_transfer(
     inv: &Invocation,
     args: &VaultTransferArgs,
@@ -567,8 +565,6 @@ async fn raw_vault_details_row(
     details.into_row(vault, user.is_some())
 }
 
-/// Every vault the exchange lists, from its public stats dataset.
-///
 /// `/info` `vaultSummaries` answers `[]` on both networks, so the list comes
 /// from the public stats dataset the exchange's own vault page reads. With a
 /// `user`, each vault row carries that user's deposit, read from their vault

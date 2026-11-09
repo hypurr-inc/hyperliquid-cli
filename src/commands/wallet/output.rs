@@ -11,8 +11,8 @@ use ows_lib::types::WalletInfo as VaultWalletInfo;
 /// The `type` every `account ls` row reports: the vault is the only backend.
 const OWS_WALLET_TYPE: &str = "ows-wallet";
 
-/// One `account ls` row. The shape predates the vault: `id` is a 1-based
-/// display index, and `type` (always [`OWS_WALLET_TYPE`]) is only on the wire.
+/// `id` is a 1-based display index, and `type` (always [`OWS_WALLET_TYPE`]) is only on
+/// the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRow {
     pub id: i64,
@@ -94,8 +94,6 @@ impl TableData for AccountsOutput {
     }
 }
 
-/// What a wallet command reports: the wallet's address, alias and source,
-/// where the config and vault live, and the config keys the command wrote.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(super) struct WalletReceipt {
     pub message: String,
@@ -228,7 +226,7 @@ pub(super) fn print_status(inv: &Invocation, status: &str, message: &str) {
     }
 }
 
-/// Report a declined confirmation. Human runs get a stderr note; JSON keeps its status document.
+/// Human runs get a stderr note; JSON keeps its status document.
 pub(super) fn print_declined(inv: &Invocation, message: &str) {
     if inv.format() == OutputFormat::Json {
         print_status(inv, "cancelled", message);
@@ -237,7 +235,6 @@ pub(super) fn print_declined(inv: &Invocation, message: &str) {
     }
 }
 
-/// The result of `wallet login` / `wallet logout`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub(super) struct BankrStatusOutput {
     status: String,
@@ -295,7 +292,6 @@ impl TableData for BankrStatusOutput {
     }
 }
 
-/// Quote a value for display in a copy-pasteable shell command.
 pub(super) fn shell_arg(value: &str) -> String {
     let plain = !value.is_empty()
         && value

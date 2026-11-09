@@ -255,7 +255,6 @@ pub struct DexLimitsArgs {
     pub dex: String,
 }
 
-/// One funding-rate record of `fundingHistory`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
 pub struct FundingRateRow {
@@ -284,7 +283,6 @@ impl ListRow for FundingRateRow {
     const EMPTY: &'static str = "No funding history.";
 }
 
-/// A funding rate one venue predicts for a coin.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PredictedFundingRow {
     pub coin: String,
@@ -383,7 +381,6 @@ pub struct FundingMultiplierRow {
     pub multiplier: Decimal,
 }
 
-/// A builder-deployed perp dex as `perpDexs` lists it.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DexInfoRow {
     pub name: String,
@@ -429,7 +426,6 @@ impl ListRow for DexInfoRow {
     const EMPTY: &'static str = "No builder-deployed perp dexes.";
 }
 
-/// A dex's open-interest limits and net deposits.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DexLimitsRow {
     pub dex: String,

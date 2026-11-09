@@ -95,7 +95,6 @@ pub struct PortfolioArgs {
     pub dex: Option<String>,
 }
 
-/// A fills request over `start..end`, which the API aggregates by time on request.
 fn fills_window(
     request: InfoRequest,
     start: u64,
@@ -122,8 +121,6 @@ async fn print_info_value(
     Ok(())
 }
 
-/// Print a time-windowed history as the raw rows the API sent (keys
-/// snake_cased), saying on stderr when the page was cut off at the API's cap.
 async fn print_window(
     inv: &Invocation,
     endpoint: Endpoint,
@@ -183,7 +180,6 @@ pub struct FillRow {
     pub twap_id: Option<u64>,
 }
 
-/// The liquidation a fill took part in, as the API reports it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
 pub struct FillLiquidation {
@@ -262,8 +258,8 @@ impl From<RawFill> for FillRow {
     }
 }
 
-/// Decode fill rows, naming spot pairs as the markets list them (`@107` is
-/// `HYPE/USDC`). The metadata is read only when a spot coin needs it.
+/// Spot coins are named as the markets list them (`@107` is `HYPE/USDC`); the metadata
+/// is read only when a spot coin needs it.
 async fn fill_rows(
     inv: &Invocation,
     raw: Vec<serde_json::Value>,
@@ -383,8 +379,7 @@ impl PortfolioSummaryRow {
     }
 }
 
-/// A position in the portfolio view: the shared position fields under the
-/// public `account portfolio` JSON keys.
+/// The shared position fields under the public `account portfolio` JSON keys.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PositionRow {
     pub coin: String,
@@ -408,7 +403,6 @@ pub struct PositionRow {
     pub cum_funding: CumFundingRow,
 }
 
-/// A position's cumulative funding over the three horizons the API reports.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CumFundingRow {
     #[serde(with = "rust_decimal::serde::str")]
@@ -529,7 +523,6 @@ impl PortfolioOutput {
 }
 
 impl PortfolioOutput {
-    /// The table rows; `pnl` formats a position's unrealized PnL.
     fn table_rows(&self, pnl: fn(Decimal) -> String) -> Vec<Vec<String>> {
         let mut rows = vec![
             vec![
@@ -815,8 +808,7 @@ impl CliCommand for AccountPortfolio {
             .clearinghouse_state(user, dex.clone())
             .await
             .map_err(from_sdk)?;
-        // Spot balances and vault equities are account-wide, not per-dex: report
-        // them only for the default dex so a HIP-3 view is not double-counted.
+        // Spot balances and vault equities are account-wide, not per-dex.
         let (spot_balances, vault_equities) = if dex.is_some() {
             (Vec::new(), Vec::new())
         } else {

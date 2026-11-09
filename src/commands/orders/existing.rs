@@ -1,6 +1,3 @@
-//! Orders that already exist: finding them, and planning their cancel or
-//! replacement.
-
 use hypersdk::hypercore::types::{
     Action, BasicOrder, BatchCancel, BatchCancelCloid, BatchModify, Cancel, CancelByCloid, Modify,
     OrderRequest, OrderType, OrderTypePlacement, Side, TimeInForce, TpSl,
@@ -41,8 +38,6 @@ async fn lookup_order(
     Ok(order.order)
 }
 
-/// The protocol asset an existing order trades, and how its prices and sizes are
-/// constrained when the market is known.
 struct OrderAsset {
     index: usize,
     precision: Option<MarketPrecision>,
@@ -203,7 +198,6 @@ fn filter_orders_by_coin(orders: Vec<BasicOrder>, coin: Option<&str>) -> Vec<Bas
         .collect()
 }
 
-/// The open orders `cancel-all` will cancel, each with the asset to cancel it on.
 pub(super) struct CancelAllOrdersPlan {
     cancels: Vec<Cancel>,
     pub(super) summary_coin: String,
@@ -280,8 +274,6 @@ pub(super) struct ModifyOrderPlan {
     pub(super) confirmation: ModifyConfirmation,
 }
 
-/// Check the flags of `orders modify` before anything is read, and name the
-/// order they modify.
 pub(super) fn validate_modify_args(args: &ModifyArgs) -> Result<OrderIdentifier, CliError> {
     let identifier = OrderIdentifier::for_modify(args.order_id, args.cloid.as_deref())?;
     super::validation::positive_price(args.price, "price")?;
@@ -373,7 +365,6 @@ pub(super) fn modify_dry_run_plan(args: &ModifyArgs) -> OrderDryRunPlan {
     )
 }
 
-/// The one `batchModify` action for several planned modifications.
 pub(super) fn batch_modify_action(modifies: Vec<Modify>, always_place: bool) -> Action {
     Action::BatchModify(BatchModify {
         modifies,
@@ -411,8 +402,6 @@ pub(super) fn batch_modify_dry_run_plan(
     )
 }
 
-/// The placement a modified order is replaced with: the order's own type, with
-/// any new trigger or limit price applied.
 pub(super) fn order_type_placement(
     order: &BasicOrder,
     trigger_price: Option<Decimal>,
@@ -429,8 +418,7 @@ pub(super) fn order_type_placement(
         tpsl,
     };
     match order.order_type {
-        // A generic `Trigger` order reports no TP/SL side; it has always been
-        // replaced as a stop.
+        // A generic `Trigger` order reports no TP/SL side, so it is replaced as a stop.
         OrderType::StopMarket | OrderType::Trigger => Ok(market_trigger(TpSl::Sl)),
         OrderType::TakeProfitMarket => Ok(market_trigger(TpSl::Tp)),
         OrderType::StopLimit => Ok(OrderTypePlacement::Trigger {

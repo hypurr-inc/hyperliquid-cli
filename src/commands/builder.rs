@@ -54,7 +54,6 @@ pub struct ApproveArgs {
     pub yes: bool,
 }
 
-/// `builder approve`'s arguments, validated.
 struct ApproveRequest {
     builder: Address,
     max_fee_rate: MaxFeeRate,

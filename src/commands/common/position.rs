@@ -18,7 +18,6 @@ use crate::errors::{CliError, from_sdk};
 use crate::http_api::ApiClient;
 use crate::output;
 
-/// A position's leverage mode and multiple, shown as `cross 5x`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Leverage {
     pub kind: LeverageType,
@@ -47,7 +46,6 @@ pub(crate) fn mark_price(position: &PositionData) -> Decimal {
     }
 }
 
-/// A position as `positions list` and `vault positions` show it.
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PositionRow {
     pub coin: String,
@@ -91,7 +89,6 @@ impl From<AssetPosition> for PositionRow {
 }
 
 impl PositionRow {
-    /// The rows of the positions with a nonzero size.
     pub(crate) fn open(positions: Vec<AssetPosition>) -> Vec<Self> {
         positions
             .into_iter()
@@ -130,7 +127,6 @@ impl Row for PositionRow {
         ]
     }
 
-    /// [`Self::cells`] with the PnL coloured by sign and missing values greyed.
     fn pretty_cells(&self) -> Vec<String> {
         let mut cells = self.cells();
         style_column::<Self>(&mut cells, "Unrealized PnL", |_| {
@@ -149,7 +145,6 @@ impl ListRow for PositionRow {
     const EMPTY: &'static str = "No open positions.";
 }
 
-/// A PnL value, green when positive and red when negative.
 pub(crate) fn pretty_pnl(value: Decimal) -> String {
     let formatted = value.to_string();
     if value > Decimal::ZERO {
@@ -161,9 +156,8 @@ pub(crate) fn pretty_pnl(value: Decimal) -> String {
     }
 }
 
-/// The `coin` position of `account` in `perp`'s dex. A position the account
-/// closed is still listed by the exchange with a zero size: it is returned only
-/// when `include_flat`.
+/// A position the account closed is still listed by the exchange with a zero size:
+/// it is returned only when `include_flat`.
 pub(crate) async fn find_position(
     client: &ApiClient,
     account: Address,

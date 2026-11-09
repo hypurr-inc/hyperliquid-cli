@@ -1,6 +1,3 @@
-//! What a live order command runs against: the connection, the signer, the
-//! account it acts for, and whether the user still has to approve.
-
 use hypersdk::Address;
 
 use super::consent::{ConsentKind, ConsentTarget};
@@ -24,14 +21,12 @@ pub(super) struct OrderSubmissionContext<'a> {
 }
 
 impl<'a> OrderSubmissionContext<'a> {
-    /// The account whose orders and balances this run reads and changes.
     pub(super) fn account(self) -> Address {
         self.vault_address
             .unwrap_or_else(|| self.signer.query_address())
     }
 
-    /// Ask the user to approve an action before it is sent. A no-op when no
-    /// approval is required. A decline fails with `kind`'s error.
+    /// A no-op when no approval is required. A decline fails with `kind`'s error.
     pub(super) fn consent(
         self,
         kind: ConsentKind,

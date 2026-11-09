@@ -17,9 +17,6 @@ use crate::http_api::ApiClient;
 use crate::output::{self, TableData};
 use crate::wire::InfoRequest;
 
-/// One open or historical order, as `orders open`, `orders history` and
-/// `account orders` list it.
-///
 /// The exchange reports `triggerPx: "0.0"` and `triggerCondition: "N/A"` on an
 /// order that is not a trigger; those placeholders read as no trigger here.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -81,7 +78,6 @@ impl From<BasicOrder> for OrderListRow {
 }
 
 impl OrderListRow {
-    /// Show `coin` instead of the exchange's spelling, for this order and its children.
     pub(crate) fn with_display_coin(mut self, display: &impl Fn(&str) -> String) -> Self {
         self.coin = display(&self.coin);
         self.children = self
@@ -104,9 +100,8 @@ impl OrderListRow {
     }
 }
 
-/// The text an order's type has in listings. It is spelled out here, not taken
-/// from the SDK's `Debug`, so a renamed SDK variant cannot change the output;
-/// a new variant fails to compile until it is given a label.
+/// Spelled out here, not taken from the SDK's `Debug`, so a renamed SDK variant cannot
+/// change the output; a new variant fails to compile until it is given a label.
 fn order_type_label(order_type: &OrderType) -> &'static str {
     match order_type {
         OrderType::Limit => "Limit",
@@ -123,7 +118,6 @@ fn order_type_label(order_type: &OrderType) -> &'static str {
     }
 }
 
-/// The text an order's time in force has in listings; see [`order_type_label`].
 fn tif_label(tif: TimeInForce) -> &'static str {
     match tif {
         TimeInForce::Alo => "Alo",
@@ -134,7 +128,7 @@ fn tif_label(tif: TimeInForce) -> &'static str {
     }
 }
 
-/// A list of orders. `empty_message` is what a run with no orders says.
+/// `empty_message` is what a run with no orders says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrderListOutput {
     rows: Vec<OrderListRow>,
@@ -149,7 +143,6 @@ impl OrderListOutput {
         }
     }
 
-    /// Only `orders history` rows carry a status, so only its table has the columns.
     fn has_status(&self) -> bool {
         self.rows.iter().any(|order| order.status.is_some())
     }
@@ -244,7 +237,6 @@ impl TableData for OrderListOutput {
     }
 }
 
-/// The TIF cell of an order that has none, such as a trigger order.
 const NO_TIF: &str = "n/a";
 
 /// An open order as `frontendOpenOrders` lists it: the SDK's order plus the
@@ -268,9 +260,8 @@ impl FrontendOrder {
     }
 }
 
-/// Fetch an account's open orders, trigger fields and TP/SL children
-/// included, without printing them. `account orders` and `orders open` list
-/// the same rows.
+/// Trigger fields and TP/SL children are included; `account orders` and `orders open`
+/// list the same rows.
 pub async fn open_orders_output(
     api: &ApiClient,
     resolver: &AssetResolver,

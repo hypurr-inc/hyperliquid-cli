@@ -17,9 +17,8 @@ pub struct IssueReport {
 }
 
 impl IssueReport {
-    /// A new-issue URL carrying `title`, `body` and the comma-separated
-    /// `labels`. `--open` (`open_requested`) opens it in the browser only for a
-    /// person at a terminal: an agent, CI or a JSON run only prints the URL.
+    /// `--open` (`open_requested`) opens the browser only for a person at a terminal: an
+    /// agent, CI or a JSON run only prints the URL.
     #[must_use]
     pub fn new(
         title: String,
@@ -71,7 +70,6 @@ fn urlencoding(input: &str) -> String {
     out
 }
 
-/// The program that opens a URL in the user's browser on this platform.
 fn browser_command(url: &str) -> Option<std::process::Command> {
     #[cfg(target_os = "macos")]
     {
@@ -98,7 +96,6 @@ fn browser_command(url: &str) -> Option<std::process::Command> {
     }
 }
 
-/// Whether `command` ran and exited successfully.
 fn succeeds(mut command: std::process::Command) -> bool {
     command.status().is_ok_and(|status| status.success())
 }
@@ -107,7 +104,6 @@ fn open_in_browser(url: &str) -> bool {
     browser_command(url).is_some_and(succeeds)
 }
 
-/// The CLI version and platform lines every report body carries.
 #[must_use]
 pub fn environment_lines() -> String {
     format!(

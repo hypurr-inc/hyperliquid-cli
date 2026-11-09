@@ -18,7 +18,6 @@ pub fn parse_candle_interval(input: &str) -> Result<CandleInterval, String> {
         .map_err(|_| format!("invalid interval '{input}'. Valid intervals: {VALID_INTERVALS}"))
 }
 
-/// The info-endpoint coin a data command subscribes to or queries for `market`.
 fn market_info_coin(market: Market, input: &str) -> Result<String, CliError> {
     match market {
         Market::Perp(perp) => Ok(perp.display_name()),
@@ -27,7 +26,6 @@ fn market_info_coin(market: Market, input: &str) -> Result<String, CliError> {
     }
 }
 
-/// Resolve a perpetual, fetching the market when it belongs to another dex.
 pub(crate) async fn resolve_perp_coin_or_fetch(
     client: &ApiClient,
     resolver: &AssetResolver,
@@ -40,7 +38,6 @@ pub(crate) async fn resolve_perp_coin_or_fetch(
         .display_name())
 }
 
-/// Resolve any market for a data command, fetching a HIP-3 market when needed.
 pub(crate) async fn resolve_market_coin(
     client: &ApiClient,
     resolver: &AssetResolver,

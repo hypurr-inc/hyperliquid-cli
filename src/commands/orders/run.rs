@@ -7,7 +7,7 @@
 //! the account they read is the vault, else the signer's own when one resolves
 //! (none: no read). A signer that resolves but could not sign the command fails
 //! the preview, as the live run would. A read that fails never fails the
-//! preview, except HIP-3 funding, whose error has always been the preview's:
+//! preview, except HIP-3 funding, whose error is the preview's:
 //!
 //! | read             | when it fails                                  |
 //! |------------------|------------------------------------------------|
@@ -36,7 +36,6 @@ pub(super) struct OrderRun<'a> {
     inv: &'a Invocation,
     /// The vault or subaccount the command acts for; `None` acts for the signer.
     vault: Option<Address>,
-    /// The `--on-behalf-of` selector as the user typed it.
     on_behalf_of: Option<String>,
     yes: bool,
 }
@@ -71,8 +70,6 @@ impl<'a> OrderRun<'a> {
         self.on_behalf_of.as_deref()
     }
 
-    /// Print the `--dry-run` document of `plan`, naming the account the
-    /// command acts for.
     pub(super) fn preview(&self, plan: OrderDryRunPlan) -> Result<(), anyhow::Error> {
         let would_execute = plan.would_execute();
         let args = plan.with_account(self.on_behalf_of()).into_args();
@@ -84,9 +81,8 @@ impl<'a> OrderRun<'a> {
         )
     }
 
-    /// The context a live run sends in. It fails before any side effect when
-    /// the connection is not there. `yes` waives the approval prompt, which
-    /// only commands whose spec prompts on this network ask for.
+    /// It fails before any side effect when the connection is not there. `yes` waives the
+    /// approval prompt, which only commands whose spec prompts on this network ask for.
     pub(super) fn context<'s>(
         &'s self,
         signer: &'s SelectedSigner,
@@ -101,7 +97,6 @@ impl<'a> OrderRun<'a> {
         })
     }
 
-    /// The account a preview reads; see the module's policy.
     fn preview_account(&self) -> Result<Option<Address>, CliError> {
         if let Some(vault) = self.vault {
             return Ok(Some(vault));
@@ -125,8 +120,6 @@ impl<'a> OrderRun<'a> {
         let Some(account) = self.preview_account()? else {
             return Ok(plan);
         };
-        // Best effort: an unread account leaves the market rule's guess, and the
-        // live run's own check reports the failure.
         Ok(
             match margin::read_account_mode(self.inv.remote()?.api(), account, perp).await {
                 Ok(mode) => plan.with_account_mode(mode),
@@ -135,8 +128,6 @@ impl<'a> OrderRun<'a> {
         )
     }
 
-    /// [`Self::previewed_margin`] for an order that may be on a market with no
-    /// margin, which previews none.
     pub(super) async fn previewed_margin_of(
         &self,
         perp: Option<&PerpAsset>,

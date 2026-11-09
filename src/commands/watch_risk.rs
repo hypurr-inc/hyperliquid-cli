@@ -54,7 +54,6 @@ impl RiskRule {
         RiskRule::PositionLifecycle,
     ];
 
-    /// The rule name in alert JSON and on the command line.
     pub fn as_str(self) -> &'static str {
         match self {
             RiskRule::LiqProximity => "liq_proximity",
@@ -73,10 +72,8 @@ const MARGIN_USED_LIMIT_PERCENT: i64 = 80;
 /// `liq_proximity` fires as critical and as a warning.
 const LIQ_CRITICAL_DISTANCE: Decimal = Decimal::from_parts(5, 0, 0, false, 2);
 const LIQ_WARNING_DISTANCE: Decimal = Decimal::from_parts(1, 0, 0, false, 1);
-/// Minutes a position may stay open without a TP/SL order.
 const NO_TPSL_AFTER_MINUTES: u64 = 15;
 const NO_TPSL_AFTER: Duration = Duration::from_secs(NO_TPSL_AFTER_MINUTES * 60);
-/// Time a position must be watched before paid funding is reported.
 const FUNDING_BLEED_WINDOW: Duration = Duration::from_secs(60 * 60);
 /// A resting order at least this old and this far from the mid (a fraction) is stale.
 const STALE_ORDER_AGE: Duration = Duration::from_secs(12 * 60 * 60);
@@ -241,8 +238,6 @@ impl<'a> RiskWatcher<'a> {
         user: Address,
         args: &WatchRiskArgs,
     ) -> Result<Self, anyhow::Error> {
-        // Seed position ages from fill history so positions opened before this
-        // watcher started do not wait a full threshold window for age-based rules.
         let fills = api.sdk().user_fills(user).await.map_err(from_sdk)?;
         Ok(Self {
             api,
@@ -255,10 +250,9 @@ impl<'a> RiskWatcher<'a> {
         })
     }
 
-    /// What `margin_usage` measures for this account. A pooled account's perp
-    /// margin summary is not its real equity, so a unified account is measured
-    /// by the docs' unified account ratio and a portfolio-margin one by the
-    /// protocol's own health verdict.
+    /// A pooled account's perp margin summary is not its real equity, so a unified
+    /// account is measured by the docs' unified account ratio and a portfolio-margin one
+    /// by the protocol's own health verdict.
     async fn margin_basis(
         &mut self,
         mode: AccountMode,
@@ -342,8 +336,6 @@ impl Ticker for RiskWatcher<'_> {
             .iter()
             .all(|position| position.position.szi.is_zero());
         if no_positions {
-            // Heartbeat once per flat transition; a flat account keeps
-            // monitoring so positions opened later are still observed.
             if !self.flat_announced {
                 alerts.push(RiskAlert::heartbeat(self.user));
                 self.flat_announced = true;
@@ -364,8 +356,6 @@ struct RiskSnapshot<'a> {
     margin: MarginBasis,
 }
 
-/// What the `margin_usage` rule measures, which depends on where the account
-/// keeps its balances.
 enum MarginBasis {
     /// The perp margin summary: a standard or dex-abstraction account.
     PerpSummary {
@@ -375,7 +365,6 @@ enum MarginBasis {
     /// The unified account risk; `None` when no collateral token carries
     /// cross maintenance margin.
     UnifiedRatio(Option<UnifiedRisk>),
-    /// The borrow/lend health a portfolio-margin account reports.
     PortfolioHealth {
         health: String,
         health_factor: Option<Decimal>,
@@ -464,7 +453,6 @@ struct RiskEvalState {
     funding_seen: HashMap<String, Instant>,
     funding_baseline: HashMap<String, Decimal>,
     funding_alerted: HashSet<String>,
-    /// Coin → position open time (ms since epoch) seeded from fill history.
     open_times: HashMap<String, u64>,
 }
 
@@ -517,7 +505,6 @@ fn position_open_times(fills: &[Fill]) -> HashMap<String, u64> {
     open_times
 }
 
-/// Instant approximating a position open time in ms since epoch.
 fn open_instant(open_times: &HashMap<String, u64>, coin: &str) -> Option<Instant> {
     let ms = *open_times.get(coin)?;
     let now_ms = clock::now_ms();
@@ -540,8 +527,6 @@ fn evaluate_state(
         alerts.push(alert);
     }
 
-    // Detect positions that closed by disappearing from the snapshot entirely:
-    // a coin remembered with nonzero size that is absent now has closed.
     if enabled.contains(&RiskRule::PositionLifecycle) {
         let present: HashSet<String> = snapshot
             .positions
@@ -607,8 +592,6 @@ fn evaluate_state(
             state.forget_clocks(&coin);
             continue;
         }
-        // Seed from fill history when available so pre-existing positions do
-        // not restart their age clocks at watcher startup.
         let seeded = open_instant(&state.open_times, &coin);
         state
             .first_seen
