@@ -35,6 +35,13 @@
 - `orders bracket --entry limit` refuses `--amount` with a bracket-specific message (exit `2`).
 - `account orders` shows a missing TIF as a dimmed `n/a` in pretty output, like `orders open`.
 - `orders history` retries the raw order list only when the response shape does not match, not when the body is malformed JSON.
+- `orders create` (and `buy`, `sell`, `bracket` entries) fails with the "exchange returned N statuses for 1 order" error, exit `1`, when the exchange answers a single order with anything but exactly one status; before, zero statuses printed an empty table and exited `0`.
+- `orders bracket --entry limit` protects the whole entry when it fills while resting: an entry that vanished from the open orders was reported as `entry_unfilled` ("nothing filled") unless a partial fill had been seen first, leaving the new position without TP/SL. `--entry-timeout` now counts from the moment the entry is resting, not from the start of the command, and `orders chase --timeout` counts from the first quote, not from the market lookups before it.
+- `orders chase --dry-run` previews the first quote as the live chase sends it: the price truncated to the market's tick grid, and a `--size` below one lot is refused (exit `2`) like the live command.
+- `orders cancel-all --coin` fails (exit `13`) for a coin or HIP-3 market the exchange does not list instead of listing nothing to cancel, and validates `--dex` against `perpDexs` like `orders open`.
+- `orders create --grouping normal-tpsl --builder ...` (or a configured default builder) sends the builder fee with the grouped batch; before, the fee was shown in the preview and dropped from the signed action.
+- `orders scale` and `orders batch-create` on a HIP-3 dex run the same helper margin transfer as `orders create` for accounts that do not pool margin across dexes, one transfer per dex sized to the whole batch, and their `--dry-run` previews list it under `side_effects`. The transfer moves the dex's own collateral token instead of always `USDC`.
+- `orders cancel-all` reports a cancel status other than `success` or an error as failed instead of cancelled.
 
 ## 0.17.0 - 2026-11-09
 

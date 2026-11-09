@@ -1,4 +1,5 @@
-//! One reading of an exchange order/cancel/modify status list.
+//! What the exchange said about orders: one reading of an order, cancel or
+//! modify status list, and the one wire shape of a builder fee.
 //!
 //! Placement rows, chase, and bracket all ask [`Placement`] what a status
 //! means. The wire decode stays here so a new waiting status is handled once.
