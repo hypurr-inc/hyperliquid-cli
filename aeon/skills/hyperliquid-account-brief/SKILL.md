@@ -22,7 +22,7 @@ metadata:
 
 Today is ${today}. Read one Hyperliquid account and report what it holds now.
 
-Hyperliquid is a perp and spot DEX where the account is the address: balances, positions and open orders are public, so a brief needs no key and cannot move anything. The helper reads them with plain `fetch` (no CLI, no install), across the default perp dex and every HIP-3 dex, and handles unified and portfolio-margin accounts, whose collateral lives in the spot state.
+Hyperliquid is a perp and spot DEX where the account is the address: balances, positions and open orders are public, so a brief needs no key and cannot move anything. The helper runs the pinned `hyperliquid` CLI release (`node` fetches it once, verifies its SHA-256 and caches it; a read-only run may not call `hyperliquid` directly but may run `node`) and reads the account across the default perp dex and every HIP-3 dex. It handles unified and portfolio-margin accounts, whose collateral lives in the spot state. The reads run one after another, so a full brief takes up to a minute.
 
 ## Steps
 
@@ -52,10 +52,11 @@ Hyperliquid is a perp and spot DEX where the account is the address: balances, p
 - **liq** is the liquidation price the exchange reports for that position, not a calculation of ours. Cross-margin positions can share margin, so `liq` on one line is not the whole story.
 - **uPnL** is unrealized and moves with mark price; **realized PnL** in the 24h section comes from fills, so it is final.
 - Positions are the fifteen largest by value, orders the first ten; the rest are counted. If the fills read hits the API's 2000-fill limit the brief says so.
+- A dex the CLI cannot read is named on a `Could not read:` line instead of failing the brief; the default dex must read or the run exits `3`.
 - An empty account means the reads succeeded and the account is quiet, not that the skill failed. Only exit `3` means the API could not be read.
 
 ## Hard limits
 
 - Read-only. This skill never signs, never submits, and never asks for a key.
 - It reads one account per run. For a watchlist of markets use `hyperliquid-market-monitor`.
-- Reads are unauthenticated HTTP calls to `api.hyperliquid.xyz`, so no secret is involved and `./secretcurl` is not used.
+- The CLI makes unauthenticated calls to `api.hyperliquid.xyz` and runs with an empty environment apart from `PATH`, so no secret is involved and `./secretcurl` is not used. The helper downloads one release asset from `github.com/hypurr-inc/hyperliquid-cli` on first use.

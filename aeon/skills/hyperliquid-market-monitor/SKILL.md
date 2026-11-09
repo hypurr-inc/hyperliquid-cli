@@ -19,7 +19,7 @@ metadata:
 ---
 
 > **${var}** - What to watch and how sensitive to be: `<coins> [move=<pct>] [funding=<pct>]`.
-> - `<coins>` - comma-separated perps (`BTC,ETH`); `dex:COIN` for a HIP-3 market (`xyz:XYZ100`). Empty watches `BTC,ETH,SOL,HYPE`.
+> - `<coins>` - comma-separated default-dex perps (`BTC,ETH`). Empty watches `BTC,ETH,SOL,HYPE`. HIP-3 markets are not watched and are refused as bad input.
 > - `move=<pct>` - absolute 24h move in percent that counts as notable. Default `5`.
 > - `funding=<pct>` - absolute hourly funding rate in percent. Default `0.01` (about 88%/yr).
 >
@@ -27,7 +27,7 @@ metadata:
 
 Today is ${today}. Report only the watched Hyperliquid perps that newly crossed a threshold, not a full market dump.
 
-Hyperliquid publishes one document per venue with everything this check needs per market: mid price, previous-day price, hourly funding, open interest and 24h volume. The helper reads it with plain `fetch` (no CLI, no key), filters it, and compares the result with the hits the previous run logged, so a move that persists is reported once rather than every run.
+The `hyperliquid` CLI's `meta` command returns, per market, the mid price, previous-day price, hourly funding, open interest and 24h volume. The helper runs the pinned CLI release (`node` fetches it once, verifies its SHA-256 and caches it; a read-only run may not call `hyperliquid` directly but may run `node`), filters that document, and compares the result with the hits the previous run logged, so a move that persists is reported once rather than every run.
 
 ## Steps
 
@@ -65,4 +65,4 @@ Hyperliquid publishes one document per venue with everything this check needs pe
 - Read-only. This skill never signs, never submits an order and never asks for a key.
 - It reports thresholds, not advice: no entry, stop, size or direction call.
 - For one account's state use `hyperliquid-account-brief`.
-- Reads are unauthenticated HTTP calls to `api.hyperliquid.xyz`, so no secret is involved and `./secretcurl` is not used.
+- The CLI makes unauthenticated calls to `api.hyperliquid.xyz` and runs with an empty environment apart from `PATH`, so no secret is involved and `./secretcurl` is not used. The helper downloads one release asset from `github.com/hypurr-inc/hyperliquid-cli` on first use.
