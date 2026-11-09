@@ -8,14 +8,10 @@
 //! [`Signs`] names a payload's kind before it exists, so a command's spec can
 //! state what it signs and [`SelectedSigner::ensure_covers`] can refuse early;
 //! [`Payload::signs`] derives the same kind from a payload, so the early and the
-//! late answer are one rule. Both live in the [`payload`] leaf, which the
+//! late answer are one rule. Both live in the [`crate::signable`] leaf, which the
 //! providers import instead of this module. Every signature a remote provider
 //! returns is checked, once, against the payload's own digest and the selected
 //! address.
-
-pub(crate) mod nonce;
-pub(crate) mod payload;
-pub(crate) mod signature;
 
 use alloy::dyn_abi::TypedData;
 use alloy::primitives::B256;
@@ -27,27 +23,21 @@ use hypersdk::hypercore::types::{Action, ActionRequest, Signature};
 use hypersdk::hypercore::{Chain, PrivateKeySigner};
 use ows_lib::types::WalletInfo;
 
-pub(crate) use self::payload::{Payload, USER_SIGNED_PREFIX};
-pub use self::payload::{Signs, ensure_supports_expires_after};
-use self::signature::Provider;
 use crate::bankr::{self, BankrClient, BankrSigner};
 use crate::errors::CliError;
 use crate::ows::signing::{self as ows_signing, OwsSigningConfig};
 use crate::ows::vault::Vault;
+use crate::signable::{Payload, Signs, ensure_supports_expires_after};
+use crate::signature::Provider;
 
-/// What a signing key is to the exchange: whether it acts for its own account
-/// or for a master's. An API wallet can trade for its master but not approve
-/// agents or withdraw, and holds no account data of its own.
+/// The agent form of an action: an API wallet cannot sign the user-signed
+/// (EIP-712) form, so the actions that have one are signed by it as L1 actions
+/// that apply to the `master` it acts for. An API wallet can trade for its
+/// master but not approve agents or withdraw, and holds no account data of its
+/// own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignerRole {
-    /// Acts for its own account: the exchange answered and it is no API wallet.
-    Master,
-    /// An API wallet signing for `master`, as a stored account records or as
-    /// the exchange reports.
-    Agent { master: Address },
-    /// Nothing proves which. A key that no stored account describes, whose
-    /// role was not asked of the exchange or could not be read.
-    Unverified,
+pub struct AgentForm {
+    pub master: Address,
 }
 
 /// How a local key was obtained, which is all `wallet show` needs to say.
@@ -166,18 +156,17 @@ impl SelectedSigner {
         }
     }
 
-    /// What the account store alone says this signer is: a stored account
-    /// whose data lives under another address is an agent of that master.
-    /// Every other signer is [`SignerRole::Unverified`] here; only the
-    /// exchange can say ([`Invocation::signer_role`](crate::invocation::Invocation::signer_role)).
-    /// The one offline definition of an agent wallet, which `master_only` and
-    /// the agent form of an action use through the invocation.
+    /// The agent form this signer signs in, as the account store alone says: a
+    /// stored account whose data lives under another address is an agent of
+    /// that master. `None` for every other signer, which signs the user-signed
+    /// form; only the exchange can say whether a bare key is an API wallet
+    /// ([`Invocation::resolve_signer_account`](crate::invocation::Invocation::resolve_signer_account)).
+    /// The one offline definition of an agent wallet, which `master_only`, the
+    /// live action and the dry-run marker all ask.
     #[must_use]
-    pub fn local_role(&self) -> SignerRole {
-        match self.query_address() {
-            master if master != self.address() => SignerRole::Agent { master },
-            _ => SignerRole::Unverified,
-        }
+    pub fn agent_form(&self) -> Option<AgentForm> {
+        let master = self.query_address();
+        (master != self.address()).then_some(AgentForm { master })
     }
 
     #[must_use]
@@ -332,19 +321,13 @@ impl SelectedSigner {
 mod tests {
     use super::*;
     use crate::ows::vault::test_support::import_test_wallet;
+    use crate::signable::{USER_SIGNED_PREFIX, UsdClassTransfer};
     use alloy::dyn_abi::{Eip712Types, Resolver};
     use alloy::sol_types::SolStruct;
     use hypersdk::hypercore::types::api::ApproveAgent;
     use hypersdk::hypercore::types::{Action, ScheduleCancel};
 
     alloy::sol! {
-        struct UsdClassTransfer {
-            string hyperliquidChain;
-            string amount;
-            bool toPerp;
-            uint64 nonce;
-        }
-
         struct Withdraw {
             string hyperliquidChain;
             string destination;
@@ -677,7 +660,7 @@ mod tests {
             (withdraw(Chain::Mainnet), Signs::user_signed::<Withdraw>()),
         ] {
             assert_eq!(
-                crate::bankr::covers(signs),
+                signs.bankr_covers(),
                 crate::bankr::document(&Payload::UserSigned(&typed)).is_ok(),
                 "{signs:?}"
             );
@@ -751,13 +734,13 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(
-            SelectedSigner::stored_account(key(), "agent".to_string(), master).local_role(),
-            SignerRole::Agent { master }
+            SelectedSigner::stored_account(key(), "agent".to_string(), master).agent_form(),
+            Some(AgentForm { master })
         );
         let own = SelectedSigner::private_key(key());
         let stored_master = SelectedSigner::stored_account(key(), "m".to_string(), own.address());
         for signer in [own, stored_master, SelectedSigner::keystore(key())] {
-            assert_eq!(signer.local_role(), SignerRole::Unverified);
+            assert_eq!(signer.agent_form(), None);
         }
     }
 }

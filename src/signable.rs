@@ -9,18 +9,46 @@
 
 use alloy::dyn_abi::TypedData;
 use alloy::primitives::B256;
+use alloy::sol;
 use alloy::sol_types::SolStruct;
 use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::signing::agent_signing_hash;
+use serde::Serialize;
 
 use crate::errors::CliError;
 
 /// The prefix of a user-signed action's EIP-712 primary type.
 pub(crate) const USER_SIGNED_PREFIX: &str = "HyperliquidTransaction:";
 
+/// A user-signed action: an EIP-712 struct whose JSON is the action body, and
+/// the tag the exchange knows the action by. A command declares the struct once
+/// and names its tag; its spec derives what it signs and what only the master
+/// may sign from the type ([`CommandSpec::user_signed`](crate::command_spec::CommandSpec::user_signed)).
+pub trait UserSigned: SolStruct + Serialize {
+    /// The exchange action's `type` tag.
+    const ACTION_TYPE: &'static str;
+}
+
+sol! {
+    /// The one user-signed document a Bankr hosted wallet can rebuild, a
+    /// spot↔perp USDC move ([`Signs::bankr_covers`]); `transfer usd-class`
+    /// signs it.
+    #[derive(Serialize)]
+    struct UsdClassTransfer {
+        string hyperliquidChain;
+        string amount;
+        bool toPerp;
+        uint64 nonce;
+    }
+}
+
+impl UserSigned for UsdClassTransfer {
+    const ACTION_TYPE: &'static str = "usdClassTransfer";
+}
+
 /// The kind of signature a command asks for, known before anything is signed:
 /// what a [`CommandSpec`](crate::command_spec::CommandSpec) declares and what
-/// each provider answers [`SelectedSigner::ensure_covers`](super::SelectedSigner::ensure_covers) for.
+/// each provider answers [`SelectedSigner::ensure_covers`](crate::signing::SelectedSigner::ensure_covers) for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signs<'a> {
     /// An L1 action: trading, margin, vault and subaccount actions.
@@ -40,6 +68,16 @@ impl Signs<'static> {
 }
 
 impl Signs<'_> {
+    /// Whether a Bankr hosted wallet signs this kind: every L1 action, and the
+    /// one user-signed action it can rebuild, a spot↔perp USDC move. Every
+    /// other user-signed action (withdrawals, sends, staking, approvals,
+    /// multisig) is refused before a request is sent. A command's spec and a
+    /// payload about to be signed both ask this, so they can never disagree.
+    #[must_use]
+    pub fn bankr_covers(self) -> bool {
+        self == Signs::L1Action || self == Signs::user_signed::<UsdClassTransfer>()
+    }
+
     /// Whether an action of this kind can carry `expiresAfter`: only an L1
     /// action hashes it. A user-signed action signs a document with no such
     /// field, and the exchange rejects the request field beside it
@@ -59,7 +97,7 @@ pub(crate) fn expires_after_refusal() -> CliError {
 
 /// Whether a command that signs `signs` can carry `--expires-after`. The one
 /// rule: the run pipeline asks it for a command's spec before anything runs,
-/// and [`SelectedSigner::sign_l1_action_sync`](super::SelectedSigner::sign_l1_action_sync)
+/// and [`SelectedSigner::sign_l1_action_sync`](crate::signing::SelectedSigner::sign_l1_action_sync)
 /// asks it again for the payload it just derived.
 pub fn ensure_supports_expires_after(signs: Option<Signs<'_>>) -> Result<(), CliError> {
     match signs {

@@ -3,7 +3,8 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::types::{Action, GossipPriorityBid};
 use serde::Serialize;
 
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
 use crate::commands::common::rows::{ListRow, MISSING, Row, Rows};
 use crate::commands::common::support::print_dry_run;
 use crate::errors::CliError;

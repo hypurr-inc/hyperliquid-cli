@@ -1,4 +1,5 @@
-use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, NoArgs};
 use crate::invocation::Invocation;
 
 pub struct Mcp;

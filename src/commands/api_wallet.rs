@@ -6,15 +6,16 @@ use hypersdk::hypercore::{Chain, PrivateKeySigner};
 use serde::Serialize;
 
 use crate::auth;
+use crate::cli_command::CliCommand;
 use crate::clock::{self, DurationError};
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
 use crate::exchange::actions;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
 use crate::output::{TableData, serialize_row};
-use crate::signing::{SelectedSigner, Signs};
+use crate::signing::SelectedSigner;
 use crate::terminal::OutputFormat;
 use crate::wire::{AddressRole, address};
 
@@ -611,8 +612,7 @@ impl CliCommand for ApiWalletCreate {
         "Generate or approve an API wallet",
         "Generate or approve a Hyperliquid API/agent wallet. When the CLI generates a local agent keypair, it prints the private key exactly once before approval.",
     )
-    .signs(Signs::Digest)
-    .master_only("approveAgent")
+    .digest_signed("approveAgent")
     .long_about("Generate or approve an API wallet.\n\
 \n\
 By default this command generates a new local API wallet keypair, signs an approveAgent action for that address with the selected master account, and prints the generated private key exactly once unless command is running in dry-run.")
@@ -643,8 +643,7 @@ impl CliCommand for ApiWalletApprove {
         "Approve an existing or generated API wallet address",
         "Approve an existing or generated API/agent wallet address for the selected master account.",
     )
-    .signs(Signs::Digest)
-    .master_only("approveAgent")
+    .digest_signed("approveAgent")
     .args(&[
         arg("name").describe("Optional API wallet name."),
         arg("expires_in").kind(InputKind::Duration).describe("Expiration duration such as 30d, 12h, or 1w. Requires name."),
@@ -700,8 +699,7 @@ impl CliCommand for ApiWalletRevoke {
         "Revoke an API wallet by replacing it with a throwaway agent",
         "Revoke a named API wallet by replacing it with a short-lived throwaway agent, or the unnamed API wallet (--unnamed) by replacing it with a throwaway agent whose key is discarded.",
     )
-    .signs(Signs::Digest)
-    .master_only("approveAgent")
+    .digest_signed("approveAgent")
     .one_of_required(&[&["name"], &["unnamed"]])
     .args(&[
         arg("name")

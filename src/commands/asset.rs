@@ -12,7 +12,8 @@ use crate::assets::{
     AssetResolver, Names, OutcomeCatalog, OutcomeDescription, OutcomeSideRow, PerpAsset, SpotAsset,
     normalize_asset_name,
 };
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::rows::or_missing;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;

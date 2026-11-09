@@ -25,8 +25,8 @@ use crate::errors::{
     network_error, transport_cause,
 };
 use crate::network::Network;
+use crate::nonce::NonceStore;
 use crate::response_sanitization::Untrusted;
-use crate::signing::nonce::NonceStore;
 
 mod sdk;
 
@@ -217,6 +217,15 @@ impl std::fmt::Debug for ApiClient {
     }
 }
 
+/// The `hypersdk` info/exchange client, pointed at `api_override` when given.
+fn sdk_client(chain: Chain, api_override: Option<reqwest::Url>) -> HttpClient {
+    let client = HttpClient::new(chain);
+    match api_override {
+        Some(url) => client.with_url(url),
+        None => client,
+    }
+}
+
 impl ApiClient {
     #[must_use]
     pub fn new(network: Network, api_override: Option<reqwest::Url>) -> Self {
@@ -230,7 +239,7 @@ impl ApiClient {
             base_url,
             label,
             has_override,
-            sdk: network.http_client(api_override),
+            sdk: sdk_client(network.chain(), api_override),
             http: OnceLock::new(),
             timeout: DEFAULT_API_TIMEOUT,
             policy: ReadPolicy::new(),

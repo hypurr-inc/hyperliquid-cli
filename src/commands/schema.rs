@@ -4,8 +4,9 @@
 use clap::Args;
 use serde_json::Value;
 
+use crate::cli_command::CliCommand;
 use crate::command_registry::{CommandContract, CommandRegistry};
-use crate::command_spec::{CliCommand, CommandSpec, NetworkUse, OutputContract, arg};
+use crate::command_spec::{CommandSpec, NetworkUse, OutputContract, arg};
 use crate::errors::CliError;
 use crate::invocation::Invocation;
 use crate::output::{TableData, serialize_row};

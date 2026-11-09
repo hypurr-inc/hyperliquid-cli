@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::account_mode::{AccountMode, fetch_abstraction};
 use crate::assets::{SpotTokenListing, load_spot_tokens, require_spot_token};
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, NoArgs, arg};
 use crate::commands::common::borrow_lend_state::{RawBorrowLendUserState, fetch_user_state};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, style_column};
 use crate::commands::common::selector::{OptionalAddressArgs, USER_SELECTOR};

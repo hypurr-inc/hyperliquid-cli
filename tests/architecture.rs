@@ -473,3 +473,70 @@ fn the_scan_resolves_the_shared_layer_imports_commands_really_make() {
     }
     assert!(importers >= 10, "found only {importers} importers");
 }
+
+/// The leaves the signing and command-spec graph hangs on keep pointing down:
+/// each `(files, forbidden)` row says the files import none of the modules.
+/// What they would need from a forbidden module belongs in a leaf below both
+/// (`signable`, `signature`, `nonce`, `cli_command`), so the providers, the
+/// specs and the HTTP edge never form a cycle through `signing` or
+/// `invocation`.
+#[test]
+fn the_signing_and_spec_leaves_import_nothing_above_them() {
+    let rows: &[(&[&str], &[&str])] = &[
+        (
+            &["signable.rs", "signature.rs", "nonce.rs"],
+            &[
+                "signing",
+                "bankr",
+                "ows",
+                "invocation",
+                "http_api",
+                "exchange",
+                "command_spec",
+            ],
+        ),
+        (
+            &["command_spec.rs"],
+            &["invocation", "bankr", "ows", "signing", "exchange"],
+        ),
+        (&["network.rs"], &["http_api", "ws"]),
+        (&["http_api.rs"], &["signing", "bankr", "ows"]),
+        (
+            &["bankr.rs", "ows/mod.rs", "ows/signing.rs", "ows/vault.rs"],
+            &["signing"],
+        ),
+        (
+            &[
+                "exchange/mod.rs",
+                "exchange/actions.rs",
+                "exchange/funds.rs",
+                "exchange/send_asset.rs",
+                "exchange/user_signed.rs",
+                "exchange/builder_approval.rs",
+            ],
+            &["invocation"],
+        ),
+    ];
+    let mut found = Vec::new();
+    for (files, forbidden) in rows {
+        for relative in *files {
+            let file = src_dir().join(relative);
+            let source = fs::read_to_string(&file).unwrap();
+            for path in paths_in(&file, &source) {
+                if let Some(target) = path.get(1)
+                    && forbidden.contains(&target.as_str())
+                    && module_of(&file).first() != Some(target)
+                {
+                    found.push(format!("{relative} -> {}", path.join("::")));
+                }
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    assert!(
+        found.is_empty(),
+        "a leaf imports a module above it:\n{}",
+        found.join("\n")
+    );
+}

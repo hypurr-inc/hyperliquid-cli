@@ -7,7 +7,8 @@ use crate::assets::{
     PerpListing, canonical_dex, eq_asset_name, load_hip3_market, load_perp_listings, normalize_dex,
     parse_asset_query, perp_price_tick, qualify_dex_asset,
 };
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
 use crate::commands::common::paging;
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::commands::common::time_range::{parse_time_millis, validate_optional_time_range};

@@ -11,7 +11,8 @@ use hypersdk::hypercore::types::Action;
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
-use crate::command_spec::{CliCommand, CommandSpec, InputKind, YES_FOR_AUTOMATION, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, InputKind, YES_FOR_AUTOMATION, arg};
 use crate::commands::common::rows::{One, Row};
 use crate::commands::common::support::print_dry_run;
 use crate::consent::{self, ConsentBlock};

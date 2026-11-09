@@ -33,8 +33,8 @@ use crate::network::is_loopback_url;
 use crate::resolvers::parse_hex_address;
 use crate::response_sanitization::Untrusted;
 use crate::settings::Settings;
-use crate::signing::payload::{Payload, Signs};
-use crate::signing::signature::Provider;
+use crate::signable::{Payload, Signs};
+use crate::signature::Provider;
 
 /// Bankr's public API, used when no other URL is configured.
 pub const DEFAULT_API_URL: &str = "https://api.bankr.bot";
@@ -76,25 +76,9 @@ struct SignRequest<'a> {
     typed_data: &'a Value,
 }
 
-/// What Bankr signs: every L1 action, and the one user-signed action it can
-/// rebuild, a spot↔perp USDC move. Every other user-signed action
-/// (withdrawals, sends, staking, approvals, multisig) is refused before a
-/// request is sent. The move is named by its EIP-712 struct, which
-/// `commands/transfers.rs` defines with `sol!` (`Signs::user_signed` takes the
-/// name from that type), so it is spelled out here; the registry fixture's
-/// `bankr_signer` column for `transfer usd-class` pins the two together.
-const COVERED: &[Signs<'static>] = &[Signs::L1Action, Signs::UserSigned("UsdClassTransfer")];
-
-/// Whether Bankr signs `signs`. A command's spec and a payload about to be
-/// signed both ask this, so they can never disagree.
-#[must_use]
-pub fn covers(signs: Signs<'_>) -> bool {
-    COVERED.contains(&signs)
-}
-
 /// The refusal for a signature Bankr does not cover, before a request is sent.
 pub fn ensure_covers(signs: Signs<'_>) -> Result<(), CliError> {
-    if covers(signs) {
+    if signs.bankr_covers() {
         Ok(())
     } else {
         Err(not_covered())

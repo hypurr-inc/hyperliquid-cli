@@ -4,7 +4,8 @@ use hypersdk::hypercore::Chain;
 use serde::de::IgnoredAny;
 use serde::{Deserialize, Serialize};
 
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, NoArgs, OwsSupport, Risk, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, NoArgs, OwsSupport, Risk, arg};
 use crate::commands::common::rows::{One, Row, or_missing};
 use crate::commands::common::support::print_dry_run;
 use crate::dry_run::ActionReversibility;
@@ -333,7 +334,7 @@ impl CliCommand for ReferralStatus {
     .auth();
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
-        let user = inv.resolve_signer()?.query_address();
+        let user = inv.resolve_signer_account().await?;
         let info = inv
             .remote()?
             .api()

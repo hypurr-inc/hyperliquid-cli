@@ -5,9 +5,8 @@ use hypersdk::{Address, Decimal};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::command_spec::{
-    CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, YES, YES_FLAG, arg,
-};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, NoArgs, YES, YES_FLAG, arg};
 use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing, style_column};
 use crate::commands::common::selector::{OptionalAddressArgs, USER_SELECTOR};
 use crate::commands::common::support::print_dry_run;
@@ -15,12 +14,13 @@ use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
 use crate::exchange::actions;
-use crate::exchange::user_signed::{self, AgentForm, UserSigned};
+use crate::exchange::user_signed;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::{self, JsonValueOutput};
 use crate::quantity::{self, Scale};
-use crate::signing::{SelectedSigner, Signs};
+use crate::signable::{Signs, UserSigned};
+use crate::signing::SelectedSigner;
 use crate::wire::{AddressRole, InfoRequest, address};
 
 const ASSET: &str = "HYPE";
@@ -824,15 +824,17 @@ async fn run_deposit(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::
     let agent_action = StakingL1Action::CDeposit2 { wei };
     if inv.dry_run() {
         let mut preview = amount_dry_run_value(inv.remote()?.chain(), args, kind);
-        inv.dry_run_signer()?;
-        if inv.acts_as_agent() {
+        if inv
+            .dry_run_signer()?
+            .is_some_and(|signer| signer.agent_form().is_some())
+        {
             preview["action_type"] = agent_action.type_tag();
         }
         return print_dry_run(inv, kind.would_execute(), preview);
     }
     let signer = inv.resolve_signer()?;
     let remote = inv.remote()?;
-    if AgentForm::of(inv).is_some() {
+    if signer.agent_form().is_some() {
         actions::send_raw_l1_json_action(
             remote.api(),
             &signer,
@@ -864,8 +866,7 @@ impl CliCommand for StakingDelegate {
         "Delegate stake to a validator",
         "Delegate HYPE to a validator.",
     )
-    .signs(Signs::user_signed::<TokenDelegate>())
-    .master_only("tokenDelegate")
+    .user_signed::<TokenDelegate>()
     .args(&[
         arg("validator")
             .kind(InputKind::ProtocolObjectAddress)
@@ -892,8 +893,7 @@ impl CliCommand for StakingUndelegate {
         "Undelegate stake from a validator",
         "Undelegate HYPE from a validator.",
     )
-    .signs(Signs::user_signed::<TokenDelegate>())
-    .master_only("tokenDelegate")
+    .user_signed::<TokenDelegate>()
     .args(&[
         arg("validator")
             .kind(InputKind::ProtocolObjectAddress)
@@ -941,8 +941,7 @@ impl CliCommand for StakingWithdraw {
         "Withdraw from staking",
         "Queue HYPE withdrawal from staking.",
     )
-    .signs(Signs::user_signed::<CWithdraw>())
-    .master_only("cWithdraw")
+    .user_signed::<CWithdraw>()
     .args(&[arg("amount")
         .kind(InputKind::Amount)
         .describe("HYPE amount.")]);
@@ -1009,8 +1008,7 @@ impl CliCommand for StakingLinkInitiate {
         "Initiate staking-link from the trading account, targeting the staking user",
         "Initiate staking-link fee discount attribution from the trading account, targeting the staking user. This is control-affecting; use --dry-run first.",
     )
-    .signs(Signs::user_signed::<LinkStakingUser>())
-    .master_only("linkStakingUser")
+    .user_signed::<LinkStakingUser>()
     .prompt()
     .args(&[
         arg("user").kind(InputKind::ProtocolObjectAddress).describe("Protocol user address for the staking account to link.").resource_id("staking-link user address"),
@@ -1033,8 +1031,7 @@ impl CliCommand for StakingLinkFinalize {
         "Finalize staking-link from the staking account, targeting the trading user",
         "Finalize staking-link fee discount attribution from the staking account, targeting the trading user. Finalization may be permanent; use --dry-run first.",
     )
-    .signs(Signs::user_signed::<LinkStakingUser>())
-    .master_only("linkStakingUser")
+    .user_signed::<LinkStakingUser>()
     .prompt()
     .args(&[
         arg("user").kind(InputKind::ProtocolObjectAddress).describe("Protocol user address for the trading account to link.").resource_id("staking-link user address"),

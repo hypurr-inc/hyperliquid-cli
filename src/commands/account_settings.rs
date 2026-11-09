@@ -9,16 +9,18 @@ use hypersdk::hypercore::{AbstractionMode, Chain, UserRole};
 use serde::Serialize;
 
 use crate::account_mode::AccountMode;
-use crate::command_spec::{CliCommand, CommandSpec, InputKind, Risk, YES_FOR_LIVE_EXECUTION, arg};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, InputKind, Risk, YES_FOR_LIVE_EXECUTION, arg};
 use crate::commands::common::rows::{One, Row};
 use crate::commands::common::support::print_dry_run;
 use crate::consent::{self, ConsentBlock};
 use crate::errors::CliError;
 use crate::exchange::actions;
-use crate::exchange::user_signed::{self, AgentForm, UserSigned};
+use crate::exchange::user_signed;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::signing::{SelectedSigner, Signs};
+use crate::signable::{Signs, UserSigned};
+use crate::signing::{AgentForm, SelectedSigner};
 use crate::wire::InfoRequest;
 
 sol! {
@@ -287,7 +289,7 @@ Use --dry-run to preview; confirm or pass -y for live submit.")
         if inv.dry_run() {
             let plan = match inv.dry_run_signer()? {
                 Some(signer) => Some(abstraction_plan(
-                    AgentForm::of(inv),
+                    signer.agent_form(),
                     signer.address(),
                     requested,
                 )?),
@@ -303,7 +305,7 @@ Use --dry-run to preview; confirm or pass -y for live submit.")
             );
         }
         let signer = inv.resolve_signer()?;
-        let plan = abstraction_plan(AgentForm::of(inv), signer.address(), requested)?;
+        let plan = abstraction_plan(signer.agent_form(), signer.address(), requested)?;
         set_abstraction(inv, &signer, plan, args).await
     }
 }
