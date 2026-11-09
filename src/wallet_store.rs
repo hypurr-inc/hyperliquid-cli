@@ -160,7 +160,6 @@ impl<'a> WalletStore<'a> {
         config.default_wallet_id = Some(wallet.id.clone());
     }
 
-    /// A [`ConfigEdit`] that makes the new wallet the default.
     pub fn set_default_edit() -> ConfigEdit<'static> {
         Box::new(|config, wallet, _| Self::make_default(config, wallet))
     }

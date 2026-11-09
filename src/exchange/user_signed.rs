@@ -38,8 +38,6 @@ impl AgentForm {
     }
 }
 
-/// Sign and submit the action `build` describes.
-///
 /// `build` receives the network name for `hyperliquidChain` and the nonce the
 /// action is signed and sent with.
 pub(crate) async fn submit<T: UserSigned>(

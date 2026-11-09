@@ -11,7 +11,6 @@ use crate::spot_balances::user_spot_balances_raw;
 /// USDC is spot token 0 on every network.
 const USDC_TOKEN_INDEX: usize = 0;
 
-/// Which of an account's USDC a spend draws on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pool {
     /// The spot balance, whatever the account's abstraction.
@@ -52,7 +51,6 @@ async fn available_usdc(
     Ok((withdrawable, "perp withdrawable"))
 }
 
-/// Refuse a spend of `amount` USDC that `user`'s `pool` cannot cover.
 pub(crate) async fn ensure_usdc(
     api: &ApiClient,
     user: Address,

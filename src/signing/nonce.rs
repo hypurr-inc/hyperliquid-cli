@@ -168,7 +168,6 @@ impl NonceStore {
         }
     }
 
-    /// The nonce for the next signed action of this process.
     pub(crate) fn next(&self) -> u64 {
         self.issue(&WARNED)
     }

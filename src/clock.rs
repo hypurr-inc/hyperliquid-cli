@@ -88,7 +88,6 @@ pub enum DurationError {
     TooLarge,
 }
 
-/// `input` as a duration of `grammar`.
 pub fn parse_duration(input: &str, grammar: &Grammar) -> Result<Duration, DurationError> {
     let text = input.trim();
     let Some(last) = text.chars().last() else {

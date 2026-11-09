@@ -89,7 +89,6 @@ fn validate_raw_payload_supported(spec: &CommandSpec) -> Result<(), CliError> {
     )))
 }
 
-/// What the command line said about `--yes` for the matched command.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Confirmation {
     /// The command has a `--yes` option.

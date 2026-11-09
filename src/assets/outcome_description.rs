@@ -1,8 +1,6 @@
 //! The `key:value|key:value` text an outcome's or question's `description`
 //! carries: the one parser, and the keys the CLI reads from it.
 
-/// A parsed outcome description.
-///
 /// Parts without a colon are not pairs, keys and values are trimmed, a pair
 /// with an empty value is absent, and the first occurrence of a key wins.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

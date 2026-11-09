@@ -13,7 +13,6 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 
-/// How the reader of a variable interprets its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// A switch this CLI owns: `1|true|yes|on` or `0|false|no|off`, and
@@ -32,7 +31,6 @@ pub enum Kind {
     Value,
 }
 
-/// One environment variable.
 #[derive(Debug, Clone, Copy)]
 pub struct Var {
     pub name: &'static str,
@@ -47,7 +45,6 @@ macro_rules! env_vars {
     ($($(#[$meta:meta])* $name:ident = $value:literal, $kind:ident => $help:literal $(, build $build:ident)?;)*) => {
         $($(#[$meta])* pub const $name: &str = $value;)*
 
-        /// Every variable, in help order.
         pub const TABLE: &[Var] = &[$(Var { name: $value, kind: Kind::$kind, help: $help }),*];
 
         /// The names of every variable, for a harness that must clear them all.
@@ -114,10 +111,9 @@ env_vars! {
 
 // Each `build` row above bakes the variable's value into the binary when it is
 // set at build time (`HYPERLIQUID_DEFAULT_BUILDER_ADDRESS=... cargo build`); a
-// runtime variable with the same name still overrides it. All are empty in the
-// upstream repo, meaning no default.
+// runtime variable with the same name still overrides it. A variable unset at
+// build time bakes in no default.
 
-/// The kind of the variable called `name`, when the table has it.
 #[must_use]
 pub fn kind(name: &str) -> Option<Kind> {
     TABLE
@@ -126,7 +122,6 @@ pub fn kind(name: &str) -> Option<Kind> {
         .map(|var| var.kind)
 }
 
-/// The names of the variables read as strict flags.
 pub fn strict_flags() -> impl Iterator<Item = &'static str> {
     TABLE
         .iter()

@@ -101,7 +101,6 @@ impl AssetMetadata {
     }
 }
 
-/// The default dex's perps and the spot metadata that names their collateral.
 async fn load_default_dex(api: &ApiClient) -> Result<(Vec<PerpAsset>, RawSpotMeta), CliError> {
     let meta = DexMeta::load(api, None).await?;
     let spot_meta = load_raw_spot_meta(api).await?;
@@ -144,7 +143,6 @@ fn spot_asset_from_listing(listing: SpotListing) -> Result<SpotAsset, CliError> 
     })
 }
 
-/// A spot market as `spotMeta` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotListing {
     pub symbol: String,
@@ -155,7 +153,6 @@ pub struct SpotListing {
     pub quote_sz_decimals: i64,
 }
 
-/// A spot token as `spotMeta` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotTokenListing {
     pub name: String,
@@ -284,7 +281,6 @@ async fn load_raw_spot_meta(api: &ApiClient) -> Result<RawSpotMeta, CliError> {
         .await
 }
 
-/// Every spot token `spotMeta` lists.
 pub async fn load_spot_tokens(api: &ApiClient) -> Result<Vec<SpotTokenListing>, CliError> {
     load_raw_spot_meta(api).await?.into_tokens()
 }

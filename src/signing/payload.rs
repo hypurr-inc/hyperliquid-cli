@@ -50,7 +50,6 @@ impl Signs<'_> {
     }
 }
 
-/// The refusal for `expiresAfter` on a user-signed action.
 pub(crate) fn expires_after_refusal() -> CliError {
     CliError::Unsupported(
         "--expires-after applies to L1 actions only (orders, cancels, modifies, leverage, margin, TWAP, vault, subaccount and similar); user-signed actions such as transfers, withdrawals, staking deposits and delegations, API wallet and builder approvals and abstraction changes do not support expiresAfter"

@@ -7,16 +7,8 @@
 //! [`EnvSource`] and parses the config file at most once, lazily, so a flag that
 //! settles a question never touches a broken config file. Every write to the
 //! config file goes through [`Settings::update_config`], which owns the
-//! lock, fresh read, edit and save sequence.
-
-//! The layered settings built from flags, environment and the config file.
-//!
-//! [`Settings`] reads the environment through an [`EnvSource`] and parses the
-//! config file at most once, lazily, so a flag that settles a question never
-//! touches a broken config file. Every write to the config file goes through
-//! [`Settings::update_config`], which owns the lock, fresh read, edit and save
-//! sequence. The variable names live in [`crate::env`]; the Bankr credential
-//! rule is in [`crate::bankr_credentials`].
+//! lock, fresh read, edit and save sequence. The Bankr credential rule is in
+//! [`crate::bankr_credentials`].
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};

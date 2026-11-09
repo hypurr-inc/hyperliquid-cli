@@ -1,8 +1,6 @@
 use super::spec::{self, Spec};
 use super::{CliError, NextCommand};
 
-/// A JSON-serializable error envelope.
-///
 /// In JSON mode, errors are rendered to stdout with stable top-level fields so
 /// agents can route failures without parsing prose. `error`, `category`, and
 /// `exit_code` are the stable core; `reason` is a stable snake_case code and

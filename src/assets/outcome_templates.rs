@@ -19,7 +19,6 @@ use super::outcome_description::OutcomeDescription;
 /// What marks a name or side name as template-derived.
 pub const TEMPLATE_PREFIX: &str = "template:";
 
-/// One keyword a template takes, with the type its value must have.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TemplateKeyword {
     pub keyword: String,
@@ -27,7 +26,6 @@ pub struct TemplateKeyword {
     pub kind: String,
 }
 
-/// How a template is used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateRole {
     StandaloneOutcome,
@@ -56,7 +54,6 @@ impl Serialize for TemplateRole {
     }
 }
 
-/// One outcome template, as `outcomeTemplates` lists it.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OutcomeTemplate {
     pub id: String,

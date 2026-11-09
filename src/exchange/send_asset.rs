@@ -16,7 +16,6 @@ use crate::invocation::{Invocation, Remote};
 use crate::signing::SelectedSigner;
 use crate::wire::{AddressRole, address};
 
-/// A venue `sendAsset` moves an asset between.
 #[derive(Debug)]
 pub struct AssetVenue {
     target: AssetTarget,
@@ -68,10 +67,8 @@ impl AssetVenue {
     }
 }
 
-/// What a `sendAsset` moves, where from and to.
 #[derive(Debug)]
 pub struct AssetMove {
-    /// The account that receives the asset.
     pub to: Address,
     pub source: AssetVenue,
     pub dest: AssetVenue,
@@ -102,7 +99,6 @@ pub(crate) fn from_subaccount_address(raw: &str) -> Result<Address, CliError> {
     address(raw, AddressRole::Explicit(Some("--from-subaccount")))
 }
 
-/// An [`AssetMove`] with its token resolved.
 pub(crate) struct ResolvedMove {
     pub(crate) mv: AssetMove,
     pub(crate) token: SpotTokenListing,

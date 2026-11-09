@@ -93,7 +93,6 @@ pub struct BuilderFee {
 }
 
 impl BuilderFee {
-    /// At most this many sub-builders share one builder fee.
     pub const MAX_SUB_BUILDERS: usize = 5;
     /// The sub-builder shares sum to at most this: 100%.
     pub const MAX_SUB_BUILDER_SHARES: u64 = 100_000;
@@ -134,7 +133,6 @@ impl BuilderFee {
         percent(self.tenths_bps)
     }
 
-    /// Refuse a fee above what a perpetual order may pay.
     pub fn ensure_within_perp_cap(&self) -> Result<(), CliError> {
         let cap = FeeCap::PerpOrder;
         if self.tenths_bps > cap.tenths_bps() {
