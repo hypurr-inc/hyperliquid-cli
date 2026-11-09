@@ -7,8 +7,8 @@ use serde::Serialize;
 use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
 use crate::errors::from_sdk;
 use crate::invocation::Invocation;
-use crate::output::TableData;
 use crate::output::format::{duration, plural};
+use crate::output::{TableData, serialize_row};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct StatusOutput {
@@ -44,7 +44,7 @@ impl TableData for StatusOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        serialize_row(self)
     }
 }
 

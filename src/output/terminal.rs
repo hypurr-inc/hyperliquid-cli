@@ -71,8 +71,12 @@ pub fn with_tty_for_test<T>(stdout: bool, stderr: bool, f: impl FnOnce() -> T) -
     f()
 }
 
-/// A boolean environment variable read strictly: only
-/// `1|true|yes|on|0|false|no|off` (case-insensitive) are values.
+/// A boolean environment variable, parsed by [`parse_flag`]: the one place
+/// that decides what `1|true|yes|on|0|false|no|off` (case-insensitive) mean.
+///
+/// Variables this CLI owns read it strictly: only [`EnvFlag::On`] enables and
+/// [`EnvFlag::Invalid`] is an error for the caller to report. Variables other
+/// tools define (`CI`, `FORCE_COLOR`) read it with [`EnvFlag::on_unless_off`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvFlag {
     /// Unset or empty.
@@ -81,6 +85,16 @@ pub enum EnvFlag {
     Off,
     /// Set to something outside the accepted values.
     Invalid,
+}
+
+impl EnvFlag {
+    /// The lenient reading for variables other tools define: set to anything
+    /// but an explicit off value means on, so `CI=1`, `CI=true` and
+    /// `FORCE_COLOR=2` all enable.
+    #[must_use]
+    pub fn on_unless_off(self) -> bool {
+        matches!(self, Self::On | Self::Invalid)
+    }
 }
 
 #[must_use]
@@ -105,13 +119,11 @@ pub fn agent_env() -> bool {
     env_flag("HYPERLIQUID_AGENT") == EnvFlag::On
 }
 
-/// The process runs under CI (`CI` set to anything except empty, `0`, or `false`).
+/// The process runs under CI: `CI` is set to anything but an explicit off
+/// value (see [`EnvFlag::on_unless_off`]).
 #[must_use]
 pub fn ci_env() -> bool {
-    std::env::var("CI").is_ok_and(|value| {
-        let value = value.trim().to_ascii_lowercase();
-        !value.is_empty() && value != "0" && value != "false"
-    })
+    env_flag("CI").on_unless_off()
 }
 
 /// Terminal and environment facts about this run, probed once at startup and
@@ -149,5 +161,15 @@ mod tests {
         assert_eq!(parse_flag(" off "), EnvFlag::Off);
         assert_eq!(parse_flag(""), EnvFlag::Unset);
         assert_eq!(parse_flag("banana"), EnvFlag::Invalid);
+    }
+
+    #[test]
+    fn lenient_reading_turns_on_for_anything_but_an_explicit_off() {
+        for on in ["1", "true", "yes", "on", "2", "banana"] {
+            assert!(parse_flag(on).on_unless_off(), "{on}");
+        }
+        for off in ["", "0", "false", "no", "off", " OFF "] {
+            assert!(!parse_flag(off).on_unless_off(), "{off:?}");
+        }
     }
 }
