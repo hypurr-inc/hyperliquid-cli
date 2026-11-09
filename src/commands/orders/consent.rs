@@ -1,7 +1,8 @@
 use std::io::{self, Write};
 
 use chrono::Utc;
-use hypersdk::Address;
+use hypersdk::hypercore::types::OrderGrouping;
+use hypersdk::{Address, Decimal};
 
 use super::context::OrderSubmissionContext;
 use super::exchange::OrderBuilderFee;
@@ -14,6 +15,7 @@ use crate::mode::Mode;
 use crate::network::Network;
 use crate::output;
 use crate::prompt;
+use crate::quantity::Scale;
 use crate::signing::SelectedSigner;
 
 /// What the user is asked to approve. It names the error a decline fails with.
@@ -26,6 +28,7 @@ pub(super) enum ConsentKind {
     Twap,
     ScheduleCancel,
     TrailingStop,
+    ModifyOrders,
     CancelAll,
 }
 
@@ -39,6 +42,7 @@ impl ConsentKind {
             Self::Twap => ("TWAP", "TWAP creation"),
             Self::ScheduleCancel => ("schedule-cancel", "action"),
             Self::TrailingStop => ("trailing stop", "trailing stop placement"),
+            Self::ModifyOrders => ("batch modify", "order modification"),
             Self::CancelAll => {
                 return CliError::Configuration("cancel-all aborted".to_string());
             }
@@ -47,6 +51,18 @@ impl ConsentKind {
             "Mainnet {label} confirmation required; {cancelled} cancelled. Rerun with --yes for deliberate automation."
         ))
     }
+}
+
+pub(super) fn confirm_mainnet_batch_modify(
+    count: usize,
+    target: &ConsentTarget<'_>,
+) -> Result<bool, CliError> {
+    let orders = output::format::noun(count, "order", "orders");
+    ask_confirmation(
+        target,
+        &[format!("Modifications: {count} {orders}")],
+        &format!("Modify {count} {orders} on {}?", target.network()),
+    )
 }
 
 pub(super) fn confirm_cancel_all(
@@ -111,10 +127,22 @@ pub(super) fn confirm_mainnet_order(
     if let Some(slippage_warning) = &prepared.warning {
         details.push(prompt::warning(slippage_warning));
     }
+    if let Some(rate) = prepared.priority_rate {
+        details.push(priority_line(rate));
+    }
     ask_confirmation(
         target,
         &details,
         &format!("Place this order on {}?", target.network()),
+    )
+}
+
+/// The consent line for an order write priority: a real charge, burned, from
+/// staking balance rather than from the trading account.
+fn priority_line(rate: u32) -> String {
+    let bps = (Decimal::from(rate) / Decimal::from(10_000)).normalize();
+    format!(
+        "Priority: {rate} ({bps} bps of the filled notional for IOC, resting notional for ALO), charged from undelegated staking balance"
     )
 }
 
@@ -125,9 +153,13 @@ pub(super) fn confirm_mainnet_order_batch(
 ) -> Result<bool, CliError> {
     let count = prepared.legs.len();
     let orders = output::format::noun(count, "order", "orders");
+    let mut details = vec![format!("Orders: {count} {label} {orders}")];
+    if let OrderGrouping::PriorityRate(rate) = prepared.batch.grouping {
+        details.push(priority_line(rate));
+    }
     ask_confirmation(
         target,
-        &[format!("Orders: {count} {label} {orders}")],
+        &details,
         &format!("Submit {count} {label} {orders} on {}?", target.network()),
     )
 }
@@ -231,6 +263,13 @@ impl<'a> ConsentTarget<'a> {
                 builder.b,
                 builder.percent()
             ));
+            for sub in &builder.s {
+                lines.push(format!(
+                    "Sub-builder: {} ({}% of the builder fee)",
+                    sub.b,
+                    Scale::TENTHS_BPS_PER_PERCENT.amount(sub.s)
+                ));
+            }
         }
         lines
     }
@@ -287,6 +326,10 @@ mod tests {
             (
                 ConsentKind::TrailingStop,
                 "Mainnet trailing stop confirmation required; trailing stop placement cancelled. Rerun with --yes for deliberate automation.",
+            ),
+            (
+                ConsentKind::ModifyOrders,
+                "Mainnet batch modify confirmation required; order modification cancelled. Rerun with --yes for deliberate automation.",
             ),
             (ConsentKind::CancelAll, "cancel-all aborted"),
         ] {

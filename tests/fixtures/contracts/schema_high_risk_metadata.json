@@ -508,6 +508,18 @@
     {
       "auth_required": true,
       "bankr_signer": "supported",
+      "command": "hyperliquid orders batch-modify",
+      "confirmation": "prompt",
+      "dangerous": true,
+      "dry_run": "optional",
+      "lifecycle": "live_mutating",
+      "ows_signer": "experimental_feature_gated",
+      "raw_payload": "dry_run_only",
+      "risk": "funds_movement"
+    },
+    {
+      "auth_required": true,
+      "bankr_signer": "supported",
       "command": "hyperliquid orders twap-create",
       "confirmation": "prompt",
       "dangerous": true,

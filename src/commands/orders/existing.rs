@@ -9,7 +9,7 @@ use hypersdk::hypercore::types::{
 use hypersdk::hypercore::{Cloid, HttpClient, OidOrCloid};
 use hypersdk::{Address, Decimal};
 
-use super::args::{CancelAllArgs, CancelArgs, ModifyArgs};
+use super::args::{BatchModifyArgs, CancelAllArgs, CancelArgs, ModifyArgs};
 use super::cloid::{parse_cloid, parse_lookup_cloid, wire_cloid};
 use super::live_order::CloidAsset;
 use super::planning::OrderDryRunPlan;
@@ -67,6 +67,11 @@ impl OrderIdentifier {
         }
     }
 
+    /// Whether both name the same order the way the exchange keys it: an
+    /// order id, or a client order id.
+    pub(super) fn names_same_order_as(&self, other: &Self) -> bool {
+        self.to_status_identifier() == other.to_status_identifier()
+    }
     fn display(&self) -> String {
         match self {
             Self::Oid(oid) => oid.to_string(),
@@ -320,7 +325,7 @@ pub(super) async fn cancel_all_dry_run_plan(
 }
 
 pub(super) struct ModifyOrderPlan {
-    pub(super) action: Action,
+    pub(super) modify: Modify,
     pub(super) confirmation: ModifyConfirmation,
 }
 
@@ -345,6 +350,7 @@ pub(super) async fn prepare_modify_order_plan(
     user: Address,
     identifier: &OrderIdentifier,
     args: &ModifyArgs,
+    command: &str,
 ) -> Result<ModifyOrderPlan, CliError> {
     let order = lookup_order(client, user, identifier).await?;
     let asset = order_asset(client, resolver, &order).await?;
@@ -372,10 +378,9 @@ pub(super) async fn prepare_modify_order_plan(
             }
         };
         if needs_always_place {
-            return Err(CliError::Configuration(
-                "orders modify without --always-place can only place an ALO or non-executable GTC replacement; add --always-place to modify trigger orders or place an IOC replacement"
-                    .to_string(),
-            ));
+            return Err(CliError::Configuration(format!(
+                "{command} without --always-place can only place an ALO or non-executable GTC replacement; add --always-place to modify trigger orders or place an IOC replacement"
+            )));
         }
     }
     let replacement = OrderRequest {
@@ -388,13 +393,10 @@ pub(super) async fn prepare_modify_order_plan(
         cloid: wire_cloid(order.cloid),
     };
     Ok(ModifyOrderPlan {
-        action: Action::BatchModify(BatchModify {
-            modifies: vec![Modify {
-                oid: identifier.to_status_identifier(),
-                order: replacement,
-            }],
-            always_place: args.always_place,
-        }),
+        modify: Modify {
+            oid: identifier.to_status_identifier(),
+            order: replacement,
+        },
         confirmation: ModifyConfirmation {
             coin,
             status: "modified".to_string(),
@@ -420,6 +422,74 @@ pub(super) fn modify_dry_run_plan(args: &ModifyArgs) -> OrderDryRunPlan {
             "trigger_price": args.trigger_price.map(|value| value.to_string()),
             "size": args.size.map(|value| value.to_string()),
             "always_place": args.always_place,
+        }),
+    )
+}
+
+/// One modification of `orders batch-modify`, as the orders file names it.
+#[derive(Debug, Clone)]
+pub(super) struct BatchModifyOrder {
+    pub(super) identifier: OrderIdentifier,
+    pub(super) price: Option<Decimal>,
+    pub(super) trigger_price: Option<Decimal>,
+    pub(super) size: Option<Decimal>,
+}
+
+impl BatchModifyOrder {
+    /// The flags `orders modify` would have been given for this order, so a
+    /// batch leg is planned by the one modify planner.
+    pub(super) fn modify_args(&self, always_place: bool) -> ModifyArgs {
+        let (order_id, cloid) = match &self.identifier {
+            OrderIdentifier::Oid(oid) => (Some(*oid), None),
+            OrderIdentifier::Cloid { raw, .. } => (None, Some(raw.clone())),
+        };
+        ModifyArgs {
+            order_id,
+            cloid,
+            price: self.price,
+            trigger_price: self.trigger_price,
+            size: self.size,
+            always_place,
+            on_behalf_of: None,
+        }
+    }
+}
+
+/// The one `batchModify` action for several planned modifications.
+pub(super) fn batch_modify_action(modifies: Vec<Modify>, always_place: bool) -> Action {
+    Action::BatchModify(BatchModify {
+        modifies,
+        always_place,
+    })
+}
+
+pub(super) fn batch_modify_dry_run_plan(
+    orders: &[BatchModifyOrder],
+    args: &BatchModifyArgs,
+) -> OrderDryRunPlan {
+    let modifications: Vec<_> = orders
+        .iter()
+        .enumerate()
+        .map(|(index, order)| {
+            let modify = order.modify_args(args.always_place);
+            serde_json::json!({
+                "leg_index": index,
+                "order_id": modify.order_id,
+                "cloid": modify.cloid,
+                "price": modify.price.map(|value| value.to_string()),
+                "trigger_price": modify.trigger_price.map(|value| value.to_string()),
+                "size": modify.size.map(|value| value.to_string()),
+            })
+        })
+        .collect();
+    OrderDryRunPlan::new(
+        "modify_orders",
+        serde_json::json!({
+            "orders_file": args.orders_file,
+            "order_count": orders.len(),
+            "on_behalf_of": args.on_behalf_of,
+            "always_place": args.always_place,
+            "modifications": modifications,
         }),
     )
 }

@@ -118,6 +118,7 @@ const SCHEMA_ORDER: &[&str] = &[
     "orders cancel",
     "orders cancel-all",
     "orders modify",
+    "orders batch-modify",
     "orders twap-create",
     "orders twap-cancel",
     "positions update-leverage",

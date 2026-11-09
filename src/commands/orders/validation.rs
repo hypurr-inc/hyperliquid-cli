@@ -7,15 +7,18 @@ use hypersdk::{Address, Decimal};
 use rust_decimal::RoundingStrategy;
 
 use super::args::{
-    BatchCreateArgs, BatchCreateOrder, BracketArgs, CreateArgs, CreateOrderType,
+    BatchCreateArgs, BatchCreateOrder, BatchModifyArgs, BracketArgs, CreateArgs, CreateOrderType,
     CreateTpslGroupingArg, MAX_MARKET_ORDER_SLIPPAGE_BPS, MIN_MARKET_ORDER_SLIPPAGE_BPS,
     MarginModeArg, OrderSide, ScaleArgs, TifArg, TpslArgs, TriggerPriceSpec, TwapCreateArgs,
 };
 use super::cloid::parse_cloid;
+use super::exchange::{OrderBuilderFee, SubBuilder};
+use super::existing::{BatchModifyOrder, OrderIdentifier};
 use crate::assets::{Market, PerpAsset};
 use crate::builder_fee::MaxFeeRate;
 use crate::errors::CliError;
 use crate::input_hardening::{FilePolicy, read_json_file};
+use crate::quantity::{self, Scale};
 use crate::wire::{self, AddressRole};
 
 pub(super) const BPS_DENOMINATOR: i64 = 10_000;
@@ -144,6 +147,8 @@ pub(crate) struct OrderSpec {
     pub(super) builder: BuilderRequest,
     pub(super) margin_mode: Option<MarginModeArg>,
     pub(super) tpsl: Option<AttachedTpsl>,
+    /// The order write priority rate, in 1/100,000,000 of notional.
+    pub(super) priority_rate: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -201,25 +206,34 @@ impl OrderKind {
 /// The builder fee an order should carry. `Default` defers to the configured
 /// default builder, if any; `None` carries no builder fee and never consults
 /// that configuration (generated batch legs are sent without one).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) enum BuilderRequest {
     None,
     Default,
-    Explicit { address: Address, fee: u64 },
+    Explicit {
+        address: Address,
+        fee: u64,
+        sub_builders: Vec<SubBuilder>,
+    },
 }
 
 impl BuilderRequest {
     pub(super) fn from_flags(
         builder: Option<&str>,
         fee_rate: Option<&str>,
+        sub_builders: &[String],
     ) -> Result<Self, CliError> {
         match (builder, fee_rate) {
             (Some(raw_builder), Some(raw_fee)) => Ok(Self::Explicit {
                 address: wire::address(raw_builder, AddressRole::Builder)?,
                 fee: MaxFeeRate::parse(raw_fee)?.tenths_bps(),
+                sub_builders: parse_sub_builders(sub_builders)?,
             }),
             (Some(_), None) | (None, Some(_)) => Err(CliError::Configuration(
                 "--builder and --builder-fee-rate must be given together".to_string(),
+            )),
+            (None, None) if !sub_builders.is_empty() => Err(CliError::Configuration(
+                "--sub-builder requires --builder and --builder-fee-rate".to_string(),
             )),
             (None, None) => Ok(Self::Default),
         }
@@ -245,8 +259,11 @@ impl OrderSpec {
         positive_price(args.stop_loss, "stop-loss")?;
         validate_market_slippage(args.max_slippage_bps)?;
         let tpsl = attached_tpsl(args)?;
-        let builder =
-            BuilderRequest::from_flags(args.builder.as_deref(), args.builder_fee_rate.as_deref())?;
+        let builder = BuilderRequest::from_flags(
+            args.builder.as_deref(),
+            args.builder_fee_rate.as_deref(),
+            &args.sub_builder,
+        )?;
         Ok(Self {
             coin: args.coin.clone(),
             dex: args.dex.clone(),
@@ -257,6 +274,7 @@ impl OrderSpec {
             builder,
             margin_mode: args.margin_mode,
             tpsl,
+            priority_rate: args.priority_rate,
         })
     }
 
@@ -281,6 +299,7 @@ impl OrderSpec {
             builder: BuilderRequest::None,
             margin_mode: None,
             tpsl: None,
+            priority_rate: None,
         })
     }
 
@@ -301,6 +320,11 @@ impl OrderSpec {
 
     pub(super) fn with_builder(mut self, builder: BuilderRequest) -> Self {
         self.builder = builder;
+        self
+    }
+
+    pub(super) fn with_priority_rate(mut self, priority_rate: Option<u32>) -> Self {
+        self.priority_rate = priority_rate;
         self
     }
 
@@ -330,6 +354,7 @@ impl OrderSpec {
             builder: BuilderRequest::None,
             margin_mode: None,
             tpsl: None,
+            priority_rate: None,
         })
     }
 }
@@ -435,9 +460,99 @@ fn attached_tpsl(args: &CreateArgs) -> Result<Option<AttachedTpsl>, CliError> {
     }
 }
 
+/// Order write priority is only accepted for non-outcome assets, and only when
+/// every order is IOC or every order is a non-reduce-only ALO (the docs'
+/// priority-fees page). A market order is sent with the frontend's market
+/// time in force, which is neither, so it is refused too.
+fn validate_priority_for_market(spec: &OrderSpec, market: &Market) -> Result<(), CliError> {
+    if spec.priority_rate.is_none() {
+        return Ok(());
+    }
+    if matches!(market, Market::Outcome(_)) {
+        return Err(CliError::Unsupported(
+            "--priority-rate does not apply to outcome markets; Hyperliquid accepts order priority on non-outcome assets only"
+                .to_string(),
+        ));
+    }
+    match spec.kind {
+        OrderKind::Limit {
+            tif: TifArg::Ioc, ..
+        } => Ok(()),
+        OrderKind::Limit {
+            tif: TifArg::Alo, ..
+        } if spec.reduce_only => Err(CliError::Unsupported(
+            "--priority-rate on an ALO order can't be combined with --reduce-only; Hyperliquid accepts priority only for IOC orders or non-reduce-only ALO orders"
+                .to_string(),
+        )),
+        OrderKind::Limit {
+            tif: TifArg::Alo, ..
+        } => Ok(()),
+        _ => Err(CliError::Unsupported(
+            "--priority-rate requires a limit order with --tif ioc, or --tif alo without --reduce-only; Hyperliquid accepts priority only for those orders"
+                .to_string(),
+        )),
+    }
+}
+
+/// The sub-builders `--sub-builder ADDRESS:SHARE` names. A share is a percent
+/// of the builder's fee; the wire unit is 0.001% of it. The exchange accepts up
+/// to [`OrderBuilderFee::MAX_SUB_BUILDERS`], each with a positive share, whose
+/// shares sum to at most 100%.
+pub(super) fn parse_sub_builders(raw: &[String]) -> Result<Vec<SubBuilder>, CliError> {
+    if raw.len() > OrderBuilderFee::MAX_SUB_BUILDERS {
+        return Err(CliError::Configuration(format!(
+            "--sub-builder can be given at most {} times, {} given",
+            OrderBuilderFee::MAX_SUB_BUILDERS,
+            raw.len()
+        )));
+    }
+    let mut total = 0u64;
+    let mut sub_builders = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let sub_builder = parse_sub_builder(entry)?;
+        total += sub_builder.s;
+        sub_builders.push(sub_builder);
+    }
+    if total > OrderBuilderFee::MAX_SUB_BUILDER_SHARES {
+        return Err(CliError::Configuration(
+            "--sub-builder shares must sum to at most 100%".to_string(),
+        ));
+    }
+    Ok(sub_builders)
+}
+
+fn parse_sub_builder(entry: &str) -> Result<SubBuilder, CliError> {
+    let usage = || {
+        CliError::Configuration(format!(
+            "--sub-builder must be ADDRESS:SHARE with SHARE a percent of the builder fee such as 25%; got '{entry}'"
+        ))
+    };
+    let (address, share) = entry.split_once(':').ok_or_else(usage)?;
+    let percent = share
+        .strip_suffix('%')
+        .filter(|body| body.trim() == *body)
+        .ok_or_else(usage)?
+        .parse::<Decimal>()
+        .map_err(|_| usage())?;
+    let units = quantity::positive::<u64>(percent, Scale::TENTHS_BPS_PER_PERCENT)
+        .map_err(|err| err.config("--sub-builder share", Scale::TENTHS_BPS_PER_PERCENT))?;
+    if units > OrderBuilderFee::MAX_SUB_BUILDER_SHARES {
+        return Err(CliError::Configuration(
+            "--sub-builder share cannot exceed 100%".to_string(),
+        ));
+    }
+    Ok(SubBuilder {
+        b: wire::address(address, AddressRole::Protocol("sub-builder"))?
+            .to_string()
+            .to_ascii_lowercase(),
+        s: units,
+    })
+}
+
 /// The one owner of what a market cannot do: a non-perpetual market refuses
 /// the perpetual-only flags, and a perpetual market only its own margin rule.
 pub(super) fn validate_order_for_market(spec: &OrderSpec, market: &Market) -> Result<(), CliError> {
+    validate_priority_for_market(spec, market)?;
     if let Market::Perp(perp) = market {
         return match spec.margin_mode {
             Some(margin_mode) => validate_margin_mode_for_market(perp, margin_mode),
@@ -578,6 +693,39 @@ pub fn read_validated_batch_create_orders(
         return Err(CliError::Configuration(
             "orders batch-create requires at least one order leg".to_string(),
         ));
+    }
+    Ok(orders)
+}
+
+/// The modifications `orders batch-modify` reads from its orders file. No two
+/// may name the same order: the exchange would apply one over the other.
+pub(super) fn read_validated_batch_modify_orders(
+    args: &BatchModifyArgs,
+) -> Result<Vec<BatchModifyOrder>, CliError> {
+    if args.orders_file.as_os_str().is_empty() {
+        return Err(CliError::Configuration(
+            "orders batch-modify requires --orders-file".to_string(),
+        ));
+    }
+    let orders = read_order_legs(
+        &args.orders_file,
+        "orders batch-modify",
+        parse_batch_modify_leg,
+    )?;
+    if orders.is_empty() {
+        return Err(CliError::Configuration(
+            "orders batch-modify requires at least one order".to_string(),
+        ));
+    }
+    for (index, order) in orders.iter().enumerate() {
+        if let Some(earlier) = orders[..index]
+            .iter()
+            .position(|earlier| earlier.identifier.names_same_order_as(&order.identifier))
+        {
+            return Err(CliError::Configuration(format!(
+                "orders[{index}] modifies the same order as orders[{earlier}]"
+            )));
+        }
     }
     Ok(orders)
 }
@@ -807,6 +955,17 @@ fn validate_market_slippage(max_slippage_bps: u16) -> Result<(), CliError> {
 const MAX_LISTED_LEG_PROBLEMS: usize = 5;
 
 fn read_batch_create_orders(path: &Path) -> Result<Vec<BatchCreateOrder>, CliError> {
+    read_order_legs(path, "orders batch-create", parse_batch_leg)
+}
+
+/// The legs of an orders file for `command`: a JSON array, or an object with
+/// an `orders` array, of at most [`MAX_BATCH_ORDER_COUNT`] legs. Every invalid
+/// field of every leg is named in the one error `parse_leg` builds up.
+fn read_order_legs<T>(
+    path: &Path,
+    command: &str,
+    parse_leg: impl Fn(usize, &serde_json::Value) -> Result<T, Vec<String>>,
+) -> Result<Vec<T>, CliError> {
     let value = read_json_file(path, FilePolicy::json_artifact("orders file"))?;
     let orders_value = value.get("orders").cloned().unwrap_or(value);
     let serde_json::Value::Array(items) = orders_value else {
@@ -817,7 +976,7 @@ fn read_batch_create_orders(path: &Path) -> Result<Vec<BatchCreateOrder>, CliErr
     };
     if items.len() > MAX_BATCH_ORDER_COUNT {
         return Err(CliError::Configuration(format!(
-            "orders batch-create supports at most {MAX_BATCH_ORDER_COUNT} order legs, {} given in {}",
+            "{command} supports at most {MAX_BATCH_ORDER_COUNT} order legs, {} given in {}",
             items.len(),
             path.display()
         )));
@@ -826,7 +985,7 @@ fn read_batch_create_orders(path: &Path) -> Result<Vec<BatchCreateOrder>, CliErr
     let mut orders = Vec::with_capacity(items.len());
     let mut problems = Vec::new();
     for (index, item) in items.iter().enumerate() {
-        match parse_batch_leg(index, item) {
+        match parse_leg(index, item) {
             Ok(order) => orders.push(order),
             Err(leg_problems) => problems.extend(leg_problems),
         }
@@ -849,6 +1008,72 @@ fn read_batch_create_orders(path: &Path) -> Result<Vec<BatchCreateOrder>, CliErr
         path.display(),
         lines.join("\n")
     )))
+}
+
+/// One `orders batch-modify` leg, or every invalid field of it named
+/// `orders[<index>].<field>`: the order, by `order_id` or `cloid`, and at
+/// least one of `price`, `trigger_price` and `size` to replace.
+fn parse_batch_modify_leg(
+    index: usize,
+    item: &serde_json::Value,
+) -> Result<BatchModifyOrder, Vec<String>> {
+    let Some(object) = item.as_object() else {
+        return Err(vec![format!("orders[{index}] must be an object")]);
+    };
+    let mut leg = LegReader {
+        index,
+        object,
+        problems: Vec::new(),
+    };
+    let order_id = leg.optional::<Option<u64>>("order_id").flatten();
+    let cloid = leg.optional::<Option<String>>("cloid").flatten();
+    let price = leg.optional::<Option<Decimal>>("price").flatten();
+    let trigger_price = leg.optional::<Option<Decimal>>("trigger_price").flatten();
+    let size = leg.optional::<Option<Decimal>>("size").flatten();
+    for (value, name) in [
+        (price, "price"),
+        (trigger_price, "trigger_price"),
+        (size, "size"),
+    ] {
+        if value.is_some_and(|value| value <= Decimal::ZERO) {
+            leg.problems
+                .push(format!("orders[{index}].{name} must be greater than zero"));
+        }
+    }
+    if price.is_none() && trigger_price.is_none() && size.is_none() {
+        leg.problems.push(format!(
+            "orders[{index}] needs price, trigger_price, or size to replace"
+        ));
+    }
+    let identifier = match (order_id, cloid.as_deref()) {
+        (Some(_), Some(_)) => {
+            leg.problems.push(format!(
+                "orders[{index}] names the order with order_id or cloid, not both"
+            ));
+            None
+        }
+        (None, None) => {
+            leg.problems
+                .push(format!("orders[{index}].order_id or cloid is required"));
+            None
+        }
+        (order_id, cloid) => match OrderIdentifier::for_modify(order_id, cloid) {
+            Ok(identifier) => Some(identifier),
+            Err(err) => {
+                leg.problems.push(format!("orders[{index}].cloid: {err}"));
+                None
+            }
+        },
+    };
+    match identifier {
+        Some(identifier) if leg.problems.is_empty() => Ok(BatchModifyOrder {
+            identifier,
+            price,
+            trigger_price,
+            size,
+        }),
+        _ => Err(leg.problems),
+    }
 }
 
 /// One batch leg, or every invalid field of it named `orders[<index>].<field>`.
@@ -983,6 +1208,70 @@ mod tests {
     fn batch_leg_rejects_non_objects() {
         let problems = parse_batch_leg(1, &serde_json::json!(["BTC"])).unwrap_err();
         assert_eq!(problems, ["orders[1] must be an object"]);
+    }
+
+    #[test]
+    fn sub_builder_shares_are_percents_of_the_builder_fee_in_thousandths_of_a_percent() {
+        let sub = |text: &str| parse_sub_builders(&[text.to_string()]);
+        let address = "0x00000000000000000000000000000000000000cc";
+        let parsed = sub(&format!("{address}:12.345%")).unwrap();
+        assert_eq!(parsed[0].b, address);
+        assert_eq!(parsed[0].s, 12_345);
+        assert_eq!(sub(&format!("{address}:100%")).unwrap()[0].s, 100_000);
+        for bad in [
+            "0:1%",
+            "nope",
+            &format!("{address}:1"),
+            &format!("{address}: 1%"),
+        ] {
+            assert!(sub(bad).is_err(), "{bad}");
+        }
+        for bad in ["0%", "0.0001%", "100.001%", "-1%"] {
+            assert!(sub(&format!("{address}:{bad}")).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn sub_builders_are_at_most_five_and_their_shares_sum_to_at_most_a_whole_fee() {
+        let address = "0x00000000000000000000000000000000000000cc";
+        let shares = |percents: &[&str]| {
+            parse_sub_builders(
+                &percents
+                    .iter()
+                    .map(|percent| format!("{address}:{percent}"))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert!(shares(&["20%", "20%", "20%", "20%", "20%"]).is_ok());
+        assert!(shares(&["10%", "10%", "10%", "10%", "10%", "10%"]).is_err());
+        assert!(shares(&["60%", "40.001%"]).is_err());
+    }
+
+    #[test]
+    fn batch_modify_leg_reads_an_order_and_what_to_replace() {
+        let leg = parse_batch_modify_leg(
+            0,
+            &serde_json::json!({"order_id": 9, "price": "1.5", "size": "2"}),
+        )
+        .unwrap();
+        assert!(matches!(leg.identifier, OrderIdentifier::Oid(9)));
+        assert_eq!(leg.price, Some(Decimal::new(15, 1)));
+        assert_eq!(leg.size, Some(Decimal::from(2)));
+        assert_eq!(leg.trigger_price, None);
+    }
+
+    #[test]
+    fn batch_modify_leg_names_every_invalid_field_in_one_pass() {
+        let problems =
+            parse_batch_modify_leg(2, &serde_json::json!({"order_id": 9, "cloid": "0x1"}))
+                .unwrap_err();
+        assert_eq!(
+            problems,
+            [
+                "orders[2] needs price, trigger_price, or size to replace",
+                "orders[2] names the order with order_id or cloid, not both",
+            ]
+        );
     }
 
     #[test]
