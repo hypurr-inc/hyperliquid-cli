@@ -11,10 +11,10 @@ use crate::builder_fee::{self, MaxFeeRate};
 use crate::command_spec::{
     CliCommand, CommandSpec, InputKind, Lifecycle, NetworkUse, OwsSupport, Risk, YES, YES_FLAG, arg,
 };
-use crate::commands::builder_approval;
 use crate::env;
 use crate::errors::CliError;
 use crate::errors::from_sdk;
+use crate::exchange::builder_approval;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::mode::Mode;

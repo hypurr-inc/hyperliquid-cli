@@ -20,6 +20,7 @@ macro_rules! yes_flag {
     };
 }
 
+pub mod account_mode;
 pub mod assets;
 pub mod auth;
 pub mod bankr;
@@ -34,6 +35,7 @@ pub mod consent;
 pub mod dry_run;
 pub mod env;
 pub mod errors;
+pub mod exchange;
 pub mod exchange_reply;
 pub mod hints;
 pub mod http_api;
@@ -56,6 +58,7 @@ pub mod resolvers;
 pub mod response_sanitization;
 pub mod settings;
 pub mod signing;
+pub mod spot_balances;
 pub mod stream;
 pub mod stream_bounds;
 pub mod terminal;

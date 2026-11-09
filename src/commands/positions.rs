@@ -1,29 +1,29 @@
-use std::fmt;
-
 use clap::Args;
 use hypersdk::Address;
 use hypersdk::Decimal;
 use hypersdk::hypercore::Subscription;
 use hypersdk::hypercore::api::UpdateLeverage;
 use hypersdk::hypercore::types::api::{TopUpIsolatedOnlyMargin, UpdateIsolatedMargin};
-use hypersdk::hypercore::types::{Action, AssetPosition, LeverageType, PositionData};
-use serde::{Serialize, Serializer};
+use hypersdk::hypercore::types::{Action, LeverageType};
+use serde::Serialize;
 
 use crate::assets::canonical_dex;
 use crate::assets::{AssetResolver, PerpAsset};
 use crate::command_spec::{
     ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg,
 };
-use crate::commands::actions;
-use crate::commands::rows::{ListRow, MISSING, Row, Rows, or_missing, style_column};
-use crate::commands::support::{print_dry_run_acting_for, resolve_optional_acting_account_target};
+use crate::commands::common::position::{PositionRow, find_position};
+use crate::commands::common::rows::{ListRow, Row, Rows};
+use crate::commands::common::support::{
+    print_dry_run_acting_for, resolve_optional_acting_account_target,
+};
 use crate::errors::CliError;
 use crate::errors::from_sdk;
+use crate::exchange::actions;
 use crate::hints::update_leverage_command;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::margin::{MarginModeArg, isolated_only_market};
-use crate::output;
 use crate::quantity;
 use crate::stream_bounds::SnapshotWatchArgs;
 use crate::stream_bounds::StreamBound;
@@ -78,149 +78,6 @@ pub struct TopUpMarginArgs {
     /// Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id
     #[arg(long)]
     pub on_behalf_of: Option<String>,
-}
-
-/// A position's leverage mode and multiple, shown as `cross 5x`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Leverage {
-    pub kind: LeverageType,
-    pub value: u32,
-}
-
-impl fmt::Display for Leverage {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {}x", self.kind, self.value)
-    }
-}
-
-impl Serialize for Leverage {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
-    }
-}
-
-/// The mark price a position implies: its value per unit of size.
-pub(crate) fn mark_price(position: &PositionData) -> Decimal {
-    let size = position.abs_size();
-    if size.is_zero() {
-        Decimal::ZERO
-    } else {
-        position.position_value / size
-    }
-}
-
-/// A position as `positions list` and `vault positions` show it.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct PositionRow {
-    pub coin: String,
-    pub side: &'static str,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub size: Decimal,
-    #[serde(with = "rust_decimal::serde::str_option")]
-    pub entry: Option<Decimal>,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub mark: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub unrealized_pnl: Decimal,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub position_value: Decimal,
-    pub leverage: Leverage,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub margin_used: Decimal,
-    #[serde(with = "rust_decimal::serde::str_option")]
-    pub liquidation_price: Option<Decimal>,
-}
-
-impl From<AssetPosition> for PositionRow {
-    fn from(value: AssetPosition) -> Self {
-        let position = value.position;
-        Self {
-            mark: mark_price(&position),
-            side: position.side(),
-            leverage: Leverage {
-                kind: position.leverage.leverage_type,
-                value: position.leverage.value,
-            },
-            coin: position.coin,
-            size: position.szi,
-            entry: position.entry_px,
-            unrealized_pnl: position.unrealized_pnl,
-            position_value: position.position_value,
-            margin_used: position.margin_used,
-            liquidation_price: position.liquidation_px,
-        }
-    }
-}
-
-impl PositionRow {
-    /// The rows of the positions with a nonzero size.
-    pub(crate) fn open(positions: Vec<AssetPosition>) -> Vec<Self> {
-        positions
-            .into_iter()
-            .map(Self::from)
-            .filter(|row| !row.size.is_zero())
-            .collect()
-    }
-}
-
-impl Row for PositionRow {
-    const HEADERS: &'static [&'static str] = &[
-        "Coin",
-        "Side",
-        "Size",
-        "Entry",
-        "Mark",
-        "Unrealized PnL",
-        "Position Value",
-        "Leverage",
-        "Margin Used",
-        "Liquidation",
-    ];
-
-    fn cells(&self) -> Vec<String> {
-        vec![
-            self.coin.clone(),
-            self.side.to_string(),
-            self.size.to_string(),
-            or_missing(self.entry),
-            self.mark.to_string(),
-            self.unrealized_pnl.to_string(),
-            self.position_value.to_string(),
-            self.leverage.to_string(),
-            self.margin_used.to_string(),
-            or_missing(self.liquidation_price),
-        ]
-    }
-
-    /// [`Self::cells`] with the PnL coloured by sign and missing values greyed.
-    fn pretty_cells(&self) -> Vec<String> {
-        let mut cells = self.cells();
-        style_column::<Self>(&mut cells, "Unrealized PnL", |_| {
-            pretty_pnl(self.unrealized_pnl)
-        });
-        for cell in &mut cells {
-            if cell == MISSING {
-                *cell = output::colors::gray(cell);
-            }
-        }
-        cells
-    }
-}
-
-impl ListRow for PositionRow {
-    const EMPTY: &'static str = "No open positions.";
-}
-
-/// A PnL value, green when positive and red when negative.
-pub(crate) fn pretty_pnl(value: Decimal) -> String {
-    let formatted = value.to_string();
-    if value > Decimal::ZERO {
-        output::colors::green(&formatted)
-    } else if value < Decimal::ZERO {
-        output::colors::red(&formatted)
-    } else {
-        formatted
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -319,25 +176,6 @@ fn margin_direction(ntli: i64) -> &'static str {
     if ntli < 0 { "remove" } else { "add" }
 }
 
-/// The open `coin` position of `account`, if any. A closed one is not open.
-async fn open_position(
-    client: &ApiClient,
-    account: Address,
-    perp: &PerpAsset,
-) -> Result<Option<AssetPosition>, CliError> {
-    let coin = perp.display_name();
-    Ok(client
-        .sdk()
-        .clearinghouse_state(account, perp.dex.clone())
-        .await
-        .map_err(from_sdk)?
-        .asset_positions
-        .into_iter()
-        .find(|position| {
-            position.position.coin.eq_ignore_ascii_case(&coin) && !position.position.szi.is_zero()
-        }))
-}
-
 /// Refuse a margin change on a position that has no isolated margin to change.
 /// The exchange would reject it with a terse error.
 async fn ensure_isolated_position(
@@ -347,7 +185,7 @@ async fn ensure_isolated_position(
     on_behalf_of: Option<&str>,
 ) -> Result<(), CliError> {
     let coin = perp.display_name();
-    match open_position(inv.remote()?.api(), account, perp).await? {
+    match find_position(inv.remote()?.api(), account, perp, false).await? {
         None => Err(CliError::Unsupported(format!(
             "{account} has no open {coin} position, and isolated margin belongs to an open isolated position; open one first (set isolated mode with `{}`)",
             update_leverage_command(&coin, "<N>", true, on_behalf_of)
@@ -698,56 +536,6 @@ async fn watch_positions(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn position(szi: &str, pnl: &str) -> AssetPosition {
-        serde_json::from_value::<AssetPosition>(serde_json::json!({
-            "type": "oneWay",
-            "position": {
-                "coin": "BTC",
-                "szi": szi,
-                "leverage": {"type": "cross", "value": 5},
-                "entryPx": "50000",
-                "positionValue": "5100",
-                "unrealizedPnl": pnl,
-                "returnOnEquity": "0.1",
-                "liquidationPx": null,
-                "marginUsed": "1000",
-                "maxLeverage": 50,
-                "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
-            }
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn position_rows_compute_mark_from_value_and_abs_size() {
-        let row = PositionRow::from(position("0.1", "100"));
-
-        assert_eq!(row.mark, Decimal::from(51_000));
-        assert_eq!(row.side, "long");
-        assert_eq!(row.leverage.to_string(), "cross 5x");
-
-        let short = PositionRow::from(position("-0.1", "-20"));
-        assert_eq!(short.mark, Decimal::from(51_000));
-        assert_eq!(short.side, "short");
-    }
-
-    #[test]
-    fn closed_positions_are_not_listed() {
-        let rows = PositionRow::open(vec![position("0", "0"), position("0.1", "100")]);
-
-        assert_eq!(rows.len(), 1);
-    }
-
-    #[test]
-    fn position_json_keeps_decimal_strings_and_null_liquidation() {
-        let json = serde_json::to_value(PositionRow::from(position("0.1", "100"))).unwrap();
-
-        assert_eq!(json["entry"], "50000");
-        assert_eq!(json["mark"], "51000");
-        assert_eq!(json["leverage"], "cross 5x");
-        assert!(json["liquidation_price"].is_null());
-    }
 
     #[test]
     fn update_margin_amount_is_signed_nonzero_and_micro_unit_exact() {

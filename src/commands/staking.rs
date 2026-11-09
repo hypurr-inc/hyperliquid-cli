@@ -8,14 +8,14 @@ use serde::{Deserialize, Serialize};
 use crate::command_spec::{
     CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, YES, YES_FLAG, arg,
 };
-use crate::commands::actions;
-use crate::commands::rows::{ListRow, One, Row, Rows, or_missing, style_column};
-use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
-use crate::commands::support::print_dry_run;
-use crate::commands::user_signed::{self, AgentForm, UserSigned};
+use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing, style_column};
+use crate::commands::common::selector::{OptionalAddressArgs, USER_SELECTOR};
+use crate::commands::common::support::print_dry_run;
 use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
+use crate::exchange::actions;
+use crate::exchange::user_signed::{self, AgentForm, UserSigned};
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::{self, JsonValueOutput};
@@ -1165,7 +1165,7 @@ mod tests {
 
         let mut bare = validator_summary();
         bare.stats.clear();
-        assert_eq!(apr_cell(bare), crate::commands::rows::MISSING);
+        assert_eq!(apr_cell(bare), crate::commands::common::rows::MISSING);
     }
 
     #[test]

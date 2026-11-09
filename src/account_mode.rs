@@ -1,5 +1,10 @@
-//! An account's abstraction mode, as `account abstraction` reports it and as
-//! order placement reads it.
+//! The account-mode domain: an account's abstraction mode, where its balances
+//! live under each mode, the collateral token of each perp dex and the unified
+//! account risk.
+//!
+//! Layer rule: below `commands`; it reads the API and never imports a command
+//! or a presentation type. `account abstraction` prints it, and order
+//! placement, transfers and `watch risk` decide by it.
 
 use std::collections::BTreeMap;
 
@@ -9,15 +14,14 @@ use hypersdk::{Address, Decimal};
 use serde::Serialize;
 
 use crate::assets::{DexMeta, PerpDexList};
-use crate::commands::rows::Row;
-use crate::commands::spot_balances::RawSpotBalance;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
+use crate::spot_balances::RawSpotBalance;
 use crate::wire::InfoRequest;
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct AbstractionRow {
-    pub user: String,
+/// What `userAbstraction` answers: the protocol value and the mode it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAbstraction {
     pub raw_mode: String,
     pub normalized_mode: AccountMode,
 }
@@ -106,27 +110,17 @@ impl Serialize for AccountMode {
     }
 }
 
-impl Row for AbstractionRow {
-    const HEADERS: &'static [&'static str] = &["User", "Mode", "Raw Mode"];
-
-    fn cells(&self) -> Vec<String> {
-        vec![
-            self.user.clone(),
-            self.normalized_mode.as_str().to_string(),
-            self.raw_mode.clone(),
-        ]
-    }
-}
-
-pub async fn fetch_abstraction(api: &ApiClient, user: Address) -> Result<AbstractionRow, CliError> {
+pub async fn fetch_abstraction(
+    api: &ApiClient,
+    user: Address,
+) -> Result<UserAbstraction, CliError> {
     let raw_mode = api
         .info::<String>(
             &InfoRequest::user("userAbstraction", user),
             "loading user abstraction",
         )
         .await?;
-    Ok(AbstractionRow {
-        user: user.to_string(),
+    Ok(UserAbstraction {
         normalized_mode: AccountMode::parse(&raw_mode),
         raw_mode,
     })

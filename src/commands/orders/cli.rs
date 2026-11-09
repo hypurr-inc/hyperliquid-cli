@@ -22,7 +22,7 @@ use super::planning::{
     scale_dry_run_plan, schedule_cancel_dry_run_plan, tpsl_dry_run_plan, twap_cancel_dry_run_plan,
     twap_create_dry_run_plan, validate_trailing_stop_args,
 };
-use super::queries::{history, open, open_orders_output, status};
+use super::queries::{history, open, status};
 use super::run::OrderRun;
 use super::trailing_stop::trailing_stop;
 use super::validation::{
@@ -38,6 +38,7 @@ use crate::command_spec::{
     ArgSpec, CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, OwsSupport, Risk,
     YES_FOR_AUTOMATION, arg,
 };
+use crate::commands::common::order_list::open_orders_output;
 use crate::errors::CliError;
 use crate::input_hardening::{FilePolicy, validate_file_path};
 use crate::invocation::Invocation;

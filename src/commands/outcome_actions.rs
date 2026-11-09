@@ -18,11 +18,11 @@ use serde::Serialize;
 
 use crate::assets::{Names, OutcomeCatalog};
 use crate::command_spec::{ArgSpec, CliCommand, CommandSpec, InputKind, YES, arg};
-use crate::commands::actions;
-use crate::commands::rows::{ListRow, Row, Rows, or_missing};
-use crate::commands::support::print_dry_run;
+use crate::commands::common::rows::{ListRow, Row, Rows, or_missing};
+use crate::commands::common::support::print_dry_run;
 use crate::consent::{self, ConsentBlock};
 use crate::errors::CliError;
+use crate::exchange::actions;
 use crate::invocation::Invocation;
 use crate::quantity;
 

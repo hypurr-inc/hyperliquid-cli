@@ -13,7 +13,7 @@ use crate::assets::{
     normalize_asset_name,
 };
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::commands::rows::or_missing;
+use crate::commands::common::rows::or_missing;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
