@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.18.0 - 2026-11-09
+
+Highlights:
+
+- Order prices and sizes follow the exchange tick and lot rules on every placing command and dry-run; `orders modify` keeps trigger prices; `twap-create` enforces the 7-day maximum.
+- HIP-3 reads (`book`, `candles`, `spread`, `funding`, `subscribe`) and the `--dex` scope on `mids`, `positions list`, `orders open` and `account portfolio`; `positions update-leverage|update-margin` accept HIP-3 markets; HIP-3 positions are found by their dex-qualified name.
+- A signer that cannot sign a command is refused on `--dry-run` exactly as on a live run; every signing dry-run preview carries `signer`, `acting_as` and `vault_address`.
+- Error envelopes, exit codes and `.claude/error-catalog.json` come from one table; catalog entries carry `retry` instead of `retryable`.
+- Internal refactor of orders, signing, output and command modules with unchanged JSON shapes and exit codes except where listed below.
+
+Command-line behavior:
 
 - `feedback --open` and `report-incident --open` open the browser only for a person at a terminal (not under an agent, CI or JSON output), and `opened_in_browser` is `true` only when the opener exits successfully.
 - `account ls`, `wallet show`, `wallet address`, and `wallet list` no longer print a `Notes:` block claiming they change state or "run as soon as you invoke it" in `--help`.
