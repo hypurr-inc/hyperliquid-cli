@@ -211,6 +211,6 @@ mod tests {
             Err(LockError::Busy)
         ));
         drop(first);
-        FileLock::acquire(&path, Duration::ZERO).unwrap();
+        FileLock::acquire(&path, Duration::from_secs(5)).unwrap();
     }
 }

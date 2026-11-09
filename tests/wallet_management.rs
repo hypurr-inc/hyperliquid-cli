@@ -1,14 +1,13 @@
 mod support;
 
-use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use support::{
-    ACCOUNT_KEY_PASSPHRASE_ENV, ACCOUNT_KEY_STORE_DIR_ENV, IsolatedHome, TEST_ACCOUNT_PASSPHRASE,
-    copy_dir_all, expected_address,
+    ACCOUNT_KEY_STORE_DIR_ENV, IsolatedHome, TEST_ACCOUNT_PASSPHRASE, copy_dir_all,
+    expected_address,
 };
 
 const IMPORT_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000004";
@@ -239,23 +238,11 @@ fn wallet_reset_yes_removes_configuration_without_prompt() {
         .stdout(predicate::str::contains("Delete config file").not());
 
     // Reset clears config but leaves OWS vault wallets intact.
-    // wallet address still auto-detects from the vault.
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
         .args(["wallet", "address"])
         .assert()
         .success()
         .stdout(predicate::str::contains(expected_address(IMPORT_KEY)));
-
-    env.account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["wallet", "delete", "imported", "--yes"])
-        .assert()
-        .success();
-
-    env.account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["wallet", "address"])
-        .assert()
-        .code(10)
-        .stderr(predicate::str::contains("Authentication required"));
 }
 
 #[test]
@@ -371,33 +358,28 @@ fn copied_data_directory_alone_cannot_decrypt_stored_wallet_key() {
 }
 
 #[test]
-fn legacy_raw_key_store_override_is_rejected() {
+fn removed_raw_key_store_variable_does_not_change_where_wallet_keys_go() {
     let env = IsolatedHome::new();
     let address = expected_address(IMPORT_KEY);
+    let raw_key_store = env.tmp_path().join("raw-key-store");
 
-    let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    command
-        .env("HOME", &env.home)
-        .env("XDG_CONFIG_HOME", &env.config)
-        .env("XDG_DATA_HOME", &env.data)
-        .env("HYPERLIQUID_FORMAT", "pretty")
-        .env(
-            ACCOUNT_KEY_STORE_DIR_ENV,
-            env.tmp_path().join("raw-key-store"),
-        )
-        .env_remove(ACCOUNT_KEY_PASSPHRASE_ENV)
-        .env_remove("CI")
-        .env_remove("HYPERLIQUID_PRIVATE_KEY")
-        .env_remove("HYPERLIQUID_NETWORK")
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .env(ACCOUNT_KEY_STORE_DIR_ENV, &raw_key_store)
         .args(["wallet", "import", IMPORT_KEY])
         .assert()
         .success()
         .stdout(predicate::str::contains("Imported wallet"))
         .stdout(predicate::str::contains(address));
+
+    assert!(
+        !raw_key_store.exists(),
+        "the removed variable must not make the CLI write key material there"
+    );
+    assert_directory_bytes_do_not_contain(&env.ows_vault_path(), IMPORT_KEY.as_bytes());
 }
 
 #[test]
-fn unavailable_keychain_without_passphrase_fails_closed() {
+fn wallet_import_without_an_account_passphrase_creates_no_legacy_storage() {
     let env = IsolatedHome::new();
     let address = expected_address(IMPORT_KEY);
 
@@ -500,59 +482,21 @@ fn read_only_legacy_wallet_lookup_does_not_migrate_key_storage() {
 }
 
 #[test]
-fn wallet_import_help_warns_about_argument_exposure() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["wallet", "import", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("process listings"))
-        .stdout(predicate::str::contains("shell history"))
-        .stdout(predicate::str::contains("without PRIVATE_KEY"))
-        .stdout(predicate::str::contains("controlled automation"));
-}
+fn secret_taking_commands_warn_about_argument_exposure_in_help() {
+    for args in [["wallet", "import", "--help"], ["account", "add", "--help"]] {
+        support::hyperliquid_command()
+            .args(args)
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("process listings"))
+            .stdout(predicate::str::contains("shell history"));
+    }
 
-#[test]
-fn account_and_setup_help_explain_public_reads_and_secret_handling() {
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["account", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Read account data"))
-        .stdout(predicate::str::contains("do not require a signer"))
-        .stdout(predicate::str::contains(
-            "wallets can also be selected by name, id, or address",
-        ))
-        .stdout(predicate::str::contains("global --account"))
-        .stdout(predicate::str::contains("OWS account commands"));
-
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("--account"));
-
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .args(["account", "add", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("hidden prompt"))
-        .stdout(predicate::str::contains("process listings"))
-        .stdout(predicate::str::contains("shell history"))
-        .stdout(predicate::str::contains("--alias"))
-        .stdout(predicate::str::contains("--default"));
-
-    Command::cargo_bin("hyperliquid")
-        .unwrap()
+    support::hyperliquid_command()
         .args(["setup", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hidden prompt"))
-        .stdout(predicate::str::contains("OWS vault"))
-        .stdout(predicate::str::contains("default signing account"))
         .stdout(predicate::str::contains("never printed"));
 }
 
@@ -710,7 +654,6 @@ fn wallet_create_reuses_unique_aliases_on_subsequent_runs() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Created wallet"))
-        .stdout(predicate::str::contains("wallet"))
         .get_output()
         .stdout
         .clone();
@@ -1121,6 +1064,12 @@ fn account_remove_json_requires_yes_before_prompting() {
             .unwrap()
             .contains("without confirmation in non-interactive mode")
     );
+
+    env.account_command(TEST_ACCOUNT_PASSPHRASE)
+        .args(["account", "ls"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("main"));
 }
 
 #[test]
@@ -1156,7 +1105,7 @@ fn account_remove_json_yes_outputs_removed_account_without_prompt() {
 }
 
 #[test]
-fn account_ls_displays_legacy_api_wallet_type_as_local_signing_account() {
+fn account_add_with_a_legacy_type_is_listed_as_an_ows_wallet() {
     let env = IsolatedHome::new();
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)

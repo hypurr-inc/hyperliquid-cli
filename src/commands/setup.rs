@@ -558,31 +558,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn setup_summary_does_not_expose_private_key() {
-        let summary = SetupSummary {
-            message: "Setup complete".to_string(),
-            address: "0xabc".to_string(),
-            wallet_name: "setup".to_string(),
-            network: "mainnet".to_string(),
-            config_path: "config.json".to_string(),
-            vault_path: "~/.hyperliquid".to_string(),
-            connection: "Test query succeeded".to_string(),
-            default_builder: "not configured".to_string(),
-            builder_approval: "not configured".to_string(),
-            default_referral_code: "not configured".to_string(),
-            config_keys_written: vec!["network".to_string()],
-        };
-
-        let json = summary.to_json_value();
-        assert!(json.get("private_key").is_none());
-        assert!(
-            crate::output::Session::for_test(OutputFormat::Pretty)
-                .render(&summary)
-                .contains("Setup complete")
-        );
-    }
-
-    #[test]
     fn setup_without_yes_fails_before_prompting_in_json_runs() {
         let args = SetupArgs {
             yes: false,

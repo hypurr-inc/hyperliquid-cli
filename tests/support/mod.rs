@@ -15,8 +15,6 @@ pub const FORMAT_ENV: &str = env::FORMAT;
 #[allow(dead_code)]
 pub const PRIVATE_KEY_ENV: &str = env::PRIVATE_KEY;
 #[allow(dead_code)]
-pub const NETWORK_ENV: &str = env::NETWORK;
-#[allow(dead_code)]
 pub const WATCH_MAX_TICKS_ENV: &str = env::WATCH_MAX_TICKS;
 pub const ACCOUNT_KEY_PASSPHRASE_ENV: &str = env::ACCOUNT_KEY_PASSPHRASE;
 pub const ACCOUNT_KEYCHAIN_DISABLED_ENV: &str = env::ACCOUNT_KEYCHAIN_DISABLED;
@@ -142,26 +140,6 @@ impl IsolatedHome {
     }
 
     #[allow(dead_code)]
-    pub fn command_with_testnet_server(&self, server: &MockServer) -> Command {
-        let mut command = self.command();
-        command.env(TESTNET_API_OVERRIDE_ENV, server.uri());
-        command
-    }
-
-    #[allow(dead_code)]
-    pub fn command_with_mainnet_and_testnet(
-        &self,
-        mainnet_server: &MockServer,
-        testnet_server: &MockServer,
-    ) -> Command {
-        let mut command = self.command();
-        command
-            .env(MAINNET_API_OVERRIDE_ENV, mainnet_server.uri())
-            .env(TESTNET_API_OVERRIDE_ENV, testnet_server.uri());
-        command
-    }
-
-    #[allow(dead_code)]
     pub fn account_command_with_server(&self, passphrase: &str, server: &MockServer) -> Command {
         let mut command = self.account_command(passphrase);
         command.env(API_OVERRIDE_ENV, server.uri());
@@ -226,14 +204,6 @@ impl IsolatedHome {
                 .join("hyperliquid")
                 .join("accounts.db"),
         ]
-    }
-
-    #[allow(dead_code)]
-    pub fn accounts_db_path(&self) -> PathBuf {
-        self.accounts_db_candidates()
-            .into_iter()
-            .find(|path| path.exists())
-            .expect("accounts.db should exist")
     }
 
     #[allow(dead_code)]

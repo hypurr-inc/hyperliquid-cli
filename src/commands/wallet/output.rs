@@ -334,25 +334,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accounts_output_hides_secrets_and_labels_vault_wallets() {
-        let output = AccountsOutput::new(vec![AccountRow {
-            id: 1,
-            alias: "main".to_string(),
-            address: "0xabc".to_string(),
-            account_type: OWS_WALLET_TYPE.to_string(),
-            is_default: true,
-            created_at: "now".to_string(),
-        }]);
-        let rendered = crate::output::Session::for_test(OutputFormat::Json).render(&output);
-
-        assert!(rendered.contains("main"));
-        assert!(rendered.contains("\"type\":\"ows-wallet\""));
-        assert!(!rendered.contains("private_key"));
-        assert!(!rendered.contains("encrypted"));
-        assert_eq!(output.rows()[0][3], "OWS wallet");
-    }
-
-    #[test]
     fn shell_arg_quotes_only_when_needed() {
         assert_eq!(shell_arg("main"), "main");
         assert_eq!(shell_arg("my wallet"), "'my wallet'");

@@ -62,9 +62,9 @@ async fn setup_create_wallet_saves_config_and_verifies_connection() {
         .to_string();
 
     let config_path = env.config_file_path();
-    let config = fs::read_to_string(&config_path).unwrap();
-    assert!(config.contains("\"network\": \"mainnet\""));
-    assert!(!config.contains("private_key"));
+    let config: Value = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(config["network"], "mainnet");
+    assert!(config.get("private_key").is_none());
 
     env.account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &server)
         .args(["wallet", "address"])
@@ -174,9 +174,9 @@ async fn setup_import_wallet_uses_hidden_prompt_path_and_stores_key_encrypted() 
         .stderr(predicate::str::contains(IMPORT_KEY).not());
 
     let config_path = env.config_file_path();
-    let config = fs::read_to_string(&config_path).unwrap();
-    assert!(config.contains("\"network\": \"testnet\""));
-    assert!(!config.contains("private_key"));
+    let config: Value = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(config["network"], "testnet");
+    assert!(config.get("private_key").is_none());
 
     let vault_path = env.ows_vault_path();
     assert_directory_does_not_contain(&vault_path, IMPORT_KEY);
@@ -227,63 +227,33 @@ async fn setup_connection_failure_has_clear_error_and_nonzero_exit() {
 }
 
 #[tokio::test]
-async fn setup_selecting_testnet_verifies_against_testnet_endpoint() {
-    let env = IsolatedHome::new();
-    let mainnet_server = mock_all_mids_server_with_prices("50000.0", "3000.0").await;
-    let testnet_server = mock_all_mids_server_with_prices("51000.0", "3100.0").await;
+async fn setup_verifies_exactly_once_against_the_selected_network_only() {
+    for (network_answer, selected_is_testnet) in [("y", true), ("n", false)] {
+        let env = IsolatedHome::new();
+        let mainnet_server = mock_all_mids_server_with_prices("50000.0", "3000.0").await;
+        let testnet_server = mock_all_mids_server_with_prices("51000.0", "3100.0").await;
 
-    env.account_command_with_mainnet_and_testnet(
-        TEST_ACCOUNT_PASSPHRASE,
-        &mainnet_server,
-        &testnet_server,
-    )
-    .arg("setup")
-    .write_stdin("1\ny\n\n\n")
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Test query succeeded"));
+        env.account_command_with_mainnet_and_testnet(
+            TEST_ACCOUNT_PASSPHRASE,
+            &mainnet_server,
+            &testnet_server,
+        )
+        .arg("setup")
+        .write_stdin(format!("1\n{network_answer}\n\n\n"))
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Test query succeeded"));
 
-    let mainnet_requests = mainnet_server.received_requests().await.unwrap();
-    let testnet_requests = testnet_server.received_requests().await.unwrap();
-    assert!(
-        mainnet_requests.is_empty(),
-        "testnet setup must not verify against the mainnet endpoint"
-    );
-    assert_eq!(
-        testnet_requests.len(),
-        1,
-        "testnet setup must verify exactly once against the selected testnet endpoint"
-    );
-}
-
-#[tokio::test]
-async fn setup_selecting_mainnet_verifies_against_mainnet_endpoint() {
-    let env = IsolatedHome::new();
-    let mainnet_server = mock_all_mids_server_with_prices("50000.0", "3000.0").await;
-    let testnet_server = mock_all_mids_server_with_prices("51000.0", "3100.0").await;
-
-    env.account_command_with_mainnet_and_testnet(
-        TEST_ACCOUNT_PASSPHRASE,
-        &mainnet_server,
-        &testnet_server,
-    )
-    .arg("setup")
-    .write_stdin("1\nn\n\n\n")
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Test query succeeded"));
-
-    let mainnet_requests = mainnet_server.received_requests().await.unwrap();
-    let testnet_requests = testnet_server.received_requests().await.unwrap();
-    assert_eq!(
-        mainnet_requests.len(),
-        1,
-        "mainnet setup must verify exactly once against the selected mainnet endpoint"
-    );
-    assert!(
-        testnet_requests.is_empty(),
-        "mainnet setup must not verify against the testnet endpoint"
-    );
+        let mainnet_requests = mainnet_server.received_requests().await.unwrap().len();
+        let testnet_requests = testnet_server.received_requests().await.unwrap().len();
+        let (selected, other) = if selected_is_testnet {
+            (testnet_requests, mainnet_requests)
+        } else {
+            (mainnet_requests, testnet_requests)
+        };
+        assert_eq!(selected, 1, "testnet selected: {selected_is_testnet}");
+        assert_eq!(other, 0, "testnet selected: {selected_is_testnet}");
+    }
 }
 
 #[tokio::test]

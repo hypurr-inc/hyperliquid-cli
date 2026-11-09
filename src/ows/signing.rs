@@ -284,60 +284,6 @@ mod tests {
     use super::super::vault::test_support::{KEY, import_test_wallet};
     use super::*;
 
-    #[test]
-    fn eip712_domain_type_is_added_for_ows_parser() {
-        let mut value = serde_json::json!({
-            "types": {
-                "HyperliquidTransaction:UsdClassTransfer": [
-                    {"name": "hyperliquidChain", "type": "string"},
-                    {"name": "amount", "type": "string"}
-                ]
-            },
-            "primaryType": "HyperliquidTransaction:UsdClassTransfer",
-            "domain": {"name": "Exchange", "version": "1", "chainId": "0x66eee"},
-            "message": {"hyperliquidChain": "Testnet", "amount": "5"}
-        });
-
-        ensure_eip712_domain_type(&mut value);
-
-        assert_eq!(
-            value["types"]["EIP712Domain"],
-            serde_json::json!([
-                {"name": "name", "type": "string"},
-                {"name": "version", "type": "string"},
-                {"name": "chainId", "type": "uint256"}
-            ])
-        );
-    }
-
-    #[test]
-    fn odd_hex_padding_respects_declared_eip712_types() {
-        let mut value = serde_json::json!({
-            "types": {
-                "EIP712Domain": [
-                    {"name": "chainId", "type": "uint256"},
-                    {"name": "salt", "type": "bytes32"}
-                ],
-                "TestAction": [
-                    {"name": "label", "type": "string"},
-                    {"name": "amount", "type": "uint256"},
-                    {"name": "blob", "type": "bytes"}
-                ]
-            },
-            "primaryType": "TestAction",
-            "domain": {"chainId": "0x3e7", "salt": "0xabc"},
-            "message": {"label": "0xabc", "amount": "0x5", "blob": "0xdef"}
-        });
-
-        pad_odd_hex_typed_values(&mut value);
-
-        assert_eq!(value["domain"]["chainId"], "0x03e7");
-        assert_eq!(value["domain"]["salt"], "0x0abc");
-        assert_eq!(value["message"]["label"], "0xabc");
-        assert_eq!(value["message"]["amount"], "0x05");
-        assert_eq!(value["message"]["blob"], "0x0def");
-    }
-
     fn signing_config(wallet: &WalletInfo, vault_path: &std::path::Path) -> OwsSigningConfig {
         OwsSigningConfig::for_wallet(wallet, test_signer_address(), Vault::at(vault_path))
     }
@@ -417,6 +363,46 @@ mod tests {
             .recover_address_from_prehash(&signing_hash)
             .unwrap();
 
+        assert_eq!(recovered, config.address());
+    }
+
+    #[test]
+    fn ows_signs_hyperliquid_user_signed_documents_without_a_domain_type() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let wallet = import_test_wallet(tmp.path(), "test-wallet");
+        let config = signing_config(&wallet, tmp.path());
+        let typed_data: TypedData = serde_json::from_value(serde_json::json!({
+            "types": {
+                "HyperliquidTransaction:UsdClassTransfer": [
+                    {"name": "hyperliquidChain", "type": "string"},
+                    {"name": "amount", "type": "string"},
+                    {"name": "toPerp", "type": "bool"},
+                    {"name": "memo", "type": "string"},
+                    {"name": "nonce", "type": "uint64"}
+                ]
+            },
+            "primaryType": "HyperliquidTransaction:UsdClassTransfer",
+            "domain": {
+                "name": "HyperliquidSignTransaction",
+                "version": "1",
+                "chainId": "0x66eee",
+                "verifyingContract": "0x0000000000000000000000000000000000000000"
+            },
+            "message": {
+                "hyperliquidChain": "Testnet",
+                "amount": "5",
+                "toPerp": true,
+                "memo": "0xabc",
+                "nonce": 1_700_000_000_123_u64
+            }
+        }))
+        .unwrap();
+
+        let signature = sign(&config, &Payload::UserSigned(&typed_data)).unwrap();
+
+        let recovered = alloy::primitives::Signature::from(signature)
+            .recover_address_from_prehash(&typed_data.eip712_signing_hash().unwrap())
+            .unwrap();
         assert_eq!(recovered, config.address());
     }
 }

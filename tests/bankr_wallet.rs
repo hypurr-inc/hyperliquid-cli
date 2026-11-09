@@ -163,18 +163,37 @@ fn wallet_login_dry_run_does_not_call_the_api() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Would execute"))
-        .stdout(predicate::str::contains("validate_and_store_bankr_api_key"));
+        .stdout(predicate::str::contains("Would execute"));
+
+    assert!(
+        env.config_file_candidates()
+            .iter()
+            .all(|path| !path.exists()),
+        "a dry run must not store the key"
+    );
 }
 
 #[test]
 fn bankr_flag_without_credentials_names_wallet_login() {
     let env = IsolatedHome::new();
-    env.command()
+    let output = env
+        .command()
         .args(["--format", "json", "--bankr", "wallet", "show"])
-        .env_remove("BANKR_API_KEY")
         .assert()
-        .code(10);
+        .code(10)
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(json["reason"], "auth_required");
+    assert!(
+        json["next"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["command"] == "hyperliquid wallet login"),
+        "{json}"
+    );
 }
 
 #[test]

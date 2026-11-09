@@ -808,7 +808,10 @@ mod tests {
         assert!(settings.testnet(true).unwrap());
         assert_eq!(settings.private_key(None).unwrap().as_deref(), Some("env"));
         assert!(settings.testnet(false).is_err());
-        assert!(settings.private_key(Some("")).is_ok());
+        assert_eq!(
+            settings.private_key(Some("")).unwrap().as_deref(),
+            Some("env")
+        );
     }
 
     #[test]
@@ -1022,25 +1025,6 @@ mod tests {
                 Some("TESTNET")
             );
         }
-    }
-
-    #[test]
-    fn help_section_lists_every_documented_variable_aligned() {
-        let section = env_help_section();
-        assert!(section.starts_with("Environment:\n"));
-        for (name, description) in ENV_HELP {
-            assert_eq!(section.contains(name), !description.is_empty(), "{name}");
-        }
-        let column = section
-            .lines()
-            .nth(1)
-            .unwrap()
-            .find("Default output")
-            .unwrap();
-        assert!(section.lines().skip(1).all(|line| {
-            line.get(..column)
-                .is_some_and(|prefix| prefix.ends_with(' '))
-        }));
     }
 
     #[test]

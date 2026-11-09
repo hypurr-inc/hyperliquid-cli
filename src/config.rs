@@ -336,6 +336,29 @@ mod tests {
     }
 
     #[test]
+    fn every_field_survives_a_save_and_read() {
+        let tmp = TempDir::new().unwrap();
+        let file = file_in(&tmp);
+        let config = Config {
+            private_key: Some("0xkey".to_string()),
+            network: Network::Testnet,
+            default_wallet_id: Some("wallet".to_string()),
+            default_builder_address: Some("0xbuilder".to_string()),
+            default_builder_fee_rate: Some("0.001%".to_string()),
+            default_referral_code: Some("CODE".to_string()),
+            ..Config::default()
+        };
+        save(&file, &config);
+        assert_eq!(file.read().unwrap(), Some(config));
+    }
+
+    #[test]
+    fn network_names_in_the_file_are_case_insensitive() {
+        let config: Config = serde_json::from_str(r#"{"network":"TESTNET"}"#).unwrap();
+        assert_eq!(config.network, Network::Testnet);
+    }
+
+    #[test]
     fn missing_file_reads_as_none_and_invalid_json_is_a_configuration_error() {
         let tmp = TempDir::new().unwrap();
         let file = file_in(&tmp);
@@ -349,12 +372,14 @@ mod tests {
     }
 
     #[test]
-    fn invalid_network_in_file_is_rejected() {
+    fn invalid_network_in_file_is_a_configuration_error_naming_the_value() {
         let tmp = TempDir::new().unwrap();
         let file = file_in(&tmp);
         save(&file, &Config::default());
         std::fs::write(file.path(), r#"{"network":"bogus"}"#).unwrap();
-        assert!(file.read().is_err());
+        let err = file.read().unwrap_err();
+        assert!(matches!(err, CliError::Configuration(_)));
+        assert!(err.to_string().contains("bogus"), "{err}");
     }
 
     #[cfg(unix)]
@@ -386,20 +411,16 @@ mod tests {
     }
 
     #[test]
-    fn lock_excludes_a_second_holder_until_released() {
+    fn config_lock_excludes_other_lock_holders_until_released() {
         let tmp = TempDir::new().unwrap();
         let file = ConfigFile::at(tmp.path().join("config.json"));
         let first = file.lock().unwrap();
-        let lock_file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(tmp.path().join("config.json.lock"))
-            .unwrap();
         assert!(matches!(
-            lock_file.try_lock(),
-            Err(std::fs::TryLockError::WouldBlock)
+            FileLock::acquire(file.path(), Duration::ZERO),
+            Err(LockError::Busy)
         ));
         drop(first);
-        assert!(lock_file.try_lock().is_ok());
+        FileLock::acquire(file.path(), Duration::from_secs(5)).unwrap();
     }
 
     #[test]

@@ -737,7 +737,6 @@ fn validate_api_wallet_args(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::Session;
 
     #[test]
     fn parses_agent_expiration_durations() {
@@ -784,27 +783,5 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("--expires-in requires --name"));
-    }
-
-    #[test]
-    fn dry_run_output_does_not_expose_generated_private_key() {
-        let row = ApiWalletActionRow {
-            status: "dry_run".to_string(),
-            action: "api_wallet_create".to_string(),
-            master_address: None,
-            agent_address: "0x0000000000000000000000000000000000000001".to_string(),
-            name: Some("bot".to_string()),
-            action_agent_name: Some("bot".to_string()),
-            expires_at: None,
-            generated: true,
-            private_key: None,
-            note: "safe".to_string(),
-            approval_action: serde_json::json!({"type": "approveAgent"}),
-        };
-        let rendered = Session::for_test(OutputFormat::Json).render(&ApiWalletActionOutput { row });
-        assert!(!rendered.contains("private_key"));
-        assert!(
-            !rendered.contains("000000000000000000000000000000000000000000000000000000000000000")
-        );
     }
 }

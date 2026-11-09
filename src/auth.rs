@@ -391,9 +391,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_private_key_and_derives_address() {
+    fn parses_private_key_and_derives_its_address() {
         let signer = parse_private_key(KEY).unwrap();
-        assert!(signer.address().to_string().starts_with("0x"));
+        assert_eq!(
+            signer.address().to_string(),
+            "0xF7Edc8FA1eCc32967F827C9043FcAe6ba73afA5c"
+        );
         assert_eq!(signer_private_key_hex(&signer), KEY);
     }
 
