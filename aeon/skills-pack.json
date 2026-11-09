@@ -1,7 +1,7 @@
 {
   "name": "Hyperliquid CLI Pack",
-  "version": "1.0.0",
-  "description": "Read-only Hyperliquid monitoring through the hyperliquid CLI: a daily account and risk brief, and a watchlist monitor for price, funding and open-interest moves.",
+  "version": "1.1.0",
+  "description": "Read-only Hyperliquid monitoring for Aeon with no install and no key: a daily account and risk brief, and a watchlist monitor for 24h move and funding that reports each crossing once.",
   "author": "hypurr-inc",
   "license": "MIT",
   "homepage": "https://github.com/hypurr-inc/hyperliquid-cli",
@@ -9,22 +9,30 @@
     {
       "slug": "hyperliquid-account-brief",
       "path": "skills/hyperliquid-account-brief",
-      "description": "Daily Hyperliquid account brief: equity, withdrawable, margin use, per-position PnL and liquidation price, open orders, and 24h realized PnL and fees. Read-only.",
+      "description": "Daily Hyperliquid account brief for the address in var: equity, withdrawable, margin use, per-position PnL and liquidation price, open orders, and 24h realized PnL and fees. Read-only.",
       "category": "crypto",
       "schedule": "0 13 * * *",
       "default_enabled": false,
       "secrets_required": [],
-      "capabilities": ["read_only", "external_api", "sends_notifications"]
+      "capabilities": [
+        "read_only",
+        "external_api",
+        "sends_notifications"
+      ]
     },
     {
       "slug": "hyperliquid-market-monitor",
       "path": "skills/hyperliquid-market-monitor",
-      "description": "Watch Hyperliquid perps by 24h move, funding rate and open interest, and notify only when a threshold is crossed. Read-only.",
+      "description": "Watch Hyperliquid perps by 24h move and hourly funding, and notify only when a threshold is newly crossed. Thresholds and coins come from var. Read-only.",
       "category": "crypto",
-      "schedule": "0 * * * *",
+      "schedule": "0 */4 * * *",
       "default_enabled": false,
       "secrets_required": [],
-      "capabilities": ["read_only", "external_api", "sends_notifications"]
+      "capabilities": [
+        "read_only",
+        "external_api",
+        "sends_notifications"
+      ]
     }
   ]
 }
