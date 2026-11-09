@@ -7,7 +7,8 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use hypersdk::hypercore::types::{
-    AssetPosition, BatchOrder, OrderGrouping, OrderRequest, OrderTypePlacement, TimeInForce, TpSl,
+    AssetPosition, BatchOrder, LeverageType, OrderGrouping, OrderRequest, OrderTypePlacement,
+    TimeInForce, TpSl,
 };
 use hypersdk::hypercore::{Cloid, HttpClient};
 use hypersdk::{Address, Decimal};
@@ -25,7 +26,8 @@ use super::prepared::{
 };
 use super::validation::{
     AttachedTpsl, BuilderRequest, ClosingSize, MarketPrecision, MarketSizing, OrderKind, OrderSpec,
-    ScaleLadder, TpslSpec, validate_order_for_market, validate_twap_create_args,
+    ScaleLadder, TpslSpec, validate_margin_mode_for_market, validate_order_for_market,
+    validate_twap_create_args,
 };
 use crate::assets::asset_id::spot_coin_key;
 use crate::assets::{
@@ -34,7 +36,9 @@ use crate::assets::{
 };
 use crate::builder_fee;
 use crate::errors::{CliError, from_sdk};
+use crate::http_api::ApiClient;
 use crate::settings::Settings;
+use crate::wire::InfoRequest;
 
 pub(super) struct OrderDryRunPlan {
     would_execute: &'static str,
@@ -52,6 +56,15 @@ impl OrderDryRunPlan {
     fn acting_for(mut self, on_behalf_of: &Option<String>) -> Self {
         if let Some(object) = self.args.as_object_mut() {
             object.insert("on_behalf_of".to_string(), serde_json::json!(on_behalf_of));
+        }
+        self
+    }
+
+    /// Replace the previewed `margin_mode` with the one the account is set to
+    /// for this market, as read from the exchange.
+    pub(super) fn with_account_margin_mode(mut self, margin_mode: MarginModeArg) -> Self {
+        if let Some(object) = self.args.as_object_mut() {
+            object.insert("margin_mode".to_string(), serde_json::json!(margin_mode));
         }
         self
     }
@@ -76,7 +89,7 @@ pub(super) struct TwapCreatePlan {
     pub(super) duration_seconds: u64,
     pub(super) duration_minutes: u64,
     pub(super) randomize: bool,
-    /// The margin mode the account's position must already use.
+    /// The margin mode the account must already be set to for this market.
     pub(super) margin_mode: Option<MarginModeArg>,
 }
 
@@ -120,11 +133,23 @@ impl ScheduleCancelPlan {
     }
 }
 
-fn insert_margin_mode(preview: &mut serde_json::Value, margin_mode: Option<MarginModeArg>) {
+/// The margin mode a preview shows: the one requested, else the mode the
+/// market's rule implies (isolated for an isolated-only market, cross
+/// otherwise). The account's own setting replaces it where the command can
+/// read one ([`OrderDryRunPlan::with_account_margin_mode`]).
+fn insert_margin_mode(
+    preview: &mut serde_json::Value,
+    perp: Option<&PerpAsset>,
+    margin_mode: Option<MarginModeArg>,
+) {
+    let rule_default = match perp {
+        Some(perp) if !perp.margin_rule.allows_cross() => MarginModeArg::Isolated,
+        _ => MarginModeArg::Cross,
+    };
     if let Some(object) = preview.as_object_mut() {
         object.insert(
             "margin_mode".to_string(),
-            serde_json::json!(margin_mode.unwrap_or(MarginModeArg::Cross).to_string()),
+            serde_json::json!(margin_mode.unwrap_or(rule_default).to_string()),
         );
     }
 }
@@ -725,6 +750,30 @@ pub(super) async fn fetch_position(
         }))
 }
 
+/// The margin mode `user` is set to for `perp`, from `activeAssetData`. Unlike
+/// a position's leverage type, it exists before any position is open.
+pub(super) async fn fetch_current_margin_mode(
+    api: &ApiClient,
+    user: Address,
+    perp: &PerpAsset,
+) -> Result<MarginModeArg, CliError> {
+    #[derive(serde::Deserialize)]
+    struct ActiveAssetData {
+        leverage: ActiveLeverage,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ActiveLeverage {
+        #[serde(rename = "type")]
+        leverage_type: LeverageType,
+    }
+
+    // HIP-3 coins are dex-qualified on the wire, as in position rows.
+    let request = InfoRequest::user("activeAssetData", user).field("coin", perp.display_name());
+    let data: ActiveAssetData = api.info(&request, "loading margin mode").await?;
+    Ok(data.leverage.leverage_type.into())
+}
+
 fn position_close_side_and_size(
     position: &AssetPosition,
 ) -> Result<(OrderSide, Decimal), CliError> {
@@ -747,6 +796,9 @@ pub(super) async fn prepare_position_tpsl_batch(
     user: Address,
     spec: &TpslSpec,
 ) -> Result<PreparedTpslBatch, CliError> {
+    if let Some(margin_mode) = spec.margin_mode {
+        validate_margin_mode_for_market(perp, margin_mode)?;
+    }
     let (close_side, size, entry) = match spec.close {
         ClosingSize::Fixed { side, size } => {
             let entry =
@@ -866,6 +918,9 @@ pub(super) fn prepare_twap_create_plan(
     perp: &PerpAsset,
     args: &TwapCreateArgs,
 ) -> Result<TwapCreatePlan, CliError> {
+    if let Some(margin_mode) = args.margin_mode {
+        validate_margin_mode_for_market(perp, margin_mode)?;
+    }
     let minutes = validate_twap_create_args(args)?;
     let coin = perp.display_name();
     let size = MarketPrecision::of_perp(perp).size(args.size, &coin)?;
@@ -955,7 +1010,11 @@ pub(super) fn scale_dry_run_plan(
     args: &ScaleArgs,
 ) -> OrderDryRunPlan {
     let mut preview = order_batch_dry_run_args(prepared);
-    insert_margin_mode(&mut preview, args.margin_mode);
+    insert_margin_mode(
+        &mut preview,
+        prepared.legs.first().and_then(PreparedOrder::perp),
+        args.margin_mode,
+    );
     OrderDryRunPlan::new("submit_order_batch", preview).acting_for(&args.on_behalf_of)
 }
 
@@ -988,7 +1047,7 @@ pub(super) fn twap_create_dry_run_plan(
         "asset_id": plan.perp.index,
         "resolved_asset": plan.coin,
     });
-    insert_margin_mode(&mut preview, plan.margin_mode);
+    insert_margin_mode(&mut preview, Some(&plan.perp), plan.margin_mode);
     OrderDryRunPlan::new("create_twap_order", preview).acting_for(&args.on_behalf_of)
 }
 
@@ -1084,7 +1143,7 @@ fn prepared_order_dry_run_args(
                 }));
             }
         }
-        Market::Perp(_) => insert_margin_mode(&mut value, args.margin_mode),
+        Market::Perp(perp) => insert_margin_mode(&mut value, Some(perp), args.margin_mode),
         Market::Spot(_) => {}
     }
     Ok(value)
@@ -1151,6 +1210,9 @@ pub(super) fn tpsl_dry_run_plan(
     spec: &TpslSpec,
     on_behalf_of: &Option<String>,
 ) -> Result<OrderDryRunPlan, CliError> {
+    if let Some(margin_mode) = spec.margin_mode {
+        validate_margin_mode_for_market(perp, margin_mode)?;
+    }
     let (absolute_tp, absolute_sl) =
         absolute_trigger_prices(spec.take_profit.as_ref(), spec.stop_loss.as_ref());
     let (absolute_tp, absolute_sl) = truncate_triggers(perp, absolute_tp, absolute_sl)?;
@@ -1176,7 +1238,7 @@ pub(super) fn tpsl_dry_run_plan(
         "size": fixed_size.map(|value| value.to_string()),
         "size_mode": if fixed_size.is_some() { "fixed" } else { "current_position" },
     });
-    insert_margin_mode(&mut preview, spec.margin_mode);
+    insert_margin_mode(&mut preview, Some(perp), spec.margin_mode);
 
     match spec.close {
         ClosingSize::Fixed { side, size } => {

@@ -688,10 +688,11 @@ async fn cancel_all_names_the_dex_in_its_canonical_spelling() {
     assert!(open.iter().all(|body| body["dex"] == "xyz"), "{open:?}");
 }
 
-/// An account that does not pool margin across dexes, with nothing on `xyz`:
-/// every order there needs a helper transfer first.
-async fn mount_unfunded_dex_account(server: &MockServer) {
-    mount_priority_info(server, json!({"type": "userAbstraction"}), json!("default")).await;
+/// An account with nothing on `xyz` and the given raw `userAbstraction`: unless
+/// the mode has the exchange move collateral itself, every order there needs a
+/// helper transfer first.
+async fn mount_unfunded_dex_account_in_mode(server: &MockServer, raw_mode: &str) {
+    mount_priority_info(server, json!({"type": "userAbstraction"}), json!(raw_mode)).await;
     mount_priority_info(
         server,
         json!({"type": "clearinghouseState", "dex": "xyz"}),
@@ -711,6 +712,11 @@ async fn mount_unfunded_dex_account(server: &MockServer) {
         }),
     )
     .await;
+}
+
+/// An account that does not pool margin across dexes, with nothing on `xyz`.
+async fn mount_unfunded_dex_account(server: &MockServer) {
+    mount_unfunded_dex_account_in_mode(server, "default").await;
 }
 
 fn helper_transfer(amount: &str) -> Value {
@@ -754,6 +760,42 @@ async fn create_dry_run_previews_the_hip3_helper_transfer() {
         json_stdout(&assert)["args"]["side_effects"],
         json!([helper_transfer("1.44")])
     );
+}
+
+#[tokio::test]
+async fn modes_where_the_exchange_moves_dex_collateral_need_no_helper_transfer() {
+    // dexAbstraction is the discontinued mode in which the exchange moves
+    // collateral to the dex an order trades on; the CLI must not also do it.
+    for raw_mode in ["portfolioMargin", "dexAbstraction"] {
+        let env = IsolatedHome::new();
+        let server = hip3_server(json!({"resting": {"oid": OID}})).await;
+        mount_unfunded_dex_account_in_mode(&server, raw_mode).await;
+
+        let assert = command_against(
+            &env,
+            &server,
+            &[
+                "--dry-run",
+                "orders",
+                "create",
+                "--coin",
+                "xyz:TOKEN",
+                "--side",
+                "buy",
+                "--price",
+                "1.2",
+                "--size",
+                "10",
+            ],
+        )
+        .assert()
+        .success();
+
+        assert!(
+            json_stdout(&assert)["args"].get("side_effects").is_none(),
+            "{raw_mode}"
+        );
+    }
 }
 
 #[tokio::test]

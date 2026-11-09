@@ -218,7 +218,7 @@
         {
           "arg_type": "string",
           "default": null,
-          "description": "Margin mode intent for perpetual orders. Defaults to cross.",
+          "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
           "enum_values": [
             "cross",
             "isolated"
@@ -340,7 +340,7 @@
             "type": "string"
           },
           "margin_mode": {
-            "description": "Margin mode intent for perpetual orders. Defaults to cross.",
+            "description": "Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.",
             "enum": [
               "cross",
               "isolated"

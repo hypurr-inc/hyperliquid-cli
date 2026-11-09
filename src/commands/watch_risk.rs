@@ -6,17 +6,25 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use clap::{Args, ValueEnum};
-use hypersdk::hypercore::HttpClient;
-use hypersdk::hypercore::types::{AssetPosition, BasicOrder, Fill, OrderType, Side};
+use hypersdk::hypercore::types::{
+    AssetPosition, BasicOrder, ClearinghouseState, Fill, OrderType, Side,
+};
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 use serde_json::json;
 
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, StreamBound, arg};
+use crate::commands::abstraction::{
+    AccountMode, DexCollateral, UnifiedRisk, fetch_abstraction, load_dex_collateral,
+    unified_account_ratio,
+};
 use crate::commands::actions::nonce_now;
+use crate::commands::borrowlend::fetch_user_state;
 use crate::commands::positions::mark_price;
 use crate::commands::rows::{One, Row};
+use crate::commands::spot_balances::user_spot_balances_raw;
 use crate::errors::from_sdk;
+use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::{OutputFormat, Session};
 use crate::stream::{
@@ -188,12 +196,12 @@ pub async fn watch_risk(
     user: Address,
     args: &WatchRiskArgs,
 ) -> Result<(), anyhow::Error> {
-    let client = inv.remote()?.api().sdk();
+    let api = inv.remote()?.api();
     let session = inv.session();
     let bounds = StreamBounds::watch_risk(&args.stream);
 
     stream::run_stream(async {
-        let mut watcher = RiskWatcher::new(client, user, args).await?;
+        let mut watcher = RiskWatcher::new(api, user, args).await?;
         stream::poll_stream(&mut watcher, args.interval, bounds, |alert| {
             emit_alert(alert, session)
         })
@@ -215,31 +223,89 @@ fn emit_alert(alert: RiskAlert, session: &Session) -> Result<(), anyhow::Error> 
 }
 
 struct RiskWatcher<'a> {
-    client: &'a HttpClient,
+    api: &'a ApiClient,
     user: Address,
     enabled: Vec<RiskRule>,
     min_severity: AlertSeverity,
     state: RiskEvalState,
     flat_announced: bool,
+    /// Each perp dex's collateral token, read when a unified account first
+    /// needs it. A dex deployed after that is not part of the ratio.
+    dex_collateral: Option<Vec<DexCollateral>>,
 }
 
 impl<'a> RiskWatcher<'a> {
     async fn new(
-        client: &'a HttpClient,
+        api: &'a ApiClient,
         user: Address,
         args: &WatchRiskArgs,
     ) -> Result<Self, anyhow::Error> {
         // Seed position ages from fill history so positions opened before this
         // watcher started do not wait a full threshold window for age-based rules.
-        let fills = client.user_fills(user).await.map_err(from_sdk)?;
+        let fills = api.sdk().user_fills(user).await.map_err(from_sdk)?;
         Ok(Self {
-            client,
+            api,
             user,
             enabled: enabled_rules(args),
             min_severity: args.min_severity,
             state: RiskEvalState::new(position_open_times(&fills)),
             flat_announced: false,
+            dex_collateral: None,
         })
+    }
+
+    /// What `margin_usage` measures for this account. A pooled account's perp
+    /// margin summary is not its real equity, so a unified account is measured
+    /// by the docs' unified account ratio and a portfolio-margin one by the
+    /// protocol's own health verdict.
+    async fn margin_basis(
+        &mut self,
+        mode: AccountMode,
+        state: &ClearinghouseState,
+    ) -> Result<MarginBasis, anyhow::Error> {
+        match mode {
+            AccountMode::Unified => {
+                if self.dex_collateral.is_none() {
+                    self.dex_collateral = Some(load_dex_collateral(self.api).await?);
+                }
+                let dexes = self.dex_collateral.as_deref().unwrap_or_default();
+                let mut others = Vec::new();
+                for dex in dexes {
+                    if let Some(name) = &dex.dex {
+                        let other = self
+                            .api
+                            .sdk()
+                            .clearinghouse_state(self.user, Some(name.clone()))
+                            .await
+                            .map_err(from_sdk)?;
+                        others.push((dex.token, other));
+                    }
+                }
+                let default_token = dexes
+                    .iter()
+                    .find(|dex| dex.dex.is_none())
+                    .map_or(0, |dex| dex.token);
+                let mut states = vec![(default_token, state)];
+                states.extend(others.iter().map(|(token, other)| (*token, other)));
+                let balances = user_spot_balances_raw(self.api, self.user).await?;
+                Ok(MarginBasis::UnifiedRatio(unified_account_ratio(
+                    &states, &balances,
+                )))
+            }
+            AccountMode::PortfolioMargin => {
+                let borrow_lend = fetch_user_state(self.api, self.user).await?;
+                Ok(MarginBasis::PortfolioHealth {
+                    health_factor: borrow_lend.health_factor(),
+                    health: borrow_lend.health,
+                })
+            }
+            AccountMode::Standard { .. } | AccountMode::DexAbstraction | AccountMode::Unknown => {
+                Ok(MarginBasis::PerpSummary {
+                    equity: state.margin_summary.account_value,
+                    margin_used: state.margin_summary.total_margin_used,
+                })
+            }
+        }
     }
 }
 
@@ -247,24 +313,26 @@ impl Ticker for RiskWatcher<'_> {
     type Item = RiskAlert;
 
     async fn tick(&mut self) -> Result<Vec<RiskAlert>, anyhow::Error> {
-        let state = self
-            .client
+        let client = self.api.sdk();
+        let mode = fetch_abstraction(self.api, self.user)
+            .await?
+            .normalized_mode;
+        let state = client
             .clearinghouse_state(self.user, None)
             .await
             .map_err(from_sdk)?;
-        let open_orders = self
-            .client
+        let open_orders = client
             .open_orders(self.user, None)
             .await
             .map_err(from_sdk)?;
-        let mids = self.client.all_mids(None).await.map_err(from_sdk)?;
+        let mids = client.all_mids(None).await.map_err(from_sdk)?;
+        let margin = self.margin_basis(mode, &state).await?;
 
         let snapshot = RiskSnapshot {
             positions: &state.asset_positions,
             open_orders: &open_orders,
             mids: &mids,
-            equity: state.margin_summary.account_value,
-            margin_used: state.margin_summary.total_margin_used,
+            margin,
         };
         let mut alerts = evaluate_state(self.user, &self.enabled, snapshot, &mut self.state);
 
@@ -292,8 +360,101 @@ struct RiskSnapshot<'a> {
     positions: &'a [AssetPosition],
     open_orders: &'a [BasicOrder],
     mids: &'a HashMap<String, Decimal>,
-    equity: Decimal,
-    margin_used: Decimal,
+    margin: MarginBasis,
+}
+
+/// What the `margin_usage` rule measures, which depends on where the account
+/// keeps its balances.
+enum MarginBasis {
+    /// The perp margin summary: a standard or dex-abstraction account.
+    PerpSummary {
+        equity: Decimal,
+        margin_used: Decimal,
+    },
+    /// The unified account risk; `None` when no collateral token carries
+    /// cross maintenance margin.
+    UnifiedRatio(Option<UnifiedRisk>),
+    /// The borrow/lend health a portfolio-margin account reports.
+    PortfolioHealth {
+        health: String,
+        health_factor: Option<Decimal>,
+    },
+}
+
+impl MarginBasis {
+    fn alert(&self, user: Address) -> Option<RiskAlert> {
+        let limit = Decimal::from(MARGIN_USED_LIMIT_PERCENT);
+        let (message, payload) = match self {
+            Self::PerpSummary {
+                equity,
+                margin_used,
+            } => {
+                if *equity <= Decimal::ZERO {
+                    return None;
+                }
+                let pct = *margin_used * Decimal::from(100) / *equity;
+                if pct < limit {
+                    return None;
+                }
+                (
+                    format!("margin used {pct}% of equity"),
+                    json!({ "margin_used_pct": pct.to_string() }),
+                )
+            }
+            Self::UnifiedRatio(risk) => match (*risk)? {
+                UnifiedRisk::Ratio(ratio) => {
+                    let pct = (ratio.ratio * Decimal::from(100)).round_dp(2).normalize();
+                    if pct < limit {
+                        return None;
+                    }
+                    (
+                        format!(
+                            "unified account ratio {pct}% (maintenance margin over collateral)"
+                        ),
+                        json!({
+                            "margin_used_pct": pct.to_string(),
+                            "basis": "unified_account_ratio",
+                            "collateral_token": ratio.collateral_token,
+                        }),
+                    )
+                }
+                UnifiedRisk::Uncovered { collateral_token } => (
+                    format!(
+                        "unified account has maintenance margin on collateral token {collateral_token} and no collateral left to cover it"
+                    ),
+                    json!({
+                        "basis": "unified_account_ratio",
+                        "collateral_token": collateral_token,
+                        "uncovered": true,
+                    }),
+                ),
+            },
+            Self::PortfolioHealth {
+                health,
+                health_factor,
+            } => {
+                if health == "healthy" {
+                    return None;
+                }
+                (
+                    format!("portfolio margin health is {health}"),
+                    json!({
+                        "basis": "portfolio_margin_health",
+                        "health": health,
+                        "health_factor": health_factor.map(|factor| factor.to_string()),
+                    }),
+                )
+            }
+        };
+        Some(RiskAlert::for_rule(
+            user,
+            RiskRule::MarginUsage,
+            None,
+            AlertSeverity::Warning,
+            message,
+            payload,
+        ))
+    }
 }
 
 struct RiskEvalState {
@@ -373,19 +534,9 @@ fn evaluate_state(
 ) -> Vec<RiskAlert> {
     let mut alerts = Vec::new();
     if enabled.contains(&RiskRule::MarginUsage)
-        && snapshot.equity > Decimal::ZERO
-        && snapshot.margin_used * Decimal::from(100) / snapshot.equity
-            >= Decimal::from(MARGIN_USED_LIMIT_PERCENT)
+        && let Some(alert) = snapshot.margin.alert(user)
     {
-        let pct = snapshot.margin_used * Decimal::from(100) / snapshot.equity;
-        alerts.push(RiskAlert::for_rule(
-            user,
-            RiskRule::MarginUsage,
-            None,
-            AlertSeverity::Warning,
-            format!("margin used {pct}% of equity"),
-            json!({ "margin_used_pct": pct.to_string() }),
-        ));
+        alerts.push(alert);
     }
 
     // Detect positions that closed by disappearing from the snapshot entirely:
@@ -785,8 +936,10 @@ mod tests {
                     positions: &[],
                     open_orders: &[],
                     mids: &mids,
-                    equity: Decimal::from(100),
-                    margin_used: Decimal::from(margin_used),
+                    margin: MarginBasis::PerpSummary {
+                        equity: Decimal::from(100),
+                        margin_used: Decimal::from(margin_used),
+                    },
                 },
                 &mut state,
             )
@@ -810,8 +963,10 @@ mod tests {
                 positions: &[],
                 open_orders: &[],
                 mids: &mids,
-                equity: Decimal::from(100),
-                margin_used: Decimal::from(100),
+                margin: MarginBasis::PerpSummary {
+                    equity: Decimal::from(100),
+                    margin_used: Decimal::from(100),
+                },
             },
             &mut state,
         );

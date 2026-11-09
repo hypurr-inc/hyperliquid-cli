@@ -44,6 +44,22 @@ async fn mount_borrowlend_and_staking_public(server: &MockServer) {
     Mock::given(method("POST"))
         .and(path("/info"))
         .and(body_partial_json(
+            serde_json::json!({"type": "borrowLendUserState"}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tokenToState": [[0, {
+                "borrow": {"basis": "0.0", "value": "0.0"},
+                "supply": {"basis": "1000.0", "value": "1000.0"}
+            }]],
+            "health": "healthy",
+            "healthFactor": null
+        })))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/info"))
+        .and(body_partial_json(
             serde_json::json!({"type": "delegatorSummary"}),
         ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

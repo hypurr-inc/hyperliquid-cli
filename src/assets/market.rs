@@ -1,6 +1,82 @@
+use hypersdk::hypercore::{MarginMode, PerpMarket};
+
 use crate::errors::CliError;
 
 use super::asset_id::{self, OutcomeNotation};
+
+/// Which margin modes a perpetual market accepts, from `meta`'s `marginMode`
+/// and its deprecated duplicate `onlyIsolated`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarginRule {
+    /// Cross and isolated are both allowed (no `marginMode`).
+    CrossOrIsolated,
+    /// `onlyIsolated: true` without a `marginMode`: isolated only, and whether
+    /// margin can be removed is not stated.
+    IsolatedOnly,
+    /// `noCross`: isolated only; margin can be removed.
+    NoCross,
+    /// `strictIsolated`: isolated only; margin cannot be removed (it leaves
+    /// proportionally as the position closes).
+    StrictIsolated,
+}
+
+impl MarginRule {
+    /// The rule `meta` states, preferring `marginMode` over the legacy flag.
+    #[must_use]
+    pub fn from_sdk(only_isolated: bool, margin_mode: Option<MarginMode>) -> Self {
+        match margin_mode {
+            Some(MarginMode::StrictIsolated) => Self::StrictIsolated,
+            Some(MarginMode::NoCross) => Self::NoCross,
+            None => Self::from_legacy_flag(only_isolated),
+        }
+    }
+
+    /// [`Self::from_sdk`] for raw `meta`, where `marginMode` is the wire string.
+    /// A value this CLI does not know falls back to the legacy flag.
+    #[must_use]
+    pub(super) fn from_wire(only_isolated: bool, margin_mode: Option<&str>) -> Self {
+        match margin_mode {
+            Some("strictIsolated") => Self::StrictIsolated,
+            Some("noCross") => Self::NoCross,
+            _ => Self::from_legacy_flag(only_isolated),
+        }
+    }
+
+    #[must_use]
+    pub fn of_market(market: &PerpMarket) -> Self {
+        Self::from_sdk(market.isolated_margin, market.margin_mode)
+    }
+
+    fn from_legacy_flag(only_isolated: bool) -> Self {
+        if only_isolated {
+            Self::IsolatedOnly
+        } else {
+            Self::CrossOrIsolated
+        }
+    }
+
+    #[must_use]
+    pub fn allows_cross(self) -> bool {
+        self == Self::CrossOrIsolated
+    }
+
+    /// Only `strictIsolated` is known to refuse margin removal; a legacy
+    /// `onlyIsolated` market leaves the answer to the exchange.
+    #[must_use]
+    pub fn refuses_margin_removal(self) -> bool {
+        self == Self::StrictIsolated
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CrossOrIsolated => "cross_or_isolated",
+            Self::IsolatedOnly => "isolated_only",
+            Self::NoCross => "no_cross",
+            Self::StrictIsolated => "strict_isolated",
+        }
+    }
+}
 
 /// Perpetual market, including HIP-3 markets when `dex` is set.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10,6 +86,7 @@ pub struct PerpAsset {
     pub dex: Option<String>,
     pub sz_decimals: u32,
     pub collateral: String,
+    pub margin_rule: MarginRule,
 }
 
 impl PerpAsset {
@@ -103,7 +180,7 @@ impl Market {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use super::{PerpAsset, SpotAsset};
+    use super::{MarginRule, PerpAsset, SpotAsset};
 
     pub(crate) fn perp(name: &str, index: usize) -> PerpAsset {
         PerpAsset {
@@ -112,6 +189,7 @@ pub(crate) mod test_support {
             dex: None,
             sz_decimals: 8,
             collateral: "USDC".to_string(),
+            margin_rule: MarginRule::CrossOrIsolated,
         }
     }
 
@@ -130,5 +208,50 @@ pub(crate) mod test_support {
             quote: quote.to_string(),
             base_sz_decimals: 8,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn margin_mode_names_the_rule_and_beats_the_legacy_flag() {
+        for (only_isolated, mode, expected) in [
+            (false, None, MarginRule::CrossOrIsolated),
+            (true, None, MarginRule::IsolatedOnly),
+            (true, Some("strictIsolated"), MarginRule::StrictIsolated),
+            (true, Some("noCross"), MarginRule::NoCross),
+            (false, Some("noCross"), MarginRule::NoCross),
+            (true, Some("somethingNew"), MarginRule::IsolatedOnly),
+            (false, Some("somethingNew"), MarginRule::CrossOrIsolated),
+        ] {
+            assert_eq!(MarginRule::from_wire(only_isolated, mode), expected);
+        }
+        assert_eq!(
+            MarginRule::from_sdk(true, Some(MarginMode::StrictIsolated)),
+            MarginRule::StrictIsolated
+        );
+        assert_eq!(
+            MarginRule::from_sdk(true, Some(MarginMode::NoCross)),
+            MarginRule::NoCross
+        );
+        assert_eq!(MarginRule::from_sdk(true, None), MarginRule::IsolatedOnly);
+    }
+
+    #[test]
+    fn only_strict_isolated_refuses_removal_and_only_the_open_rule_allows_cross() {
+        assert!(MarginRule::CrossOrIsolated.allows_cross());
+        for rule in [
+            MarginRule::IsolatedOnly,
+            MarginRule::NoCross,
+            MarginRule::StrictIsolated,
+        ] {
+            assert!(!rule.allows_cross());
+        }
+        assert!(MarginRule::StrictIsolated.refuses_margin_removal());
+        assert!(!MarginRule::NoCross.refuses_margin_removal());
+        assert!(!MarginRule::IsolatedOnly.refuses_margin_removal());
+        assert!(!MarginRule::CrossOrIsolated.refuses_margin_removal());
     }
 }

@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::assets::canonical_dex;
 use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, Risk, arg};
-use crate::commands::abstraction::fetch_abstraction;
+use crate::commands::abstraction::{AccountMode, fetch_abstraction};
 use crate::commands::confirm;
 use crate::commands::orders::OrderListOutput;
 use crate::commands::positions::{self, pretty_pnl as format_pretty_pnl};
@@ -386,6 +386,11 @@ pub struct PortfolioSummaryRow {
     pub spot_balances_count: usize,
     pub vault_equities_count: usize,
     pub time: u64,
+    pub account_mode: AccountMode,
+    /// Under a pooled mode the perp figures above are not the account's real
+    /// balances: they live in the spot balance.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub perp_state_is_partial: bool,
 }
 
 impl PortfolioSummaryRow {
@@ -393,6 +398,7 @@ impl PortfolioSummaryRow {
         state: &ClearinghouseState,
         spot_balances_count: usize,
         vault_equities_count: usize,
+        account_mode: AccountMode,
     ) -> Self {
         Self {
             account_value: state.margin_summary.account_value,
@@ -406,6 +412,8 @@ impl PortfolioSummaryRow {
             spot_balances_count,
             vault_equities_count,
             time: state.time,
+            account_mode,
+            perp_state_is_partial: account_mode.pools_collateral(),
         }
     }
 }
@@ -500,8 +508,14 @@ impl PortfolioOutput {
         state: ClearinghouseState,
         spot_balances: Vec<BalanceRow>,
         vault_equities: Vec<UserVaultEquity>,
+        account_mode: AccountMode,
     ) -> Self {
-        let summary = PortfolioSummaryRow::new(&state, spot_balances.len(), vault_equities.len());
+        let summary = PortfolioSummaryRow::new(
+            &state,
+            spot_balances.len(),
+            vault_equities.len(),
+            account_mode,
+        );
         let positions = state
             .asset_positions
             .into_iter()
@@ -605,7 +619,20 @@ impl TableData for PortfolioOutput {
     }
 
     fn pretty_rows(&self) -> Vec<Vec<String>> {
-        self.table_rows(format_pretty_pnl)
+        let mut rows = self.table_rows(format_pretty_pnl);
+        if self.summary.perp_state_is_partial {
+            rows.insert(
+                3,
+                vec![
+                    "Note".to_string(),
+                    "Account Mode".to_string(),
+                    self.summary.account_mode.as_str().to_string(),
+                    "Balances live in the spot balance under this mode; the perp figures above are partial."
+                        .to_string(),
+                ],
+            );
+        }
+        rows
     }
 
     fn to_json_value(&self) -> serde_json::Value {
@@ -834,6 +861,7 @@ impl CliCommand for AccountPortfolio {
         let api = inv.remote()?.api();
         let client = api.sdk();
         let dex = canonical_dex(client, args.dex.as_deref()).await?;
+        let account_mode = fetch_abstraction(api, user).await?.normalized_mode;
         let state = client
             .clearinghouse_state(user, dex.clone())
             .await
@@ -853,7 +881,12 @@ impl CliCommand for AccountPortfolio {
                 client.user_vault_equities(user).await.map_err(from_sdk)?,
             )
         };
-        inv.print(&PortfolioOutput::new(state, spot_balances, vault_equities));
+        inv.print(&PortfolioOutput::new(
+            state,
+            spot_balances,
+            vault_equities,
+            account_mode,
+        ));
         Ok(())
     }
 }
@@ -1078,8 +1111,15 @@ impl CliCommand for AccountAbstractionSet {
         &["account", "abstraction", "set"],
         "account",
         "Set abstraction mode for the selected signer",
-        "Set account abstraction for the signer (userSetAbstraction). Use --dry-run to preview; confirm or pass -y for live submit.",
+        "Set account abstraction for the signer (userSetAbstraction). `disabled` is Standard: separate perp and spot balances. Cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode; unified-account and portfolio-margin accounts are limited to 50k actions per day. Use --dry-run to preview; confirm or pass -y for live submit.",
     )
+    .long_about("Set account abstraction for the signer (userSetAbstraction).\n\
+\n\
+`disabled` is Standard: separate perp and spot balances. `unified-account` keeps one balance per asset for spot and every perp dex; `portfolio-margin` margins eligible assets together.\n\
+\n\
+Cautions: builder-code addresses and HIP-3/HIP-4 deployers must stay in standard mode. Unified-account and portfolio-margin accounts are limited to 50k actions per day.\n\
+\n\
+Use --dry-run to preview; confirm or pass -y for live submit.")
     .signs(Signs::user_signed::<UserSetAbstraction>())
     .master_only("userSetAbstraction")
     .risk(Risk::AccountState)

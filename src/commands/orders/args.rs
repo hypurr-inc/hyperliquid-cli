@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use hypersdk::Decimal;
-use hypersdk::hypercore::types::{OrderGrouping, TimeInForce, TpSl};
+use hypersdk::hypercore::types::{LeverageType, OrderGrouping, TimeInForce, TpSl};
 use serde::{Deserialize, Serialize};
 
 use crate::errors::CliError;
@@ -90,7 +90,7 @@ pub struct CreateArgs {
     #[arg(long)]
     pub on_behalf_of: Option<String>,
 
-    /// Margin mode intent for perpetual orders. Defaults to cross. Use `positions update-leverage` first to establish isolated mode for new entries.
+    /// Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.
     #[arg(long, value_enum)]
     pub margin_mode: Option<MarginModeArg>,
 
@@ -154,7 +154,7 @@ pub struct ScaleArgs {
     #[arg(long)]
     pub on_behalf_of: Option<String>,
 
-    /// Margin mode intent for perpetual orders. Defaults to cross. Use `positions update-leverage` first to establish isolated mode for new entries.
+    /// Margin mode intent for perpetual orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.
     #[arg(long, value_enum)]
     pub margin_mode: Option<MarginModeArg>,
 
@@ -214,7 +214,7 @@ pub struct TpslArgs {
     #[arg(long)]
     pub on_behalf_of: Option<String>,
 
-    /// Margin mode intent for perpetual TP/SL attachment. Defaults to cross.
+    /// Margin mode intent for perpetual TP/SL attachment. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.
     #[arg(long, value_enum)]
     pub margin_mode: Option<MarginModeArg>,
 
@@ -326,7 +326,7 @@ pub struct TwapCreateArgs {
     #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
     pub duration: u64,
 
-    /// Margin mode intent for perpetual TWAP orders. Defaults to cross. Use `positions update-leverage` first to establish isolated mode for new entries.
+    /// Margin mode intent for perpetual TWAP orders. Defaults to the market's current margin mode; isolated-only markets always use isolated margin. Set the mode first with `positions update-leverage`.
     #[arg(long, value_enum)]
     pub margin_mode: Option<MarginModeArg>,
 
@@ -419,6 +419,15 @@ impl MarginModeArg {
         match self {
             Self::Cross => "cross",
             Self::Isolated => "isolated",
+        }
+    }
+}
+
+impl From<LeverageType> for MarginModeArg {
+    fn from(leverage_type: LeverageType) -> Self {
+        match leverage_type {
+            LeverageType::Cross => Self::Cross,
+            LeverageType::Isolated => Self::Isolated,
         }
     }
 }

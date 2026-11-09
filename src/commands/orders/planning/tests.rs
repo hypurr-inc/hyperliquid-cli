@@ -5,7 +5,7 @@ use hypersdk::hypercore::types::TimeInForce;
 
 use super::*;
 use crate::assets::test_support::hip3_perp;
-use crate::assets::{AssetMetadata, SpotAsset};
+use crate::assets::{AssetMetadata, MarginRule, SpotAsset};
 use crate::commands::orders::args::{
     CreateTpslGroupingArg, DEFAULT_MARKET_ORDER_SLIPPAGE_BPS, PositionTpslGroupingArg, TpslArgs,
 };
@@ -21,6 +21,7 @@ fn resolver() -> AssetResolver {
                 dex: None,
                 sz_decimals: 5,
                 collateral: "USDC".to_string(),
+                margin_rule: MarginRule::CrossOrIsolated,
             },
             hip3_perp("testdex", "HYPE", 11_100),
         ],
@@ -689,6 +690,7 @@ fn market_precision_clamps_the_decimal_budget_for_oversized_lots() {
         dex: None,
         sz_decimals: 8,
         collateral: "USDC".to_string(),
+        margin_rule: MarginRule::CrossOrIsolated,
     };
     assert_eq!(
         MarketPrecision::of_perp(&token)
@@ -711,6 +713,51 @@ fn margin_mode_on_a_spot_market_is_rejected_with_one_message() {
         err.to_string(),
         "Configuration error: --margin-mode isolated is only supported for perpetual orders"
     );
+}
+
+fn isolated_only_perp(rule: MarginRule) -> PerpAsset {
+    PerpAsset {
+        margin_rule: rule,
+        ..hip3_perp("xyz", "HOOD", 110_000)
+    }
+}
+
+#[test]
+fn cross_on_an_isolated_only_market_is_unsupported_and_isolated_is_not() {
+    for rule in [
+        MarginRule::IsolatedOnly,
+        MarginRule::NoCross,
+        MarginRule::StrictIsolated,
+    ] {
+        let perp = isolated_only_perp(rule);
+        let err = validate_margin_mode_for_market(&perp, MarginModeArg::Cross).unwrap_err();
+        assert_eq!(err.exit_code(), 13, "{rule:?}");
+        assert!(err.to_string().contains("xyz:HOOD"), "{err}");
+        validate_margin_mode_for_market(&perp, MarginModeArg::Isolated).unwrap();
+    }
+    let open = hip3_perp("xyz", "OPEN", 110_001);
+    validate_margin_mode_for_market(&open, MarginModeArg::Cross).unwrap();
+    validate_margin_mode_for_market(&open, MarginModeArg::Isolated).unwrap();
+}
+
+#[test]
+fn preview_margin_mode_is_the_request_else_the_market_rule_default() {
+    let preview = |perp: Option<&PerpAsset>, requested| {
+        let mut value = serde_json::json!({});
+        insert_margin_mode(&mut value, perp, requested);
+        value["margin_mode"].clone()
+    };
+    let open = btc();
+    let strict = isolated_only_perp(MarginRule::StrictIsolated);
+
+    assert_eq!(preview(Some(&open), None), "cross");
+    assert_eq!(preview(Some(&strict), None), "isolated");
+    assert_eq!(
+        preview(Some(&open), Some(MarginModeArg::Isolated)),
+        "isolated"
+    );
+    assert_eq!(preview(Some(&strict), Some(MarginModeArg::Cross)), "cross");
+    assert_eq!(preview(None, None), "cross");
 }
 
 #[tokio::test]

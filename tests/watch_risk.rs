@@ -130,3 +130,315 @@ async fn watch_risk_json_honors_results_only_as_a_harmless_flag() {
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0]["rule"], "position_lifecycle");
 }
+
+/// What `margin_usage` measures depends on the account abstraction: the perp
+/// margin summary only for accounts that keep their balances there.
+mod margin_basis {
+    use serde_json::{Value, json};
+
+    use crate::support::IsolatedHome;
+    use crate::support::exchange::{ExchangeFixture, Hip3Dex};
+
+    const USER: &str = "0x0000000000000000000000000000000000000001";
+
+    fn position(coin: &str, leverage: Value, margin_used: &str) -> Value {
+        json!({
+            "type": "oneWay",
+            "position": {
+                "coin": coin,
+                "szi": "1",
+                "leverage": leverage,
+                "entryPx": "100",
+                "positionValue": "100",
+                "unrealizedPnl": "0",
+                "returnOnEquity": "0",
+                "liquidationPx": null,
+                "marginUsed": margin_used,
+                "maxLeverage": 50,
+                "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
+            }
+        })
+    }
+
+    fn perp_state(
+        account_value: &str,
+        margin_used: &str,
+        maintenance: &str,
+        positions: Vec<Value>,
+    ) -> Value {
+        let summary = json!({
+            "accountValue": account_value, "totalNtlPos": "100",
+            "totalRawUsd": account_value, "totalMarginUsed": margin_used
+        });
+        json!({
+            "marginSummary": summary,
+            "crossMarginSummary": summary,
+            "crossMaintenanceMarginUsed": maintenance,
+            "withdrawable": "0",
+            "assetPositions": positions,
+            "time": 1_700_000_000_000_u64
+        })
+    }
+
+    fn cross_position() -> Value {
+        position("BTC", json!({"type": "cross", "value": 5}), "10")
+    }
+
+    /// The default dex and `xyz`, both collateralised in USDC (token 0), for an
+    /// account in `raw_mode` with the given perp state on each dex.
+    async fn account(
+        raw_mode: &str,
+        default_dex: Value,
+        xyz: Value,
+        spot_usdc: &str,
+    ) -> ExchangeFixture {
+        let server = ExchangeFixture::start_with(vec![Hip3Dex::xyz()]).await;
+        server
+            .mount_info_containing(json!({"type": "userAbstraction"}), json!(raw_mode))
+            .await;
+        server
+            .mount_info_containing(json!({"type": "clearinghouseState", "dex": "xyz"}), xyz)
+            .await;
+        server
+            .mount_info_containing(json!({"type": "clearinghouseState"}), default_dex)
+            .await;
+        server
+            .mount_info_containing(
+                json!({"type": "spotClearinghouseState"}),
+                json!({"balances": [{
+                    "coin": "USDC", "token": 0, "hold": "0",
+                    "total": spot_usdc, "entryNtl": "0"
+                }]}),
+            )
+            .await;
+        server
+            .mount_info_containing(json!({"type": "frontendOpenOrders"}), json!([]))
+            .await;
+        server
+            .mount_info_containing(json!({"type": "userFills"}), json!([]))
+            .await;
+        server
+    }
+
+    /// The JSON alert lines `watch risk --only margin_usage` prints before it
+    /// has read `ticks` snapshots.
+    fn margin_alerts(server: &ExchangeFixture, ticks: &str) -> Vec<Value> {
+        let output = IsolatedHome::new()
+            .command_with_server(server)
+            .args([
+                "--format",
+                "json",
+                "watch",
+                "risk",
+                "--user",
+                USER,
+                "--only",
+                "margin_usage",
+                "--interval",
+                "100ms",
+                "--idle-timeout-ms",
+                "1500",
+                "--max-events",
+                ticks,
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_standard_account_is_measured_by_its_perp_margin_summary() {
+        for raw_mode in ["disabled", "default", "dexAbstraction"] {
+            let server = account(
+                raw_mode,
+                perp_state("100", "85", "5", vec![cross_position()]),
+                perp_state("0", "0", "0", vec![]),
+                "0",
+            )
+            .await;
+
+            let alerts = margin_alerts(&server, "1");
+
+            assert_eq!(alerts.len(), 1, "{raw_mode}");
+            assert_eq!(alerts[0]["rule"], "margin_usage");
+            assert_eq!(alerts[0]["message"], "margin used 85% of equity");
+            assert_eq!(alerts[0]["payload"], json!({"margin_used_pct": "85"}));
+            assert!(
+                server
+                    .info_requests("spotClearinghouseState")
+                    .await
+                    .is_empty()
+            );
+            assert!(server.info_requests("borrowLendUserState").await.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_unified_account_is_measured_by_the_unified_account_ratio() {
+        // Maintenance margin 500 on the default dex and 400 on xyz, over 1100 of
+        // USDC less the 100 an isolated position holds: 900 / 1000. The default
+        // dex's own summary says 1% used and would never alert.
+        let default_dex = perp_state(
+            "10000",
+            "100",
+            "500",
+            vec![
+                cross_position(),
+                position(
+                    "ETH",
+                    json!({"type": "isolated", "value": 3, "rawUsd": "100"}),
+                    "100",
+                ),
+            ],
+        );
+        let server = account(
+            "unifiedAccount",
+            default_dex,
+            perp_state("0", "0", "400", vec![]),
+            "1100",
+        )
+        .await;
+
+        let alerts = margin_alerts(&server, "2");
+
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0]["rule"], "margin_usage");
+        assert_eq!(
+            alerts[0]["message"],
+            "unified account ratio 90% (maintenance margin over collateral)"
+        );
+        assert_eq!(
+            alerts[0]["payload"],
+            json!({
+                "margin_used_pct": "90",
+                "basis": "unified_account_ratio",
+                "collateral_token": 0
+            })
+        );
+        // The dex list and each dex's collateral are read once, not per tick.
+        assert_eq!(
+            server
+                .info_requests("meta")
+                .await
+                .iter()
+                .filter(|body| body["dex"] == "xyz")
+                .count(),
+            1
+        );
+        let xyz_states = server.info_requests("clearinghouseState").await;
+        assert_eq!(
+            xyz_states
+                .iter()
+                .filter(|body| body["dex"] == "xyz")
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_unified_account_with_no_collateral_left_for_its_maintenance_margin_alerts() {
+        // 500 of maintenance margin and a USDC balance of 0: there is no ratio
+        // to compute, which is the most dangerous state, not a quiet one.
+        let server = account(
+            "unifiedAccount",
+            perp_state("100", "1", "500", vec![cross_position()]),
+            perp_state("0", "0", "0", vec![]),
+            "0",
+        )
+        .await;
+
+        let alerts = margin_alerts(&server, "1");
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["rule"], "margin_usage");
+        assert_eq!(
+            alerts[0]["payload"],
+            json!({
+                "basis": "unified_account_ratio",
+                "collateral_token": 0,
+                "uncovered": true
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_unified_account_below_the_limit_stays_quiet_whatever_its_perp_summary_says() {
+        // The perp summary claims 95% used; the account has 10000 of USDC.
+        let server = account(
+            "unifiedAccount",
+            perp_state("100", "95", "50", vec![cross_position()]),
+            perp_state("0", "0", "0", vec![]),
+            "10000",
+        )
+        .await;
+
+        assert!(margin_alerts(&server, "1").is_empty());
+        assert!(
+            !server
+                .info_requests("spotClearinghouseState")
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_portfolio_margin_account_alerts_on_the_health_it_reports() {
+        let server = account(
+            "portfolioMargin",
+            perp_state("100", "95", "50", vec![cross_position()]),
+            perp_state("0", "0", "0", vec![]),
+            "10000",
+        )
+        .await;
+        server
+            .mount_info_containing(
+                json!({"type": "borrowLendUserState"}),
+                json!({"tokenToState": [], "health": "liquidatable", "healthFactor": 0.97}),
+            )
+            .await;
+
+        let alerts = margin_alerts(&server, "1");
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0]["rule"], "margin_usage");
+        assert_eq!(
+            alerts[0]["message"],
+            "portfolio margin health is liquidatable"
+        );
+        assert_eq!(
+            alerts[0]["payload"],
+            json!({
+                "basis": "portfolio_margin_health",
+                "health": "liquidatable",
+                "health_factor": "0.97"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_healthy_portfolio_margin_account_stays_quiet_whatever_its_perp_summary_says() {
+        let server = account(
+            "portfolioMargin",
+            perp_state("100", "95", "50", vec![cross_position()]),
+            perp_state("0", "0", "0", vec![]),
+            "10000",
+        )
+        .await;
+        server
+            .mount_info_containing(
+                json!({"type": "borrowLendUserState"}),
+                json!({"tokenToState": [], "health": "healthy", "healthFactor": null}),
+            )
+            .await;
+
+        assert!(margin_alerts(&server, "1").is_empty());
+        assert!(!server.info_requests("borrowLendUserState").await.is_empty());
+    }
+}
