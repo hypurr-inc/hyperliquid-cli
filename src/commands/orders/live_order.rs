@@ -35,7 +35,6 @@ pub(crate) fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Send an order-management action built for a tracked order, signed now.
 pub(crate) async fn send_tracked_action(
     context: OrderSubmissionContext<'_>,
     action: Action,
@@ -91,7 +90,6 @@ impl LiveOrder {
         })
     }
 
-    /// Cancel by oid when the exchange assigned one, otherwise by cloid.
     pub(crate) fn cancel_prefer_oid(&self) -> Action {
         match self.oid {
             Some(oid) => Action::Cancel(BatchCancel {

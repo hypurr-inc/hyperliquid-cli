@@ -1,5 +1,3 @@
-//! Authenticated order management commands.
-
 use std::fmt;
 use std::io::{self, Write};
 
@@ -106,7 +104,6 @@ impl PreparedOrder {
         self.perp().and_then(|perp| perp.dex.as_deref())
     }
 
-    /// The price the order is sent at.
     fn price(&self) -> Decimal {
         self.request.limit_px
     }
@@ -263,7 +260,6 @@ impl<'a> OrderSubmissionContext<'a> {
     }
 }
 
-/// Place a planned `orders create`: an entry order, or an entry with TP/SL children.
 async fn create(
     context: OrderExecutionContext<'_>,
     submission: CreateOrderSubmission,
@@ -318,7 +314,6 @@ async fn create(
     }
 }
 
-/// Plan the HIP-3 margin helper transfer for an order, if one is needed.
 async fn plan_hip3_helper(
     context: OrderExecutionContext<'_>,
     user: Address,
@@ -333,7 +328,6 @@ async fn plan_hip3_helper(
     .await
 }
 
-/// Disclose a planned HIP-3 margin helper transfer before order confirmation.
 fn warn_hip3_margin_helper(helper: &Option<Hip3MarginPlan>) -> Result<(), CliError> {
     if let Some(plan) = helper {
         let mut stderr = io::stderr();
@@ -350,7 +344,6 @@ fn warn_hip3_margin_helper(helper: &Option<Hip3MarginPlan>) -> Result<(), CliErr
     Ok(())
 }
 
-/// Execute a planned HIP-3 margin helper transfer after confirmation.
 async fn execute_hip3_helper(
     context: OrderExecutionContext<'_>,
     user: Address,
@@ -369,8 +362,6 @@ async fn execute_hip3_helper(
     Ok(())
 }
 
-/// Submit a single prepared order, running the HIP-3 margin helper after
-/// confirmation and before placement. Returns the exchange order statuses.
 async fn place_prepared_single(
     context: OrderExecutionContext<'_>,
     prepared: &PreparedOrder,
@@ -587,7 +578,6 @@ async fn verify_margin_mode(
     Ok(())
 }
 
-/// The `positions update-leverage` command that puts a position in `margin_mode`.
 fn update_leverage_command(coin: &str, margin_mode: MarginModeArg) -> String {
     let isolated = if margin_mode == MarginModeArg::Isolated {
         " --isolated"
@@ -637,7 +627,6 @@ fn finish_order_batch(rows: Vec<OrderConfirmation>, inv: &Invocation) -> Result<
     finish_with_failures(legs, "Placed", "place orders", failures, inv)
 }
 
-/// Print a placed TP/SL batch, or report its failed legs.
 fn report_tpsl_batch(
     legs: TpslOrderConfirmationOutput,
     inv: &Invocation,
@@ -1318,7 +1307,6 @@ mod tests {
         );
 
         assert_eq!(prepared.legs.len(), 2);
-        // Take-profit leg (first child) gets the custom cloid
         assert_eq!(prepared.legs[0].request.cloid, cloid);
         assert_eq!(prepared.legs[0].leg, TpslLegKind::TakeProfit);
         // Stop-loss leg (second child) gets default to avoid duplicates
@@ -1335,13 +1323,12 @@ mod tests {
             &btc(),
             OrderSide::Sell,
             Decimal::new(1, 1),
-            None, // no take-profit
+            None,
             Some(Decimal::from(49_000)),
             Some(cloid),
         );
 
         assert_eq!(prepared.legs.len(), 1);
-        // When only stop-loss is present, it gets the custom cloid
         assert_eq!(prepared.legs[0].request.cloid, cloid);
         assert_eq!(prepared.legs[0].leg, TpslLegKind::StopLoss);
     }

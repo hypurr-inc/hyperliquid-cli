@@ -11,7 +11,6 @@ use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::JsonValueOutput;
 
-/// List authenticated user's open orders.
 pub async fn open(
     inv: &Invocation,
     resolver: &AssetResolver,
@@ -39,7 +38,6 @@ pub async fn open_snapshot(
     Ok(OrderListOutput::new(orders, "No open orders."))
 }
 
-/// Show a public order status by OID or CLOID.
 pub async fn status(
     inv: &Invocation,
     user: Address,
@@ -81,7 +79,6 @@ struct OrderStatusRequest {
     oid: serde_json::Value,
 }
 
-/// List authenticated user's historical orders.
 pub async fn history(
     inv: &Invocation,
     resolver: &AssetResolver,

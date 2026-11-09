@@ -671,7 +671,6 @@ async fn prio_bid_compares_decimal_current_gas_after_converting_to_wei() {
     );
 }
 
-/// `orders bracket` resolves a HIP-3 market for the entry and both protection legs.
 #[tokio::test]
 async fn orders_bracket_dry_run_resolves_hip3_dex_markets() {
     let server = mock_advanced_server().await;
@@ -703,7 +702,6 @@ async fn orders_bracket_dry_run_resolves_hip3_dex_markets() {
         .clone();
     let json: Value = serde_json::from_slice(&output).unwrap();
 
-    // Entry and both protection legs must resolve the HIP-3 market.
     assert_eq!(json["args"]["entry_plan"]["resolved_asset"], "xyz:TOKEN");
     assert_eq!(
         json["args"]["protection_plan"]["resolved_asset"],

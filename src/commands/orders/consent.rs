@@ -1,7 +1,3 @@
-//! What a mainnet run shows the user before asking to place, cancel or
-//! schedule: the target facts, one summary per kind of action, and the
-//! question.
-
 use std::io::{self, Write};
 
 use chrono::Utc;
@@ -159,7 +155,6 @@ pub(super) fn confirm_mainnet_twap(
     )
 }
 
-/// Target facts every consent preview shows before the question.
 pub(super) struct ConsentTarget<'a> {
     mode: &'a Mode,
     network: Network,

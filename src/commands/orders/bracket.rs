@@ -24,10 +24,8 @@ use super::{
     protect_position,
 };
 
-/// How often a resting entry order is checked for a fill.
 const ENTRY_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
-/// The entry order of a bracket, with exactly what its type needs.
 enum BracketEntry {
     Limit { price: Decimal, size: Decimal },
     Market(MarketSizing),
@@ -432,7 +430,6 @@ impl Bracket<'_> {
         Ok(())
     }
 
-    /// Report an entry that is live or filled without protection.
     fn report_unprotected(
         &self,
         entry: &EntryRef,

@@ -219,13 +219,11 @@ pub(crate) fn prepare_trailing_stop_plan(
 }
 
 impl TrailingStopPlan {
-    /// The `--dry-run` preview of this plan.
     pub(crate) fn dry_run_plan(&self, args: &TrailingStopArgs) -> OrderDryRunPlan {
         OrderDryRunPlan::new("trailing_stop", self.dry_run_args(args))
     }
 }
 
-/// Place a native trailing stop through the signed L1 exchange action.
 pub async fn trailing_stop(
     context: OrderSubmissionContext<'_>,
     plan: &TrailingStopPlan,
@@ -269,7 +267,6 @@ pub async fn trailing_stop(
     Ok(())
 }
 
-/// Tell a human how to remove the stop they just placed.
 fn print_cancel_hint(oid: u64, on_behalf_of: Option<&str>) {
     let mut stderr = io::stderr();
     // A closed stderr must not turn a placed order into a failure.
