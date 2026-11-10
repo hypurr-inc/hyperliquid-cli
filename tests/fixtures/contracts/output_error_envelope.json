@@ -1,18 +1,14 @@
 {
-  "characterization": true,
-  "error": {
-    "category": "usage",
-    "data": {
-      "usage": "Usage: hyperliquid wallet show [OPTIONS]"
-    },
-    "error": "unexpected argument '--bogus' found",
-    "exit_code": 2,
-    "next": [
-      {
-        "command": "hyperliquid wallet show --help"
-      }
-    ],
-    "reason": "invalid_arguments"
+  "category": "usage",
+  "data": {
+    "usage": "Usage: hyperliquid wallet show [OPTIONS]"
   },
-  "review_required_to_update": true
+  "error": "unexpected argument '--bogus' found",
+  "exit_code": 2,
+  "next": [
+    {
+      "command": "hyperliquid wallet show --help"
+    }
+  ],
+  "reason": "invalid_arguments"
 }

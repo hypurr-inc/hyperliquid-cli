@@ -2,7 +2,7 @@
 //! reference to every handler.
 //!
 //! The output session, the prompting mode, the selected command, the dry-run
-//! and payload inputs and the asset metadata cache are known at startup. The
+//! and payload inputs and the market cache are known at startup. The
 //! network, API endpoint, HTTP client and signer depend on the environment and
 //! config file, so they resolve on first use ([`Invocation::remote`]) and
 //! local-only commands such as `wallet list` never read them.
@@ -10,11 +10,10 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use hypersdk::Address;
 use hypersdk::hypercore::Chain;
 use hypersdk::hypercore::UserRole;
 
-use crate::assets::{AssetResolver, MetadataCache};
+use crate::assets::{AssetMetadata, AssetResolver, DexArg, MarketCache, PerpDex, PerpDexList};
 use crate::auth::{SignerFlags, SignerSelection};
 use crate::command_spec::CommandSpec;
 use crate::errors::CliError;
@@ -22,12 +21,13 @@ use crate::http_api::ApiClient;
 use crate::input_hardening::{FilePolicy, parse_json_text, read_json_file};
 use crate::mode::Mode;
 use crate::network::Network;
-use crate::output::{OutputFormat, Session, TableData};
+use crate::nonce::NonceStore;
+use crate::output::{Notice, Session, TableData, sink};
 use crate::settings::Settings;
-use crate::signing::SelectedSigner;
+use crate::signing::{AgentForm, SelectedSigner};
+use crate::terminal::OutputFormat;
 use crate::wire::InfoRequest;
 
-/// The parsed global flags that shape an invocation.
 #[derive(Debug, Clone, Default)]
 pub struct InvocationFlags {
     pub testnet: bool,
@@ -70,9 +70,10 @@ pub struct Remote {
     network: Network,
     api: ApiClient,
     signer: OnceLock<SelectedSigner>,
-    /// The master account when the selected signer proved to be an API wallet:
-    /// `None` for any other signer and when the role could not be read.
-    signer_master: OnceLock<Option<Address>>,
+    /// What the exchange says the selected signer is, for a signer no stored
+    /// account describes: `None` for a master and for a role that could not be
+    /// read.
+    signer_agent: OnceLock<Option<AgentForm>>,
 }
 
 impl std::fmt::Debug for Remote {
@@ -101,7 +102,6 @@ impl Remote {
     }
 }
 
-/// The context of one CLI run.
 #[derive(Debug)]
 pub struct Invocation {
     settings: Settings,
@@ -109,8 +109,9 @@ pub struct Invocation {
     mode: Mode,
     flags: InvocationFlags,
     command: &'static CommandSpec,
+    confirmed: bool,
     payload: OnceLock<Option<serde_json::Value>>,
-    metadata: MetadataCache,
+    markets: MarketCache,
     remote: OnceLock<Remote>,
 }
 
@@ -129,8 +130,9 @@ impl Invocation {
             mode,
             flags,
             command,
+            confirmed: false,
             payload: OnceLock::new(),
-            metadata: MetadataCache::new(),
+            markets: MarketCache::new(),
             remote: OnceLock::new(),
         }
     }
@@ -152,6 +154,32 @@ impl Invocation {
         self.command.key()
     }
 
+    /// This run with the `--yes` its command line carried, as the pipeline
+    /// read it from the matched command.
+    #[must_use]
+    pub fn with_confirmed(mut self, confirmed: bool) -> Self {
+        self.confirmed = confirmed;
+        self
+    }
+
+    /// Whether `--yes` was passed; `false` for a command with no such option.
+    #[must_use]
+    pub fn confirmed(&self) -> bool {
+        self.confirmed
+    }
+
+    /// Whether this run must be approved before it acts: the command prompts on
+    /// the resolved network and `yes` (`--yes`) was not given. The one rule the
+    /// pipeline, the commands and the order submit path share; see
+    /// [`crate::consent`] for asking.
+    pub fn requires_approval(&self, yes: bool) -> Result<bool, CliError> {
+        if yes {
+            return Ok(false);
+        }
+        self.command
+            .prompts_on(|| self.remote().map(Remote::network))
+    }
+
     #[must_use]
     pub fn session(&self) -> &Session {
         &self.session
@@ -166,7 +194,7 @@ impl Invocation {
     pub fn print(&self, data: &dyn TableData) {
         self.session.print(data);
         if self.mode.timing_footer() {
-            eprintln!("{}", self.session.timing_footer());
+            sink::err_line(&self.session.timing_footer());
         }
     }
 
@@ -225,7 +253,7 @@ impl Invocation {
             network,
             api: self.api_client_for(network)?,
             signer: OnceLock::new(),
-            signer_master: OnceLock::new(),
+            signer_agent: OnceLock::new(),
         };
         Ok(self.remote.get_or_init(|| remote))
     }
@@ -234,10 +262,13 @@ impl Invocation {
     /// may pick another network than the run resolved. A person at a terminal
     /// is told when a read is retried.
     pub fn api_client_for(&self, network: Network) -> Result<ApiClient, CliError> {
-        let api = ApiClient::new(network, self.settings.api_base_url_override(network)?)
+        let mut api = ApiClient::new(network, self.settings.api_base_url_override(network)?)
             .with_request_lifetime(self.flags.expires_after);
+        if let Some(mark) = crate::paths::nonce_high_water_file(self.settings.env()) {
+            api = api.with_nonce_store(NonceStore::recorded_at(mark, crate::output::warn));
+        }
         Ok(if self.mode.person_on_stderr() {
-            api.on_retry(|| eprintln!("Retrying automatically…"))
+            api.on_retry(|| Notice::Retrying.eprint())
         } else {
             api
         })
@@ -267,7 +298,7 @@ impl Invocation {
             signer.ensure_covers(signs)?;
         }
         if let Some(action) = self.command.master_only
-            && signer.is_stored_agent()
+            && signer.agent_form().is_some()
         {
             return Err(CliError::Unsupported(format!(
                 "{action} must be signed by the master account; select the master wallet, not a stored API wallet"
@@ -287,6 +318,22 @@ impl Invocation {
             Ok(signer) => self.ensure_signer_fits(signer).map(|()| Ok(signer)),
             Err(unresolved) => Ok(Err(unresolved)),
         }
+    }
+
+    /// The signer a dry run previews with: `None` when none resolves, an error
+    /// when one resolves that the live run would refuse. The one way a command's
+    /// preview asks, so no preview swallows a refusal the live run would give.
+    pub(crate) fn dry_run_signer(&self) -> Result<Option<&SelectedSigner>, CliError> {
+        Ok(self.preview_signer()?.ok())
+    }
+
+    /// How the signer a dry run previews with would sign
+    /// ([`SelectedSigner::agent_form`]): `None` when none resolves or it signs
+    /// the user-signed form. A command that signs both forms marks the agent
+    /// one in its preview with this, as its live run does with its resolved
+    /// signer.
+    pub(crate) fn dry_run_agent_form(&self) -> Result<Option<AgentForm>, CliError> {
+        Ok(self.dry_run_signer()?.and_then(SelectedSigner::agent_form))
     }
 
     /// The signer a live run signs with, checked before any prompt or network
@@ -320,12 +367,12 @@ impl Invocation {
     /// signer's. An API wallet has no account data of its own, so a bare key
     /// that turns out to be one (a stored API wallet already reads its master)
     /// is refused with the master it signs for, instead of answering with an
-    /// empty result. The role is read once per run; a failed read is not a reason
-    /// to refuse.
+    /// empty result. The role is read once per run; a role that cannot be
+    /// read is not a reason to refuse.
     pub async fn resolve_signer_account(&self) -> Result<hypersdk::Address, anyhow::Error> {
         let signer = self.resolve_signer()?;
-        if !signer.is_stored_agent()
-            && let Some(master) = self.signer_master(&signer).await
+        if signer.agent_form().is_none()
+            && let Some(AgentForm { master }) = self.exchange_agent_form(&signer).await
         {
             return Err(CliError::Unsupported(format!(
                 "the selected signer {} is an API wallet for {master}, which has no account data of its own and would read empty; query the master account instead: pass {master} as the account argument, or select the master wallet",
@@ -336,13 +383,18 @@ impl Invocation {
         Ok(signer.query_address())
     }
 
-    /// The master `signer` is an API wallet of, if its `userRole` says so.
-    async fn signer_master(&self, signer: &SelectedSigner) -> Option<Address> {
-        let remote = self.remote().ok()?;
-        if let Some(known) = remote.signer_master.get() {
-            return *known;
+    /// Whether the exchange calls a signer no stored account describes an API
+    /// wallet (`userRole`), once per run. A lookup that fails reads as no
+    /// agent, cached like an answer: the role guard is best-effort and never
+    /// turns a flaky request into a refusal.
+    async fn exchange_agent_form(&self, signer: &SelectedSigner) -> Option<AgentForm> {
+        let Ok(remote) = self.remote() else {
+            return None;
+        };
+        if let Some(form) = remote.signer_agent.get() {
+            return *form;
         }
-        let master = match remote
+        let form = match remote
             .api
             .info::<UserRole>(
                 &InfoRequest::user("userRole", signer.address()),
@@ -350,11 +402,11 @@ impl Invocation {
             )
             .await
         {
-            Ok(UserRole::Agent { user }) => Some(user),
-            Ok(_) | Err(_) => None,
+            Ok(UserRole::Agent { user }) => Some(AgentForm { master: user }),
+            _ => None,
         };
-        let _ = remote.signer_master.set(master);
-        master
+        let _ = remote.signer_agent.set(form);
+        form
     }
 
     /// The address an account selector names, whether a command reads its data
@@ -363,46 +415,56 @@ impl Invocation {
         crate::auth::lookup_account_address(selector, &self.settings, &self.mode)
     }
 
-    /// Asset metadata through the per-run cache.
+    /// The run's asset metadata, read once.
     pub async fn asset_resolver(&self) -> Result<AssetResolver, CliError> {
-        let metadata = self.metadata.get_or_load(self.remote()?.api()).await?;
-        Ok(AssetResolver::new(metadata))
+        self.markets.resolver(self.remote()?.api()).await
     }
 
-    /// Like [`Self::asset_resolver`], falling back to the raw exchange metadata
-    /// when the SDK cannot decode the universe. The SDK reports a reply it
-    /// cannot decode as an unclassified failure, so every classified one (the
-    /// network, a rate limit, a rejected credential, an HTTP status) is the
-    /// answer, not a reason to ask again.
-    pub async fn trading_resolver(&self) -> Result<AssetResolver, CliError> {
-        match self.asset_resolver().await {
-            Err(CliError::Internal(_)) => AssetResolver::load_raw(self.remote()?.api()).await,
-            other => other,
-        }
+    /// A resolver over metadata a command already holds; see
+    /// [`MarketCache::resolver_over`].
+    #[must_use]
+    pub fn resolver_over(&self, metadata: AssetMetadata) -> AssetResolver {
+        self.markets.resolver_over(metadata)
+    }
+
+    /// The perp dex a `--dex` value names, validated against the exchange:
+    /// the one way a command turns the flag into a dex name or slot. `None`
+    /// is the default dex.
+    pub(crate) async fn dex(
+        &self,
+        requested: Option<&DexArg>,
+    ) -> Result<Option<&PerpDex>, CliError> {
+        self.markets
+            .dexes()
+            .select(self.remote()?.api(), requested)
+            .await
+    }
+
+    /// The name of the perp dex a `--dex` value names ([`Self::dex`]), for
+    /// the commands that only send or filter by it.
+    pub(crate) async fn dex_name(
+        &self,
+        requested: Option<&DexArg>,
+    ) -> Result<Option<String>, CliError> {
+        Ok(self.dex(requested).await?.map(|dex| dex.name.clone()))
+    }
+
+    /// Every perp dex the exchange lists, read once per run.
+    pub(crate) async fn dex_list(&self) -> Result<&PerpDexList, CliError> {
+        self.markets.dexes().list(self.remote()?.api()).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command_spec::{CliCommand, NoArgs};
     use crate::config::{BankrLogin, Config, ConfigFile};
+    use crate::env::{self, EnvSource};
     use crate::output::JsonRenderOptions;
-    use crate::settings::{EnvSource, env};
-    use crate::signing::Signs;
+    use crate::signable::Signs;
     use tempfile::TempDir;
 
-    struct Probe;
-
-    impl CliCommand for Probe {
-        type Args = NoArgs;
-
-        const SPEC: CommandSpec = CommandSpec::read(&["probe", "run"], "system", "Probe", "Probe.");
-
-        async fn run(_inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
-            Ok(())
-        }
-    }
+    static PROBE: CommandSpec = CommandSpec::read(&["probe", "run"], "system", "Probe", "Probe.");
 
     fn invocation_over(
         settings: Settings,
@@ -420,7 +482,20 @@ mod tests {
 
     fn invocation(flags: InvocationFlags) -> Invocation {
         let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
-        invocation_over(settings, flags, &Probe::SPEC)
+        invocation_over(settings, flags, &PROBE)
+    }
+
+    #[test]
+    fn the_nonce_mark_lives_in_the_data_directory_of_the_runs_own_environment() {
+        let data = TempDir::new().unwrap();
+        let settings = Settings::detached(
+            EnvSource::fixed([(env::DATA_DIR, data.path().to_str().unwrap())]),
+            None,
+        );
+        let inv = invocation_over(settings, InvocationFlags::default(), &PROBE);
+        let nonce = inv.remote().unwrap().api().nonces().next();
+        let mark = std::fs::read_to_string(data.path().join("nonce-high-water")).unwrap();
+        assert_eq!(mark.trim().parse::<u64>().unwrap(), nonce);
     }
 
     const KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000009";
@@ -450,6 +525,66 @@ mod tests {
         invocation_over(settings, flags, command)
     }
 
+    static ASKS: CommandSpec =
+        CommandSpec::read(&["probe", "asks"], "system", "Probe", "Probe.").prompt();
+    static ASKS_ON_MAINNET: CommandSpec =
+        CommandSpec::read(&["probe", "asks-on-mainnet"], "system", "Probe", "Probe.")
+            .prompt()
+            .testnet_unprompted();
+
+    fn on_network(command: &'static CommandSpec, testnet: bool) -> Invocation {
+        let settings = Settings::detached(EnvSource::fixed::<&str, &str>([]), None);
+        invocation_over(
+            settings,
+            InvocationFlags {
+                testnet,
+                ..InvocationFlags::default()
+            },
+            command,
+        )
+    }
+
+    #[test]
+    fn a_prompting_command_needs_approval_unless_yes_was_given() {
+        for testnet in [false, true] {
+            let inv = on_network(&ASKS, testnet);
+            assert!(inv.requires_approval(false).unwrap(), "testnet={testnet}");
+            assert!(!inv.requires_approval(true).unwrap(), "testnet={testnet}");
+        }
+        let silent = on_network(&PROBE, false);
+        assert!(!silent.requires_approval(false).unwrap());
+    }
+
+    #[test]
+    fn a_command_that_skips_the_testnet_prompt_needs_approval_on_mainnet_only() {
+        assert!(
+            on_network(&ASKS_ON_MAINNET, false)
+                .requires_approval(false)
+                .unwrap()
+        );
+        assert!(
+            !on_network(&ASKS_ON_MAINNET, true)
+                .requires_approval(false)
+                .unwrap()
+        );
+        assert!(
+            !on_network(&ASKS_ON_MAINNET, false)
+                .requires_approval(true)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn only_a_command_that_skips_the_testnet_prompt_reads_the_network() {
+        let broken = || Settings::detached(EnvSource::fixed([(env::NETWORK, "nonsense")]), None);
+        let asks = invocation_over(broken(), InvocationFlags::default(), &ASKS);
+        assert!(asks.remote().is_err(), "the network setting is unusable");
+        assert!(asks.requires_approval(false).unwrap());
+
+        let skips = invocation_over(broken(), InvocationFlags::default(), &ASKS_ON_MAINNET);
+        assert!(skips.requires_approval(false).is_err());
+    }
+
     #[test]
     fn a_run_that_never_signs_never_reads_the_signer_inputs() {
         let tmp = TempDir::new().unwrap();
@@ -459,7 +594,7 @@ mod tests {
             EnvSource::fixed([(env::NETWORK, "testnet")]),
             Some(ConfigFile::at(path)),
         );
-        let inv = invocation_over(settings, InvocationFlags::default(), &Probe::SPEC);
+        let inv = invocation_over(settings, InvocationFlags::default(), &PROBE);
 
         assert!(inv.remote().is_ok(), "a public read needs no signer");
         assert!(
@@ -607,31 +742,77 @@ mod tests {
         assert!(!InvocationFlags::default().payload_from_stdin());
     }
 
-    #[tokio::test]
-    async fn a_classified_metadata_failure_is_not_retried_against_the_raw_metadata() {
+    /// An invocation signing with `KEY` as a bare private key against a mock
+    /// exchange whose every `/info` reply is `reply`.
+    async fn role_invocation(
+        reply: wiremock::ResponseTemplate,
+    ) -> (wiremock::MockServer, Invocation) {
         use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{Mock, MockServer};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/info"))
-            .respond_with(ResponseTemplate::new(500))
+            .respond_with(reply)
             .mount(&server)
             .await;
         let settings =
             Settings::detached(EnvSource::fixed([(env::API_BASE_URL, server.uri())]), None);
-        let inv = invocation_over(settings, InvocationFlags::default(), &Probe::SPEC);
+        let mut flags = InvocationFlags::default();
+        flags.signer.private_key = Some(KEY.to_string());
+        (server, invocation_over(settings, flags, &TRADE))
+    }
 
-        let direct = inv.asset_resolver().await.unwrap_err();
-        assert!(!matches!(direct, CliError::Internal(_)), "{direct}");
-        let after_direct = server.received_requests().await.unwrap().len();
+    #[tokio::test]
+    async fn a_bare_key_the_exchange_calls_an_agent_is_refused_for_a_read_and_asked_once() {
+        use wiremock::ResponseTemplate;
 
-        inv.trading_resolver().await.unwrap_err();
-        let after_trading = server.received_requests().await.unwrap().len();
+        let (server, inv) = role_invocation(
+            ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({"role": "agent", "data": {"user": RAW_ADDRESS}})),
+        )
+        .await;
+
+        for _ in 0..2 {
+            let err = inv.resolve_signer_account().await.unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("is an API wallet for {RAW_ADDRESS}")),
+                "{err}"
+            );
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
         assert_eq!(
-            after_trading,
-            after_direct * 2,
-            "only the SDK's own load ran again, not the raw metadata fallback"
+            inv.resolve_signer().unwrap().agent_form(),
+            None,
+            "the offline answer never waits for the network: a bare key is not known to be an agent"
         );
+    }
+
+    #[tokio::test]
+    async fn a_key_the_exchange_calls_a_user_reads_its_own_account() {
+        use wiremock::ResponseTemplate;
+
+        let (_server, inv) = role_invocation(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"role": "user"})),
+        )
+        .await;
+        assert_eq!(
+            inv.resolve_signer_account().await.unwrap(),
+            inv.resolve_signer().unwrap().address()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_role_that_cannot_be_read_is_no_reason_to_refuse_and_is_not_asked_again() {
+        use wiremock::ResponseTemplate;
+
+        let (server, inv) = role_invocation(ResponseTemplate::new(404)).await;
+        assert!(inv.resolve_signer_account().await.is_ok());
+        let asked = server.received_requests().await.unwrap().len();
+        assert!(asked >= 1);
+
+        assert!(inv.resolve_signer_account().await.is_ok());
+        assert_eq!(server.received_requests().await.unwrap().len(), asked);
     }
 }

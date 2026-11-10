@@ -3,51 +3,22 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use hyperliquid_cli::settings::env;
+use hyperliquid_cli::env;
 use support::exchange::ExchangeFixture;
 use support::{
-    IsolatedHome, LOOPBACK_NO_PROXY, PROCESS_ENV_OUTSIDE_SETTINGS, TEST_ACCOUNT_PASSPHRASE,
-    VALID_PRIVATE_KEY, expected_address, hermetic_command, json_stdout,
+    CLOSED_PROXY_URL, IsolatedHome, LOOPBACK_NO_PROXY, TEST_ACCOUNT_PASSPHRASE, VALID_PRIVATE_KEY,
+    expected_address, hermetic_command, run_json, run_json_failure, rust_files,
 };
-
-/// Test files that still spawn the binary themselves. Each one skips the
-/// harness's environment clearing and its `IsolatedHome`; migrate it to
-/// `support::hermetic_command()` (or `IsolatedHome::command()`) and delete its
-/// entry. An entry whose file no longer spawns the binary fails the guard.
-const SPAWNS_THE_BINARY_ITSELF: &[&str] = &[
-    "cli_integration.rs",
-    "command_contracts.rs",
-    "contract_support/mod.rs",
-    "error_envelope.rs",
-    "mcp.rs",
-    "output_contracts.rs",
-    "output_formatting.rs",
-    "release_artifacts.rs",
-    "schema_contracts.rs",
-    "security_contracts.rs",
-];
-
-fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, found);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            found.push(path);
-        }
-    }
-}
 
 /// The test files, relative to `tests/`, whose code spawns the binary directly.
 fn files_that_spawn_the_binary(tests: &Path) -> Vec<String> {
     let needle = ["cargo", "_bin("].concat();
-    let mut files = Vec::new();
-    rust_files(tests, &mut files);
-    let mut spawning: Vec<String> = files
+    let mut spawning: Vec<String> = rust_files(tests)
         .iter()
         .map(|path| {
             path.strip_prefix(tests)
@@ -71,67 +42,97 @@ fn only_the_harness_spawns_the_binary() {
     let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let spawning = files_that_spawn_the_binary(&tests);
 
-    let new_offenders: Vec<_> = spawning
-        .iter()
-        .filter(|name| !SPAWNS_THE_BINARY_ITSELF.contains(&name.as_str()))
-        .collect();
     assert!(
-        new_offenders.is_empty(),
-        "spawn the CLI with support::hermetic_command() or IsolatedHome::command(): {new_offenders:?}"
-    );
-
-    let stale: Vec<_> = SPAWNS_THE_BINARY_ITSELF
-        .iter()
-        .filter(|name| !spawning.iter().any(|spawning| spawning == *name))
-        .collect();
-    assert!(
-        stale.is_empty(),
-        "these files were migrated; remove them from SPAWNS_THE_BINARY_ITSELF: {stale:?}"
+        spawning.is_empty(),
+        "spawn the CLI with support::hermetic_command() or IsolatedHome::command(): {spawning:?}"
     );
 }
 
-#[test]
-fn the_hermetic_command_clears_every_setting_and_proxy_variable() {
-    let command = hermetic_command();
-    let envs: Vec<_> = command.get_envs().collect();
-    let value_of = |name: &str| {
-        envs.iter()
-            .find(|(key, _)| *key == name)
-            .unwrap_or_else(|| panic!("{name} is neither set nor removed"))
-            .1
-    };
-
-    for name in env::ALL
-        .iter()
-        .chain(PROCESS_ENV_OUTSIDE_SETTINGS)
-        .filter(|name| **name != "NO_PROXY")
-    {
-        assert!(value_of(name).is_none(), "{name} must be removed");
+/// The environment a process gets when it is started from a shell that sets
+/// `inherited`, with the variables the hermetic command sets or removes applied
+/// on top: `env(1)` stands in for the CLI.
+fn environment_a_hermetic_child_sees(inherited: &[(&str, &str)]) -> BTreeMap<String, String> {
+    let hermetic = hermetic_command();
+    let mut probe = std::process::Command::new("env");
+    probe.envs(inherited.iter().copied());
+    for (name, value) in hermetic.get_envs() {
+        match value {
+            Some(value) => probe.env(name, value),
+            None => probe.env_remove(name),
+        };
     }
-    assert_eq!(
-        value_of("NO_PROXY").unwrap(),
-        std::ffi::OsStr::new(LOOPBACK_NO_PROXY)
+    let output = probe.output().expect("env(1) runs");
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+#[test]
+fn a_hermetic_child_does_not_see_the_shell_it_was_started_from() {
+    let seen = environment_a_hermetic_child_sees(&[
+        (env::FORMAT, "table"),
+        (env::AGENT, "1"),
+        (env::CI, "1"),
+        (env::NETWORK, "testnet"),
+        (env::PRIVATE_KEY, "sentinel-key"),
+        (env::API_BASE_URL, "http://sentinel.invalid"),
+        (env::CONFIG_DIR, "/sentinel/config"),
+        ("HOME", "/sentinel/home"),
+        ("HTTPS_PROXY", "http://sentinel.invalid:3128"),
+    ]);
+
+    for name in [
+        env::FORMAT,
+        env::AGENT,
+        env::CI,
+        env::NETWORK,
+        env::PRIVATE_KEY,
+        env::API_BASE_URL,
+        env::CONFIG_DIR,
+    ] {
+        assert_eq!(seen.get(name), None, "{name} reached the child");
+    }
+    assert_ne!(seen["HOME"], "/sentinel/home");
+    assert_eq!(seen["HTTPS_PROXY"], CLOSED_PROXY_URL);
+    assert_eq!(seen["NO_PROXY"], LOOPBACK_NO_PROXY);
+}
+
+/// A read no test mocked must fail on the closed proxy, not succeed against the
+/// public API: the suite stays offline.
+#[test]
+fn an_unmocked_read_fails_on_the_closed_proxy() {
+    let home = IsolatedHome::new();
+
+    let error = run_json_failure(home.json_command().arg("mids"), 12);
+
+    assert_eq!(error["reason"], "network_error", "{error}");
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("HTTPS_PROXY (127.0.0.1:1)"),
+        "{error}"
     );
 }
 
 /// `reqwest` honors the proxy variables and does not bypass loopback on its
-/// own, so without the harness's `NO_PROXY` a proxy in the shell would receive
+/// own, so without the harness's `NO_PROXY` the closed proxy would receive
 /// every request meant for a mock server.
 #[tokio::test]
-async fn a_proxy_in_the_shell_does_not_swallow_requests_to_a_loopback_mock() {
+async fn a_loopback_mock_server_is_reached_directly() {
     let server = ExchangeFixture::start().await;
-    let env = IsolatedHome::new();
+    let home = IsolatedHome::new();
 
-    let assert = env
-        .command_with_server(&server)
-        .env("HTTP_PROXY", "http://127.0.0.1:9")
-        .env("HTTPS_PROXY", "http://127.0.0.1:9")
-        .env("ALL_PROXY", "http://127.0.0.1:9")
-        .args(["--format", "json", "mids"])
-        .assert()
-        .success();
+    let mids = run_json(
+        home.json_command()
+            .env(support::API_OVERRIDE_ENV, server.uri())
+            .arg("mids"),
+    );
 
-    assert_eq!(json_stdout(&assert)["BTC"], "50000");
+    assert_eq!(mids["BTC"], "50000");
 }
 
 /// The CLI is pointed at its directories by `HYPERLIQUID_*_DIR` only. These

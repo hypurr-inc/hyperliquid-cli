@@ -5,20 +5,23 @@ use hypersdk::{Address, Decimal};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, NoArgs, arg};
-use crate::commands::actions;
-use crate::commands::confirm;
-use crate::commands::rows::{ListRow, One, Row, Rows, or_missing, style_column};
-use crate::commands::selector::{OptionalAddressArgs, USER_SELECTOR};
-use crate::commands::support::print_dry_run;
-use crate::commands::user_signed::{self, UserSigned};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, NoArgs, YES, YES_FLAG, arg};
+use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing, style_column};
+use crate::commands::common::selector::{OptionalAddressArgs, USER_SELECTOR};
+use crate::commands::common::support::{SUBMITTED, print_dry_run};
+use crate::consent::{self, ConsentBlock};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
+use crate::exchange::actions;
+use crate::exchange::user_signed;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::network::ChainExt;
 use crate::output::{self, JsonValueOutput};
 use crate::quantity::{self, Scale};
-use crate::signing::{SelectedSigner, Signs};
+use crate::signable::{Signs, UserSigned};
+use crate::signing::SelectedSigner;
 use crate::wire::{AddressRole, InfoRequest, address};
 
 const ASSET: &str = "HYPE";
@@ -141,7 +144,6 @@ impl StakingActionKind {
         }
     }
 
-    /// The action name receipts report.
     fn receipt_action(self) -> &'static str {
         match self {
             Self::Delegate => "delegate",
@@ -155,6 +157,19 @@ impl StakingActionKind {
 
     fn note(self) -> Option<&'static str> {
         (self == Self::Withdraw).then_some(WITHDRAWAL_NOTE)
+    }
+
+    /// Whether a link kind is the finalize step. Asked of the link kinds only.
+    fn is_finalize(self) -> bool {
+        self == Self::LinkFinalize
+    }
+
+    fn link_phase(self) -> &'static str {
+        if self.is_finalize() {
+            "finalize"
+        } else {
+            "initiate"
+        }
     }
 }
 
@@ -233,8 +248,7 @@ pub struct ValidatorStats {
     pub n_samples: u64,
 }
 
-/// A validator as `staking validators` reports it: the exchange's fields plus
-/// the stake in HYPE, with the per-period stats as objects.
+/// The stake is in HYPE, with the per-period stats as objects.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct ValidatorRow {
     validator: String,
@@ -330,7 +344,6 @@ impl ListRow for ValidatorRow {
     const EMPTY: &'static str = "No results.";
 }
 
-/// `staking summary`: the delegator summary with its delegations and rewards.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 struct StakingSummaryRow {
     address: String,
@@ -373,7 +386,7 @@ struct ActionRow {
     network: String,
     signer: String,
     acting_as: String,
-    reversibility: String,
+    reversibility: ActionReversibility,
     #[serde(with = "rust_decimal::serde::str")]
     amount: Decimal,
     asset: String,
@@ -402,7 +415,7 @@ impl Row for ActionRow {
             self.network.clone(),
             self.signer.clone(),
             self.acting_as.clone(),
-            self.reversibility.clone(),
+            self.reversibility.as_str().to_string(),
             self.amount.to_string(),
             self.asset.clone(),
             self.validator.clone().unwrap_or_default(),
@@ -421,7 +434,7 @@ struct LinkStakingRow {
     user: String,
     is_finalize: bool,
     network: String,
-    reversibility: String,
+    reversibility: ActionReversibility,
     warning: String,
 }
 
@@ -449,7 +462,7 @@ impl Row for LinkStakingRow {
             self.user.clone(),
             self.is_finalize.to_string(),
             self.network.clone(),
-            self.reversibility.clone(),
+            self.reversibility.as_str().to_string(),
             self.warning.clone(),
         ]
     }
@@ -461,76 +474,23 @@ impl Row for LinkStakingRow {
     }
 }
 
+/// The staking actions sent as raw L1 JSON. The `type` tag is what the
+/// exchange dispatches on, and what a dry run names.
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ClaimRewardsAction {
-    #[serde(rename = "type")]
-    action_type: &'static str,
+#[serde(tag = "type", rename_all = "camelCase")]
+enum StakingL1Action {
+    ClaimRewards,
+    /// The agent-signed form of `cDeposit`.
+    #[serde(rename = "cDeposit2")]
+    CDeposit2 {
+        wei: u64,
+    },
 }
 
-/// The agent-signed form of `cDeposit`: an L1 action, `{"type":"cDeposit2","wei":N}`.
-#[derive(Debug, Serialize)]
-struct CDeposit2Action {
-    #[serde(rename = "type")]
-    action_type: &'static str,
-    wei: u64,
-}
-
-async fn summary(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    let api = inv.remote()?.api();
-    let summary = staking_info(api, "delegatorSummary", user, "loading staking summary").await?;
-    let delegations = staking_info(api, "delegations", user, "loading delegations").await?;
-    let rewards: Vec<RewardRow> =
-        staking_info(api, "delegatorRewards", user, "loading staking rewards").await?;
-    let pending_rewards = rewards.iter().map(|row| row.total_amount).sum();
-    inv.print(&One::new(StakingSummaryRow {
-        address: user.to_string(),
-        summary,
-        pending_rewards,
-        delegations,
-        rewards,
-    }));
-    Ok(())
-}
-
-async fn validators(inv: &Invocation) -> Result<(), anyhow::Error> {
-    let rows: Vec<ValidatorRow> = inv
-        .remote()?
-        .api()
-        .info::<Vec<ValidatorSummary>>(
-            &InfoRequest::new("validatorSummaries"),
-            "loading validator summaries",
-        )
-        .await?
-        .into_iter()
-        .map(ValidatorRow::from)
-        .collect();
-    inv.print(&Rows::new(rows));
-    Ok(())
-}
-
-async fn rewards(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    let rows: Vec<RewardRow> = staking_info(
-        inv.remote()?.api(),
-        "delegatorRewards",
-        user,
-        "loading staking rewards",
-    )
-    .await?;
-    inv.print(&Rows::new(rows));
-    Ok(())
-}
-
-async fn history(inv: &Invocation, user: Address) -> Result<(), anyhow::Error> {
-    let value: serde_json::Value = staking_info(
-        inv.remote()?.api(),
-        "delegatorHistory",
-        user,
-        "loading staking history",
-    )
-    .await?;
-    inv.print(&JsonValueOutput::new(value, "No staking history."));
-    Ok(())
+impl StakingL1Action {
+    fn type_tag(&self) -> serde_json::Value {
+        serde_json::to_value(self).map_or(serde_json::Value::Null, |action| action["type"].clone())
+    }
 }
 
 async fn staking_info<T: DeserializeOwned>(
@@ -547,10 +507,8 @@ async fn claim_rewards(inv: &Invocation, signer: &SelectedSigner) -> Result<(), 
     actions::send_raw_l1_json_action(
         remote.api(),
         signer,
-        &ClaimRewardsAction {
-            action_type: "claimRewards",
-        },
-        actions::RawL1ActionMetadata::new(actions::nonce_now()),
+        &StakingL1Action::ClaimRewards,
+        None,
         "claim staking rewards",
     )
     .await?;
@@ -565,27 +523,31 @@ async fn claim_rewards(inv: &Invocation, signer: &SelectedSigner) -> Result<(), 
     Ok(())
 }
 
-fn link_dry_run_value(chain: Chain, user: Address, is_finalize: bool) -> serde_json::Value {
+fn link_dry_run_value(chain: Chain, user: Address, kind: StakingActionKind) -> serde_json::Value {
+    let mut action = user_signed::preview(
+        &LinkStakingUser {
+            hyperliquidChain: chain.label().to_string(),
+            user,
+            isFinalize: kind.is_finalize(),
+            nonce: 0,
+        },
+        chain,
+    );
+    action["user"] = user.to_string().into();
+    action["nonce"] = "current_timestamp_ms".into();
     serde_json::json!({
-        "phase": link_phase(is_finalize),
+        "phase": kind.link_phase(),
         "user": user.to_string(),
-        "is_finalize": is_finalize,
-        "network": chain.to_string(),
-        "reversibility": action_kind_for_link(is_finalize).reversibility(),
+        "is_finalize": kind.is_finalize(),
+        "network": chain.label(),
+        "reversibility": kind.reversibility(),
         "warning": STAKING_LINK_WARNING,
         "verified_shape": {
             "source": "@nktkas/hyperliquid v0.31.0 linkStakingUser",
             "signature_type": "HyperliquidTransaction:LinkStakingUser",
             "eip712_fields": ["hyperliquidChain", "user", "isFinalize", "nonce"]
         },
-        "action": {
-            "type": LinkStakingUser::ACTION_TYPE,
-            "signatureChainId": chain.arbitrum_id().to_string(),
-            "hyperliquidChain": chain.to_string(),
-            "user": user.to_string(),
-            "isFinalize": is_finalize,
-            "nonce": "current_timestamp_ms"
-        }
+        "action": action
     })
 }
 
@@ -598,7 +560,7 @@ fn delegate_dry_run_value(
         "validator": args.validator,
         "amount": args.amount.to_string(),
         "asset": ASSET,
-        "network": chain.to_string(),
+        "network": chain.label(),
         "reversibility": action_kind.reversibility(),
     })
 }
@@ -611,7 +573,7 @@ fn amount_dry_run_value(
     let mut value = serde_json::json!({
         "amount": args.amount.to_string(),
         "asset": ASSET,
-        "network": chain.to_string(),
+        "network": chain.label(),
         "reversibility": action_kind.reversibility(),
     });
     if let Some(note) = action_kind.note() {
@@ -623,7 +585,7 @@ fn amount_dry_run_value(
 fn claim_rewards_dry_run_value(chain: Chain) -> serde_json::Value {
     serde_json::json!({
         "asset": ASSET,
-        "network": chain.to_string(),
+        "network": chain.label(),
         "reversibility": StakingActionKind::ClaimRewards.reversibility(),
     })
 }
@@ -634,64 +596,42 @@ async fn link_staking_user(
     signer: &SelectedSigner,
     user: Address,
     args: &LinkArgs,
-    is_finalize: bool,
+    kind: StakingActionKind,
 ) -> Result<(), anyhow::Error> {
-    let question = format!(
-        "Submit staking link {} for user {user}?",
-        link_phase(is_finalize)
-    );
-    confirm::unless_yes(
+    let question = format!("Submit staking link {} for user {user}?", kind.link_phase());
+    consent::approve(
+        inv,
         args.yes,
-        inv.mode(),
-        STAKING_LINK_WARNING,
+        &ConsentBlock::new().text(STAKING_LINK_WARNING),
         &question,
-        "staking-link confirmation required; action cancelled. Rerun with --yes for deliberate automation.",
+        &format!(
+            "staking-link confirmation required; action cancelled. Rerun with {YES_FLAG} for deliberate automation."
+        ),
     )?;
     let remote = inv.remote()?;
     user_signed::submit(remote.api(), signer, |hyperliquid_chain, nonce| {
         LinkStakingUser {
             hyperliquidChain: hyperliquid_chain,
             user,
-            isFinalize: is_finalize,
+            isFinalize: kind.is_finalize(),
             nonce,
         }
     })
     .await?;
 
     inv.print(&One::new(LinkStakingRow {
-        status: "submitted".to_string(),
+        status: SUBMITTED.to_string(),
         action: "staking-link".to_string(),
-        phase: link_phase(is_finalize).to_string(),
+        phase: kind.link_phase().to_string(),
         acting_as: signer.query_address().to_string(),
         signer: signer.address().to_string(),
         user: user.to_string(),
-        is_finalize,
-        network: remote.chain().to_string(),
-        reversibility: action_kind_for_link(is_finalize)
-            .reversibility()
-            .as_str()
-            .to_string(),
+        is_finalize: kind.is_finalize(),
+        network: remote.chain().label().to_string(),
+        reversibility: kind.reversibility(),
         warning: STAKING_LINK_WARNING.to_string(),
     }));
     Ok(())
-}
-
-/// An amount of HYPE in HyperCore wei.
-fn validate_amount_to_wei(amount: Decimal) -> Result<u64, CliError> {
-    quantity::positive(amount, Scale::HYPE_CORE)
-        .map_err(|err| err.config("amount", Scale::HYPE_CORE))
-}
-
-fn link_phase(is_finalize: bool) -> &'static str {
-    if is_finalize { "finalize" } else { "initiate" }
-}
-
-fn action_kind_for_link(is_finalize: bool) -> StakingActionKind {
-    if is_finalize {
-        StakingActionKind::LinkFinalize
-    } else {
-        StakingActionKind::LinkInitiate
-    }
 }
 
 fn print_action_confirmation(
@@ -704,11 +644,11 @@ fn print_action_confirmation(
 ) {
     inv.print(&One::new(ActionRow {
         action: kind.receipt_action().to_string(),
-        status: "submitted".to_string(),
-        network: chain.to_string(),
+        status: SUBMITTED.to_string(),
+        network: chain.label().to_string(),
         signer: signer.address().to_string(),
         acting_as: signer.query_address().to_string(),
-        reversibility: kind.reversibility().as_str().to_string(),
+        reversibility: kind.reversibility(),
         amount,
         asset: ASSET.to_string(),
         validator,
@@ -737,7 +677,22 @@ impl CliCommand for StakingSummary {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        summary(inv, args.resolve(inv).await?).await
+        let user = args.resolve(inv).await?;
+        let api = inv.remote()?.api();
+        let summary =
+            staking_info(api, "delegatorSummary", user, "loading staking summary").await?;
+        let delegations = staking_info(api, "delegations", user, "loading delegations").await?;
+        let rewards: Vec<RewardRow> =
+            staking_info(api, "delegatorRewards", user, "loading staking rewards").await?;
+        let pending_rewards = rewards.iter().map(|row| row.total_amount).sum();
+        inv.print(&One::new(StakingSummaryRow {
+            address: user.to_string(),
+            summary,
+            pending_rewards,
+            delegations,
+            rewards,
+        }));
+        Ok(())
     }
 }
 
@@ -754,7 +709,19 @@ impl CliCommand for StakingValidators {
     );
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
-        validators(inv).await
+        let rows: Vec<ValidatorRow> = inv
+            .remote()?
+            .api()
+            .info::<Vec<ValidatorSummary>>(
+                &InfoRequest::new("validatorSummaries"),
+                "loading validator summaries",
+            )
+            .await?
+            .into_iter()
+            .map(ValidatorRow::from)
+            .collect();
+        inv.print(&Rows::new(rows));
+        Ok(())
     }
 }
 
@@ -772,7 +739,16 @@ impl CliCommand for StakingRewards {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        rewards(inv, args.resolve(inv).await?).await
+        let user = args.resolve(inv).await?;
+        let rows: Vec<RewardRow> = staking_info(
+            inv.remote()?.api(),
+            "delegatorRewards",
+            user,
+            "loading staking rewards",
+        )
+        .await?;
+        inv.print(&Rows::new(rows));
+        Ok(())
     }
 }
 
@@ -790,18 +766,26 @@ impl CliCommand for StakingHistory {
     .args(&[USER_SELECTOR.schema_required()]);
 
     async fn run(inv: &Invocation, args: &OptionalAddressArgs) -> Result<(), anyhow::Error> {
-        history(inv, args.resolve(inv).await?).await
+        let user = args.resolve(inv).await?;
+        let value: serde_json::Value = staking_info(
+            inv.remote()?.api(),
+            "delegatorHistory",
+            user,
+            "loading staking history",
+        )
+        .await?;
+        inv.print(&JsonValueOutput::new(value, "No staking history."));
+        Ok(())
     }
 }
 
-/// `staking delegate` and `staking undelegate`.
 async fn run_delegation(
     inv: &Invocation,
     args: &DelegateArgs,
     kind: StakingActionKind,
 ) -> Result<(), anyhow::Error> {
     let validator = address(&args.validator, AddressRole::Protocol("validator"))?;
-    let wei = validate_amount_to_wei(args.amount)?;
+    let wei: u64 = quantity::units(args.amount, Scale::HYPE_CORE, "amount")?;
     if inv.dry_run() {
         return print_dry_run(
             inv,
@@ -836,29 +820,23 @@ async fn run_delegation(
 /// else the user-signed `cDeposit`.
 async fn run_deposit(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::Error> {
     let kind = StakingActionKind::Deposit;
-    let wei = validate_amount_to_wei(args.amount)?;
+    let wei: u64 = quantity::units(args.amount, Scale::HYPE_CORE, "amount")?;
+    let agent_action = StakingL1Action::CDeposit2 { wei };
     if inv.dry_run() {
         let mut preview = amount_dry_run_value(inv.remote()?.chain(), args, kind);
-        if inv
-            .preview_signer()?
-            .ok()
-            .is_some_and(SelectedSigner::is_stored_agent)
-        {
-            preview["action_type"] = "cDeposit2".into();
+        if inv.dry_run_agent_form()?.is_some() {
+            preview["action_type"] = agent_action.type_tag();
         }
         return print_dry_run(inv, kind.would_execute(), preview);
     }
     let signer = inv.resolve_signer()?;
     let remote = inv.remote()?;
-    if signer.is_stored_agent() {
+    if signer.agent_form().is_some() {
         actions::send_raw_l1_json_action(
             remote.api(),
             &signer,
-            &CDeposit2Action {
-                action_type: "cDeposit2",
-                wei,
-            },
-            actions::RawL1ActionMetadata::new(actions::nonce_now()),
+            &agent_action,
+            None,
             "deposit to staking",
         )
         .await?;
@@ -874,32 +852,6 @@ async fn run_deposit(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::
     Ok(())
 }
 
-/// `staking withdraw`: `build` makes the action from the network name, the
-/// amount in wei and the nonce.
-async fn run_amount<T: UserSigned>(
-    inv: &Invocation,
-    args: &AmountArgs,
-    kind: StakingActionKind,
-    build: impl FnOnce(String, u64, u64) -> T,
-) -> Result<(), anyhow::Error> {
-    let wei = validate_amount_to_wei(args.amount)?;
-    if inv.dry_run() {
-        return print_dry_run(
-            inv,
-            kind.would_execute(),
-            amount_dry_run_value(inv.remote()?.chain(), args, kind),
-        );
-    }
-    let signer = inv.resolve_signer()?;
-    let remote = inv.remote()?;
-    user_signed::submit(remote.api(), &signer, |hyperliquid_chain, nonce| {
-        build(hyperliquid_chain, wei, nonce)
-    })
-    .await?;
-    print_action_confirmation(inv, &signer, remote.chain(), kind, args.amount, None);
-    Ok(())
-}
-
 pub struct StakingDelegate;
 
 impl CliCommand for StakingDelegate {
@@ -911,8 +863,7 @@ impl CliCommand for StakingDelegate {
         "Delegate stake to a validator",
         "Delegate HYPE to a validator.",
     )
-    .signs(Signs::user_signed::<TokenDelegate>())
-    .master_only("tokenDelegate")
+    .user_signed::<TokenDelegate>()
     .args(&[
         arg("validator")
             .kind(InputKind::ProtocolObjectAddress)
@@ -939,8 +890,7 @@ impl CliCommand for StakingUndelegate {
         "Undelegate stake from a validator",
         "Undelegate HYPE from a validator.",
     )
-    .signs(Signs::user_signed::<TokenDelegate>())
-    .master_only("tokenDelegate")
+    .user_signed::<TokenDelegate>()
     .args(&[
         arg("validator")
             .kind(InputKind::ProtocolObjectAddress)
@@ -988,24 +938,33 @@ impl CliCommand for StakingWithdraw {
         "Withdraw from staking",
         "Queue HYPE withdrawal from staking.",
     )
-    .signs(Signs::user_signed::<CWithdraw>())
-    .master_only("cWithdraw")
+    .user_signed::<CWithdraw>()
     .args(&[arg("amount")
         .kind(InputKind::Amount)
         .describe("HYPE amount.")]);
 
     async fn run(inv: &Invocation, args: &AmountArgs) -> Result<(), anyhow::Error> {
-        run_amount(
-            inv,
-            args,
-            StakingActionKind::Withdraw,
-            |hyperliquid_chain, wei, nonce| CWithdraw {
+        let kind = StakingActionKind::Withdraw;
+        let wei: u64 = quantity::units(args.amount, Scale::HYPE_CORE, "amount")?;
+        if inv.dry_run() {
+            return print_dry_run(
+                inv,
+                kind.would_execute(),
+                amount_dry_run_value(inv.remote()?.chain(), args, kind),
+            );
+        }
+        let signer = inv.resolve_signer()?;
+        let remote = inv.remote()?;
+        user_signed::submit(remote.api(), &signer, |hyperliquid_chain, nonce| {
+            CWithdraw {
                 hyperliquidChain: hyperliquid_chain,
                 wei,
                 nonce,
-            },
-        )
-        .await
+            }
+        })
+        .await?;
+        print_action_confirmation(inv, &signer, remote.chain(), kind, args.amount, None);
+        Ok(())
     }
 }
 
@@ -1046,16 +1005,15 @@ impl CliCommand for StakingLinkInitiate {
         "Initiate staking-link from the trading account, targeting the staking user",
         "Initiate staking-link fee discount attribution from the trading account, targeting the staking user. This is control-affecting; use --dry-run first.",
     )
-    .signs(Signs::user_signed::<LinkStakingUser>())
-    .master_only("linkStakingUser")
+    .user_signed::<LinkStakingUser>()
     .prompt()
     .args(&[
         arg("user").kind(InputKind::ProtocolObjectAddress).describe("Protocol user address for the staking account to link.").resource_id("staking-link user address"),
-        arg("yes").kind(InputKind::Boolean),
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &LinkArgs) -> Result<(), anyhow::Error> {
-        staking_link(inv, args, false).await
+        staking_link(inv, args, StakingActionKind::LinkInitiate).await
     }
 }
 
@@ -1070,35 +1028,33 @@ impl CliCommand for StakingLinkFinalize {
         "Finalize staking-link from the staking account, targeting the trading user",
         "Finalize staking-link fee discount attribution from the staking account, targeting the trading user. Finalization may be permanent; use --dry-run first.",
     )
-    .signs(Signs::user_signed::<LinkStakingUser>())
-    .master_only("linkStakingUser")
+    .user_signed::<LinkStakingUser>()
     .prompt()
     .args(&[
         arg("user").kind(InputKind::ProtocolObjectAddress).describe("Protocol user address for the trading account to link.").resource_id("staking-link user address"),
-        arg("yes").kind(InputKind::Boolean),
+        YES,
     ]);
 
     async fn run(inv: &Invocation, args: &LinkArgs) -> Result<(), anyhow::Error> {
-        staking_link(inv, args, true).await
+        staking_link(inv, args, StakingActionKind::LinkFinalize).await
     }
 }
 
 async fn staking_link(
     inv: &Invocation,
     args: &LinkArgs,
-    is_finalize: bool,
+    kind: StakingActionKind,
 ) -> Result<(), anyhow::Error> {
     let user = address(&args.user, AddressRole::Protocol("staking-link user"))?;
     if inv.dry_run() {
-        let action_kind = action_kind_for_link(is_finalize);
         return print_dry_run(
             inv,
-            action_kind.would_execute(),
-            link_dry_run_value(inv.remote()?.chain(), user, is_finalize),
+            kind.would_execute(),
+            link_dry_run_value(inv.remote()?.chain(), user, kind),
         );
     }
     let signer = inv.resolve_signer()?;
-    link_staking_user(inv, &signer, user, args, is_finalize).await
+    link_staking_user(inv, &signer, user, args, kind).await
 }
 
 #[cfg(test)]
@@ -1107,13 +1063,40 @@ mod tests {
 
     #[test]
     fn amount_to_wei_accepts_only_positive_eight_decimal_amounts() {
+        let wei = |amount: &str| {
+            quantity::units::<u64>(amount.parse().unwrap(), Scale::HYPE_CORE, "amount")
+        };
+
+        assert_eq!(wei("0.00000001").unwrap(), 1);
+        assert!(wei("0").is_err());
+        assert!(wei("-1").is_err());
+        assert!(wei("0.000000001").is_err());
+    }
+
+    #[test]
+    fn raw_l1_actions_keep_their_wire_shape() {
+        let claim = StakingL1Action::ClaimRewards;
+        let deposit = StakingL1Action::CDeposit2 { wei: 150_000_000 };
+
         assert_eq!(
-            validate_amount_to_wei("0.00000001".parse::<Decimal>().unwrap()).unwrap(),
-            1
+            serde_json::to_value(&claim).unwrap(),
+            serde_json::json!({"type": "claimRewards"})
         );
-        assert!(validate_amount_to_wei(Decimal::ZERO).is_err());
-        assert!(validate_amount_to_wei("-1".parse::<Decimal>().unwrap()).is_err());
-        assert!(validate_amount_to_wei("0.000000001".parse::<Decimal>().unwrap()).is_err());
+        assert_eq!(
+            serde_json::to_value(&deposit).unwrap(),
+            serde_json::json!({"type": "cDeposit2", "wei": 150_000_000})
+        );
+        // The L1 action hash covers the msgpack of the action, so its key
+        // order and encoding are part of the contract.
+        assert_eq!(
+            rmp_serde::to_vec_named(&claim).unwrap(),
+            b"\x81\xa4type\xacclaimRewards"
+        );
+        assert_eq!(
+            rmp_serde::to_vec_named(&StakingL1Action::CDeposit2 { wei: 1 }).unwrap(),
+            b"\x82\xa4type\xa9cDeposit2\xa3wei\x01"
+        );
+        assert_eq!(deposit.type_tag(), "cDeposit2");
     }
 
     fn validator_summary() -> ValidatorSummary {
@@ -1170,7 +1153,7 @@ mod tests {
 
         let mut bare = validator_summary();
         bare.stats.clear();
-        assert_eq!(apr_cell(bare), crate::commands::rows::MISSING);
+        assert_eq!(apr_cell(bare), crate::commands::common::rows::MISSING);
     }
 
     #[test]
@@ -1184,7 +1167,7 @@ mod tests {
             user: "0xc".to_string(),
             is_finalize: false,
             network: "Testnet".to_string(),
-            reversibility: "irreversible".to_string(),
+            reversibility: ActionReversibility::Irreversible,
             warning: "careful".to_string(),
         };
         let plain = row.cells();

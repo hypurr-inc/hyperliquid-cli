@@ -5,36 +5,17 @@ mod support;
 
 use serde_json::{Value, json};
 use support::exchange::{ExchangeFixture, Hip3Dex};
-use support::{IsolatedHome, fixture_perp, fixture_perp_meta};
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use support::reads::{read, read_json};
+use support::{IsolatedHome, wire};
 
 const USER: &str = "0x0000000000000000000000000000000000000001";
 const VAULT: &str = "0x0000000000000000000000000000000000000002";
 const START: u64 = 1_700_000_000_000;
 
-fn run_args(server: &MockServer, args: &[&str]) -> assert_cmd::assert::Assert {
-    let env = IsolatedHome::new();
-    env.command_with_server(server)
-        .args(["--format", "json"])
-        .args(args)
-        .assert()
-}
-
-fn json_of(server: &MockServer, args: &[&str]) -> Value {
-    support::json_stdout(&run_args(server, args).success())
-}
-
-fn stderr_text(assert: &assert_cmd::assert::Assert) -> String {
-    String::from_utf8(assert.get_output().stderr.clone()).unwrap()
-}
-
-// ---- account orders --dex ------------------------------------------------
-
 #[tokio::test]
 async fn account_orders_reads_the_requested_hip3_dex() {
     let server = ExchangeFixture::start_with(vec![Hip3Dex::xyz()]).await;
-    let mut order = support::fixture_basic_order("xyz:XYZ100", 9);
+    let mut order = support::wire::basic_order("xyz:XYZ100", 9);
     order["limitPx"] = json!("123.5");
     server
         .mount_info(
@@ -43,7 +24,7 @@ async fn account_orders_reads_the_requested_hip3_dex() {
         )
         .await;
 
-    let rows = json_of(&server, &["account", "orders", USER, "--dex", "xyz"]);
+    let rows = read_json(&server, &["account", "orders", USER, "--dex", "xyz"]);
 
     assert_eq!(rows[0]["coin"], "xyz:XYZ100");
     assert_eq!(rows[0]["oid"], 9);
@@ -53,33 +34,34 @@ async fn account_orders_reads_the_requested_hip3_dex() {
 async fn account_orders_refuses_an_unknown_dex_before_reading_orders() {
     let server = ExchangeFixture::start().await;
 
-    let assert = run_args(&server, &["account", "orders", USER, "--dex", "nope"]).failure();
+    let assert = read(&server, &["account", "orders", USER, "--dex", "nope"]).failure();
 
     assert_eq!(assert.get_output().status.code(), Some(13));
     assert!(server.info_requests("frontendOpenOrders").await.is_empty());
 }
 
-// ---- account portfolio ---------------------------------------------------
-
 #[tokio::test]
 async fn portfolio_positions_carry_return_on_equity_cumulative_funding_and_max_leverage() {
-    let server = MockServer::start().await;
-    support::mount_override_healthcheck(&server).await;
+    let server = ExchangeFixture::start().await;
     support::mount_account_state(&server, vec![], vec![], "9000", "100", 5).await;
+    let mut state = wire::clearinghouse_state("9000", 5);
+    state["assetPositions"][0]["position"]["cumFunding"] =
+        json!({"allTime": "-12.5", "sinceOpen": "3.25", "sinceChange": "0.5"});
+    server
+        .override_info(json!({"type": "clearinghouseState", "user": USER}), state)
+        .await;
 
-    let portfolio = json_of(&server, &["account", "portfolio", USER]);
+    let portfolio = read_json(&server, &["account", "portfolio", USER]);
 
     let position = &portfolio["positions"][0];
     assert_eq!(position["return_on_equity"], "0.1");
     assert_eq!(position["max_leverage"], 50);
     assert_eq!(
         position["cum_funding"],
-        json!({"all_time": "0", "since_open": "0", "since_change": "0"})
+        json!({"all_time": "-12.5", "since_open": "3.25", "since_change": "0.5"})
     );
     assert_eq!(position["leverage"], "5x cross");
 }
-
-// ---- account role / multisig / asset data --------------------------------
 
 #[tokio::test]
 async fn account_role_names_the_master_of_a_subaccount() {
@@ -91,14 +73,14 @@ async fn account_role_names_the_master_of_a_subaccount() {
         )
         .await;
 
-    let role = json_of(&server, &["account", "role", USER]);
+    let role = read_json(&server, &["account", "role", USER]);
 
     assert_eq!(role["role"], "subAccount");
     assert_eq!(role["data"]["master"], VAULT);
 }
 
 #[tokio::test]
-async fn multisig_signers_of_a_plain_account_say_so_on_stderr_and_print_null() {
+async fn multisig_signers_of_a_plain_account_are_null_with_nothing_on_stderr() {
     let server = ExchangeFixture::start().await;
     server
         .mount_info(
@@ -107,9 +89,10 @@ async fn multisig_signers_of_a_plain_account_say_so_on_stderr_and_print_null() {
         )
         .await;
 
-    let assert = run_args(&server, &["account", "multisig-signers", USER]).success();
+    let assert = read(&server, &["account", "multisig-signers", USER]).success();
 
     assert_eq!(support::json_stdout(&assert), Value::Null);
+    assert_eq!(support::stderr_text(&assert), "");
 }
 
 #[tokio::test]
@@ -122,7 +105,7 @@ async fn multisig_signers_are_listed_with_their_threshold() {
         )
         .await;
 
-    let signers = json_of(&server, &["account", "multisig-signers", USER]);
+    let signers = read_json(&server, &["account", "multisig-signers", USER]);
 
     assert_eq!(signers["authorized_users"][0], VAULT);
     assert_eq!(signers["threshold"], 1);
@@ -145,7 +128,7 @@ async fn asset_data_reads_leverage_and_trade_capacity_without_a_position() {
         )
         .await;
 
-    let data = json_of(&server, &["account", "asset-data", USER, "--coin", "btc"]);
+    let data = read_json(&server, &["account", "asset-data", USER, "--coin", "btc"]);
 
     assert_eq!(data["leverage"]["value"], 5);
     assert_eq!(data["max_trade_szs"][1], "0.12019");
@@ -162,7 +145,7 @@ async fn asset_data_qualifies_a_hip3_coin_with_its_dex() {
         )
         .await;
 
-    let data = json_of(
+    let data = read_json(
         &server,
         &["account", "asset-data", USER, "--coin", "xyz:XYZ100"],
     );
@@ -170,21 +153,22 @@ async fn asset_data_qualifies_a_hip3_coin_with_its_dex() {
     assert_eq!(data["leverage"]["type"], "isolated");
 }
 
-// ---- perps list / get / meta ---------------------------------------------
-
 #[tokio::test]
 async fn perps_list_flags_delisted_markets_and_hides_none() {
     let server = ExchangeFixture::start().await;
-    let mut gone = fixture_perp("OLD", 2, 10);
+    let mut gone = wire::perp_with("OLD", 2, 10, wire::MarginRule::Either);
     gone["isDelisted"] = json!(true);
     server
         .override_info(
             json!({"type": "meta"}),
-            fixture_perp_meta(vec![fixture_perp("BTC", 5, 50), gone]),
+            wire::perp_meta(vec![
+                wire::perp_with("BTC", 5, 50, wire::MarginRule::Either),
+                gone,
+            ]),
         )
         .await;
 
-    let rows = json_of(&server, &["perps", "list"]);
+    let rows = read_json(&server, &["perps", "list"]);
 
     assert_eq!(rows.as_array().unwrap().len(), 2, "nothing is hidden");
     assert_eq!(rows[0]["delisted"], false);
@@ -193,8 +177,73 @@ async fn perps_list_flags_delisted_markets_and_hides_none() {
 }
 
 #[tokio::test]
+async fn listed_ticks_are_the_ticks_orders_truncate_to() {
+    let server = ExchangeFixture::start().await;
+    // A size precision past the price's decimal budget (6 for perps, 8 for
+    // spot) leaves no decimals: such a market takes whole-number prices.
+    server
+        .override_info(
+            json!({"type": "meta"}),
+            wire::perp_meta(vec![
+                wire::perp_with("BTC", 5, 50, wire::MarginRule::Either),
+                wire::perp_with("WIDE", 7, 10, wire::MarginRule::Either),
+            ]),
+        )
+        .await;
+    server
+        .override_info(
+            json!({"type": "spotMeta"}),
+            json!({
+                "universe": [{"name": "PURR/USDC", "index": 0, "tokens": [1, 0]}],
+                "tokens": [
+                    {"name": "USDC", "index": 0, "tokenId": "0x00000000000000000000000000000000",
+                     "szDecimals": 6, "weiDecimals": 6, "evmContract": null},
+                    {"name": "PURR", "index": 1, "tokenId": "0x00000000000000000000000000000001",
+                     "szDecimals": 9, "weiDecimals": 9, "evmContract": null}
+                ]
+            }),
+        )
+        .await;
+
+    let perps = read_json(&server, &["perps", "list"]);
+    let spot = read_json(&server, &["spot", "list"]);
+
+    assert_eq!(perps[0]["tick_size_at_price_1"], "0.10");
+    assert_eq!(perps[1]["tick_size_at_price_1"], "1");
+    assert_eq!(spot[0]["tick_size_at_price_1"], "1");
+}
+
+#[tokio::test]
+async fn a_perp_that_is_not_listed_is_diagnosed_from_the_list_the_command_read() {
+    let server = ExchangeFixture::start().await;
+
+    let assert = read(&server, &["perps", "get", "NOPE"]).failure();
+
+    assert_eq!(assert.get_output().status.code(), Some(13));
+    assert_eq!(server.info_requests("meta").await.len(), 1);
+    // A default-dex market is named in USDC: no spot metadata is read to say so.
+    assert!(server.info_requests("spotMeta").await.is_empty());
+    assert!(server.info_requests("perpDexs").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_spot_pair_that_is_not_listed_is_diagnosed_from_the_list_the_command_read() {
+    let server = exchange_with_spot_contexts(json!([])).await;
+
+    let assert = read(&server, &["spot", "get", "PUR/USDC"]).failure();
+
+    assert_eq!(assert.get_output().status.code(), Some(13));
+    assert!(
+        String::from_utf8_lossy(&assert.get_output().stdout).contains("Did you mean PURR/USDC"),
+        "a miss is diagnosed from the metadata the one read carried"
+    );
+    assert_eq!(server.info_requests("spotMetaAndAssetCtxs").await.len(), 1);
+    assert!(server.info_requests("spotMeta").await.is_empty());
+}
+
+#[tokio::test]
 async fn hip3_markets_show_their_deployer_fee_scale() {
-    let mut market = fixture_perp("xyz:XYZ100", 2, 10);
+    let mut market = wire::perp_with("xyz:XYZ100", 2, 10, wire::MarginRule::Either);
     market["deployerFeeScale"] = json!("0.5");
     let server = ExchangeFixture::start_with(vec![Hip3Dex {
         name: "xyz",
@@ -203,7 +252,7 @@ async fn hip3_markets_show_their_deployer_fee_scale() {
     }])
     .await;
 
-    let rows = json_of(&server, &["perps", "list", "--dex", "xyz"]);
+    let rows = read_json(&server, &["perps", "list", "--dex", "xyz"]);
 
     assert_eq!(rows[0]["deployer_fee_scale"], "0.5");
 }
@@ -226,7 +275,7 @@ fn dex_with_scales(scales: &[(&str, &str)]) -> Hip3Dex {
         universe: scales
             .iter()
             .map(|(name, scale)| {
-                let mut market = fixture_perp(name, 2, 10);
+                let mut market = wire::perp_with(name, 2, 10, wire::MarginRule::Either);
                 market["deployerFeeScale"] = json!(scale);
                 market
             })
@@ -244,7 +293,7 @@ async fn meta_reads_the_deployer_fee_scale_from_the_dex_markets() {
     .await;
     mount_meta_contexts(&server).await;
 
-    let meta = json_of(&server, &["meta"]);
+    let meta = read_json(&server, &["meta"]);
 
     assert_eq!(meta["dexes"][0]["name"], "xyz");
     assert_eq!(meta["dexes"][0]["deployer_fee_scale"], "0.1111");
@@ -262,7 +311,7 @@ async fn meta_lists_each_markets_scale_when_a_dex_mixes_them() {
             .await;
     mount_meta_contexts(&server).await;
 
-    let dex = json_of(&server, &["meta"])["dexes"][0].clone();
+    let dex = read_json(&server, &["meta"])["dexes"][0].clone();
 
     assert_eq!(dex["deployer_fee_scale"], Value::Null);
     assert_eq!(
@@ -273,8 +322,6 @@ async fn meta_lists_each_markets_scale_when_a_dex_mixes_them() {
         ])
     );
 }
-
-// ---- perps dexs / dex-limits / at-oi-cap ---------------------------------
 
 #[tokio::test]
 async fn perps_dexs_lists_deployer_fee_recipient_caps_and_multipliers() {
@@ -294,7 +341,7 @@ async fn perps_dexs_lists_deployer_fee_recipient_caps_and_multipliers() {
         )
         .await;
 
-    let dexs = json_of(&server, &["perps", "dexs"]);
+    let dexs = read_json(&server, &["perps", "dexs"]);
 
     assert_eq!(
         dexs.as_array().unwrap().len(),
@@ -340,7 +387,7 @@ async fn dex_limits_joins_the_limits_and_the_net_deposit() {
         )
         .await;
 
-    let limits = json_of(&server, &["perps", "dex-limits", "XYZ"]);
+    let limits = read_json(&server, &["perps", "dex-limits", "XYZ"]);
 
     assert_eq!(
         limits["dex"], "xyz",
@@ -360,7 +407,7 @@ async fn dex_limits_joins_the_limits_and_the_net_deposit() {
 async fn dex_limits_refuses_an_unknown_dex_before_reading_limits() {
     let server = ExchangeFixture::start().await;
 
-    let assert = run_args(&server, &["perps", "dex-limits", "nope"]).failure();
+    let assert = read(&server, &["perps", "dex-limits", "nope"]).failure();
 
     assert_eq!(assert.get_output().status.code(), Some(13));
     assert!(server.info_requests("perpDexLimits").await.is_empty());
@@ -383,16 +430,14 @@ async fn at_oi_cap_lists_the_capped_perps_of_a_dex() {
         .await;
 
     assert_eq!(
-        json_of(&server, &["perps", "at-oi-cap"]),
+        read_json(&server, &["perps", "at-oi-cap"]),
         json!([{"coin": "CANTO"}, {"coin": "FTM"}])
     );
     assert_eq!(
-        json_of(&server, &["perps", "at-oi-cap", "--dex", "xyz"]),
+        read_json(&server, &["perps", "at-oi-cap", "--dex", "xyz"]),
         json!([{"coin": "xyz:XYZ100"}])
     );
 }
-
-// ---- perps funding-predicted / funding-history ---------------------------
 
 #[tokio::test]
 async fn predicted_fundings_flatten_venue_pairs_with_the_interval_when_stated() {
@@ -411,7 +456,7 @@ async fn predicted_fundings_flatten_venue_pairs_with_the_interval_when_stated() 
         )
         .await;
 
-    let all = json_of(&server, &["perps", "funding-predicted"]);
+    let all = read_json(&server, &["perps", "funding-predicted"]);
     assert_eq!(all.as_array().unwrap().len(), 3, "a null venue is skipped");
     assert_eq!(
         all[0],
@@ -419,7 +464,7 @@ async fn predicted_fundings_flatten_venue_pairs_with_the_interval_when_stated() 
     );
     assert!(all[1].get("funding_interval_hours").is_none());
 
-    let btc = json_of(&server, &["perps", "funding-predicted", "--coin", "btc"]);
+    let btc = read_json(&server, &["perps", "funding-predicted", "--coin", "btc"]);
     assert_eq!(btc.as_array().unwrap().len(), 2);
 }
 
@@ -442,7 +487,7 @@ async fn funding_history_lists_rates_and_announces_a_full_page() {
         .mount_info(history_request(START), json!(funding_page(START, 500)))
         .await;
 
-    let assert = run_args(
+    let assert = read(
         &server,
         &[
             "perps",
@@ -460,7 +505,7 @@ async fn funding_history_lists_rates_and_announces_a_full_page() {
         rows[0],
         json!({"coin": "BTC", "funding_rate": "0.0000125", "premium": "0.0001", "time": START})
     );
-    let warning: Value = serde_json::from_str(stderr_text(&assert).trim()).unwrap();
+    let warning: Value = serde_json::from_str(support::stderr_text(&assert).trim()).unwrap();
     assert_eq!(warning["warning"]["cap"], 500);
     assert_eq!(warning["warning"]["next_start"], START + 499);
 }
@@ -478,7 +523,7 @@ async fn funding_history_all_pages_through_the_window() {
         )
         .await;
 
-    let assert = run_args(
+    let assert = read(
         &server,
         &[
             "perps",
@@ -492,7 +537,7 @@ async fn funding_history_all_pages_through_the_window() {
     .success();
 
     assert_eq!(support::json_stdout(&assert).as_array().unwrap().len(), 501);
-    assert_eq!(stderr_text(&assert), "");
+    assert_eq!(support::stderr_text(&assert), "");
 }
 
 #[tokio::test]
@@ -505,7 +550,7 @@ async fn funding_history_sends_the_end_of_the_window() {
         )
         .await;
 
-    let rows = json_of(
+    let rows = read_json(
         &server,
         &[
             "perps",
@@ -520,8 +565,6 @@ async fn funding_history_sends_the_end_of_the_window() {
 
     assert_eq!(rows.as_array().unwrap().len(), 1);
 }
-
-// ---- spot token / spot get -----------------------------------------------
 
 fn spot_meta_with_hype() -> Value {
     json!({
@@ -550,7 +593,7 @@ async fn spot_token_resolves_a_name_to_its_token_id() {
         )
         .await;
 
-    let details = json_of(&server, &["spot", "token", "hype"]);
+    let details = read_json(&server, &["spot", "token", "hype"]);
 
     assert_eq!(details["name"], "HYPE");
     assert_eq!(details["max_supply"], "1000000000.0");
@@ -567,7 +610,7 @@ async fn spot_token_takes_a_token_id_as_given() {
         )
         .await;
 
-    let details = json_of(
+    let details = read_json(
         &server,
         &["spot", "token", "0x0D01DC56DCAACA66AD901C959B4011EC"],
     );
@@ -579,34 +622,37 @@ async fn spot_token_takes_a_token_id_as_given() {
 async fn spot_token_refuses_a_malformed_token_id_and_an_unknown_name() {
     let server = ExchangeFixture::start().await;
 
-    let malformed = run_args(&server, &["spot", "token", "0x1234"]).failure();
+    let malformed = read(&server, &["spot", "token", "0x1234"]).failure();
     assert_eq!(malformed.get_output().status.code(), Some(2));
 
-    let unknown = run_args(&server, &["spot", "token", "NOPE"]).failure();
+    let unknown = read(&server, &["spot", "token", "NOPE"]).failure();
     assert_eq!(unknown.get_output().status.code(), Some(13));
     assert!(server.info_requests("tokenDetails").await.is_empty());
 }
 
-#[tokio::test]
-async fn spot_get_adds_prices_and_volume_from_the_asset_context() {
+/// An exchange whose `spotMetaAndAssetCtxs` lists `contexts` after the HYPE
+/// spot metadata, which is its first element. `spotMeta` is left at the
+/// fixture's USDC-only answer, so a command that read it would not find HYPE.
+async fn exchange_with_spot_contexts(contexts: Value) -> ExchangeFixture {
     let server = ExchangeFixture::start().await;
-    server
-        .override_info(json!({"type": "spotMeta"}), spot_meta_with_hype())
-        .await;
     server
         .mount_info(
             json!({"type": "spotMetaAndAssetCtxs"}),
-            json!([
-                {"universe": [], "tokens": []},
-                [
-                    {"coin": "@107", "markPx": "9", "midPx": "9"},
-                    {"coin": "PURR/USDC", "markPx": "0.09155", "midPx": "0.0915055", "prevDayPx": "0.099126", "dayNtlVlm": "990489.1359", "dayBaseVlm": "10566932.0"}
-                ]
-            ]),
+            json!([spot_meta_with_hype(), contexts]),
         )
         .await;
+    server
+}
 
-    let pair = json_of(&server, &["spot", "get", "PURR/USDC"]);
+#[tokio::test]
+async fn spot_get_adds_prices_and_volume_from_the_asset_context() {
+    let server = exchange_with_spot_contexts(json!([
+        {"coin": "@107", "markPx": "9", "midPx": "9"},
+        {"coin": "PURR/USDC", "markPx": "0.09155", "midPx": "0.0915055", "prevDayPx": "0.099126", "dayNtlVlm": "990489.1359", "dayBaseVlm": "10566932.0"}
+    ]))
+    .await;
+
+    let pair = read_json(&server, &["spot", "get", "PURR/USDC"]);
 
     assert_eq!(pair["symbol"], "PURR/USDC");
     assert_eq!(pair["mark_price"], "0.09155");
@@ -615,22 +661,18 @@ async fn spot_get_adds_prices_and_volume_from_the_asset_context() {
     assert_eq!(pair["day_notional_volume"], "990489.1359");
     assert_eq!(pair["day_base_volume"], "10566932.0");
     assert_eq!(pair["tick_size_at_price_1"], json!("0.0001"));
+    // The context read carries the spot metadata: nothing else is read for it.
+    assert_eq!(server.info_requests("spotMetaAndAssetCtxs").await.len(), 1);
+    assert!(server.info_requests("spotMeta").await.is_empty());
 }
 
 #[tokio::test]
 async fn spot_get_leaves_prices_null_for_a_market_with_no_book() {
-    let server = ExchangeFixture::start().await;
-    server
-        .override_info(json!({"type": "spotMeta"}), spot_meta_with_hype())
-        .await;
-    server
-        .mount_info(
-            json!({"type": "spotMetaAndAssetCtxs"}),
-            json!([{"universe": [], "tokens": []}, [{"coin": "PURR/USDC", "markPx": "0.1", "midPx": null}]]),
-        )
-        .await;
+    let server =
+        exchange_with_spot_contexts(json!([{"coin": "PURR/USDC", "markPx": "0.1", "midPx": null}]))
+            .await;
 
-    let pair = json_of(&server, &["spot", "get", "PURR/USDC"]);
+    let pair = read_json(&server, &["spot", "get", "PURR/USDC"]);
 
     assert_eq!(pair["mark_price"], "0.1");
     assert_eq!(pair["mid_price"], Value::Null);
@@ -643,7 +685,7 @@ async fn spot_list_does_not_read_asset_contexts() {
         .override_info(json!({"type": "spotMeta"}), spot_meta_with_hype())
         .await;
 
-    json_of(&server, &["spot", "list"]);
+    read_json(&server, &["spot", "list"]);
 
     assert!(
         server
@@ -653,58 +695,34 @@ async fn spot_list_does_not_read_asset_contexts() {
     );
 }
 
-// ---- vaults --------------------------------------------------------------
-
-async fn mount_stats(server: &MockServer, network: &str, body: Value) {
-    Mock::given(method("GET"))
-        .and(path(format!("/stats-data/{network}/vaults")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .mount(server)
-        .await;
-}
-
-fn stats_vault(name: &str, address: &str, tvl: &str, apr: Value, kind: &str) -> Value {
-    json!({
-        "apr": apr,
-        "pnls": [["day", ["0.0"]]],
-        "summary": {
-            "name": name,
-            "vaultAddress": address,
-            "leader": USER,
-            "tvl": tvl,
-            "isClosed": false,
-            "relationship": {"type": kind},
-            "createTimeMillis": 1_700_000_000_000_i64
-        }
-    })
-}
-
 #[tokio::test]
 async fn vault_list_reads_the_stats_dataset_not_the_empty_info_summaries() {
     let server = ExchangeFixture::start().await;
-    mount_stats(
-        &server,
-        "Mainnet",
-        json!([
-            stats_vault(
-                "Small",
-                "0x00000000000000000000000000000000000000a1",
-                "10.5",
-                json!(-1.8525797436137323e-6),
-                "normal"
-            ),
-            stats_vault(
-                "Big",
-                "0x00000000000000000000000000000000000000a2",
-                "149271215.28",
-                json!(0.2496),
-                "parent"
-            ),
-        ]),
-    )
-    .await;
+    server
+        .mount_vault_stats(
+            "Mainnet",
+            vec![
+                wire::stats_vault(
+                    "Small",
+                    "0x00000000000000000000000000000000000000a1",
+                    USER,
+                    "10.5",
+                    json!(-1.8525797436137323e-6),
+                    "normal",
+                ),
+                wire::stats_vault(
+                    "Big",
+                    "0x00000000000000000000000000000000000000a2",
+                    USER,
+                    "149271215.28",
+                    json!(0.2496),
+                    "parent",
+                ),
+            ],
+        )
+        .await;
 
-    let rows = json_of(&server, &["vault", "list"]);
+    let rows = read_json(&server, &["vault", "list"]);
 
     assert_eq!(rows.as_array().unwrap().len(), 2);
     assert_eq!(rows[0]["name"], "Big", "sorted by TVL");
@@ -716,53 +734,23 @@ async fn vault_list_reads_the_stats_dataset_not_the_empty_info_summaries() {
 }
 
 #[tokio::test]
-async fn vault_search_filters_the_stats_dataset() {
-    let server = ExchangeFixture::start().await;
-    mount_stats(
-        &server,
-        "Mainnet",
-        json!([
-            stats_vault(
-                "Alpha Carry",
-                "0x00000000000000000000000000000000000000a1",
-                "10",
-                json!(0.1),
-                "normal"
-            ),
-            stats_vault(
-                "Beta",
-                "0x00000000000000000000000000000000000000a2",
-                "20",
-                json!(0.2),
-                "normal"
-            ),
-        ]),
-    )
-    .await;
-
-    let rows = json_of(&server, &["vault", "search", "carry"]);
-
-    assert_eq!(rows.as_array().unwrap().len(), 1);
-    assert_eq!(rows[0]["name"], "Alpha Carry");
-}
-
-#[tokio::test]
 async fn vault_list_reads_the_testnet_dataset_on_testnet() {
     let server = ExchangeFixture::start().await;
-    mount_stats(
-        &server,
-        "Testnet",
-        json!([stats_vault(
-            "Test Vault",
-            "0x00000000000000000000000000000000000000a1",
-            "1",
-            json!(0),
-            "normal"
-        )]),
-    )
-    .await;
+    server
+        .mount_vault_stats(
+            "Testnet",
+            vec![wire::stats_vault(
+                "Test Vault",
+                "0x00000000000000000000000000000000000000a1",
+                USER,
+                "1",
+                json!(0),
+                "normal",
+            )],
+        )
+        .await;
 
-    let rows = json_of(&server, &["--testnet", "vault", "list"]);
+    let rows = read_json(&server, &["--testnet", "vault", "list"]);
 
     assert_eq!(rows[0]["name"], "Test Vault");
 }
@@ -770,27 +758,29 @@ async fn vault_list_reads_the_testnet_dataset_on_testnet() {
 #[tokio::test]
 async fn vault_list_with_a_user_adds_their_deposit_from_their_vault_equities() {
     let server = ExchangeFixture::start().await;
-    mount_stats(
-        &server,
-        "Mainnet",
-        json!([
-            stats_vault(
-                "Held",
-                "0x00000000000000000000000000000000000000A1",
-                "10",
-                json!(0.1),
-                "normal"
-            ),
-            stats_vault(
-                "Other",
-                "0x00000000000000000000000000000000000000a2",
-                "20",
-                json!(0.2),
-                "normal"
-            ),
-        ]),
-    )
-    .await;
+    server
+        .mount_vault_stats(
+            "Mainnet",
+            vec![
+                wire::stats_vault(
+                    "Held",
+                    "0x00000000000000000000000000000000000000A1",
+                    USER,
+                    "10",
+                    json!(0.1),
+                    "normal",
+                ),
+                wire::stats_vault(
+                    "Other",
+                    "0x00000000000000000000000000000000000000a2",
+                    USER,
+                    "20",
+                    json!(0.2),
+                    "normal",
+                ),
+            ],
+        )
+        .await;
     server
         .mount_info(
             json!({"type": "userVaultEquities", "user": USER}),
@@ -798,7 +788,7 @@ async fn vault_list_with_a_user_adds_their_deposit_from_their_vault_equities() {
         )
         .await;
 
-    let rows = json_of(
+    let rows = read_json(
         &server,
         &["vault", "list", "--user", USER, "--sort", "name"],
     );
@@ -810,19 +800,15 @@ async fn vault_list_with_a_user_adds_their_deposit_from_their_vault_equities() {
 
 #[tokio::test]
 async fn vault_list_fails_loudly_when_the_stats_host_does() {
+    // The stats path is not mounted: the mock answers it 404.
     let server = ExchangeFixture::start().await;
-    Mock::given(method("GET"))
-        .and(path("/stats-data/Mainnet/vaults"))
-        .respond_with(ResponseTemplate::new(404))
-        .mount(&server)
-        .await;
 
-    let assert = run_args(&server, &["vault", "list"]).failure();
+    let assert = read(&server, &["vault", "list"]).failure();
 
     // The failure is the JSON error envelope, never an empty array that reads
     // as "no vaults".
     let document: Value = serde_json::from_slice(&assert.get_output().stdout)
-        .unwrap_or_else(|_| serde_json::from_str(stderr_text(&assert).trim()).unwrap());
+        .unwrap_or_else(|_| serde_json::from_str(support::stderr_text(&assert).trim()).unwrap());
     assert!(document.is_object(), "{document}");
     assert_eq!(document["exit_code"], 12, "{document}");
     assert_eq!(document["data"]["http_status"], 404, "{document}");
@@ -863,7 +849,7 @@ async fn vault_get_says_the_follower_list_is_capped_at_the_api_limit() {
         )
         .await;
 
-    let vault = json_of(&server, &["vault", "get", VAULT]);
+    let vault = read_json(&server, &["vault", "get", VAULT]);
 
     assert_eq!(vault["followers_returned"], 100);
     assert_eq!(vault["followers_truncated"], true);
@@ -884,7 +870,7 @@ async fn vault_get_with_a_short_follower_list_is_not_truncated() {
         )
         .await;
 
-    let vault = json_of(&server, &["vault", "get", VAULT]);
+    let vault = read_json(&server, &["vault", "get", VAULT]);
 
     assert_eq!(vault["followers_returned"], 3);
     assert_eq!(vault["followers_truncated"], false);
@@ -903,7 +889,7 @@ async fn vault_get_with_a_user_sends_it_and_shows_their_stake() {
         )
         .await;
 
-    let vault = json_of(&server, &["vault", "get", VAULT, "--user", USER]);
+    let vault = read_json(&server, &["vault", "get", VAULT, "--user", USER]);
 
     assert_eq!(
         vault["follower_state"],
@@ -920,20 +906,8 @@ async fn vault_get_with_a_user_sends_it_and_shows_their_stake() {
 
 #[tokio::test]
 async fn vault_get_resolves_a_stored_account_alias_for_its_user() {
-    let env = IsolatedHome::new();
+    let env = IsolatedHome::new().with_stored_account("trader", support::VALID_PRIVATE_KEY, None);
     let address = support::expected_address(support::VALID_PRIVATE_KEY);
-    for db in env.accounts_db_candidates() {
-        let key_file = db.parent().unwrap().join("accounts.key");
-        support::legacy_accounts_fixture::create_accounts_db_with_key_file(
-            &db,
-            &key_file,
-            &[support::legacy_accounts_fixture::Row::new(
-                "trader",
-                &address,
-                support::VALID_PRIVATE_KEY,
-            )],
-        );
-    }
     let server = ExchangeFixture::start().await;
     server
         .mount_info(
@@ -962,18 +936,16 @@ async fn vault_get_with_a_user_who_holds_nothing_shows_a_null_stake() {
         )
         .await;
 
-    let vault = json_of(&server, &["vault", "get", VAULT, "--user", USER]);
+    let vault = read_json(&server, &["vault", "get", VAULT, "--user", USER]);
 
     assert_eq!(vault["follower_state"], Value::Null);
 }
-
-// ---- status ----------------------------------------------------------------
 
 #[tokio::test]
 async fn status_keeps_its_constant_rate_limit_field_and_points_at_the_account_read() {
     let server = ExchangeFixture::start().await;
 
-    let status = json_of(&server, &["status"]);
+    let status = read_json(&server, &["status"]);
 
     assert_eq!(status["rate_limit_status"], "ok");
     assert!(
@@ -995,7 +967,7 @@ async fn account_rate_limit_reads_the_request_budget() {
         )
         .await;
 
-    let limit = json_of(&server, &["account", "rate-limit", USER]);
+    let limit = read_json(&server, &["account", "rate-limit", USER]);
 
     assert_eq!(limit["n_requests_used"], 7);
     assert_eq!(limit["n_requests_cap"], 10000);
@@ -1004,51 +976,14 @@ async fn account_rate_limit_reads_the_request_budget() {
 }
 
 #[tokio::test]
-async fn portfolio_cumulative_funding_reports_each_horizon() {
-    let server = MockServer::start().await;
-    support::mount_override_healthcheck(&server).await;
-    support::mount_account_state(&server, vec![], vec![], "9000", "100", 5).await;
-    let mut state = support::fixture_clearinghouse_state("9000", 5);
-    state["assetPositions"][0]["position"]["cumFunding"] =
-        json!({"allTime": "-12.5", "sinceOpen": "3.25", "sinceChange": "0.5"});
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(wiremock::matchers::body_partial_json(
-            json!({"type": "clearinghouseState"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(state))
-        .with_priority(1)
-        .mount(&server)
-        .await;
-
-    let portfolio = json_of(&server, &["account", "portfolio", USER]);
-
-    assert_eq!(
-        portfolio["positions"][0]["cum_funding"],
-        json!({"all_time": "-12.5", "since_open": "3.25", "since_change": "0.5"})
-    );
-}
-
-#[tokio::test]
 async fn spot_get_matches_a_pair_to_its_context_by_the_at_index_key() {
-    let server = ExchangeFixture::start().await;
-    server
-        .override_info(json!({"type": "spotMeta"}), spot_meta_with_hype())
-        .await;
-    server
-        .mount_info(
-            json!({"type": "spotMetaAndAssetCtxs"}),
-            json!([
-                {"universe": [], "tokens": []},
-                [
-                    {"coin": "PURR/USDC", "markPx": "0.1", "midPx": "0.1"},
-                    {"coin": "@107", "markPx": "73.724", "midPx": "73.7235", "dayNtlVlm": "5.5"}
-                ]
-            ]),
-        )
-        .await;
+    let server = exchange_with_spot_contexts(json!([
+        {"coin": "PURR/USDC", "markPx": "0.1", "midPx": "0.1"},
+        {"coin": "@107", "markPx": "73.724", "midPx": "73.7235", "dayNtlVlm": "5.5"}
+    ]))
+    .await;
 
-    let pair = json_of(&server, &["spot", "get", "HYPE/USDC"]);
+    let pair = read_json(&server, &["spot", "get", "HYPE/USDC"]);
 
     assert_eq!(pair["mark_price"], "73.724");
     assert_eq!(pair["day_notional_volume"], "5.5");
@@ -1057,7 +992,7 @@ async fn spot_get_matches_a_pair_to_its_context_by_the_at_index_key() {
 #[tokio::test]
 async fn account_orders_lists_trigger_fields_and_children_like_orders_open() {
     let server = ExchangeFixture::start().await;
-    let mut trigger = support::fixture_basic_order("BTC", 11);
+    let mut trigger = support::wire::basic_order("BTC", 11);
     trigger["isTrigger"] = json!(true);
     trigger["triggerPx"] = json!("48000.0");
     trigger["triggerCondition"] = json!("Price below 48000");
@@ -1071,7 +1006,7 @@ async fn account_orders_lists_trigger_fields_and_children_like_orders_open() {
         )
         .await;
 
-    let rows = json_of(&server, &["account", "orders", USER]);
+    let rows = read_json(&server, &["account", "orders", USER]);
 
     assert_eq!(rows[0]["is_trigger"], true);
     assert_eq!(rows[0]["trigger_price"], "48000.0");

@@ -12,24 +12,24 @@ use hypersdk::hypercore::types::{
 use hypersdk::{Address, Decimal};
 use serde::Serialize;
 use serde_json::json;
+use tokio::sync::OnceCell;
 
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, StreamBound, arg};
-use crate::commands::abstraction::{
-    AccountMode, DexCollateral, UnifiedRisk, fetch_abstraction, load_dex_collateral,
-    unified_account_ratio,
-};
-use crate::commands::actions::nonce_now;
-use crate::commands::borrowlend::fetch_user_state;
-use crate::commands::positions::mark_price;
-use crate::commands::rows::{One, Row};
-use crate::commands::spot_balances::user_spot_balances_raw;
-use crate::errors::from_sdk;
+use crate::account_mode::{AccountMode, UnifiedRisk, fetch_abstraction, unified_account_ratio};
+use crate::assets::DexCollateral;
+use crate::cli_command::CliCommand;
+use crate::clock::{self, DurationError};
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::common::borrow_lend_state::fetch_user_state;
+use crate::commands::common::position::mark_price;
+use crate::commands::common::rows::{One, Row};
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
-use crate::output::{OutputFormat, Session};
-use crate::stream::{
-    self, StreamBoundArgs, StreamBounds, StreamEnd, Ticker, emit_json_line, write_stdout_line,
-};
+use crate::output::{Session, sink};
+use crate::spot_balances::user_spot_balances_raw;
+use crate::stream::{self, StreamEnd, Ticker, emit_json_line};
+use crate::stream_bounds::StreamBound;
+use crate::stream_bounds::{StreamBoundArgs, StreamBounds};
+use crate::terminal::OutputFormat;
 use crate::wire::{AddressRole, address};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -53,7 +53,6 @@ impl RiskRule {
         RiskRule::PositionLifecycle,
     ];
 
-    /// The rule name in alert JSON and on the command line.
     pub fn as_str(self) -> &'static str {
         match self {
             RiskRule::LiqProximity => "liq_proximity",
@@ -72,13 +71,11 @@ const MARGIN_USED_LIMIT_PERCENT: i64 = 80;
 /// `liq_proximity` fires as critical and as a warning.
 const LIQ_CRITICAL_DISTANCE: Decimal = Decimal::from_parts(5, 0, 0, false, 2);
 const LIQ_WARNING_DISTANCE: Decimal = Decimal::from_parts(1, 0, 0, false, 1);
-/// Minutes a position may stay open without a TP/SL order.
 const NO_TPSL_AFTER_MINUTES: u64 = 15;
-const NO_TPSL_AFTER: Duration = Duration::from_secs(NO_TPSL_AFTER_MINUTES * 60);
-/// Time a position must be watched before paid funding is reported.
-const FUNDING_BLEED_WINDOW: Duration = Duration::from_secs(60 * 60);
+const NO_TPSL_AFTER: Duration = clock::MINUTE.of(NO_TPSL_AFTER_MINUTES);
+const FUNDING_BLEED_WINDOW: Duration = clock::HOUR.of(1);
 /// A resting order at least this old and this far from the mid (a fraction) is stale.
-const STALE_ORDER_AGE: Duration = Duration::from_secs(12 * 60 * 60);
+const STALE_ORDER_AGE: Duration = clock::HOUR.of(12);
 const STALE_ORDER_MID_DISTANCE: Decimal = Decimal::from_parts(3, 0, 0, false, 2);
 
 #[derive(Args, Debug, Clone)]
@@ -100,7 +97,7 @@ pub struct WatchRiskArgs {
     pub disable: Vec<RiskRule>,
     #[arg(long = "only", value_enum)]
     pub only: Vec<RiskRule>,
-    #[arg(long, default_value = "15s", value_parser = parse_secs)]
+    #[arg(long, default_value = "15s", value_parser = parse_poll_interval)]
     pub interval: Duration,
     #[command(flatten)]
     pub stream: StreamBoundArgs,
@@ -180,7 +177,7 @@ impl RiskAlert {
     ) -> Self {
         Self {
             kind,
-            time: nonce_now(),
+            time: clock::now_ms(),
             address: user.to_string(),
             rule: rule.to_string(),
             coin: coin.map(str::to_string),
@@ -201,7 +198,7 @@ pub async fn watch_risk(
     let bounds = StreamBounds::watch_risk(&args.stream);
 
     stream::run_stream(async {
-        let mut watcher = RiskWatcher::new(api, user, args).await?;
+        let mut watcher = RiskWatcher::new(inv, api, user, args).await?;
         stream::poll_stream(&mut watcher, args.interval, bounds, |alert| {
             emit_alert(alert, session)
         })
@@ -218,11 +215,12 @@ fn emit_alert(alert: RiskAlert, session: &Session) -> Result<(), anyhow::Error> 
             &alert,
             session.json_options(),
         ),
-        _ => write_stdout_line(&session.render(&One::new(alert))),
+        _ => sink::stream_line(&session.render(&One::new(alert))),
     }
 }
 
 struct RiskWatcher<'a> {
+    inv: &'a Invocation,
     api: &'a ApiClient,
     user: Address,
     enabled: Vec<RiskRule>,
@@ -231,33 +229,32 @@ struct RiskWatcher<'a> {
     flat_announced: bool,
     /// Each perp dex's collateral token, read when a unified account first
     /// needs it. A dex deployed after that is not part of the ratio.
-    dex_collateral: Option<Vec<DexCollateral>>,
+    dex_collateral: OnceCell<DexCollateral>,
 }
 
 impl<'a> RiskWatcher<'a> {
     async fn new(
+        inv: &'a Invocation,
         api: &'a ApiClient,
         user: Address,
         args: &WatchRiskArgs,
     ) -> Result<Self, anyhow::Error> {
-        // Seed position ages from fill history so positions opened before this
-        // watcher started do not wait a full threshold window for age-based rules.
-        let fills = api.sdk().user_fills(user).await.map_err(from_sdk)?;
+        let fills = api.sdk().user_fills(user).await?;
         Ok(Self {
+            inv,
             api,
             user,
             enabled: enabled_rules(args),
             min_severity: args.min_severity,
             state: RiskEvalState::new(position_open_times(&fills)),
             flat_announced: false,
-            dex_collateral: None,
+            dex_collateral: OnceCell::new(),
         })
     }
 
-    /// What `margin_usage` measures for this account. A pooled account's perp
-    /// margin summary is not its real equity, so a unified account is measured
-    /// by the docs' unified account ratio and a portfolio-margin one by the
-    /// protocol's own health verdict.
+    /// A pooled account's perp margin summary is not its real equity, so a unified
+    /// account is measured by the docs' unified account ratio and a portfolio-margin one
+    /// by the protocol's own health verdict.
     async fn margin_basis(
         &mut self,
         mode: AccountMode,
@@ -265,27 +262,22 @@ impl<'a> RiskWatcher<'a> {
     ) -> Result<MarginBasis, anyhow::Error> {
         match mode {
             AccountMode::Unified => {
-                if self.dex_collateral.is_none() {
-                    self.dex_collateral = Some(load_dex_collateral(self.api).await?);
-                }
-                let dexes = self.dex_collateral.as_deref().unwrap_or_default();
+                let collateral = self
+                    .dex_collateral
+                    .get_or_try_init(|| async {
+                        self.inv.dex_list().await?.collateral_tokens(self.api).await
+                    })
+                    .await?;
                 let mut others = Vec::new();
-                for dex in dexes {
-                    if let Some(name) = &dex.dex {
-                        let other = self
-                            .api
-                            .sdk()
-                            .clearinghouse_state(self.user, Some(name.clone()))
-                            .await
-                            .map_err(from_sdk)?;
-                        others.push((dex.token, other));
-                    }
+                for (name, token) in &collateral.dexes {
+                    let other = self
+                        .api
+                        .sdk()
+                        .clearinghouse_state(self.user, Some(name.clone()))
+                        .await?;
+                    others.push((*token, other));
                 }
-                let default_token = dexes
-                    .iter()
-                    .find(|dex| dex.dex.is_none())
-                    .map_or(0, |dex| dex.token);
-                let mut states = vec![(default_token, state)];
+                let mut states = vec![(collateral.default_token, state)];
                 states.extend(others.iter().map(|(token, other)| (*token, other)));
                 let balances = user_spot_balances_raw(self.api, self.user).await?;
                 Ok(MarginBasis::UnifiedRatio(unified_account_ratio(
@@ -317,15 +309,9 @@ impl Ticker for RiskWatcher<'_> {
         let mode = fetch_abstraction(self.api, self.user)
             .await?
             .normalized_mode;
-        let state = client
-            .clearinghouse_state(self.user, None)
-            .await
-            .map_err(from_sdk)?;
-        let open_orders = client
-            .open_orders(self.user, None)
-            .await
-            .map_err(from_sdk)?;
-        let mids = client.all_mids(None).await.map_err(from_sdk)?;
+        let state = client.clearinghouse_state(self.user, None).await?;
+        let open_orders = client.open_orders(self.user, None).await?;
+        let mids = client.all_mids(None).await?;
         let margin = self.margin_basis(mode, &state).await?;
 
         let snapshot = RiskSnapshot {
@@ -341,8 +327,6 @@ impl Ticker for RiskWatcher<'_> {
             .iter()
             .all(|position| position.position.szi.is_zero());
         if no_positions {
-            // Heartbeat once per flat transition; a flat account keeps
-            // monitoring so positions opened later are still observed.
             if !self.flat_announced {
                 alerts.push(RiskAlert::heartbeat(self.user));
                 self.flat_announced = true;
@@ -363,8 +347,6 @@ struct RiskSnapshot<'a> {
     margin: MarginBasis,
 }
 
-/// What the `margin_usage` rule measures, which depends on where the account
-/// keeps its balances.
 enum MarginBasis {
     /// The perp margin summary: a standard or dex-abstraction account.
     PerpSummary {
@@ -374,7 +356,6 @@ enum MarginBasis {
     /// The unified account risk; `None` when no collateral token carries
     /// cross maintenance margin.
     UnifiedRatio(Option<UnifiedRisk>),
-    /// The borrow/lend health a portfolio-margin account reports.
     PortfolioHealth {
         health: String,
         health_factor: Option<Decimal>,
@@ -463,7 +444,6 @@ struct RiskEvalState {
     funding_seen: HashMap<String, Instant>,
     funding_baseline: HashMap<String, Decimal>,
     funding_alerted: HashSet<String>,
-    /// Coin → position open time (ms since epoch) seeded from fill history.
     open_times: HashMap<String, u64>,
 }
 
@@ -516,10 +496,9 @@ fn position_open_times(fills: &[Fill]) -> HashMap<String, u64> {
     open_times
 }
 
-/// Instant approximating a position open time in ms since epoch.
 fn open_instant(open_times: &HashMap<String, u64>, coin: &str) -> Option<Instant> {
     let ms = *open_times.get(coin)?;
-    let now_ms = nonce_now();
+    let now_ms = clock::now_ms();
     if ms >= now_ms {
         return None;
     }
@@ -539,8 +518,6 @@ fn evaluate_state(
         alerts.push(alert);
     }
 
-    // Detect positions that closed by disappearing from the snapshot entirely:
-    // a coin remembered with nonzero size that is absent now has closed.
     if enabled.contains(&RiskRule::PositionLifecycle) {
         let present: HashSet<String> = snapshot
             .positions
@@ -606,8 +583,6 @@ fn evaluate_state(
             state.forget_clocks(&coin);
             continue;
         }
-        // Seed from fill history when available so pre-existing positions do
-        // not restart their age clocks at watcher startup.
         let seeded = open_instant(&state.open_times, &coin);
         state
             .first_seen
@@ -701,7 +676,7 @@ fn evaluate_state(
     }
 
     if enabled.contains(&RiskRule::StaleOrder) {
-        let now_ms = nonce_now();
+        let now_ms = clock::now_ms();
         for order in snapshot.open_orders {
             let age_ms = now_ms.saturating_sub(order.timestamp);
             if Duration::from_millis(age_ms) < STALE_ORDER_AGE {
@@ -744,23 +719,11 @@ fn enabled_rules(args: &WatchRiskArgs) -> Vec<RiskRule> {
         .collect()
 }
 
-fn parse_secs(raw: &str) -> Result<Duration, String> {
-    let trimmed = raw.trim();
-    let interval = if let Some(ms) = trimmed.strip_suffix("ms") {
-        let value: u64 = ms.parse().map_err(|_| format!("invalid duration {raw}"))?;
-        Duration::from_millis(value)
-    } else {
-        let seconds = trimmed
-            .strip_suffix('s')
-            .unwrap_or(trimmed)
-            .parse::<u64>()
-            .map_err(|_| format!("invalid duration {raw}"))?;
-        Duration::from_secs(seconds)
-    };
-    if interval.is_zero() {
-        return Err(format!("duration must be greater than zero: {raw}"));
-    }
-    Ok(interval)
+fn parse_poll_interval(raw: &str) -> Result<Duration, String> {
+    clock::parse_duration(raw, &clock::POLL_INTERVAL).map_err(|fault| match fault {
+        DurationError::Zero => format!("duration must be greater than zero: {raw}"),
+        _ => format!("invalid duration {raw}"),
+    })
 }
 
 impl Row for RiskAlert {
@@ -812,7 +775,7 @@ hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000
         let user = if let Some(raw) = args.user.as_deref() {
             address(raw, AddressRole::Watched)?
         } else {
-            inv.resolve_signer()?.query_address()
+            inv.resolve_signer_account().await?
         };
         watch_risk(inv, user, args).await
     }
@@ -865,10 +828,13 @@ mod tests {
 
     #[test]
     fn poll_interval_must_be_positive() {
-        assert!(parse_secs("0").is_err());
-        assert!(parse_secs("0ms").is_err());
-        assert_eq!(parse_secs("500ms").unwrap(), Duration::from_millis(500));
-        assert_eq!(parse_secs("15s").unwrap(), Duration::from_secs(15));
+        assert!(parse_poll_interval("0").is_err());
+        assert!(parse_poll_interval("0ms").is_err());
+        assert_eq!(
+            parse_poll_interval("500ms").unwrap(),
+            Duration::from_millis(500)
+        );
+        assert_eq!(parse_poll_interval("15s").unwrap(), Duration::from_secs(15));
     }
 
     #[test]

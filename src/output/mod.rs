@@ -12,46 +12,28 @@
 //!
 //! Streams:
 //! - stdout carries the answer. Empty-state sentences and `--max-results`
-//!   truncation notices go to stderr in pretty and table modes.
-//! - Errors are rendered by [`crate::errors`], which depends on this module.
+//!   truncation notices go to stderr in pretty and table modes, as [`Notice`]s.
 //!
 //! Timing feedback:
-//! - "Completed in 1.2s" is printed to stderr only for human formats on a terminal
+//! - "Completed in 1.2s" is printed to stderr only for human formats on a terminal, with no agent or CI (`Mode::timing_footer`)
 
-use clap::ValueEnum;
 use serde_json::Value;
-use std::fmt;
 use std::io::Write;
 use std::sync::OnceLock;
 use tabwriter::TabWriter;
 
 use crate::response_sanitization::is_format_char;
+use crate::terminal::OutputFormat;
 
 mod session;
 
+pub use notice::{Notice, warn};
 pub use session::Session;
 
 pub mod colors;
 pub mod format;
-pub mod terminal;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
-pub enum OutputFormat {
-    #[default]
-    Pretty,
-    Table,
-    Json,
-}
-
-impl fmt::Display for OutputFormat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Pretty => write!(f, "pretty"),
-            Self::Table => write!(f, "table"),
-            Self::Json => write!(f, "json"),
-        }
-    }
-}
+pub mod notice;
+pub mod sink;
 
 /// `--select`, `--results-only` and `--max-results`, applied to JSON output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -326,10 +308,8 @@ pub trait TableData {
 
     fn rows(&self) -> Vec<Vec<String>>;
 
-    /// Row data for pretty output.
-    ///
-    /// Implementors can override this to apply human-facing ANSI styling to
-    /// selected cells while keeping [`Self::rows`] plain for table output.
+    /// Override to apply human-facing ANSI styling to selected cells while
+    /// keeping [`Self::rows`] plain for table output.
     fn pretty_rows(&self) -> Vec<Vec<String>> {
         self.rows()
     }
@@ -533,18 +513,10 @@ fn is_invisible_format_char(ch: char) -> bool {
 
 /// Length of a style sequence this module's color helpers emit at the start of `text`.
 fn known_style_len(text: &str) -> Option<usize> {
-    [
-        colors::CYAN,
-        colors::GREEN,
-        colors::RED,
-        colors::GRAY,
-        colors::YELLOW,
-        colors::BOLD,
-        colors::RESET,
-    ]
-    .iter()
-    .find(|code| text.starts_with(**code))
-    .map(|code| code.len())
+    colors::ALL_STYLES
+        .iter()
+        .find(|code| text.starts_with(**code))
+        .map(|code| code.len())
 }
 
 /// Make a table cell safe to print: control, bidi, zero-width and other
@@ -580,7 +552,14 @@ fn sanitize_cell(cell: &str, keep_styles: bool) -> String {
 
 struct Rendered {
     text: String,
-    notices: Vec<String>,
+    notices: Vec<Notice>,
+}
+
+#[cfg(test)]
+impl Rendered {
+    fn notice_texts(&self) -> Vec<String> {
+        self.notices.iter().map(Notice::text).collect()
+    }
 }
 
 /// What both human formats share before they draw anything: sanitized headers,
@@ -588,7 +567,7 @@ struct Rendered {
 struct Prepared {
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
-    notices: Vec<String>,
+    notices: Vec<Notice>,
 }
 
 impl Prepared {
@@ -628,16 +607,14 @@ impl Prepared {
 
 /// Notices for human formats: the empty-state sentence, or how many rows
 /// `--max-results` clipped.
-fn row_notices(data: &dyn TableData, total: usize, shown: usize) -> Vec<String> {
+fn row_notices(data: &dyn TableData, total: usize, shown: usize) -> Vec<Notice> {
     if total == 0 {
-        return vec![data.empty_message().unwrap_or("No results.").to_string()];
+        return vec![Notice::Empty(
+            data.empty_message().unwrap_or("No results.").to_string(),
+        )];
     }
     if shown < total {
-        return vec![format!(
-            "Showing {} of {}. Remove --max-results to see all.",
-            format::thousands(shown as u64),
-            format::thousands(total as u64)
-        )];
+        return vec![Notice::Clipped { shown, total }];
     }
     Vec::new()
 }
@@ -739,21 +716,6 @@ fn render_outcome(
     }
 }
 
-/// A warning line for stderr: `! message` with a yellow `!` in rich output,
-/// `Warning: message` otherwise.
-fn warning_line(message: &str) -> String {
-    if colors::stderr_enabled() {
-        format!("{} {message}", colors::stderr::yellow("!"))
-    } else {
-        format!("Warning: {message}")
-    }
-}
-
-/// Print a warning to stderr (all formats).
-pub fn warn(message: &str) {
-    eprintln!("{}", warning_line(message));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -765,9 +727,9 @@ mod tests {
 
     fn tty_env() -> Mode {
         Mode {
-            terminal: terminal::Terminal {
+            terminal: crate::terminal::Terminal {
                 stdout: true,
-                ..terminal::Terminal::default()
+                ..crate::terminal::Terminal::default()
             },
             ..Mode::default()
         }
@@ -1150,17 +1112,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_warning_line_uses_glyph_when_rich() {
-        assert_eq!(warning_line("careful"), "Warning: careful");
-        colors::with_streams_for_test(false, true, || {
-            assert_eq!(
-                warning_line("careful"),
-                format!("{} careful", colors::paint(colors::YELLOW, "!"))
-            );
-        });
-    }
-
     fn empty_data() -> TestData {
         TestData {
             headers: vec!["Name".to_string(), "Price".to_string()],
@@ -1173,12 +1124,12 @@ mod tests {
     fn test_empty_data_notice_goes_to_stderr_stream() {
         let options = JsonRenderOptions::default();
         let outcome = render_outcome(&empty_data(), OutputFormat::Table, &options, false);
-        assert_eq!(outcome.notices, vec!["No results.".to_string()]);
+        assert_eq!(outcome.notice_texts(), ["No results."]);
 
         let output = JsonValueOutput::new(serde_json::json!([]), "No orders.");
         let outcome = render_outcome(&output, OutputFormat::Table, &options, false);
         assert_eq!(outcome.text, "Value");
-        assert_eq!(outcome.notices, vec!["No orders.".to_string()]);
+        assert_eq!(outcome.notice_texts(), ["No orders."]);
 
         let outcome = render_outcome(&output, OutputFormat::Json, &options, false);
         assert_eq!(outcome.text, "[]");
@@ -1193,8 +1144,8 @@ mod tests {
         let table = render_outcome(&data, OutputFormat::Table, &options, false);
         assert_eq!(table.text, "Name\tPrice\tChange\nBTC\t50000.00\t+2.5%");
         assert_eq!(
-            table.notices,
-            vec!["Showing 1 of 2. Remove --max-results to see all.".to_string()]
+            table.notice_texts(),
+            ["Showing 1 of 2. Remove --max-results to see all."]
         );
         let pretty = render_outcome(&data, OutputFormat::Pretty, &options, false);
         assert_eq!(pretty.notices, table.notices);
@@ -1232,6 +1183,16 @@ mod tests {
     }
 
     #[test]
+    fn every_declared_style_passes_table_sanitising() {
+        assert!(colors::ALL_STYLES.contains(&colors::BOLD));
+        for code in colors::ALL_STYLES {
+            let cell = format!("{code}x");
+            assert_eq!(sanitize_cell(&cell, true), cell, "{code:?}");
+            assert_ne!(sanitize_cell(&cell, false), cell, "{code:?}");
+        }
+    }
+
+    #[test]
     fn test_pretty_keeps_theme_styles_but_escapes_other_escapes() {
         colors::with_streams_for_test(true, false, || {
             let cell = format!("{}\x1b[2J", colors::green("10"));
@@ -1248,8 +1209,7 @@ mod tests {
 
     #[test]
     fn cells_hide_every_format_character_the_sanitizer_hides() {
-        // Arabic number sign and a tag character are `Cf` but were outside the
-        // table cells used before it was shared with the error sanitizer.
+        // Arabic number sign and a tag character are `Cf` characters.
         assert_eq!(
             sanitize_cell("a\u{0600}b\u{E0041}c", false),
             "a\\u{600}b\\u{e0041}c"
@@ -1259,16 +1219,6 @@ mod tests {
             "a\\u{2028}b\\u{2029}c"
         );
         assert_eq!(sanitize_cell("a\u{202E}b", false), "a\\u{202e}b");
-    }
-
-    #[test]
-    fn json_text_is_pretty_on_a_terminal_and_compact_otherwise() {
-        let value = serde_json::json!({"a": [1, 2], "b": "x"});
-        assert_eq!(json_text(&value, false), r#"{"a":[1,2],"b":"x"}"#);
-        assert_eq!(
-            json_text(&value, true),
-            serde_json::to_string_pretty(&value).unwrap()
-        );
     }
 
     #[test]
@@ -1289,11 +1239,11 @@ mod tests {
         for format in [OutputFormat::Pretty, OutputFormat::Table] {
             let on_terminal = render_outcome(&empty, format, &JsonRenderOptions::default(), true);
             assert_eq!(on_terminal.text, "", "{format}");
-            assert_eq!(on_terminal.notices, ["No results."], "{format}");
+            assert_eq!(on_terminal.notice_texts(), ["No results."], "{format}");
 
             let on_pipe = render_outcome(&empty, format, &JsonRenderOptions::default(), false);
             assert_eq!(on_pipe.text, "Coin", "{format}");
-            assert_eq!(on_pipe.notices, ["No results."], "{format}");
+            assert_eq!(on_pipe.notice_texts(), ["No results."], "{format}");
         }
     }
 }

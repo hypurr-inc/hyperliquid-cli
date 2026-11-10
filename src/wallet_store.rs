@@ -9,6 +9,7 @@ use ows_lib::types::WalletInfo;
 
 use crate::config::Config;
 use crate::errors::CliError;
+use crate::hints::wallet as hints;
 use crate::ows::vault::{HyperliquidAccount, Vault};
 use crate::settings::{ConfigTransaction, Settings};
 
@@ -28,7 +29,7 @@ impl<'a> WalletName<'a> {
     /// The alias the user gave, trimmed; none or a blank one is `Next(base)`.
     #[must_use]
     pub fn from_alias(alias: Option<&'a str>, base: &'a str) -> Self {
-        match crate::config::nonblank(alias) {
+        match crate::env::nonblank(alias) {
             Some(alias) => Self::Exact(alias),
             None => Self::Next(base),
         }
@@ -146,11 +147,21 @@ impl<'a> WalletStore<'a> {
         match self.vault.delete(&wallet.id) {
             Ok(()) => cause,
             Err(err) => anyhow::anyhow!(
-                "{cause} (and removing the new wallet '{}' from the vault failed: {err}; delete it with `hyperliquid wallet delete {}`)",
+                "{cause} (and removing the new wallet '{}' from the vault failed: {err}; delete it with `{}`)",
                 wallet.name,
-                wallet.id
+                hints::wallet_delete(&wallet.id)
             ),
         }
+    }
+
+    /// How a wallet becomes the default signer in the config: the one place
+    /// that key is written for a wallet.
+    pub fn make_default(config: &mut Config, wallet: &WalletInfo) {
+        config.default_wallet_id = Some(wallet.id.clone());
+    }
+
+    pub fn set_default_edit() -> ConfigEdit<'static> {
+        Box::new(|config, wallet, _| Self::make_default(config, wallet))
     }
 
     /// Make `wallet` the default signer. A wallet that can't sign for Hyperliquid
@@ -159,7 +170,7 @@ impl<'a> WalletStore<'a> {
     pub fn set_default(&self, wallet: &WalletInfo) -> Result<HyperliquidAccount, anyhow::Error> {
         let account = Vault::hyperliquid_account(wallet)?;
         self.settings
-            .update_config(|config| config.default_wallet_id = Some(wallet.id.clone()))?;
+            .update_config(|config| Self::make_default(config, wallet))?;
         Ok(account)
     }
 
@@ -184,8 +195,8 @@ impl<'a> WalletStore<'a> {
 mod tests {
     use super::*;
     use crate::config::ConfigFile;
+    use crate::env::{self, EnvSource};
     use crate::ows::vault::test_support::{KEY, import_test_wallet};
-    use crate::settings::{EnvSource, env};
     use tempfile::TempDir;
 
     fn settings(tmp: &TempDir) -> Settings {
@@ -209,9 +220,7 @@ mod tests {
     }
 
     fn make_default() -> Option<ConfigEdit<'static>> {
-        Some(Box::new(|config, wallet, _| {
-            config.default_wallet_id = Some(wallet.id.clone());
-        }))
+        Some(WalletStore::set_default_edit())
     }
 
     #[test]

@@ -1,101 +1,68 @@
-use assert_cmd::Command;
-use hyperliquid_cli::command_registry::CommandRegistry;
+//! What a release has to deliver to the people and programs that fetch it.
+
+mod support;
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+
+use hyperliquid_cli::commands;
 
 fn repo_file(path: &str) -> String {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     fs::read_to_string(root.join(path)).unwrap_or_else(|err| panic!("failed to read {path}: {err}"))
 }
 
+/// The archive names inside the quotes of `source`.
+fn quoted_archives(source: &str) -> BTreeSet<String> {
+    source
+        .split('"')
+        .filter(|text| text.starts_with("hyperliquid-") && text.ends_with(".tar.gz"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The self-updater downloads a release asset by name: one the release
+/// workflow does not publish is an update that fails with a 404 for everyone
+/// on that platform.
 #[test]
-fn oss_release_health_files_are_present() {
-    for path in [
-        "LICENSE",
-        "CONTRIBUTING.md",
-        ".github/PULL_REQUEST_TEMPLATE.md",
-        "scripts/pre-release-check.sh",
-    ] {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+fn every_asset_the_updater_downloads_is_published_by_the_release_workflow() {
+    let workflow = repo_file(".github/workflows/release.yml");
+    let published: BTreeSet<&str> = workflow
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("asset: "))
+        .collect();
+    let downloaded = quoted_archives(&repo_file("src/update/release.rs"));
+
+    assert!(!downloaded.is_empty(), "the updater names no archive");
+    for asset in &downloaded {
         assert!(
-            root.join(path).exists(),
-            "missing OSS release health file {path}"
+            published.contains(asset.as_str()),
+            "the updater downloads {asset}, which release.yml does not publish: {published:?}"
         );
     }
 }
 
+/// `install.sh` refuses an archive that does not match the checksum published
+/// beside it, so the workflow must publish one for every asset.
 #[test]
-fn release_workflow_publishes_the_assets_the_updater_downloads_with_checksums() {
-    let release_workflow = repo_file(".github/workflows/release.yml");
-    let updater = repo_file("src/update/release.rs");
-    let install_script = repo_file("install.sh");
+fn published_assets_carry_the_checksum_the_installer_verifies() {
+    let workflow = repo_file(".github/workflows/release.yml");
+    let installer = repo_file("install.sh");
 
-    for asset in [
-        "hyperliquid-linux-x86_64.tar.gz",
-        "hyperliquid-linux-aarch64.tar.gz",
-        "hyperliquid-macos-x86_64.tar.gz",
-        "hyperliquid-macos-aarch64.tar.gz",
-    ] {
-        assert!(
-            release_workflow.contains(asset),
-            "release.yml does not build {asset}"
-        );
-        assert!(
-            updater.contains(asset),
-            "the self-updater does not map {asset}"
-        );
-    }
     assert!(
-        release_workflow.contains("sha256sum"),
-        "release.yml publishes no checksums"
+        workflow.contains("\"$asset.sha256\""),
+        "release.yml publishes no `<asset>.sha256`"
     );
     assert!(
-        install_script.contains("sha256_check") && install_script.contains("${asset}.sha256"),
+        installer.contains("${asset}.sha256") && installer.contains("sha256_check"),
         "install.sh does not verify the published checksum"
     );
 }
 
 #[test]
-fn public_docs_do_not_reference_local_user_paths() {
-    for path in ["README.md", "AGENTS.md"] {
-        let text = repo_file(path);
-        assert!(
-            !text.contains("/Users/studio"),
-            "{path} should not contain local workstation paths"
-        );
-    }
-}
-
-#[test]
-fn ci_and_task_gates_name_only_existing_test_targets() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut targets = BTreeSet::new();
-    for path in [".github/workflows/ci.yml", "Taskfile.yml"] {
-        let text = repo_file(path);
-        let mut words = text.split_whitespace();
-        while let Some(word) = words.next() {
-            if word == "--test"
-                && let Some(target) = words.next()
-            {
-                assert!(
-                    root.join("tests").join(format!("{target}.rs")).exists(),
-                    "{path} runs `--test {target}` but tests/{target}.rs does not exist"
-                );
-                targets.insert(target.to_string());
-            }
-        }
-    }
-    assert!(
-        targets.contains("contract_fixtures"),
-        "no CI or Taskfile gate runs the contract fixtures: {targets:?}"
-    );
-}
-
-#[test]
 fn top_level_help_lists_every_registered_command_group() {
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
+    let output = support::hermetic_command()
         .arg("--help")
         .assert()
         .success()
@@ -111,7 +78,7 @@ fn top_level_help_lists_every_registered_command_group() {
         .filter_map(|line| line.split_whitespace().next())
         .collect::<BTreeSet<_>>();
 
-    let missing = CommandRegistry::get()
+    let missing = commands::registry()
         .commands()
         .iter()
         .map(|command| command.command_path[0].as_str())

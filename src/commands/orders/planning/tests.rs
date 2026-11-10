@@ -1,36 +1,33 @@
 use std::time::Duration;
 
-use hypersdk::hypercore::Chain;
-use hypersdk::hypercore::types::TimeInForce;
+use hypersdk::hypercore::types::{OrderGrouping, TimeInForce};
 
 use super::*;
-use crate::assets::test_support::hip3_perp;
-use crate::assets::{AssetMetadata, MarginRule, SpotAsset};
+use crate::assets::test_support::{hip3_perp, perp, spot as spot_asset};
+use crate::assets::{AssetMetadata, SpotAsset};
 use crate::commands::orders::args::{
-    CreateTpslGroupingArg, DEFAULT_MARKET_ORDER_SLIPPAGE_BPS, PositionTpslGroupingArg, TpslArgs,
+    CreateArgs, CreateTpslGroupingArg, PositionTpslGroupingArg, TpslArgs,
 };
+use crate::commands::orders::preview::tpsl_dry_run_plan;
 use crate::commands::orders::validation::{MAX_BATCH_ORDER_COUNT, validate_order_for_market};
-use crate::settings::EnvSource;
+use crate::commands::orders::vocab::DEFAULT_MARKET_ORDER_SLIPPAGE_BPS;
+use crate::env::EnvSource;
+use crate::http_api::ApiClient;
+use crate::margin::MarginModeArg;
+use crate::network::Network;
 
 fn resolver() -> AssetResolver {
     AssetResolver::new(AssetMetadata::from_assets(
         vec![
             PerpAsset {
-                name: "BTC".to_string(),
-                index: 0,
-                dex: None,
                 sz_decimals: 5,
-                collateral: "USDC".to_string(),
-                margin_rule: MarginRule::CrossOrIsolated,
+                ..perp("BTC", 0)
             },
             hip3_perp("testdex", "HYPE", 11_100),
         ],
         vec![SpotAsset {
-            symbol: "HYPE/USDC".to_string(),
-            index: 11_035,
-            base: "HYPE".to_string(),
-            quote: "USDC".to_string(),
             base_sz_decimals: 2,
+            ..spot_asset("HYPE/USDC", 11_035, "HYPE", "USDC")
         }],
     ))
 }
@@ -40,7 +37,7 @@ fn settings() -> Settings {
 }
 
 async fn prepare(args: &CreateArgs) -> Result<PreparedOrder, CliError> {
-    let client = HttpClient::new(Chain::Testnet);
+    let client = ApiClient::new(Network::Testnet, None);
     prepare_order(
         &client,
         &resolver(),
@@ -227,7 +224,6 @@ fn position_tpsl_batch_applies_custom_cloid_to_first_child_leg() {
     assert_eq!(prepared.legs.len(), 2);
     assert_eq!(prepared.legs[0].request.cloid, cloid);
     assert_eq!(prepared.legs[0].leg, TpslLegKind::TakeProfit);
-    // Stop-loss leg (second child) gets default to avoid duplicates
     assert_eq!(prepared.legs[1].request.cloid, Cloid::default());
     assert_eq!(prepared.legs[1].leg, TpslLegKind::StopLoss);
 }
@@ -361,8 +357,11 @@ async fn spot_sell_builder_fees_are_allowed() {
     let prepared = prepare(&args).await.unwrap();
 
     let builder = prepared.builder.unwrap();
-    assert_eq!(builder.b, "0x1111111111111111111111111111111111111111");
-    assert_eq!(builder.f, 10);
+    assert_eq!(
+        builder.address_wire(),
+        "0x1111111111111111111111111111111111111111"
+    );
+    assert_eq!(builder.tenths_bps(), 10);
 }
 
 #[tokio::test]
@@ -373,8 +372,8 @@ async fn a_perp_builder_fee_above_a_tenth_of_a_percent_is_rejected() {
     args.builder_fee_rate = Some("0.1%".to_string());
     let prepared = prepare(&args).await.unwrap();
     assert_eq!(
-        prepared.builder.unwrap().f,
-        OrderBuilderFee::PERP_MAX_TENTHS_BPS
+        prepared.builder.unwrap().tenths_bps(),
+        crate::builder_fee::FeeCap::PerpOrder.tenths_bps()
     );
 
     args.builder_fee_rate = Some("0.101%".to_string());
@@ -404,7 +403,7 @@ fn scale_args(total_size: Decimal, start: Decimal, end: Decimal, count: usize) -
 async fn prepare_scale(args: &ScaleArgs) -> Result<PreparedOrderBatch, CliError> {
     let ladder = ScaleLadder::from_args(args)?;
     prepare_scale_batch(
-        &HttpClient::new(Chain::Testnet),
+        &ApiClient::new(Network::Testnet, None),
         &resolver(),
         &settings(),
         args,
@@ -638,6 +637,92 @@ fn twap_size_truncates_to_the_market_lot() {
     assert!(err.to_string().contains("truncates to zero"), "{err}");
 }
 
+/// `twap-create` and `twap-cancel` send the SDK's `Action::TwapOrder` and
+/// `TwapCancel`. The exchange verifies the signature over their msgpack, so
+/// the bytes must be those of the documented wire structs below (`s` a
+/// normalized decimal string, `m` a `u64`), although the SDK types `s` as a
+/// `Decimal` and `m` as a `u32`.
+#[test]
+fn the_sdk_twap_actions_serialize_to_the_documented_wire_structs() {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    #[serde(tag = "type", rename_all = "camelCase")]
+    enum Wire {
+        TwapOrder { twap: WireTwap },
+        TwapCancel { a: usize, t: u64 },
+    }
+    #[derive(Serialize)]
+    struct WireTwap {
+        a: usize,
+        b: bool,
+        s: String,
+        r: bool,
+        m: u64,
+        t: bool,
+    }
+
+    // Sizes with trailing zeros, whole numbers, and the largest and smallest
+    // durations: the cases where a decimal or an integer width could differ.
+    for (size, duration, side, randomize) in [
+        (Decimal::new(5, 1), 300, OrderSide::Buy, false),
+        (Decimal::new(500, 3), 600, OrderSide::Sell, true),
+        (Decimal::new(12_345, 5), 3_600, OrderSide::Buy, true),
+        (Decimal::from(100), 604_800, OrderSide::Sell, false),
+        (Decimal::new(100_000, 5), 300, OrderSide::Buy, false),
+    ] {
+        let args = TwapCreateArgs {
+            side,
+            duration,
+            randomize,
+            ..twap_args(size)
+        };
+        let plan = prepare_twap_create_plan(&btc(), &args).unwrap();
+        let wire = Wire::TwapOrder {
+            twap: WireTwap {
+                a: 0,
+                b: side.is_buy(),
+                s: plan.size.normalize().to_string(),
+                r: false,
+                m: duration / 60,
+                t: randomize,
+            },
+        };
+        assert_eq!(
+            rmp_serde::to_vec_named(&plan.action).unwrap(),
+            rmp_serde::to_vec_named(&wire).unwrap(),
+            "msgpack of {size} over {duration}s"
+        );
+        assert_eq!(
+            serde_json::to_string(&plan.action).unwrap(),
+            serde_json::to_string(&wire).unwrap(),
+            "json of {size} over {duration}s"
+        );
+    }
+
+    let cancel = prepare_twap_cancel_plan(
+        &btc(),
+        &TwapCancelArgs {
+            coin: "BTC".to_string(),
+            dex: None,
+            twap_id: 77_738_308,
+            on_behalf_of: None,
+        },
+    );
+    let wire = Wire::TwapCancel {
+        a: 0,
+        t: 77_738_308,
+    };
+    assert_eq!(
+        rmp_serde::to_vec_named(&cancel.action).unwrap(),
+        rmp_serde::to_vec_named(&wire).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_string(&cancel.action).unwrap(),
+        serde_json::to_string(&wire).unwrap()
+    );
+}
+
 fn fixed_tpsl_args(size: Decimal) -> TpslArgs {
     TpslArgs {
         coin: "BTC".to_string(),
@@ -657,7 +742,10 @@ fn fixed_tpsl_args(size: Decimal) -> TpslArgs {
 #[test]
 fn tpsl_fixed_size_truncates_to_the_market_lot_in_the_dry_run_plan() {
     let spec = TpslSpec::from_flags(&fixed_tpsl_args(Decimal::new(123_456_789, 9))).unwrap();
-    let plan = tpsl_dry_run_plan(&btc(), &spec, &None).unwrap().into_args();
+    let margin = MarginPlan::for_market(&btc(), None).unwrap();
+    let plan = tpsl_dry_run_plan(&btc(), &spec, &margin)
+        .unwrap()
+        .into_args();
     assert_eq!(plan["legs"][0]["size"], "0.12345");
     assert_eq!(plan["batch_order"]["orders"][1]["s"], "0.12345");
 }
@@ -688,12 +776,8 @@ fn market_precision_truncates_prices_to_the_tick_grid() {
 fn market_precision_clamps_the_decimal_budget_for_oversized_lots() {
     // szDecimals above the budget leaves no decimals: whole-number prices only.
     let token = PerpAsset {
-        name: "TOKEN".to_string(),
-        index: 1,
-        dex: None,
         sz_decimals: 8,
-        collateral: "USDC".to_string(),
-        margin_rule: MarginRule::CrossOrIsolated,
+        ..perp("TOKEN", 1)
     };
     assert_eq!(
         MarketPrecision::of_perp(&token)
@@ -718,49 +802,229 @@ fn margin_mode_on_a_spot_market_is_rejected_with_one_message() {
     );
 }
 
-fn isolated_only_perp(rule: MarginRule) -> PerpAsset {
-    PerpAsset {
-        margin_rule: rule,
-        ..hip3_perp("xyz", "HOOD", 110_000)
-    }
-}
-
-#[test]
-fn cross_on_an_isolated_only_market_is_unsupported_and_isolated_is_not() {
-    for rule in [
-        MarginRule::IsolatedOnly,
-        MarginRule::NoCross,
-        MarginRule::StrictIsolated,
-    ] {
-        let perp = isolated_only_perp(rule);
-        let err = validate_margin_mode_for_market(&perp, MarginModeArg::Cross).unwrap_err();
-        assert_eq!(err.exit_code(), 13, "{rule:?}");
-        assert!(err.to_string().contains("xyz:HOOD"), "{err}");
-        validate_margin_mode_for_market(&perp, MarginModeArg::Isolated).unwrap();
-    }
-    let open = hip3_perp("xyz", "OPEN", 110_001);
-    validate_margin_mode_for_market(&open, MarginModeArg::Cross).unwrap();
-    validate_margin_mode_for_market(&open, MarginModeArg::Isolated).unwrap();
-}
-
-#[test]
-fn preview_margin_mode_is_the_request_else_the_market_rule_default() {
-    let preview = |perp: Option<&PerpAsset>, requested| {
-        let mut value = serde_json::json!({});
-        insert_margin_mode(&mut value, perp, requested);
-        value["margin_mode"].clone()
+#[tokio::test]
+async fn a_perp_order_carries_the_margin_plan_its_preview_shows() {
+    let planned = |margin_mode| {
+        let mut args = base_args();
+        args.margin_mode = margin_mode;
+        async move { prepare(&args).await.unwrap().margin.unwrap() }
     };
-    let open = btc();
-    let strict = isolated_only_perp(MarginRule::StrictIsolated);
+    let open = planned(None).await;
+    assert_eq!(open.mode(), MarginModeArg::Cross);
+    assert_eq!(open.source(), crate::margin::MarginSource::MarketRule);
+    let asked = planned(Some(MarginModeArg::Isolated)).await;
+    assert_eq!(asked.mode(), MarginModeArg::Isolated);
+    assert_eq!(asked.source(), crate::margin::MarginSource::Requested);
 
-    assert_eq!(preview(Some(&open), None), "cross");
-    assert_eq!(preview(Some(&strict), None), "isolated");
+    let spot = resolver().resolve("HYPE/USDC").unwrap();
+    let spot_order = validate_order_for_market(
+        &OrderSpec::from_create(&{
+            let mut args = base_args();
+            args.coin = "HYPE/USDC".to_string();
+            args
+        })
+        .unwrap(),
+        &spot,
+    )
+    .unwrap();
+    assert!(spot_order.is_none());
+}
+
+#[test]
+fn a_spot_pair_is_looked_up_in_all_mids_by_its_info_coin() {
+    // `allMids` lists PURR/USDC by name and every other pair as `@<index>`.
+    let spot = |symbol: &str, index: usize, base: &str| {
+        Market::Spot(SpotAsset {
+            base_sz_decimals: 2,
+            ..spot_asset(symbol, index, base, "USDC")
+        })
+    };
+    let key = |market: &Market| mid_key(market, "x", None).unwrap().0;
+    assert_eq!(key(&spot("PURR/USDC", 10_000, "PURR")), "PURR/USDC");
+    assert_eq!(key(&spot("HYPE/USDC", 11_035, "HYPE")), "@1035");
+    assert_eq!(key(&Market::Perp(btc())), "BTC");
     assert_eq!(
-        preview(Some(&open), Some(MarginModeArg::Isolated)),
-        "isolated"
+        mid_key(&Market::Outcome(OutcomeAsset::new("#10")), "#10", None)
+            .unwrap_err()
+            .exit_code(),
+        13
     );
-    assert_eq!(preview(Some(&strict), Some(MarginModeArg::Cross)), "cross");
-    assert_eq!(preview(None, None), "cross");
+}
+
+#[test]
+fn trigger_prices_resolve_without_an_entry_only_when_every_one_is_absolute() {
+    let absolute = TriggerPriceSpec::Absolute(Decimal::from(55));
+    let (tp, sl) = resolve_trigger_prices(Some(&absolute), None, None, OrderSide::Buy).unwrap();
+    assert_eq!((tp, sl), (Some(Decimal::from(55)), None));
+    for spec in [
+        TriggerPriceSpec::Entry,
+        TriggerPriceSpec::Percent(Decimal::from(5)),
+    ] {
+        let err =
+            resolve_trigger_prices(Some(&absolute), Some(&spec), None, OrderSide::Buy).unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert!(
+            err.to_string()
+                .contains("open position with an entry price"),
+            "{err}"
+        );
+    }
+    let (_, sl) = resolve_trigger_prices(
+        None,
+        Some(&TriggerPriceSpec::Percent(Decimal::from(-5))),
+        Some(Decimal::from(100)),
+        OrderSide::Buy,
+    )
+    .unwrap();
+    assert_eq!(sl, Some(Decimal::from(95)));
+}
+
+mod trailing_stop {
+    use clap::Parser;
+
+    use super::*;
+    use crate::commands::orders::args::parse_retracement_pct;
+
+    #[derive(Parser)]
+    struct Harness {
+        #[command(flatten)]
+        args: TrailingStopArgs,
+    }
+
+    fn parse(extra: &[&str]) -> Result<TrailingStopArgs, clap::Error> {
+        let mut argv = vec![
+            "harness", "--coin", "BTC", "--side", "sell", "--size", "0.01",
+        ];
+        argv.extend_from_slice(extra);
+        Harness::try_parse_from(argv).map(|harness| harness.args)
+    }
+
+    fn plan_for(args: &TrailingStopArgs) -> Result<TrailingStopPlan, CliError> {
+        let perp = resolver().resolve_perp(&qualify_dex_asset(args.dex.as_deref(), &args.coin))?;
+        prepare_trailing_stop_plan(&perp, args)
+    }
+
+    #[test]
+    fn percent_parser_accepts_plain_and_suffixed_values() {
+        assert_eq!(parse_retracement_pct("5"), Ok(Decimal::from(5)));
+        assert_eq!(parse_retracement_pct("5%"), Ok(Decimal::from(5)));
+        assert_eq!(
+            parse_retracement_pct(" 1.234 % "),
+            Ok(Decimal::new(1234, 3))
+        );
+        assert!(parse_retracement_pct("five").is_err());
+        assert!(parse_retracement_pct("%").is_err());
+    }
+
+    #[test]
+    fn percent_must_be_between_zero_and_one_hundred_exclusive() {
+        for bad in ["0", "-1", "100", "250"] {
+            let args = parse(&["--retracement-pct", bad]).unwrap();
+            let err = validate_trailing_stop_args(&args).unwrap_err();
+            assert!(matches!(err, CliError::Configuration(_)), "{bad}: {err}");
+            assert_eq!(err.exit_code(), 2);
+        }
+        for good in ["0.1", "5", "99.99"] {
+            let args = parse(&["--retracement-pct", good]).unwrap();
+            validate_trailing_stop_args(&args).unwrap();
+        }
+    }
+
+    #[test]
+    fn price_distances_and_activation_must_be_positive() {
+        let cases: [(&[&str], Decimal, &str); 4] = [
+            (
+                &["--retracement-px", "0"],
+                Decimal::new(1, 2),
+                "--retracement-px",
+            ),
+            (
+                &["--retracement-px", "-5"],
+                Decimal::new(1, 2),
+                "--retracement-px",
+            ),
+            (
+                &["--retracement-px", "5", "--activation-price", "0"],
+                Decimal::new(1, 2),
+                "--activation-price",
+            ),
+            (&["--retracement-px", "5"], Decimal::ZERO, "--size"),
+        ];
+        for (extra, size, flag) in cases {
+            let mut args = parse(extra).unwrap();
+            args.size = size;
+            let err = validate_trailing_stop_args(&args).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{extra:?}");
+            assert!(
+                err.to_string()
+                    .contains(&format!("{flag} must be greater than zero")),
+                "{extra:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_serializes_the_documented_wire_shape() {
+        use hypersdk::hypercore::types::Action;
+
+        let args = parse(&["--retracement-pct", "5.0", "--reduce-only"]).unwrap();
+        let plan = plan_for(&args).unwrap();
+        assert_eq!(
+            serde_json::to_value(Action::TrailingStop(plan.action().clone())).unwrap(),
+            serde_json::json!({
+                "type": "trailingStop",
+                "asset": 0,
+                "isBuy": false,
+                "sz": "0.01",
+                "reduceOnly": true,
+                "retracement": { "pct": "5%" },
+                "activationPx": null,
+            })
+        );
+
+        let args = parse(&["--retracement-px", "150", "--activation-price", "60000.50"]).unwrap();
+        let plan = plan_for(&args).unwrap();
+        assert_eq!(
+            serde_json::to_value(Action::TrailingStop(plan.action().clone())).unwrap(),
+            serde_json::json!({
+                "type": "trailingStop",
+                "asset": 0,
+                "isBuy": false,
+                "sz": "0.01",
+                "reduceOnly": false,
+                "retracement": { "px": "150" },
+                "activationPx": "60000",
+            })
+        );
+    }
+
+    #[test]
+    fn size_truncates_to_the_market_lot_and_rejects_zero() {
+        let mut args = parse(&["--retracement-pct", "5"]).unwrap();
+        args.size = Decimal::new(1_234_567, 6);
+        let plan = plan_for(&args).unwrap();
+        assert_eq!(plan.size(), Decimal::new(123_456, 5));
+
+        args.size = Decimal::new(1, 8);
+        let err = plan_for(&args)
+            .err()
+            .expect("size below the lot truncates to zero");
+        assert!(err.to_string().contains("truncates to zero"), "{err}");
+    }
+
+    #[test]
+    fn hip3_perps_resolve_through_dex_or_qualified_coin() {
+        let mut args = parse(&["--retracement-pct", "5"]).unwrap();
+        args.coin = "HYPE".to_string();
+        args.dex = Some("testdex".to_string());
+        let plan = plan_for(&args).unwrap();
+        assert_eq!(plan.coin(), "testdex:HYPE");
+        assert_eq!(plan.action().asset, 11_100);
+
+        args.coin = "testdex:HYPE".to_string();
+        args.dex = None;
+        assert_eq!(plan_for(&args).unwrap().action().asset, 11_100);
+    }
 }
 
 #[tokio::test]

@@ -7,16 +7,29 @@
 
 use std::sync::OnceLock;
 
-use super::terminal::{self, Terminal};
-use crate::settings::{EnvSource, env as settings_env};
+use crate::env::{self, EnvSource};
+use crate::terminal::Terminal;
 
-pub const CYAN: &str = "\x1b[36m";
-pub const GREEN: &str = "\x1b[32m";
-pub const RED: &str = "\x1b[31m";
-pub const GRAY: &str = "\x1b[90m";
-pub const YELLOW: &str = "\x1b[33m";
-pub const BOLD: &str = "\x1b[1m";
-pub const RESET: &str = "\x1b[0m";
+macro_rules! style_codes {
+    ($($name:ident = $code:literal),+ $(,)?) => {
+        $(pub const $name: &str = $code;)+
+
+        /// Every style sequence the helpers here can emit. Table sanitising
+        /// lets exactly these through, so a new style appears here by being
+        /// declared.
+        pub const ALL_STYLES: &[&str] = &[$($name),+];
+    };
+}
+
+style_codes! {
+    CYAN = "\x1b[36m",
+    GREEN = "\x1b[32m",
+    RED = "\x1b[31m",
+    GRAY = "\x1b[90m",
+    YELLOW = "\x1b[33m",
+    BOLD = "\x1b[1m",
+    RESET = "\x1b[0m",
+}
 
 /// Wrap `text` in `code` unconditionally. Styling decisions belong to the
 /// helpers below; tests use this to assert styled output deterministically.
@@ -86,14 +99,12 @@ pub fn init(no_color_flag: bool, env: &EnvSource, terminal: Terminal) {
 
 fn resolve(no_color_flag: bool, env: &EnvSource, terminal: Terminal) -> (bool, bool) {
     let no_color_env = env
-        .get_os(settings_env::NO_COLOR)
+        .get_os(env::NO_COLOR)
         .is_some_and(|value| !value.is_empty());
-    let dumb = env
-        .get(settings_env::TERM)
-        .is_some_and(|term| term == "dumb");
+    let dumb = env.get(env::TERM).is_some_and(|term| term == "dumb");
     decide(
         no_color_flag || no_color_env,
-        terminal::env_flag(env, settings_env::FORCE_COLOR),
+        env::flag(env, env::FORCE_COLOR),
         dumb,
         (terminal.stdout, terminal.stderr),
     )
@@ -105,14 +116,14 @@ fn resolve(no_color_flag: bool, env: &EnvSource, terminal: Terminal) -> (bool, b
 /// off one (`0`, `false`, `no`, `off`) forces color, so `FORCE_COLOR=2` works.
 fn decide(
     disabled: bool,
-    force: terminal::EnvFlag,
+    force: env::EnvFlag,
     dumb_terminal: bool,
     is_terminal: (bool, bool),
 ) -> (bool, bool) {
     if disabled {
         return (false, false);
     }
-    if force != terminal::EnvFlag::Unset {
+    if force != env::EnvFlag::Unset {
         let on = force.on_unless_off();
         return (on, on);
     }
@@ -128,7 +139,7 @@ thread_local! {
 }
 
 /// Unit tests never inherit the developer's terminal or environment: until a
-/// test opts in with [`with_streams_for_test`], nothing is styled.
+/// test opts in with `with_streams_for_test`, nothing is styled.
 fn streams() -> (bool, bool) {
     #[cfg(test)]
     if let Some(streams) = TEST_STREAMS.with(std::cell::Cell::get) {
@@ -201,11 +212,11 @@ mod tests {
     fn force_color_follows_the_shared_flag_parser() {
         let ttys = (false, false);
         for on in ["1", "true", "YES", "on", "2", "3"] {
-            let force = terminal::parse_flag(on);
+            let force = env::parse_flag(on);
             assert_eq!(decide(false, force, false, ttys), (true, true), "{on}");
         }
         for off in ["0", "false", "no", "OFF"] {
-            let force = terminal::parse_flag(off);
+            let force = env::parse_flag(off);
             assert_eq!(
                 decide(false, force, false, (true, true)),
                 (false, false),
@@ -216,10 +227,10 @@ mod tests {
 
     #[test]
     fn disabling_beats_forcing_and_terminals_decide_the_rest() {
-        let force = terminal::parse_flag("1");
+        let force = env::parse_flag("1");
         assert_eq!(decide(true, force, false, (true, true)), (false, false));
 
-        let unset = terminal::parse_flag("");
+        let unset = env::parse_flag("");
         assert_eq!(decide(false, unset, false, (true, false)), (true, false));
         assert_eq!(decide(false, unset, true, (true, true)), (false, false));
     }

@@ -8,6 +8,7 @@
 mod classify;
 mod envelope;
 mod recovery;
+mod refusal;
 mod spec;
 mod transport;
 
@@ -15,33 +16,31 @@ use thiserror::Error;
 
 use crate::response_sanitization::Untrusted;
 
+pub(crate) use classify::from_sdk;
 pub use classify::{
-    Refusal, Rejection, address_rate_limit_in_body, classify_rejection, from_anyhow,
-    from_exchange_rejection, from_sdk, http_response_indicates_rate_limit, is_server_status,
+    Rejection, address_rate_limit_in_body, classify_rejection, from_anyhow,
+    from_exchange_rejection, http_response_indicates_rate_limit, http_status_in_text,
+    is_server_status,
 };
 pub use envelope::{ErrorEnvelope, UsageParts, partial_results_fields};
 pub use recovery::NextCommand;
+pub use refusal::Refusal;
 pub use spec::StdoutDocument;
 pub use transport::{network_error, transport_cause};
 
 #[derive(Error, Debug)]
 pub enum CliError {
-    /// Unexpected internal error (exit 1).
-    ///
     /// Wraps anyhow errors from any part of the application. Build one that
     /// quotes remote text with [`CliError::internal_with_remote`].
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
 
-    /// The exchange answered and rejected the action (exit 1).
     #[error("{context}: {remote}")]
     ExchangeRejected {
         context: &'static str,
         remote: Untrusted,
     },
 
-    /// A run that can't prompt reached a required confirmation (exit 13).
-    ///
     /// `preview` is a runnable `--dry-run` command; `approve` is the same
     /// command with `--yes`, offered only for use after a human approves.
     #[error("{headline}")]
@@ -51,41 +50,38 @@ pub enum CliError {
         approve: Option<String>,
     },
 
-    /// Invalid CLI configuration, config file, or environment setting (exit 2).
+    /// Invalid CLI configuration, config file, or environment setting.
     #[error("Configuration error: {0}")]
     Configuration(String),
 
-    /// Required input is missing and this invocation can't prompt for it (exit 2).
+    /// Required input is missing and this invocation can't prompt for it.
     #[error("{0}")]
     MissingInput(String),
 
-    /// No wallet or private key configured (exit 10).
+    /// No wallet or private key configured.
     #[error("Authentication required.")]
     AuthRequired,
 
-    /// Invalid key format or expired credentials (exit 10).
+    /// Invalid key format or expired credentials.
     #[error("Invalid authentication: {0}")]
     InvalidAuth(String),
 
-    /// A remote service rejected the credentials (exit 10).
+    /// A remote service rejected the credentials.
     #[error("Invalid authentication: {0}")]
     AuthRejected(Untrusted),
 
     /// The exchange could not find the signer: the signature recovered to an
-    /// address that is neither a user nor an approved API wallet (exit 10).
+    /// address that is neither a user nor an approved API wallet.
     #[error("Invalid authentication: {0}")]
     SignerNotRegistered(Untrusted),
 
-    /// OWS wallet not found in vault (exit 10).
     #[error("OWS wallet '{wallet}' was not found")]
     OwsWalletNotFound { wallet: String },
 
-    /// OWS wallet has no Hyperliquid or EVM account for signer resolution (exit 10).
+    /// OWS wallet has no Hyperliquid or EVM account for signer resolution.
     #[error("OWS wallet '{wallet}' has no Hyperliquid ({caip2}) or EVM (eip155:1) account")]
     OwsNoChainAccount { wallet: String, caip2: String },
 
-    /// Hyperliquid API returned a rate-limit response (exit 11).
-    ///
     /// `retry_after` is the `Retry-After` header in seconds when present.
     /// `retryable` is true only for reads, which are safe to resend.
     /// Build the no-information form with [`CliError::rate_limited`].
@@ -95,19 +91,17 @@ pub enum CliError {
         retryable: bool,
     },
 
-    /// The address spent its request budget (exit 11). The exchange answers
+    /// The address spent its request budget. The exchange answers
     /// this with HTTP 200 and its own counts, which the message quotes.
     #[error(
         "Too many requests from this address: its request allowance is used up. Exchange said: {0}"
     )]
     AddressRateLimited(Untrusted),
 
-    /// Network or API unreachable. The message is complete user-facing copy (exit 12).
+    /// Network or API unreachable. The message is complete user-facing copy.
     #[error("{0}")]
     Unavailable(String),
 
-    /// The API answered with a failure status (exit 12).
-    ///
     /// The server was reached, so this is not a connectivity problem. The
     /// status goes in [`CliError::detail`], not in the headline.
     #[error("{}", api_status_headline(*.status))]
@@ -118,51 +112,36 @@ pub enum CliError {
         remote: Option<Untrusted>,
     },
 
-    /// Operation exceeded a requested timeout (exit 12).
     #[error("{0}")]
     Timeout(String),
 
-    /// A mutation request was sent but its result is unknown (exit 12).
-    ///
-    /// Construct with [`CliError::unknown_outcome`].
+    /// A mutation request was sent but its result is unknown. Construct with
+    /// [`CliError::unknown_outcome`].
     #[error("Can't confirm whether the exchange applied this action. {0}")]
     UnknownOutcome(String),
 
-    /// Unsupported / invalid input (exit 13).
     #[error("Unsupported input: {0}")]
     Unsupported(String),
 
-    /// The exchange refused an order with one of its documented messages (exit
-    /// 13). `text` is the complete message, ending with the labelled remote text.
+    /// The exchange refused an order with one of its documented messages.
+    /// `text` is the complete message, ending with the labelled remote text.
     #[error("Unsupported input: {text}")]
     ExchangeRefused { refusal: Refusal, text: String },
 
-    /// Asset not found with a close-match suggestion (exit 13).
     #[error("Couldn't find asset \"{asset}\". Did you mean {suggestions}?")]
     AssetNotFound {
-        /// The asset name the user typed.
         asset: String,
         /// The single closest match.
         suggestions: String,
     },
 
-    /// Asset not found with no close suggestions (exit 13).
     #[error("Couldn't find asset \"{asset}\".")]
-    AssetNotFoundNoSuggestion {
-        /// The asset name the user typed.
-        asset: String,
-    },
+    AssetNotFoundNoSuggestion { asset: String },
 
-    /// Partial success in a batch operation (exit 15).
+    /// Partial success in a batch operation.
     #[error("Partial results: {0}")]
     PartialResults(String),
 }
-
-/// The address-based limit lets a spent address send one request every 10
-/// seconds.
-const ADDRESS_LIMIT_RETRY_AFTER_SECS: u64 = 10;
-
-const ADDRESS_RATE_LIMIT_HINT: &str = "Each address earns 1 request per USDC of cumulative volume traded, on top of a 10000-request starting buffer. Once that is spent it may send one request every 10 seconds; cancels have a higher cap, so open orders can still be canceled. Trade (taker fills) to free requests, or buy capacity with the `reserveRequestWeight` action (0.0005 USDC per request). `hyperliquid account rate-limit` shows the address's usage.";
 
 fn rate_limit_hint(retry_after: &Option<u64>) -> String {
     match retry_after {
@@ -179,6 +158,27 @@ fn api_status_headline(status: u16) -> &'static str {
     }
 }
 
+/// Every text in the error system that tells a person or agent to run a
+/// command: agent actions, hints, recovery commands and the outcome-notation
+/// advice. The registry test resolves the `hyperliquid <words>` in them.
+#[cfg(test)]
+pub(crate) fn command_advice() -> Vec<String> {
+    let mut texts = Vec::new();
+    for spec in spec::catalog_specs()
+        .into_iter()
+        .chain([&spec::ADDRESS_RATE_LIMITED])
+    {
+        texts.push(spec.agent_action.to_string());
+        texts.extend(spec.hint.map(str::to_string));
+    }
+    let recoveries = [CliError::AuthRequired, CliError::unknown_outcome("x")];
+    for recovery in recoveries.iter().filter_map(CliError::recovery) {
+        texts.extend(recovery.commands.into_iter().map(|next| next.command));
+    }
+    texts.push(CliError::unsupported_outcome_notation("#1").to_string());
+    texts
+}
+
 impl CliError {
     /// The spec constant for this variant: the only place a variant gets its
     /// exit code, category, reason and retry policy.
@@ -193,7 +193,8 @@ impl CliError {
             Self::SignerNotRegistered(_) => &spec::SIGNER_NOT_REGISTERED,
             Self::OwsWalletNotFound { .. } => &spec::WALLET_NOT_FOUND,
             Self::OwsNoChainAccount { .. } => &spec::WALLET_ACCOUNT_MISSING,
-            Self::RateLimited { .. } | Self::AddressRateLimited(_) => &spec::RATE_LIMITED,
+            Self::RateLimited { .. } => &spec::RATE_LIMITED,
+            Self::AddressRateLimited(_) => &spec::ADDRESS_RATE_LIMITED,
             Self::Unavailable(_) => &spec::NETWORK_ERROR,
             Self::ApiStatus { .. } => &spec::API_ERROR,
             Self::Timeout(_) => &spec::TIMEOUT,
@@ -213,13 +214,14 @@ impl CliError {
         self.spec().exit_code
     }
 
-    /// Stable high-level category for JSON error envelopes.
+    #[cfg(test)]
     #[must_use]
     pub fn category(&self) -> &'static str {
         self.spec().category
     }
 
     /// Stable snake_case reason code for JSON error envelopes.
+    #[cfg(test)]
     #[must_use]
     pub fn reason(&self) -> &'static str {
         self.spec().reason
@@ -250,13 +252,13 @@ impl CliError {
         }
     }
 
-    /// Seconds to wait before retrying, from `Retry-After`.
+    /// Seconds to wait before retrying: the `Retry-After` header of a rate
+    /// limit, or the wait its spec names.
     #[must_use]
     pub fn retry_after(&self) -> Option<u64> {
         match self {
             Self::RateLimited { retry_after, .. } => *retry_after,
-            Self::AddressRateLimited(_) => Some(ADDRESS_LIMIT_RETRY_AFTER_SECS),
-            _ => None,
+            _ => self.spec().retry_after_secs,
         }
     }
 
@@ -325,16 +327,12 @@ impl CliError {
         }
     }
 
-    /// What to do about this failure, for the refusals that have a specific
-    /// answer. The JSON envelope carries it as `data.hint`.
+    /// What to do about this failure, for the failures that have a specific
+    /// answer: the refusals, an unregistered signer, the address rate limit.
+    /// The JSON envelope carries it as `data.hint`.
     #[must_use]
     pub fn hint(&self) -> Option<&'static str> {
-        match self {
-            Self::ExchangeRefused { refusal, .. } => Some(refusal.spec().agent_action),
-            Self::SignerNotRegistered(_) => Some(spec::SIGNER_NOT_REGISTERED.agent_action),
-            Self::AddressRateLimited(_) => Some(ADDRESS_RATE_LIMIT_HINT),
-            _ => None,
-        }
+        self.spec().hint
     }
 
     /// Outcome asset notation given to a command that only trades or reads perp
@@ -342,7 +340,8 @@ impl CliError {
     #[must_use]
     pub fn unsupported_outcome_notation(raw: &str) -> Self {
         Self::Unsupported(format!(
-            "outcome asset notation '{raw}' requires an outcome-aware command path; use `hyperliquid outcomes get {raw}` to inspect the encoded HIP-4 asset id. Live limit orders support outcome notation."
+            "outcome asset notation '{raw}' requires an outcome-aware command path; use `{}` to inspect the encoded HIP-4 asset id. Live limit orders support outcome notation.",
+            crate::hints::outcome_get_command(raw)
         ))
     }
 
@@ -386,102 +385,119 @@ mod tests {
         assert!(matches!(err, CliError::ApiStatus { status: 404, .. }));
     }
 
-    fn every_variant() -> Vec<CliError> {
+    /// One error per variant, paired with the spec it must report.
+    fn variant_specs() -> Vec<(CliError, &'static spec::Spec)> {
+        let remote = |text: &str| Untrusted::from_remote(text);
         let mut variants = vec![
-            CliError::Internal(anyhow::anyhow!("test")),
-            CliError::ExchangeRejected {
-                context: "order rejected",
-                remote: Untrusted::from_remote("rejected"),
-            },
-            CliError::ConfirmationRequired {
-                headline: "needs confirmation".into(),
-                preview: None,
-                approve: None,
-            },
-            CliError::Configuration("bad config".into()),
-            CliError::MissingInput("missing".into()),
-            CliError::AuthRequired,
-            CliError::InvalidAuth("bad key".into()),
-            CliError::AuthRejected(Untrusted::from_remote("Unauthorized")),
-            CliError::SignerNotRegistered(Untrusted::from_remote(
-                "User or API Wallet 0x1 does not exist.",
-            )),
-            CliError::OwsWalletNotFound {
-                wallet: "missing-wallet".into(),
-            },
-            CliError::OwsNoChainAccount {
-                wallet: "wallet-without-account".into(),
-                caip2: "hl:testnet".into(),
-            },
-            CliError::rate_limited(),
-            CliError::RateLimited {
-                retry_after: Some(3),
-                retryable: true,
-            },
-            CliError::AddressRateLimited(Untrusted::from_remote(
-                "Too many cumulative requests sent",
-            )),
-            CliError::Unavailable("timeout".into()),
-            CliError::api_status(reqwest::StatusCode::BAD_GATEWAY, "body"),
-            CliError::Timeout("deadline exceeded".into()),
-            CliError::unknown_outcome("cause"),
-            CliError::Unsupported("bad".into()),
-            CliError::AssetNotFound {
-                asset: "BT".into(),
-                suggestions: "BTC".into(),
-            },
-            CliError::AssetNotFoundNoSuggestion { asset: "ZZ".into() },
-            CliError::PartialResults("half".into()),
+            (CliError::Internal(anyhow::anyhow!("test")), &spec::INTERNAL),
+            (
+                CliError::ExchangeRejected {
+                    context: "order rejected",
+                    remote: remote("rejected"),
+                },
+                &spec::EXCHANGE_REJECTED,
+            ),
+            (
+                CliError::ConfirmationRequired {
+                    headline: "needs confirmation".into(),
+                    preview: None,
+                    approve: None,
+                },
+                &spec::CONFIRMATION_REQUIRED,
+            ),
+            (
+                CliError::Configuration("bad config".into()),
+                &spec::INVALID_CONFIG,
+            ),
+            (
+                CliError::MissingInput("missing".into()),
+                &spec::MISSING_INPUT,
+            ),
+            (CliError::AuthRequired, &spec::AUTH_REQUIRED),
+            (CliError::InvalidAuth("bad key".into()), &spec::INVALID_AUTH),
+            (
+                CliError::AuthRejected(remote("Unauthorized")),
+                &spec::INVALID_AUTH,
+            ),
+            (
+                CliError::SignerNotRegistered(remote("User or API Wallet 0x1 does not exist.")),
+                &spec::SIGNER_NOT_REGISTERED,
+            ),
+            (
+                CliError::OwsWalletNotFound {
+                    wallet: "missing-wallet".into(),
+                },
+                &spec::WALLET_NOT_FOUND,
+            ),
+            (
+                CliError::OwsNoChainAccount {
+                    wallet: "wallet-without-account".into(),
+                    caip2: "hl:testnet".into(),
+                },
+                &spec::WALLET_ACCOUNT_MISSING,
+            ),
+            (CliError::rate_limited(), &spec::RATE_LIMITED),
+            (
+                CliError::RateLimited {
+                    retry_after: Some(3),
+                    retryable: true,
+                },
+                &spec::RATE_LIMITED,
+            ),
+            (
+                CliError::AddressRateLimited(remote("Too many cumulative requests sent")),
+                &spec::ADDRESS_RATE_LIMITED,
+            ),
+            (
+                CliError::Unavailable("timeout".into()),
+                &spec::NETWORK_ERROR,
+            ),
+            (
+                CliError::api_status(reqwest::StatusCode::BAD_GATEWAY, "body"),
+                &spec::API_ERROR,
+            ),
+            (
+                CliError::Timeout("deadline exceeded".into()),
+                &spec::TIMEOUT,
+            ),
+            (CliError::unknown_outcome("cause"), &spec::UNKNOWN_OUTCOME),
+            (
+                CliError::Unsupported("bad".into()),
+                &spec::UNSUPPORTED_INPUT,
+            ),
+            (
+                CliError::AssetNotFound {
+                    asset: "BT".into(),
+                    suggestions: "BTC".into(),
+                },
+                &spec::ASSET_NOT_FOUND,
+            ),
+            (
+                CliError::AssetNotFoundNoSuggestion { asset: "ZZ".into() },
+                &spec::ASSET_NOT_FOUND,
+            ),
+            (
+                CliError::PartialResults("half".into()),
+                &spec::PARTIAL_FAILURE,
+            ),
         ];
-        variants.extend(
-            Refusal::ALL
-                .map(|refusal| CliError::refused(refusal, "lead: ", &Untrusted::from_remote("x"))),
-        );
+        variants.extend(Refusal::ALL.iter().map(|refusal| {
+            (
+                CliError::refused(*refusal, "lead: ", &remote("x")),
+                refusal.spec(),
+            )
+        }));
         variants
     }
 
+    fn every_variant() -> Vec<CliError> {
+        variant_specs().into_iter().map(|(err, _)| err).collect()
+    }
+
     #[test]
-    fn spec_table_gives_each_variant_its_exit_code_category_and_reason() {
-        let expected = [
-            (1, "internal", "internal_error"),
-            (1, "internal", "exchange_rejected"),
-            (13, "unsupported", "confirmation_required"),
-            (2, "configuration", "invalid_config"),
-            (2, "missing_input", "missing_input"),
-            (10, "auth", "auth_required"),
-            (10, "auth", "invalid_auth"),
-            (10, "auth", "invalid_auth"),
-            (10, "auth", "signer_not_registered"),
-            (10, "auth", "wallet_not_found"),
-            (10, "auth", "wallet_account_missing"),
-            (11, "rate_limited", "rate_limited"),
-            (11, "rate_limited", "rate_limited"),
-            (11, "rate_limited", "rate_limited"),
-            (12, "unavailable", "network_error"),
-            (12, "unavailable", "api_error"),
-            (12, "unavailable", "timeout"),
-            (12, "unavailable", "unknown_outcome"),
-            (13, "unsupported", "unsupported_input"),
-            (13, "unsupported", "asset_not_found"),
-            (13, "unsupported", "asset_not_found"),
-            (15, "partial_results", "partial_failure"),
-            (13, "unsupported", "order_below_minimum_value"),
-            (13, "unsupported", "reduce_only_violation"),
-            (13, "unsupported", "post_only_would_cross"),
-            (13, "unsupported", "ioc_no_match"),
-            (13, "unsupported", "bad_price"),
-            (13, "unsupported", "price_out_of_band"),
-            (13, "unsupported", "zero_size"),
-            (13, "unsupported", "open_interest_cap"),
-            (13, "unsupported", "invalid_trigger_price"),
-            (13, "unsupported", "no_market_liquidity"),
-        ];
-        let variants = every_variant();
-        assert_eq!(variants.len(), expected.len());
-        for (err, (exit_code, category, reason)) in variants.iter().zip(expected) {
-            assert_eq!(err.exit_code(), exit_code, "{err:?}");
-            assert_eq!(err.category(), category, "{err:?}");
-            assert_eq!(err.reason(), reason, "{err:?}");
+    fn each_variant_reports_its_spec() {
+        for (err, spec) in variant_specs() {
+            assert_eq!(err.spec(), spec, "{err:?}");
         }
     }
 
@@ -525,48 +541,40 @@ mod tests {
     }
 
     #[test]
-    fn display_remote_text_is_labelled() {
-        let rejected = CliError::ExchangeRejected {
-            context: "order rejected",
-            remote: Untrusted::from_remote("Order must have minimum value of $10."),
-        };
-        assert_eq!(
-            rejected.to_string(),
-            "order rejected: [untrusted remote data] Order must have minimum value of $10."
-        );
-        let auth = CliError::AuthRejected(Untrusted::from_remote("Unauthorized"));
-        assert_eq!(
-            auth.to_string(),
-            "Invalid authentication: [untrusted remote data] Unauthorized"
-        );
-    }
-
-    #[test]
-    fn display_of_the_exchange_classes_keeps_the_remote_text_labelled() {
-        let remote = Untrusted::from_remote("Reduce only order would increase position.");
-        assert_eq!(
-            CliError::refused(
-                Refusal::ReduceOnly,
-                "Couldn't place order. Exchange said: ",
-                &remote
-            )
-            .to_string(),
-            "Unsupported input: Couldn't place order. Exchange said: [untrusted remote data] Reduce only order would increase position."
-        );
-        let signer = CliError::SignerNotRegistered(Untrusted::from_remote(
-            "User or API Wallet 0x1 does not exist.",
-        ));
-        assert_eq!(
-            signer.to_string(),
-            "Invalid authentication: [untrusted remote data] User or API Wallet 0x1 does not exist."
-        );
-        let address = CliError::AddressRateLimited(Untrusted::from_remote(
-            "Too many cumulative requests sent (2 > 1)",
-        ));
-        assert_eq!(
-            address.to_string(),
-            "Too many requests from this address: its request allowance is used up. Exchange said: [untrusted remote data] Too many cumulative requests sent (2 > 1)"
-        );
+    fn display_keeps_remote_text_labelled() {
+        let remote = Untrusted::from_remote;
+        let cases = [
+            (
+                CliError::ExchangeRejected {
+                    context: "order rejected",
+                    remote: remote("Order must have minimum value of $10."),
+                },
+                "order rejected: [untrusted remote data] Order must have minimum value of $10.",
+            ),
+            (
+                CliError::AuthRejected(remote("Unauthorized")),
+                "Invalid authentication: [untrusted remote data] Unauthorized",
+            ),
+            (
+                CliError::refused(
+                    Refusal::ReduceOnly,
+                    "Couldn't place order. Exchange said: ",
+                    &remote("Reduce only order would increase position."),
+                ),
+                "Unsupported input: Couldn't place order. Exchange said: [untrusted remote data] Reduce only order would increase position.",
+            ),
+            (
+                CliError::SignerNotRegistered(remote("User or API Wallet 0x1 does not exist.")),
+                "Invalid authentication: [untrusted remote data] User or API Wallet 0x1 does not exist.",
+            ),
+            (
+                CliError::AddressRateLimited(remote("Too many cumulative requests sent (2 > 1)")),
+                "Too many requests from this address: its request allowance is used up. Exchange said: [untrusted remote data] Too many cumulative requests sent (2 > 1)",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
     }
 
     #[test]
@@ -578,7 +586,8 @@ mod tests {
         .into_iter()
         .chain(
             Refusal::ALL
-                .map(|refusal| CliError::refused(refusal, "", &Untrusted::from_remote("x"))),
+                .iter()
+                .map(|refusal| CliError::refused(*refusal, "", &Untrusted::from_remote("x"))),
         );
         for err in hinted {
             assert!(err.hint().is_some(), "{err:?}");
@@ -598,32 +607,44 @@ mod tests {
     }
 
     #[test]
-    fn the_address_limit_names_its_wait_and_never_claims_a_resend_is_safe() {
+    fn the_address_limit_is_a_rate_limit_that_names_its_wait_and_never_claims_a_resend_is_safe() {
+        let plain = CliError::rate_limited();
         let err = CliError::AddressRateLimited(Untrusted::from_remote("x"));
+        assert_eq!(err.reason(), plain.reason());
+        assert_eq!(err.exit_code(), plain.exit_code());
         assert_eq!(err.retry_after(), Some(10));
         assert_eq!(err.retryable(), None);
     }
 
     #[test]
-    fn every_variant_reports_a_cataloged_spec() {
+    fn every_variant_reports_a_cataloged_reason() {
+        let catalog = spec::catalog_specs();
         for err in every_variant() {
-            assert!(spec::ALL.contains(&err.spec()), "{err:?}");
+            assert!(
+                catalog.iter().any(|spec| spec.reason == err.reason()),
+                "{err:?}"
+            );
         }
     }
 
     #[test]
     fn catalog_lists_each_reason_once_and_every_listed_spec_is_reachable() {
-        let mut reasons = spec::ALL.iter().map(|spec| spec.reason).collect::<Vec<_>>();
+        let catalog = spec::catalog_specs();
+        let mut reasons = catalog.iter().map(|spec| spec.reason).collect::<Vec<_>>();
         reasons.sort_unstable();
         let listed = reasons.len();
         reasons.dedup();
-        assert_eq!(reasons.len(), listed, "a reason appears twice in spec::ALL");
+        assert_eq!(
+            reasons.len(),
+            listed,
+            "a reason appears twice in the catalog"
+        );
 
         let usage = [&spec::INVALID_ARGUMENTS, &spec::UNKNOWN_COMMAND];
         let variants = every_variant();
-        for spec in spec::ALL {
+        for spec in spec::catalog_specs() {
             assert!(
-                usage.contains(spec) || variants.iter().any(|err| err.spec() == *spec),
+                usage.contains(&spec) || variants.iter().any(|err| err.spec() == spec),
                 "no error reports {}",
                 spec.reason
             );
@@ -662,7 +683,7 @@ mod tests {
 
     #[test]
     fn skill_files_document_the_catalog_exit_codes_and_reasons() {
-        let mut exit_codes = spec::ALL
+        let mut exit_codes = spec::catalog_specs()
             .iter()
             .map(|spec| spec.exit_code)
             .collect::<Vec<_>>();
@@ -687,7 +708,9 @@ mod tests {
             for reason in examples.split(", ") {
                 let reason = reason.trim_matches('`');
                 assert!(
-                    spec::ALL.iter().any(|spec| spec.reason == reason),
+                    spec::catalog_specs()
+                        .iter()
+                        .any(|spec| spec.reason == reason),
                     "{skill} names unknown reason {reason}"
                 );
             }

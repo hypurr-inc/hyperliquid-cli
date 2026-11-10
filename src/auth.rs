@@ -19,25 +19,68 @@ use hypersdk::hypercore::PrivateKeySigner;
 use ows_lib::types::WalletInfo;
 
 use crate::bankr::BankrClient;
+use crate::bankr_credentials::KeySource;
+use crate::env;
 use crate::errors::CliError;
 use crate::legacy_accounts::{LegacyAccount, LegacyAccounts};
 use crate::mode::Mode;
 use crate::ows::vault::{HyperliquidAccount, Vault};
-use crate::settings::{KeySource, Settings, env};
+use crate::settings::Settings;
 use crate::signing::SelectedSigner;
+use crate::wire::selector_address;
 
-/// Signer flags exactly as parsed from the command line.
-#[derive(Debug, Clone, Default)]
+/// The signer flags, flattened into the global options and read by
+/// [`SignerSelection::from_flags`]. Naming two signers is refused by clap, so
+/// the conflicts are declared here, beside the precedence they guard. They
+/// stay per-flag lists because a conflict declared through an `ArgGroup` does
+/// not reach a flag given after the subcommand.
+#[derive(clap::Args, Debug, Clone, Default)]
 pub struct SignerFlags {
-    pub bankr: bool,
+    /// Private key to sign with. Prefer HYPERLIQUID_PRIVATE_KEY: command-line options appear in process lists
+    #[arg(long, global = true)]
     pub private_key: Option<String>,
+
+    /// Foundry-compatible keystore file to decrypt for signing
+    #[arg(long, global = true, conflicts_with = "private_key")]
     pub keystore: Option<PathBuf>,
+
+    /// Password for --keystore. Prefer HYPERLIQUID_KEYSTORE_PASSWORD: command-line options appear in process lists
+    #[arg(long, global = true)]
     pub keystore_password: Option<String>,
+
+    /// Wallet name, id, or address to use as the signer
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = ["private_key", "keystore", "keystore_password", "ows_signer"]
+    )]
     pub account: Option<String>,
+
+    /// OWS signer selector (0x address, or wallet name/id from the OWS vault)
+    #[arg(
+        long,
+        global = true,
+        value_name = "SELECTOR",
+        alias = "wallet",
+        conflicts_with_all = ["private_key", "keystore", "keystore_password", "account"]
+    )]
     pub ows_signer: Option<String>,
+
+    /// Sign with the Bankr wallet linked by `wallet login` (or BANKR_API_KEY)
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = ["private_key", "keystore", "keystore_password", "account", "ows_signer"]
+    )]
+    pub bankr: bool,
 }
 
-/// The one signer a run names.
+impl SignerFlags {
+    /// The flags whose values are secrets: a suggested command never repeats
+    /// them. Kept beside the fields.
+    pub const SECRET: [&'static str; 2] = ["private_key", "keystore_password"];
+}
+
 #[derive(Debug, Clone)]
 pub enum SignerSelection {
     Bankr,
@@ -151,7 +194,7 @@ fn resolve_ows_flag(selector: &str, settings: &Settings) -> Result<SelectedSigne
             "--ows-signer requires a non-empty selector".to_string(),
         ));
     }
-    if let Ok(address) = selector.parse::<Address>() {
+    if let Some(address) = selector_address(selector) {
         return Ok(SelectedSigner::ows_address_only(
             selector.to_string(),
             address,
@@ -237,9 +280,9 @@ fn prompt_account_passphrase(
         .into());
     }
 
-    eprintln!(
+    crate::output::sink::err_line(&format!(
         "OS keychain is unavailable ({keychain_error}). Using a passphrase-derived account encryption key instead."
-    );
+    ));
     Ok(crate::prompt::read_secret(
         mode,
         "Account encryption passphrase: ",
@@ -320,7 +363,7 @@ pub(crate) fn lookup_account_address(
     mode: &Mode,
 ) -> Result<Address, anyhow::Error> {
     let trimmed = selector.trim();
-    if let Ok(address) = trimmed.parse::<Address>() {
+    if let Some(address) = selector_address(trimmed) {
         return Ok(address);
     }
 
@@ -338,9 +381,9 @@ pub(crate) fn lookup_account_address(
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::env::EnvSource;
     use crate::ows::vault::test_support::import_test_wallet;
-    use crate::settings::EnvSource;
-    use crate::signing::Signs;
+    use crate::signable::Signs;
     use tempfile::TempDir;
 
     fn resolve(

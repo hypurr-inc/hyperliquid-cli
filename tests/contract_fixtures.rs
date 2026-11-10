@@ -4,6 +4,7 @@
 //! all of them from the one generator in `contract_support`.
 
 mod contract_support;
+mod support;
 
 use contract_support::{assert_json_fixture, registry_fixtures};
 

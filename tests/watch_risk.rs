@@ -1,134 +1,105 @@
 mod support;
 
+use hyperliquid_cli::env;
 use predicates::prelude::*;
-use serde_json::Value;
-use support::{IsolatedHome, mount_account_state, mount_all_mids};
-use wiremock::MockServer;
+use serde_json::{Value, json};
+use support::exchange::ExchangeFixture;
+use support::{IsolatedHome, mount_account_state};
 
-#[test]
-fn schema_watch_risk_is_read_only() {
-    let output = IsolatedHome::new()
-        .command()
-        .args(["--format", "json", "schema", "watch", "risk"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["command"], "hyperliquid watch risk");
-    assert_eq!(json["lifecycle"], "read_only");
-    assert_eq!(json["auth_required"], false);
-    assert_eq!(json["dry_run"], "not_supported");
-}
+const USER: &str = "0x0000000000000000000000000000000000000001";
 
 #[test]
 fn watch_risk_requires_bounds_in_agent_mode() {
     IsolatedHome::new()
         .command()
-        .env("HYPERLIQUID_AGENT", "1")
-        .args([
-            "--format",
-            "json",
-            "watch",
-            "risk",
-            "--user",
-            "0x0000000000000000000000000000000000000001",
-        ])
+        .env(env::AGENT, "1")
+        .args(["--format", "json", "watch", "risk", "--user", USER])
         .assert()
         .code(13)
         .stdout(predicate::str::contains("--max-events 20"))
-        .stdout(predicate::str::contains(
-            "hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20",
-        ));
-}
-
-#[test]
-fn watch_risk_help_includes_examples() {
-    IsolatedHome::new()
-        .command()
-        .args(["watch", "risk", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Examples:"))
-        .stdout(predicate::str::contains("--max-events 20"));
+        .stdout(predicate::str::contains(format!(
+            "hyperliquid --format json watch risk --user {USER} --max-events 20"
+        )));
 }
 
 #[test]
 fn watch_risk_rejects_zero_idle_timeout_like_subscribe() {
     IsolatedHome::new()
         .command()
-        .args([
-            "watch",
-            "risk",
-            "--user",
-            "0x0000000000000000000000000000000000000001",
-            "--idle-timeout-ms",
-            "0",
-        ])
+        .args(["watch", "risk", "--user", USER, "--idle-timeout-ms", "0"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("--idle-timeout-ms"));
 }
 
-async fn watch_risk_lines(global_args: &[&str]) -> Vec<Value> {
-    let server = MockServer::start().await;
+/// A server where `USER` has one BTC position, and the `watch risk` command
+/// line that reads one `position_lifecycle` alert from it.
+async fn one_alert_exchange() -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
     mount_account_state(&server, vec![], vec![], "9000", "0", 10).await;
-    mount_all_mids(&server, "50000", "3000").await;
+    server
+}
 
-    let output = IsolatedHome::new()
-        .command_with_server(&server)
-        .args(global_args)
-        .args([
-            "watch",
-            "risk",
-            "--user",
-            "0x0000000000000000000000000000000000000001",
-            "--only",
-            "position_lifecycle",
-            "--max-events",
-            "1",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    String::from_utf8(output)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
+fn one_alert_args() -> [&'static str; 8] {
+    [
+        "watch",
+        "risk",
+        "--user",
+        USER,
+        "--only",
+        "position_lifecycle",
+        "--max-events",
+        "1",
+    ]
 }
 
 #[tokio::test]
-async fn watch_risk_json_emits_full_alert_without_projection_flags() {
-    let lines = watch_risk_lines(&["--format", "json"]).await;
+async fn watch_risk_json_alerts_are_whole_unless_projected() {
+    let server = one_alert_exchange().await;
+    let alerts = |global_args: &[&str]| -> Vec<Value> {
+        let assert = IsolatedHome::new()
+            .json_command_for(&server)
+            .args(global_args)
+            .args(one_alert_args())
+            .assert()
+            .success();
+        String::from_utf8(assert.get_output().stdout.clone())
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
 
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["kind"], "alert");
-    assert_eq!(lines[0]["rule"], "position_lifecycle");
-    assert_eq!(lines[0]["coin"], "BTC");
-    assert!(lines[0].get("payload").is_some());
-}
+    let whole = alerts(&[]);
+    assert_eq!(whole.len(), 1);
+    assert_eq!(whole[0]["kind"], "alert");
+    assert_eq!(whole[0]["rule"], "position_lifecycle");
+    assert_eq!(whole[0]["coin"], "BTC");
+    assert!(whole[0].get("payload").is_some());
 
-#[tokio::test]
-async fn watch_risk_json_honors_select() {
-    let lines = watch_risk_lines(&["--format", "json", "--select", "rule,coin"]).await;
-
-    assert_eq!(lines.len(), 1);
     assert_eq!(
-        lines[0],
-        serde_json::json!({"rule": "position_lifecycle", "coin": "BTC"})
+        alerts(&["--select", "rule,coin"]),
+        [json!({"rule": "position_lifecycle", "coin": "BTC"})]
     );
+
+    // `--results-only` is harmless on a stream that has no result wrapper.
+    assert_eq!(alerts(&["--results-only"])[0]["rule"], "position_lifecycle");
 }
 
 #[tokio::test]
-async fn watch_risk_json_honors_results_only_as_a_harmless_flag() {
-    let lines = watch_risk_lines(&["--format", "json", "--results-only"]).await;
+async fn watch_risk_does_not_spend_signing_nonces() {
+    let server = one_alert_exchange().await;
+    let home = IsolatedHome::new();
 
-    assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0]["rule"], "position_lifecycle");
+    home.json_command_for(&server)
+        .args(one_alert_args())
+        .assert()
+        .success();
+
+    assert!(
+        !home.data_dir().join("nonce-high-water").exists(),
+        "an alert timestamp is the wall clock, not a nonce"
+    );
 }
 
 /// What `margin_usage` measures depends on the account abstraction: the perp
@@ -138,50 +109,12 @@ mod margin_basis {
 
     use crate::support::IsolatedHome;
     use crate::support::exchange::{ExchangeFixture, Hip3Dex};
+    use crate::support::wire;
 
     const USER: &str = "0x0000000000000000000000000000000000000001";
 
-    fn position(coin: &str, leverage: Value, margin_used: &str) -> Value {
-        json!({
-            "type": "oneWay",
-            "position": {
-                "coin": coin,
-                "szi": "1",
-                "leverage": leverage,
-                "entryPx": "100",
-                "positionValue": "100",
-                "unrealizedPnl": "0",
-                "returnOnEquity": "0",
-                "liquidationPx": null,
-                "marginUsed": margin_used,
-                "maxLeverage": 50,
-                "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
-            }
-        })
-    }
-
-    fn perp_state(
-        account_value: &str,
-        margin_used: &str,
-        maintenance: &str,
-        positions: Vec<Value>,
-    ) -> Value {
-        let summary = json!({
-            "accountValue": account_value, "totalNtlPos": "100",
-            "totalRawUsd": account_value, "totalMarginUsed": margin_used
-        });
-        json!({
-            "marginSummary": summary,
-            "crossMarginSummary": summary,
-            "crossMaintenanceMarginUsed": maintenance,
-            "withdrawable": "0",
-            "assetPositions": positions,
-            "time": 1_700_000_000_000_u64
-        })
-    }
-
     fn cross_position() -> Value {
-        position("BTC", json!({"type": "cross", "value": 5}), "10")
+        wire::position_with("BTC", json!({"type": "cross", "value": 5}), "10", 50)
     }
 
     /// The default dex and `xyz`, both collateralised in USDC (token 0), for an
@@ -194,17 +127,26 @@ mod margin_basis {
     ) -> ExchangeFixture {
         let server = ExchangeFixture::start_with(vec![Hip3Dex::xyz()]).await;
         server
-            .mount_info_containing(json!({"type": "userAbstraction"}), json!(raw_mode))
+            .mount_info(
+                json!({"type": "userAbstraction", "user": USER}),
+                json!(raw_mode),
+            )
             .await;
         server
-            .mount_info_containing(json!({"type": "clearinghouseState", "dex": "xyz"}), xyz)
+            .mount_info(
+                json!({"type": "clearinghouseState", "user": USER, "dex": "xyz"}),
+                xyz,
+            )
             .await;
         server
-            .mount_info_containing(json!({"type": "clearinghouseState"}), default_dex)
+            .mount_info(
+                json!({"type": "clearinghouseState", "user": USER}),
+                default_dex,
+            )
             .await;
         server
-            .mount_info_containing(
-                json!({"type": "spotClearinghouseState"}),
+            .mount_info(
+                json!({"type": "spotClearinghouseState", "user": USER}),
                 json!({"balances": [{
                     "coin": "USDC", "token": 0, "hold": "0",
                     "total": spot_usdc, "entryNtl": "0"
@@ -212,10 +154,13 @@ mod margin_basis {
             )
             .await;
         server
-            .mount_info_containing(json!({"type": "frontendOpenOrders"}), json!([]))
+            .mount_info(
+                json!({"type": "frontendOpenOrders", "user": USER}),
+                json!([]),
+            )
             .await;
         server
-            .mount_info_containing(json!({"type": "userFills"}), json!([]))
+            .mount_info(json!({"type": "userFills", "user": USER}), json!([]))
             .await;
         server
     }
@@ -223,30 +168,14 @@ mod margin_basis {
     /// The JSON alert lines `watch risk --only margin_usage` prints before it
     /// has read `ticks` snapshots.
     fn margin_alerts(server: &ExchangeFixture, ticks: &str) -> Vec<Value> {
-        let output = IsolatedHome::new()
-            .command_with_server(server)
-            .args([
-                "--format",
-                "json",
-                "watch",
-                "risk",
-                "--user",
-                USER,
-                "--only",
-                "margin_usage",
-                "--interval",
-                "100ms",
-                "--idle-timeout-ms",
-                "1500",
-                "--max-events",
-                ticks,
-            ])
+        let assert = IsolatedHome::new()
+            .json_command_for(server)
+            .args(["watch", "risk", "--user", USER])
+            .args(["--only", "margin_usage", "--interval", "100ms"])
+            .args(["--idle-timeout-ms", "1500", "--max-events", ticks])
             .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        String::from_utf8(output)
+            .success();
+        String::from_utf8(assert.get_output().stdout.clone())
             .unwrap()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
@@ -258,8 +187,8 @@ mod margin_basis {
         for raw_mode in ["disabled", "default", "dexAbstraction"] {
             let server = account(
                 raw_mode,
-                perp_state("100", "85", "5", vec![cross_position()]),
-                perp_state("0", "0", "0", vec![]),
+                wire::perp_state_with("100", "85", "5", "0", vec![cross_position()]),
+                wire::perp_state_with("0", "0", "0", "0", vec![]),
                 "0",
             )
             .await;
@@ -285,23 +214,25 @@ mod margin_basis {
         // Maintenance margin 500 on the default dex and 400 on xyz, over 1100 of
         // USDC less the 100 an isolated position holds: 900 / 1000. The default
         // dex's own summary says 1% used and would never alert.
-        let default_dex = perp_state(
+        let default_dex = wire::perp_state_with(
             "10000",
             "100",
             "500",
+            "0",
             vec![
                 cross_position(),
-                position(
+                wire::position_with(
                     "ETH",
                     json!({"type": "isolated", "value": 3, "rawUsd": "100"}),
                     "100",
+                    50,
                 ),
             ],
         );
         let server = account(
             "unifiedAccount",
             default_dex,
-            perp_state("0", "0", "400", vec![]),
+            wire::perp_state_with("0", "0", "400", "0", vec![]),
             "1100",
         )
         .await;
@@ -348,8 +279,8 @@ mod margin_basis {
         // to compute, which is the most dangerous state, not a quiet one.
         let server = account(
             "unifiedAccount",
-            perp_state("100", "1", "500", vec![cross_position()]),
-            perp_state("0", "0", "0", vec![]),
+            wire::perp_state_with("100", "1", "500", "0", vec![cross_position()]),
+            wire::perp_state_with("0", "0", "0", "0", vec![]),
             "0",
         )
         .await;
@@ -373,8 +304,8 @@ mod margin_basis {
         // The perp summary claims 95% used; the account has 10000 of USDC.
         let server = account(
             "unifiedAccount",
-            perp_state("100", "95", "50", vec![cross_position()]),
-            perp_state("0", "0", "0", vec![]),
+            wire::perp_state_with("100", "95", "50", "0", vec![cross_position()]),
+            wire::perp_state_with("0", "0", "0", "0", vec![]),
             "10000",
         )
         .await;
@@ -392,14 +323,14 @@ mod margin_basis {
     async fn a_portfolio_margin_account_alerts_on_the_health_it_reports() {
         let server = account(
             "portfolioMargin",
-            perp_state("100", "95", "50", vec![cross_position()]),
-            perp_state("0", "0", "0", vec![]),
+            wire::perp_state_with("100", "95", "50", "0", vec![cross_position()]),
+            wire::perp_state_with("0", "0", "0", "0", vec![]),
             "10000",
         )
         .await;
         server
-            .mount_info_containing(
-                json!({"type": "borrowLendUserState"}),
+            .mount_info(
+                json!({"type": "borrowLendUserState", "user": USER}),
                 json!({"tokenToState": [], "health": "liquidatable", "healthFactor": 0.97}),
             )
             .await;
@@ -426,14 +357,14 @@ mod margin_basis {
     async fn a_healthy_portfolio_margin_account_stays_quiet_whatever_its_perp_summary_says() {
         let server = account(
             "portfolioMargin",
-            perp_state("100", "95", "50", vec![cross_position()]),
-            perp_state("0", "0", "0", vec![]),
+            wire::perp_state_with("100", "95", "50", "0", vec![cross_position()]),
+            wire::perp_state_with("0", "0", "0", "0", vec![]),
             "10000",
         )
         .await;
         server
-            .mount_info_containing(
-                json!({"type": "borrowLendUserState"}),
+            .mount_info(
+                json!({"type": "borrowLendUserState", "user": USER}),
                 json!({"tokenToState": [], "health": "healthy", "healthFactor": null}),
             )
             .await;

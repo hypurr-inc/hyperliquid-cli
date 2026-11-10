@@ -1,24 +1,15 @@
-//! `settings::env` is the one place environment variable names are spelled.
+//! `env` is the one place environment variable names are spelled.
 //!
 //! A name written as a string literal anywhere else in `src/` is a second copy
 //! that a rename or a new variable silently misses. Tests (everything from the
 //! first `#[cfg(test)]` of a file) and comments are exempt.
 
+mod support;
+
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use hyperliquid_cli::settings::env;
-
-fn rust_files(dir: &Path, found: &mut Vec<PathBuf>) {
-    for entry in fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, found);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            found.push(path);
-        }
-    }
-}
+use hyperliquid_cli::env;
 
 /// The contents of every string literal in `source`, skipping comments.
 fn string_literals(source: &str) -> Vec<String> {
@@ -67,10 +58,8 @@ fn mentions(literal: &str, name: &str) -> bool {
 }
 
 #[test]
-fn environment_variable_names_are_spelled_only_in_the_settings_table() {
+fn environment_variable_names_are_spelled_only_in_the_env_table() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = Vec::new();
-    rust_files(&root, &mut files);
     // A bare word such as `CI` or `TERM` is ordinary prose; every other name has an underscore.
     let names: Vec<&str> = env::ALL
         .iter()
@@ -79,8 +68,8 @@ fn environment_variable_names_are_spelled_only_in_the_settings_table() {
         .collect();
 
     let mut offenders = Vec::new();
-    for file in files {
-        if file.ends_with("settings.rs") {
+    for file in support::rust_files(&root) {
+        if file.ends_with("env.rs") {
             continue;
         }
         let text = fs::read_to_string(&file).unwrap();
@@ -100,16 +89,22 @@ fn environment_variable_names_are_spelled_only_in_the_settings_table() {
 
     assert!(
         offenders.is_empty(),
-        "spell these through `settings::env`:\n{}",
+        "spell these through `env`:\n{}",
         offenders.join("\n")
     );
 }
 
+/// The scan is not vacuous: run over the one file that does spell every name
+/// (the table in `env.rs`), it finds each of them in a string literal.
 #[test]
-fn the_scanner_finds_names_in_literals_and_ignores_comments_and_words() {
-    let source = "// \"HYPERLIQUID_FORMAT\"\nlet a = \"set HYPERLIQUID_FORMAT=json\";\nlet b = '\"';\nlet c = \"HYPERLIQUID_FORMATTED\";";
-    let literals = string_literals(source);
-    assert_eq!(literals.len(), 2, "{literals:?}");
-    assert!(mentions(&literals[0], env::FORMAT));
-    assert!(!mentions(&literals[1], env::FORMAT));
+fn the_scan_finds_every_name_where_the_table_spells_it() {
+    let table = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/env.rs");
+    let literals = string_literals(&fs::read_to_string(table).unwrap());
+
+    for name in env::ALL {
+        assert!(
+            literals.iter().any(|literal| mentions(literal, name)),
+            "{name} is not found in a literal of src/env.rs"
+        );
+    }
 }

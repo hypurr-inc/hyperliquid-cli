@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use wiremock::matchers::{body_json, body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::{fixture_perp, fixture_perp_meta, fixture_spot_meta_usdc_only};
+use super::wire::{self, MarginRule};
 
 /// A builder-deployed perp DEX on the mock exchange.
 pub struct Hip3Dex {
@@ -22,7 +22,7 @@ impl Hip3Dex {
     pub fn xyz() -> Self {
         Self {
             name: "xyz",
-            universe: vec![fixture_perp("xyz:XYZ100", 2, 10)],
+            universe: vec![wire::perp("xyz:XYZ100", MarginRule::Either)],
             mids: json!({ "xyz:XYZ100": "123.5" }),
         }
     }
@@ -65,19 +65,13 @@ impl ExchangeFixture {
                 .map(|dex| json!({ "name": dex.name, "deployerFeeScale": "1" })),
         );
         fixture
-            .mount_info(
-                json!({"type": "allMids"}),
-                json!({"BTC": "50000", "ETH": "3000"}),
-            )
+            .mount_info(json!({"type": "allMids"}), wire::all_mids())
             .await;
         fixture
-            .mount_info(
-                json!({"type": "meta"}),
-                fixture_perp_meta(vec![fixture_perp("BTC", 5, 50), fixture_perp("ETH", 4, 25)]),
-            )
+            .mount_info(json!({"type": "meta"}), wire::perp_meta_btc_eth())
             .await;
         fixture
-            .mount_info(json!({"type": "spotMeta"}), fixture_spot_meta_usdc_only())
+            .mount_info(json!({"type": "spotMeta"}), wire::spot_meta_usdc_only())
             .await;
         fixture
             .mount_info(json!({"type": "perpDexs"}), Value::Array(listed))
@@ -86,13 +80,25 @@ impl ExchangeFixture {
             fixture
                 .mount_info(
                     json!({"type": "meta", "dex": dex.name}),
-                    fixture_perp_meta(dex.universe),
+                    wire::perp_meta(dex.universe),
                 )
                 .await;
             fixture
                 .mount_info(json!({"type": "allMids", "dex": dex.name}), dex.mids)
                 .await;
         }
+        fixture
+    }
+
+    /// Only the override probe is answered. Every other read gets the mock's
+    /// 404, for a command that must cope with unavailable metadata.
+    pub async fn probe_only() -> Self {
+        let fixture = Self {
+            server: MockServer::start().await,
+        };
+        fixture
+            .mount_info(json!({"type": "allMids"}), wire::all_mids())
+            .await;
         fixture
     }
 
@@ -118,6 +124,17 @@ impl ExchangeFixture {
             .await;
     }
 
+    /// Answer the `/info` request whose body contains `fields` with an HTTP
+    /// error `status` and no body, for a read that fails.
+    pub async fn mount_info_failure(&self, fields: Value, status: u16) {
+        Mock::given(method("POST"))
+            .and(path("/info"))
+            .and(body_partial_json(fields))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&self.server)
+            .await;
+    }
+
     /// Like [`Self::mount_info`], but outranking every mount made without it,
     /// to change an answer the fixture already gave.
     pub async fn override_info(&self, request: Value, response: Value) {
@@ -126,6 +143,28 @@ impl ExchangeFixture {
             .and(body_json(request))
             .respond_with(ResponseTemplate::new(200).set_body_json(response))
             .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Answer the `/info` request whose body is exactly `request` with an HTTP
+    /// error `status`, for a read the exchange does not serve.
+    pub async fn mount_info_error(&self, request: Value, status: u16, body: Value) {
+        Mock::given(method("POST"))
+            .and(path("/info"))
+            .and(body_json(request))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Serve the stats dataset `vault list` and `vault search` read, which is
+    /// a `GET` beside `/info`: `/info` `vaultSummaries` answers `[]` on the
+    /// live exchange. `network` is `Mainnet` or `Testnet`.
+    pub async fn mount_vault_stats(&self, network: &str, vaults: Vec<Value>) {
+        Mock::given(method("GET"))
+            .and(path(format!("/stats-data/{network}/vaults")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(Value::Array(vaults)))
             .mount(&self.server)
             .await;
     }
@@ -139,6 +178,16 @@ impl ExchangeFixture {
             .await;
     }
 
+    /// Answer every `/exchange` request with HTTP `status` and no body, as a
+    /// gateway does when it is down.
+    pub async fn mount_exchange_http_status(&self, status: u16) {
+        Mock::given(method("POST"))
+            .and(path("/exchange"))
+            .respond_with(ResponseTemplate::new(status))
+            .mount(&self.server)
+            .await;
+    }
+
     /// Answer the next `/exchange` request, once, with `response`; mounted
     /// before [`Self::mount_exchange`] it gives a command a different answer
     /// for its first action than for the rest.
@@ -147,6 +196,16 @@ impl ExchangeFixture {
             .and(path("/exchange"))
             .respond_with(ResponseTemplate::new(200).set_body_json(response))
             .up_to_n_times(1)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Answer every `/exchange` request with an HTTP `status` and a plain-text
+    /// `body`, for a transport failure rather than an exchange reply.
+    pub async fn mount_exchange_failure(&self, status: u16, body: &str) {
+        Mock::given(method("POST"))
+            .and(path("/exchange"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
             .mount(&self.server)
             .await;
     }
@@ -167,6 +226,12 @@ impl ExchangeFixture {
     pub async fn exchange_bodies(&self) -> Vec<Value> {
         super::exchange_bodies(&self.server).await
     }
+}
+
+/// The `/exchange` reply to an action that returns nothing (transfers,
+/// vault and outcome conversions).
+pub fn default_reply() -> Value {
+    json!({"status": "ok", "response": {"type": "default"}})
 }
 
 /// An `/exchange` order reply carrying `statuses`.

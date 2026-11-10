@@ -3,32 +3,27 @@ use std::time::Duration;
 
 use hypersdk::Decimal;
 use hypersdk::hypercore::{
-    AssetContext, BookLevel, Candle, CandleInterval, Chain, FundingRate, HttpClient, Incoming,
-    L2Book, Subscription,
+    AssetContext, BookLevel, Candle, CandleInterval, FundingRate, Incoming, L2Book, Subscription,
 };
 use serde::Serialize;
 
-use crate::assets::canonical_dex;
-use crate::assets::{AssetResolver, Market};
+use crate::assets::DexArg;
+use crate::cli_command::CliCommand;
 use crate::clock;
-use crate::command_spec::{CliCommand, CommandSpec, InputKind, StreamBound, arg};
+use crate::command_spec::{CommandSpec, InputKind, arg};
+use crate::commands::common::market_input::{market_coin, parse_candle_interval, perp_coin};
+use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
 use crate::errors::CliError;
-use crate::errors::from_sdk;
+use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
-use crate::stream::SnapshotWatchArgs;
+use crate::output::format::epoch_ms_to_iso;
+use crate::stream_bounds::SnapshotWatchArgs;
+use crate::stream_bounds::StreamBound;
 use crate::ws::{Awaited, BookAggregationArgs, first_matching_message};
 
 const WEBSOCKET_TIMEOUT: Duration = Duration::from_secs(15);
-const VALID_INTERVALS: &str = "1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M";
-/// How far back `funding` looks for the latest paid funding rate.
-const FUNDING_LOOKBACK: Duration = Duration::from_secs(24 * 60 * 60);
-
-pub fn parse_candle_interval(input: &str) -> Result<CandleInterval, String> {
-    input
-        .parse::<CandleInterval>()
-        .map_err(|_| format!("invalid interval '{input}'. Valid intervals: {VALID_INTERVALS}"))
-}
+const FUNDING_LOOKBACK: Duration = clock::DAY.of(1);
 
 pub fn parse_candle_limit(input: &str) -> Result<usize, String> {
     let limit = input
@@ -56,6 +51,16 @@ pub struct BookLevelRow {
 }
 
 impl BookLevelRow {
+    fn cells(&self, side: &str) -> Vec<String> {
+        vec![
+            side.to_string(),
+            self.price.to_string(),
+            self.size.to_string(),
+            self.depth.to_string(),
+            self.orders.to_string(),
+        ]
+    }
+
     fn from_levels(levels: &[BookLevel]) -> Vec<Self> {
         let mut depth = Decimal::ZERO;
         levels
@@ -100,24 +105,8 @@ impl TableData for BookSnapshot {
     fn rows(&self) -> Vec<Vec<String>> {
         self.bids
             .iter()
-            .map(|level| {
-                vec![
-                    "Bid".to_string(),
-                    level.price.to_string(),
-                    level.size.to_string(),
-                    level.depth.to_string(),
-                    level.orders.to_string(),
-                ]
-            })
-            .chain(self.asks.iter().map(|level| {
-                vec![
-                    "Ask".to_string(),
-                    level.price.to_string(),
-                    level.size.to_string(),
-                    level.depth.to_string(),
-                    level.orders.to_string(),
-                ]
-            }))
+            .map(|level| level.cells("Bid"))
+            .chain(self.asks.iter().map(|level| level.cells("Ask")))
             .collect()
     }
 
@@ -162,60 +151,39 @@ impl From<Candle> for CandleRow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CandlesOutput {
-    candles: Vec<CandleRow>,
-}
+impl Row for CandleRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Timestamp",
+        "Coin",
+        "Interval",
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "Trades",
+    ];
 
-impl CandlesOutput {
-    #[must_use]
-    pub fn new(candles: Vec<CandleRow>) -> Self {
-        Self { candles }
-    }
-}
-
-impl TableData for CandlesOutput {
-    fn headers(&self) -> Vec<&str> {
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Timestamp",
-            "Coin",
-            "Interval",
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume",
-            "Trades",
+            epoch_ms_to_iso(self.timestamp),
+            self.coin.clone(),
+            self.interval.clone(),
+            self.open.to_string(),
+            self.high.to_string(),
+            self.low.to_string(),
+            self.close.to_string(),
+            self.volume.to_string(),
+            self.num_trades.to_string(),
         ]
     }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        self.candles
-            .iter()
-            .map(|candle| {
-                vec![
-                    crate::output::format::epoch_ms_to_iso(candle.timestamp),
-                    candle.coin.clone(),
-                    candle.interval.clone(),
-                    candle.open.to_string(),
-                    candle.high.to_string(),
-                    candle.low.to_string(),
-                    candle.close.to_string(),
-                    candle.volume.to_string(),
-                    candle.num_trades.to_string(),
-                ]
-            })
-            .collect()
-    }
-
-    fn empty_message(&self) -> Option<&str> {
-        Some("No candles.")
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        crate::output::serialize_row(&self.candles)
-    }
 }
+
+impl ListRow for CandleRow {
+    const EMPTY: &'static str = "No candles.";
+}
+
+pub type CandlesOutput = Rows<CandleRow>;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SpreadRow {
@@ -230,23 +198,17 @@ pub struct SpreadRow {
     pub spread_pct: Decimal,
 }
 
-impl TableData for SpreadRow {
-    fn headers(&self) -> Vec<&str> {
-        vec!["Coin", "Bid", "Ask", "Spread", "Spread %"]
-    }
+impl Row for SpreadRow {
+    const HEADERS: &'static [&'static str] = &["Coin", "Bid", "Ask", "Spread", "Spread %"];
 
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
+    fn cells(&self) -> Vec<String> {
+        vec![
             self.coin.clone(),
             self.bid.to_string(),
             self.ask.to_string(),
             self.spread.to_string(),
             self.spread_pct.to_string(),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        crate::output::serialize_row(self)
+        ]
     }
 }
 
@@ -266,35 +228,27 @@ pub struct FundingRow {
     pub last_funding_time: Option<u64>,
 }
 
-impl TableData for FundingRow {
-    fn headers(&self) -> Vec<&str> {
+impl Row for FundingRow {
+    const HEADERS: &'static [&'static str] = &[
+        "Coin",
+        "Current Funding",
+        "Predicted Funding",
+        "Premium",
+        "Mark",
+        "Oracle",
+        "Last Funding Time",
+    ];
+
+    fn cells(&self) -> Vec<String> {
         vec![
-            "Coin",
-            "Current Funding",
-            "Predicted Funding",
-            "Premium",
-            "Mark",
-            "Oracle",
-            "Last Funding Time",
-        ]
-    }
-
-    fn rows(&self) -> Vec<Vec<String>> {
-        vec![vec![
             self.coin.clone(),
-            format_optional_decimal(self.current_funding_rate),
+            or_missing(self.current_funding_rate),
             self.predicted_funding_rate.to_string(),
-            format_optional_decimal(self.premium),
-            format_optional_decimal(self.mark_price),
-            format_optional_decimal(self.oracle_price),
-            self.last_funding_time
-                .map(crate::output::format::epoch_ms_to_iso)
-                .unwrap_or_else(|| "n/a".to_string()),
-        ]]
-    }
-
-    fn to_json_value(&self) -> serde_json::Value {
-        crate::output::serialize_row(self)
+            or_missing(self.premium),
+            or_missing(self.mark_price),
+            or_missing(self.oracle_price),
+            or_missing(self.last_funding_time.map(epoch_ms_to_iso)),
+        ]
     }
 }
 
@@ -374,39 +328,34 @@ async fn book(
     aggregation: BookAggregationArgs,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let resolver = inv.asset_resolver().await?;
-    let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
-    inv.print(&book_snapshot_for(remote.chain(), &coin, aggregation).await?);
+    let coin = market_coin(inv, coin).await?;
+    inv.print(&book_snapshot_for(remote.api(), &coin, aggregation).await?);
     Ok(())
 }
 
-/// One L2 book snapshot for an already-resolved info coin.
 async fn book_snapshot_for(
-    chain: Chain,
+    api: &ApiClient,
     coin: &str,
     aggregation: BookAggregationArgs,
 ) -> Result<BookSnapshot, anyhow::Error> {
-    let book = fetch_l2_book(chain, coin, aggregation).await?;
+    let book = fetch_l2_book(api, coin, aggregation).await?;
     Ok(BookSnapshot::from(book))
 }
 
-/// Resolve and render candle history for a perpetual or spot market.
 async fn candles(
     inv: &Invocation,
     coin: &str,
     interval: CandleInterval,
     limit: usize,
 ) -> Result<(), anyhow::Error> {
-    let client = inv.remote()?.api().sdk();
-    let resolver = inv.asset_resolver().await?;
-    let coin = resolve_market_coin(client, &resolver, coin).await?;
+    let client = inv.remote()?.api();
+    let coin = market_coin(inv, coin).await?;
     inv.print(&candles_snapshot_for(client, &coin, interval, limit).await?);
     Ok(())
 }
 
-/// Candle history for an already-resolved info coin.
 async fn candles_snapshot_for(
-    client: &HttpClient,
+    client: &ApiClient,
     coin: &str,
     interval: CandleInterval,
     limit: usize,
@@ -418,9 +367,9 @@ async fn candles_snapshot_for(
     let start_time = end_time.saturating_sub(lookback);
 
     let mut candles = client
+        .sdk()
         .candle_snapshot(coin, interval, start_time, end_time)
-        .await
-        .map_err(from_sdk)?;
+        .await?;
 
     candles.sort_by_key(|candle| candle.open_time);
     let skip = candles.len().saturating_sub(limit);
@@ -433,21 +382,17 @@ async fn candles_snapshot_for(
     Ok(CandlesOutput::new(rows))
 }
 
-/// Resolve and render the best bid/ask spread for a perpetual or spot market.
 async fn spread(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let resolver = inv.asset_resolver().await?;
-    let coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
-    let book = fetch_l2_book(remote.chain(), &coin, BookAggregationArgs::default()).await?;
-    inv.print(&spread_row_from_book(&coin, &book)?);
+    let coin = market_coin(inv, coin).await?;
+    let book = fetch_l2_book(remote.api(), &coin, BookAggregationArgs::default()).await?;
+    inv.print(&One::new(spread_row_from_book(&coin, &book)?));
     Ok(())
 }
 
-/// Resolve and render current plus predicted funding for a perpetual market.
 async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let resolver = inv.asset_resolver().await?;
-    let coin = resolve_perp_coin_or_fetch(remote.api().sdk(), &resolver, coin).await?;
+    let coin = perp_coin(inv, coin).await?;
     let end_time = clock::now_ms();
     let start_time = end_time.saturating_sub(FUNDING_LOOKBACK.as_millis() as u64);
 
@@ -455,39 +400,38 @@ async fn funding(inv: &Invocation, coin: &str) -> Result<(), anyhow::Error> {
         .api()
         .sdk()
         .funding_history(coin.clone(), start_time, Some(end_time))
-        .await
-        .map_err(from_sdk)?
+        .await?
         .into_iter()
         .max_by_key(|rate| rate.time);
 
-    let active_ctx = fetch_active_asset_ctx(remote.chain(), &coin).await?;
-    inv.print(&FundingRow::from_history_and_context(
+    let active_ctx = fetch_active_asset_ctx(remote.api(), &coin).await?;
+    inv.print(&One::new(FundingRow::from_history_and_context(
         &coin,
         latest_history,
         active_ctx,
-    ));
+    )));
     Ok(())
 }
 
-async fn mids(inv: &Invocation, dex: Option<&str>) -> Result<(), anyhow::Error> {
+async fn mids(inv: &Invocation, dex: Option<&DexArg>) -> Result<(), anyhow::Error> {
     let selected = inv.session().json_options().selected_fields();
-    let client = inv.remote()?.api().sdk();
-    let dex = canonical_dex(client, dex).await?;
+    let client = inv.remote()?.api();
+    let dex = inv.dex_name(dex).await?;
     inv.print(&mids_snapshot(client, dex.as_deref(), selected).await?);
     Ok(())
 }
 
-/// Fetch all mid prices without printing them. `selected` is `--select`: it
-/// switches the JSON from a name-to-mid map to rows of the named fields.
+/// `selected` is `--select`: it switches the JSON from a name-to-mid map to rows of the
+/// named fields.
 async fn mids_snapshot(
-    client: &HttpClient,
+    client: &ApiClient,
     dex: Option<&str>,
     selected: Option<&[String]>,
 ) -> Result<MidsOutput, anyhow::Error> {
     let mut mids = client
+        .sdk()
         .all_mids(dex.map(str::to_string))
-        .await
-        .map_err(from_sdk)?
+        .await?
         .into_iter()
         .map(|(name, mid)| MidRow { name, mid })
         .collect::<Vec<_>>();
@@ -536,48 +480,13 @@ fn spread_row_from_book(coin: &str, book: &L2Book) -> Result<SpreadRow, CliError
     })
 }
 
-/// The info-endpoint coin a data command subscribes to or queries for `market`.
-fn market_info_coin(market: Market, input: &str) -> Result<String, CliError> {
-    match market {
-        Market::Perp(perp) => Ok(perp.display_name()),
-        Market::Spot(spot) => Ok(spot.info_coin()),
-        Market::Outcome(_) => Err(CliError::unsupported_outcome_notation(input)),
-    }
-}
-
-/// Resolve a perpetual, fetching the market when it belongs to another dex.
-pub(crate) async fn resolve_perp_coin_or_fetch(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    coin: &str,
-) -> Result<String, CliError> {
-    Ok(resolver
-        .resolve_perp_or_fetch(client, coin)
-        .await
-        .map_err(CliError::from)?
-        .display_name())
-}
-
-/// Resolve any market for a data command, fetching a HIP-3 market when needed.
-pub(crate) async fn resolve_market_coin(
-    client: &HttpClient,
-    resolver: &AssetResolver,
-    coin: &str,
-) -> Result<String, CliError> {
-    let market = resolver
-        .resolve_or_fetch(client, coin)
-        .await
-        .map_err(CliError::from)?;
-    market_info_coin(market, coin)
-}
-
 async fn fetch_l2_book(
-    chain: Chain,
+    api: &ApiClient,
     coin: &str,
     aggregation: BookAggregationArgs,
 ) -> Result<L2Book, CliError> {
     first_matching_message(
-        chain,
+        api,
         aggregation.subscription(coin),
         WEBSOCKET_TIMEOUT,
         &Awaited {
@@ -592,9 +501,9 @@ async fn fetch_l2_book(
     .await
 }
 
-async fn fetch_active_asset_ctx(chain: Chain, coin: &str) -> Result<AssetContext, CliError> {
+async fn fetch_active_asset_ctx(api: &ApiClient, coin: &str) -> Result<AssetContext, CliError> {
     first_matching_message(
-        chain,
+        api,
         Subscription::ActiveAssetCtx {
             coin: coin.to_string(),
         },
@@ -612,12 +521,6 @@ async fn fetch_active_asset_ctx(chain: Chain, coin: &str) -> Result<AssetContext
         },
     )
     .await
-}
-
-fn format_optional_decimal(value: Option<Decimal>) -> String {
-    value
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "n/a".to_string())
 }
 
 #[derive(Args, Debug, Clone)]
@@ -642,7 +545,7 @@ pub struct MidsArgs {
     pub watch: SnapshotWatchArgs,
     /// Perp dex name (HIP-3). Defaults to the first dex.
     #[arg(long)]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -729,9 +632,9 @@ impl CliCommand for Mids {
 
     async fn run(inv: &Invocation, args: &MidsArgs) -> Result<(), anyhow::Error> {
         if args.watch.watch {
-            watch_mids(inv, args.dex.as_deref(), args.watch.max_ticks).await
+            watch_mids(inv, args.dex.as_ref(), args.watch.max_ticks).await
         } else {
-            mids(inv, args.dex.as_deref()).await
+            mids(inv, args.dex.as_ref()).await
         }
     }
 }
@@ -826,19 +729,17 @@ async fn watch_book(
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let chain = remote.chain();
-    let resolver = inv.asset_resolver().await?;
-    let subscription_coin = resolve_market_coin(remote.api().sdk(), &resolver, coin).await?;
+    let api = remote.api();
+    let subscription_coin = market_coin(inv, coin).await?;
 
     crate::watch::run_snapshot_watch(
         inv,
         &format!("Live order book: {subscription_coin}"),
-        chain,
         vec![aggregation.subscription(subscription_coin.clone())],
         max_ticks,
         move || {
             let coin = subscription_coin.clone();
-            async move { book_snapshot_for(chain, &coin, aggregation).await }
+            async move { book_snapshot_for(api, &coin, aggregation).await }
         },
     )
     .await
@@ -846,18 +747,17 @@ async fn watch_book(
 
 async fn watch_mids(
     inv: &Invocation,
-    dex: Option<&str>,
+    dex: Option<&DexArg>,
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let client = remote.api().sdk();
+    let client = remote.api();
     let selected = inv.session().json_options().selected_fields();
-    let dex = canonical_dex(client, dex).await?;
+    let dex = inv.dex_name(dex).await?;
 
     crate::watch::run_snapshot_watch(
         inv,
         "Live mid prices",
-        remote.chain(),
         vec![Subscription::AllMids { dex: dex.clone() }],
         max_ticks,
         move || {
@@ -876,14 +776,12 @@ async fn watch_candles(
     max_ticks: Option<usize>,
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
-    let client = remote.api().sdk();
-    let resolver = inv.asset_resolver().await?;
-    let subscription_coin = resolve_market_coin(client, &resolver, coin).await?;
+    let client = remote.api();
+    let subscription_coin = market_coin(inv, coin).await?;
 
     crate::watch::run_snapshot_watch(
         inv,
         &format!("Live candles: {subscription_coin} {interval}"),
-        remote.chain(),
         vec![Subscription::Candle {
             coin: subscription_coin.clone(),
             interval: interval.to_string(),
@@ -900,27 +798,11 @@ async fn watch_candles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assets::AssetMetadata;
-    use crate::assets::test_support::{perp, spot};
     use rust_decimal::Decimal;
     use std::str::FromStr;
 
     fn dec(input: &str) -> Decimal {
         Decimal::from_str(input).unwrap()
-    }
-
-    fn resolve_book_coin(resolver: &AssetResolver, coin: &str) -> Result<String, CliError> {
-        market_info_coin(resolver.resolve(coin).map_err(CliError::from)?, coin)
-    }
-
-    fn fixture_resolver() -> AssetResolver {
-        AssetResolver::new(AssetMetadata::from_assets(
-            vec![perp("BTC", 0), perp("ETH", 1)],
-            vec![
-                spot("PURR/USDC", 10_000, "PURR", "USDC"),
-                spot("HYPE/USDC", 11_035, "HYPE", "USDC"),
-            ],
-        ))
     }
 
     #[test]
@@ -955,28 +837,6 @@ mod tests {
     }
 
     #[test]
-    fn book_coin_resolves_to_the_info_api_name_of_each_market_kind() {
-        let resolver = fixture_resolver();
-
-        assert_eq!(resolve_book_coin(&resolver, "btc").unwrap(), "BTC");
-        assert_eq!(
-            resolve_book_coin(&resolver, "purr/usdc").unwrap(),
-            "PURR/USDC"
-        );
-        assert_eq!(resolve_book_coin(&resolver, "hype/usdc").unwrap(), "@1035");
-    }
-
-    #[test]
-    fn book_resolution_rejects_outcome_notation_with_outcome_guidance() {
-        let resolver = fixture_resolver();
-        let err = resolve_book_coin(&resolver, "#10").unwrap_err();
-
-        assert_eq!(err.exit_code(), 13);
-        assert!(err.to_string().contains("outcome-aware command path"));
-        assert!(err.to_string().contains("outcomes get #10"));
-    }
-
-    #[test]
     fn funding_row_renders_missing_market_data_as_null_in_json_and_na_in_tables() {
         let complete = FundingRow {
             coin: "BTC".to_string(),
@@ -987,10 +847,11 @@ mod tests {
             oracle_price: Some(dec("99")),
             last_funding_time: Some(123),
         };
-        let complete_row = complete.rows().remove(0);
+        let complete_output = One::new(complete.clone());
+        let complete_row = complete_output.rows().remove(0);
         assert_eq!(complete_row[1], "0.0001");
         assert_eq!(complete_row[6], "1970-01-01T00:00:00.123Z");
-        assert_eq!(complete.to_json_value()["last_funding_time"], 123);
+        assert_eq!(complete_output.to_json_value()["last_funding_time"], 123);
 
         let sparse = FundingRow {
             current_funding_rate: None,
@@ -1000,6 +861,7 @@ mod tests {
             last_funding_time: None,
             ..complete
         };
+        let sparse = One::new(sparse);
         let sparse_row = sparse.rows().remove(0);
         assert_eq!(sparse_row[1], "n/a");
         assert_eq!(sparse_row[6], "n/a");

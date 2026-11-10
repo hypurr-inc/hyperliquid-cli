@@ -11,11 +11,11 @@ use hypersdk::Address;
 use hypersdk::hypercore::types::Signature as HyperliquidSignature;
 use ows_lib::types::WalletInfo;
 
-use super::HYPERLIQUID_CHAIN_ALIAS;
 use super::vault::Vault;
+use super::{HYPERLIQUID_CHAIN_ALIAS, WalletSource};
 use crate::errors::CliError;
-use crate::signing::Payload;
-use crate::signing::signature::Provider;
+use crate::signable::Payload;
+use crate::signature::Provider;
 
 #[derive(Debug, Clone)]
 struct SigningWallet {
@@ -71,7 +71,7 @@ impl OwsSigningConfig {
         match &self.identity {
             Identity::Wallet(wallet) => (
                 Some(wallet.name.clone()),
-                format!("OWS wallet ({})", wallet.name),
+                WalletSource::Vault.describe(&wallet.name),
             ),
             Identity::AddressOnly(selector) => (None, format!("OWS signer ({selector})")),
         }

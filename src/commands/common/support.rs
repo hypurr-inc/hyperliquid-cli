@@ -1,0 +1,115 @@
+use hypersdk::Address;
+use hypersdk::hypercore::types::Action;
+
+use crate::assets::{Names, OutcomeCatalog};
+use crate::dry_run::{DryRunEnvelope, DryRunSigning};
+use crate::errors::CliError;
+use crate::http_api::ApiClient;
+use crate::invocation::Invocation;
+use crate::output::warn;
+use crate::signing::SelectedSigner;
+
+/// The `status` of a receipt for an action the exchange accepted.
+pub(crate) const SUBMITTED: &str = "submitted";
+
+/// The token symbol a command was given, trimmed; it must not be empty.
+pub(crate) fn require_token(token: &str) -> Result<&str, CliError> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err(CliError::Configuration("token cannot be empty".to_string()));
+    }
+    Ok(token)
+}
+
+/// A signing command's preview also names the signer, once resolved here and
+/// without prompting. A signer that cannot be resolved prints as `null` with a
+/// `signer_warning`; one that resolves but doesn't fit the command fails the
+/// preview, as the live run would. A local command's preview names no network.
+pub(crate) fn print_dry_run(
+    inv: &Invocation,
+    would_execute: &str,
+    args: serde_json::Value,
+) -> Result<(), anyhow::Error> {
+    print_dry_run_acting_for(inv, would_execute, args, None)
+}
+
+/// [`print_dry_run`] for an action sent for `vault_address`, the account an
+/// order's `--on-behalf-of` names.
+pub(crate) fn print_dry_run_acting_for(
+    inv: &Invocation,
+    would_execute: &str,
+    args: serde_json::Value,
+    vault_address: Option<String>,
+) -> Result<(), anyhow::Error> {
+    let mut envelope = DryRunEnvelope::new(inv.command_key(), would_execute, args)
+        .with_payload(
+            inv.payload()
+                .map(|payload| crate::input_hardening::redact_sensitive_json(payload.clone())),
+        )
+        .with_expires_after(inv.expires_after_ms());
+    if inv.command().dry_run_names_signer() {
+        envelope = envelope.with_signing(dry_run_signing(inv, vault_address)?);
+    }
+    if inv.command().uses_network() {
+        envelope = envelope.with_network(inv.remote().ok().map(|remote| remote.network()));
+    }
+    inv.print_untimed(&envelope);
+    Ok(())
+}
+
+fn dry_run_signing(
+    inv: &Invocation,
+    vault_address: Option<String>,
+) -> Result<DryRunSigning, anyhow::Error> {
+    Ok(match inv.preview_signer()? {
+        Ok(resolved) => DryRunSigning::new(
+            Ok(resolved.address().to_string()),
+            vault_address
+                .clone()
+                .or_else(|| Some(resolved.query_address().to_string())),
+            vault_address,
+        ),
+        Err(err) => DryRunSigning::new(Err(err.to_string()), vault_address.clone(), vault_address),
+    })
+}
+
+pub(crate) fn resolve_optional_acting_account_target(
+    inv: &Invocation,
+    selector: Option<&str>,
+) -> Result<Option<Address>, anyhow::Error> {
+    selector
+        .map(|selector| inv.resolve_account(selector))
+        .transpose()
+}
+
+/// The account an action sent for `vault` is on: the vault, else the signer's own.
+pub(crate) fn acting_account(vault: Option<Address>, signer: &SelectedSigner) -> Address {
+    vault.unwrap_or_else(|| signer.query_address())
+}
+
+/// The document an L1 `action` is sent as, for a preview that must show it
+/// exactly. A preview that spells an address in its checksummed form, as the
+/// users' own tools do, cannot take this: the wire spelling is lowercase.
+pub(crate) fn action_json(action: &Action) -> Result<serde_json::Value, CliError> {
+    serde_json::to_value(action).map_err(|err| {
+        CliError::Internal(anyhow::anyhow!("failed to encode exchange action: {err}"))
+    })
+}
+
+/// One stderr warning per `outcomeMeta`/`outcomeTemplates` entry a loader
+/// could not turn into rows.
+pub(crate) fn warn_skipped(skipped: &[String]) {
+    for line in skipped {
+        warn(line);
+    }
+}
+
+/// [`OutcomeCatalog::load`], with the entries it skipped reported on stderr.
+pub(crate) async fn load_outcome_catalog(
+    api: &ApiClient,
+    names: Names,
+) -> Result<OutcomeCatalog, CliError> {
+    let catalog = OutcomeCatalog::load(api, names).await?;
+    warn_skipped(&catalog.skipped);
+    Ok(catalog)
+}

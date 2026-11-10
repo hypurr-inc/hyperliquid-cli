@@ -5,9 +5,9 @@
 //! exchange documents plus user-state problems. A 5xx status is an API
 //! failure, never a connectivity problem.
 
-use super::CliError;
-use super::spec::{self, Spec};
 use super::transport::{network_error, unreachable_from_text};
+use super::{CliError, Refusal};
+use crate::exchange_reply::{self, Reply};
 use crate::response_sanitization::Untrusted;
 
 const RATE_LIMIT_PHRASES: &[&str] = &[
@@ -31,87 +31,6 @@ const AUTH_PHRASES: &[&str] = &["invalid key", "invalid private key", "unauthori
 /// exist` is also how it refuses a missing vault or similar.
 const SIGNER_PHRASE: &str = "user or api wallet";
 const SIGNER_PHRASE_TAIL: &str = "does not exist";
-
-/// A refusal the exchange documents with a fixed string
-/// (<https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/error-responses>,
-/// plus the strings ccxt's Hyperliquid exception map and the python SDK
-/// issue tracker quote). Each one has its own reason and hint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refusal {
-    MinOrderValue,
-    ReduceOnly,
-    PostOnly,
-    IocNoMatch,
-    BadPrice,
-    PriceBand,
-    ZeroSize,
-    OpenInterestCap,
-    TriggerPrice,
-    NoLiquidity,
-}
-
-impl Refusal {
-    pub const ALL: [Self; 10] = [
-        Self::MinOrderValue,
-        Self::ReduceOnly,
-        Self::PostOnly,
-        Self::IocNoMatch,
-        Self::BadPrice,
-        Self::PriceBand,
-        Self::ZeroSize,
-        Self::OpenInterestCap,
-        Self::TriggerPrice,
-        Self::NoLiquidity,
-    ];
-
-    pub(super) fn spec(self) -> &'static Spec {
-        match self {
-            Self::MinOrderValue => &spec::MIN_ORDER_VALUE,
-            Self::ReduceOnly => &spec::REDUCE_ONLY_VIOLATION,
-            Self::PostOnly => &spec::POST_ONLY_WOULD_CROSS,
-            Self::IocNoMatch => &spec::IOC_NO_MATCH,
-            Self::BadPrice => &spec::BAD_PRICE,
-            Self::PriceBand => &spec::PRICE_OUT_OF_BAND,
-            Self::ZeroSize => &spec::ZERO_SIZE,
-            Self::OpenInterestCap => &spec::OPEN_INTEREST_CAP,
-            Self::TriggerPrice => &spec::INVALID_TRIGGER_PRICE,
-            Self::NoLiquidity => &spec::NO_MARKET_LIQUIDITY,
-        }
-    }
-
-    /// Lowercase fragments of the exchange's text. Fragments stop before any
-    /// variable part (`$10`, `{quote_token}`, `bbo was {bbo}`).
-    fn phrases(self) -> &'static [&'static str] {
-        match self {
-            Self::MinOrderValue => &["order must have minimum value of"],
-            Self::ReduceOnly => &["reduce only order would increase position"],
-            Self::PostOnly => &["post only order would have immediately matched"],
-            Self::IocNoMatch => &["order could not immediately match"],
-            Self::BadPrice => &[
-                "price must be divisible by tick size",
-                "order has invalid price",
-            ],
-            Self::PriceBand => &[
-                "order price too far from oracle",
-                "away from the reference price",
-            ],
-            Self::ZeroSize => &["order has zero size"],
-            Self::OpenInterestCap => &[
-                "open interest is capped",
-                "at open interest cap",
-                "increase open interest too quickly",
-            ],
-            Self::TriggerPrice => &["invalid tp/sl price"],
-            Self::NoLiquidity => &["no liquidity available for market order"],
-        }
-    }
-
-    fn recognize(message: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|refusal| contains_any(message, refusal.phrases()))
-    }
-}
 
 /// Exchange rejections caused by the user's account state or the request
 /// values, not by the CLI or the exchange.
@@ -146,37 +65,16 @@ fn looks_like_rate_limit_text(text: &str) -> bool {
     contains_any(text, RATE_LIMIT_PHRASES) || contains_any(text, ADDRESS_RATE_LIMIT_PHRASES)
 }
 
-/// The rate-limit error for remote text that names one: the address-based
-/// form (which carries the exchange's own counts) or the plain one.
-fn rate_limit_for_text(text: &str) -> Option<CliError> {
-    if contains_any(text, ADDRESS_RATE_LIMIT_PHRASES) {
-        Some(CliError::AddressRateLimited(Untrusted::from_remote(text)))
-    } else if contains_any(text, RATE_LIMIT_PHRASES) {
-        Some(CliError::rate_limited())
-    } else {
-        None
-    }
-}
-
 /// The address-limit error for a structured `/exchange` reply body
 /// (`{"status":"err","response":"Too many cumulative requests sent ..."}`),
 /// so the HTTP edge reports the same error a rejected status does.
 pub fn address_rate_limit_in_body(body: &str) -> Option<CliError> {
     let value = serde_json::from_str::<serde_json::Value>(body).ok()?;
-    if !value
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|status| status.eq_ignore_ascii_case("err"))
-    {
-        return None;
-    }
-    let text = value.get("response")?.as_str()?;
-    contains_any(text, ADDRESS_RATE_LIMIT_PHRASES)
-        .then(|| CliError::AddressRateLimited(Untrusted::from_remote(text)))
+    let text = exchange_reply::error_text(&value)?;
+    contains_any(&text, ADDRESS_RATE_LIMIT_PHRASES)
+        .then(|| CliError::AddressRateLimited(Untrusted::from_remote(&text)))
 }
 
-/// Return true when an HTTP response should be classified as a rate-limit error.
-///
 /// Body phrase matching is intentionally limited to non-success HTTP statuses so
 /// successful payloads can mention rate-limit concepts as ordinary data. Success
 /// responses still count as rate-limited when they use an explicit structured
@@ -193,17 +91,9 @@ fn structured_rate_limit_error(body: &str) -> bool {
         return false;
     };
 
-    let explicit_error_status = value
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|status| {
-            matches!(
-                status.to_ascii_lowercase().as_str(),
-                "err" | "error" | "failed" | "failure"
-            )
-        });
-
-    if explicit_error_status && looks_like_rate_limit_text(&value.to_string()) {
+    if matches!(Reply::decode(&value), Reply::Err(_))
+        && looks_like_rate_limit_text(&value.to_string())
+    {
         return true;
     }
 
@@ -233,16 +123,6 @@ fn code_indicates_rate_limit(code: &str) -> bool {
     )
 }
 
-fn rate_limit_or_auth(message: &str) -> Option<CliError> {
-    if let Some(rate_limited) = rate_limit_for_text(message) {
-        Some(rate_limited)
-    } else if contains_any(message, AUTH_PHRASES) {
-        Some(CliError::AuthRejected(Untrusted::from_remote(message)))
-    } else {
-        None
-    }
-}
-
 fn names_unregistered_signer(message: &str) -> bool {
     contains_any(message, &[SIGNER_PHRASE]) && contains_any(message, &[SIGNER_PHRASE_TAIL])
 }
@@ -253,18 +133,13 @@ fn names_unregistered_signer(message: &str) -> bool {
 /// It is never a network problem and its text is never read as an HTTP
 /// status. Every command that surfaces an exchange rejection classifies it
 /// here, then picks its own error for the cases that only it can name. A
-/// top-level `status: err` and an error inside an order status go through the
-/// same [`classify_rejection`], so recognised text reads the same on both.
+/// top-level `status: err`, an error inside an order status and the text of an
+/// SDK error all go through the same [`classify_rejection`], so recognised
+/// text reads the same everywhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Rejection {
-    RateLimited,
-    /// The address spent its request budget (the exchange's `Too many
-    /// cumulative requests` text, kept for the message).
-    AddressRateLimited(Untrusted),
-    /// The exchange refused the credentials.
-    AuthRejected(Untrusted),
-    /// The signature recovered to an address that is no user or API wallet.
-    SignerNotRegistered(Untrusted),
+    /// A class whose error does not depend on what the command was doing.
+    Decisive(Decisive),
     /// One of the documented order refusals.
     Refused(Refusal, Untrusted),
     /// The user's account state or the request values caused it, such as
@@ -274,20 +149,49 @@ pub enum Rejection {
     Other(Untrusted),
 }
 
+/// The rejections that end a whole action the same way whichever command ran
+/// it: they say the request was never judged on its merits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Decisive {
+    RateLimited,
+    /// The address spent its request budget (the exchange's `Too many
+    /// cumulative requests` text, kept for the message).
+    AddressRateLimited(Untrusted),
+    AuthRejected(Untrusted),
+    /// The signature recovered to an address that is no user or API wallet.
+    SignerNotRegistered(Untrusted),
+}
+
+impl Decisive {
+    fn into_error(self) -> CliError {
+        match self {
+            Self::RateLimited => CliError::rate_limited(),
+            Self::AddressRateLimited(remote) => CliError::AddressRateLimited(remote),
+            Self::AuthRejected(remote) => CliError::AuthRejected(remote),
+            Self::SignerNotRegistered(remote) => CliError::SignerNotRegistered(remote),
+        }
+    }
+}
+
 pub fn classify_rejection(message: &str) -> Rejection {
     if contains_any(message, ADDRESS_RATE_LIMIT_PHRASES) {
-        return Rejection::AddressRateLimited(Untrusted::from_remote(message));
+        return Rejection::Decisive(Decisive::AddressRateLimited(Untrusted::from_remote(
+            message,
+        )));
     }
     if contains_any(message, RATE_LIMIT_PHRASES) {
-        return Rejection::RateLimited;
+        return Rejection::Decisive(Decisive::RateLimited);
     }
     let remote = Untrusted::from_remote(message);
     if contains_any(message, AUTH_PHRASES) {
-        Rejection::AuthRejected(remote)
+        Rejection::Decisive(Decisive::AuthRejected(remote))
     } else if names_unregistered_signer(message) {
-        Rejection::SignerNotRegistered(remote)
-    } else if let Some(refusal) = Refusal::recognize(message) {
-        Rejection::Refused(refusal, remote)
+        Rejection::Decisive(Decisive::SignerNotRegistered(remote))
+    } else if let Some(refusal) = Refusal::ALL
+        .iter()
+        .find(|refusal| contains_any(message, refusal.phrases()))
+    {
+        Rejection::Refused(*refusal, remote)
     } else if contains_any(message, USER_STATE_PHRASES) {
         Rejection::UserState(remote)
     } else {
@@ -296,15 +200,23 @@ pub fn classify_rejection(message: &str) -> Rejection {
 }
 
 impl Rejection {
+    /// The error of a [`Decisive`] class, or `None` for a rejection that
+    /// depends on the command's own wording. A batch of rejections is decided
+    /// by its first decisive one.
+    #[must_use]
+    pub fn decisive(self) -> Option<CliError> {
+        match self {
+            Self::Decisive(decisive) => Some(decisive.into_error()),
+            Self::Refused(..) | Self::UserState(_) | Self::Other(_) => None,
+        }
+    }
+
     /// Every class with its own error; `lead` introduces the exchange's text
     /// in the refusals that quote it, and `otherwise` words text nothing
     /// recognises.
     fn into_error_by(self, lead: &str, otherwise: impl FnOnce(Untrusted) -> CliError) -> CliError {
         match self {
-            Self::RateLimited => CliError::rate_limited(),
-            Self::AddressRateLimited(remote) => CliError::AddressRateLimited(remote),
-            Self::AuthRejected(remote) => CliError::AuthRejected(remote),
-            Self::SignerNotRegistered(remote) => CliError::SignerNotRegistered(remote),
+            Self::Decisive(decisive) => decisive.into_error(),
             Self::Refused(refusal, remote) => CliError::refused(refusal, lead, &remote),
             Self::UserState(remote) => CliError::unsupported_with_remote(lead, &remote),
             Self::Other(remote) => otherwise(remote),
@@ -339,24 +251,29 @@ pub fn from_exchange_rejection(message: &str, context: &'static str) -> CliError
     classify_rejection(message).into_error(context)
 }
 
+/// A decisive class in `message`, else a 5xx status quoted in it.
 fn classify_known(message: &str) -> Option<CliError> {
-    rate_limit_or_auth(message).or_else(|| server_error_from_text(message))
+    classify_rejection(message)
+        .decisive()
+        .or_else(|| server_error_from_text(message))
 }
 
-/// Map `HTTP <5xx> body=<text>` text to [`CliError::ApiStatus`].
-///
-/// The server answered, so a 5xx is an API failure, not a connectivity problem.
-fn server_error_from_text(text: &str) -> Option<CliError> {
+/// The status in `HTTP <code> ...` text, the way `hypersdk` words a non-2xx reply.
+pub fn http_status_in_text(text: &str) -> Option<u16> {
     let lower = text.to_lowercase();
     let rest = &lower[lower.find("http ")? + "http ".len()..];
     let digits = rest
         .chars()
         .take_while(char::is_ascii_digit)
         .collect::<String>();
-    let status: u16 = (digits.len() == 3).then(|| digits.parse().ok()).flatten()?;
-    if !is_server_status(status) {
-        return None;
-    }
+    (digits.len() == 3).then(|| digits.parse().ok()).flatten()
+}
+
+/// Map `HTTP <5xx> body=<text>` text to [`CliError::ApiStatus`].
+///
+/// The server answered, so a 5xx is an API failure, not a connectivity problem.
+fn server_error_from_text(text: &str) -> Option<CliError> {
+    let status = http_status_in_text(text).filter(|status| is_server_status(*status))?;
     let code = reqwest::StatusCode::from_u16(status).ok()?;
     let body = text
         .split_once("body=")
@@ -369,8 +286,6 @@ fn recover_typed(err: anyhow::Error) -> Result<CliError, anyhow::Error> {
     err.downcast::<CliError>()
 }
 
-/// Convert an [`anyhow::Error`] into a [`CliError`] while preserving typed `CliError`s.
-///
 /// Command handlers often return `anyhow::Error` so they can use `?` with multiple error
 /// sources. If the original error was already a `CliError`, this helper recovers it instead
 /// of wrapping it as an internal error and losing the structured exit code.
@@ -378,14 +293,12 @@ pub fn from_anyhow(err: anyhow::Error) -> CliError {
     recover_typed(err).unwrap_or_else(CliError::Internal)
 }
 
-/// Classify an error returned by `hypersdk` into a [`CliError`].
-///
-/// hypersdk 0.3 returns `anyhow::Error`. API failures carry a
+/// hypersdk returns `anyhow::Error`. API failures carry a
 /// [`hypersdk::hypercore::ApiError`] (HTTP non-2xx arrives as
 /// `HTTP {status} body={text}`) and transport failures carry a
 /// `reqwest::Error`. Everything else is plain text.
 /// Typed [`CliError`]s that were already attached are recovered unchanged.
-pub fn from_sdk(err: anyhow::Error) -> CliError {
+pub(crate) fn from_sdk(err: anyhow::Error) -> CliError {
     let err = match recover_typed(err) {
         Ok(cli_err) => return cli_err,
         Err(err) => err,
@@ -403,6 +316,11 @@ pub fn from_sdk(err: anyhow::Error) -> CliError {
         .chain()
         .find_map(|cause| cause.downcast_ref::<reqwest::Error>())
     {
+        // The server answered: a reply that does not decode is not a
+        // connectivity problem.
+        if request_err.is_decode() {
+            return CliError::Internal(anyhow::anyhow!("couldn't decode the reply: {request_err}"));
+        }
         return network_error(request_err, None);
     }
 
@@ -417,39 +335,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn http_rate_limit_detection_always_accepts_429() {
-        assert!(http_response_indicates_rate_limit(
-            429,
-            r#"{"status":"ok","message":"ordinary success"}"#
-        ));
-    }
-
-    #[test]
-    fn http_rate_limit_detection_accepts_non_success_body_phrase() {
-        assert!(http_response_indicates_rate_limit(
-            503,
-            "temporarily unavailable due to rate-limit pressure"
-        ));
-    }
-
-    #[test]
-    fn http_rate_limit_detection_accepts_structured_error_on_success_status() {
-        assert!(http_response_indicates_rate_limit(
-            200,
-            r#"{"status":"err","response":"rate limit exceeded"}"#
-        ));
-        assert!(http_response_indicates_rate_limit(
-            200,
-            r#"{"error":"too many requests"}"#
-        ));
-    }
-
-    #[test]
-    fn http_rate_limit_detection_ignores_success_body_mentions() {
-        assert!(!http_response_indicates_rate_limit(
-            200,
-            r#"{"status":"ok","message":"read the rate-limit docs","code":"RATE-LIMIT-DOCS"}"#
-        ));
+    fn http_rate_limit_detection_reads_the_status_then_the_body() {
+        let cases = [
+            (429, r#"{"status":"ok","message":"ordinary success"}"#, true),
+            (
+                503,
+                "temporarily unavailable due to rate-limit pressure",
+                true,
+            ),
+            (
+                200,
+                r#"{"status":"err","response":"rate limit exceeded"}"#,
+                true,
+            ),
+            (200, r#"{"error":"too many requests"}"#, true),
+            (
+                200,
+                r#"{"status":"ok","message":"read the rate-limit docs","code":"RATE-LIMIT-DOCS"}"#,
+                false,
+            ),
+        ];
+        for (status, body, limited) in cases {
+            assert_eq!(
+                http_response_indicates_rate_limit(status, body),
+                limited,
+                "{status} {body}"
+            );
+        }
     }
 
     #[test]
@@ -561,6 +473,40 @@ mod tests {
         let err = from_sdk(anyhow::Error::new(request_err).context("[open_orders] request"));
         assert_eq!(err.exit_code(), 12);
         assert!(matches!(err, CliError::Unavailable(_)));
+    }
+
+    /// `hypersdk` once decoded a rate-limit body (`null`) as market metadata and
+    /// the decode error was reported as an unreachable API.
+    #[tokio::test]
+    async fn sdk_decode_failure_is_not_an_unreachable_api() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        #[derive(Debug, serde::Deserialize)]
+        struct Meta {
+            #[allow(dead_code)]
+            universe: Vec<String>,
+        }
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("null", "application/json"))
+            .mount(&server)
+            .await;
+        let decode_err = reqwest::Client::new()
+            .post(server.uri())
+            .send()
+            .await
+            .unwrap()
+            .json::<Meta>()
+            .await
+            .unwrap_err();
+        assert!(decode_err.is_decode());
+
+        let err = from_sdk(anyhow::Error::new(decode_err));
+
+        assert!(matches!(err, CliError::Internal(_)), "{err:?}");
+        assert!(!err.to_string().contains("Couldn't reach"), "{err}");
     }
 
     #[test]
@@ -694,11 +640,11 @@ mod tests {
     fn rejection_classes_follow_the_exchange_text() {
         assert_eq!(
             classify_rejection("Rate limit exceeded"),
-            Rejection::RateLimited
+            Rejection::Decisive(Decisive::RateLimited)
         );
         assert!(matches!(
             classify_rejection("Unauthorized"),
-            Rejection::AuthRejected(_)
+            Rejection::Decisive(Decisive::AuthRejected(_))
         ));
         assert!(matches!(
             classify_rejection("Insufficient margin to place order."),
@@ -894,6 +840,62 @@ mod tests {
             "not json",
         ] {
             assert!(address_rate_limit_in_body(other).is_none(), "{other}");
+        }
+    }
+
+    #[test]
+    fn every_error_status_word_finds_the_address_limit_in_a_reply_body() {
+        for status in ["err", "error", "failed", "failure", "ERR"] {
+            let body = format!(
+                r#"{{"status":"{status}","response":"Too many cumulative requests sent (2 > 1)"}}"#
+            );
+            assert!(
+                matches!(
+                    address_rate_limit_in_body(&body),
+                    Some(CliError::AddressRateLimited(_))
+                ),
+                "{status}"
+            );
+        }
+    }
+
+    #[test]
+    fn sdk_text_and_exchange_text_are_classified_by_the_same_function() {
+        let message = "L1 error: User or API Wallet 0x1111111111111111111111111111111111111111 does not exist.";
+        let err = from_sdk(api_error(message));
+        assert!(matches!(err, CliError::SignerNotRegistered(_)), "{err:?}");
+
+        let message = "Too many cumulative requests sent (2 > 1)";
+        assert!(matches!(
+            from_sdk(api_error(message)),
+            CliError::AddressRateLimited(_)
+        ));
+    }
+
+    #[test]
+    fn only_the_decisive_classes_decide_a_batch() {
+        for message in [
+            "Rate limit exceeded",
+            "Too many cumulative requests sent (2 > 1)",
+            "Unauthorized",
+            "L1 error: User or API Wallet 0x1 does not exist.",
+        ] {
+            let err = classify_rejection(message)
+                .decisive()
+                .unwrap_or_else(|| panic!("{message} is decisive"));
+            assert!(matches!(err.exit_code(), 10 | 11), "{message}");
+            let same = from_exchange_rejection(message, "order rejected");
+            assert_eq!(err.reason(), same.reason(), "{message}");
+        }
+        for message in [
+            "Order has zero size.",
+            "Insufficient margin to place order.",
+            "Something the exchange invented.",
+        ] {
+            assert!(
+                classify_rejection(message).decisive().is_none(),
+                "{message}"
+            );
         }
     }
 

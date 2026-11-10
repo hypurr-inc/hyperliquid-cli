@@ -7,10 +7,12 @@
 //! - [`IsolatedHome`] adds a private home, config and data directory to it.
 //! - [`exchange::ExchangeFixture`] is a mock Hyperliquid API for commands that
 //!   talk to the network.
+//! - [`wire`] builds the API's reply shapes and [`signing`] reads back who
+//!   signed a request the mock received.
 #![allow(dead_code)]
 
 use assert_cmd::Command;
-use hyperliquid_cli::settings::env;
+use hyperliquid_cli::env;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 use wiremock::matchers::{body_json, body_partial_json, body_string_contains, method, path};
@@ -18,6 +20,10 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 pub mod exchange;
 pub mod legacy_accounts_fixture;
+pub mod orders;
+pub mod reads;
+pub mod signing;
+pub mod wire;
 
 pub const API_OVERRIDE_ENV: &str = env::API_BASE_URL;
 pub const MAINNET_API_OVERRIDE_ENV: &str = env::MAINNET_API_BASE_URL;
@@ -32,23 +38,16 @@ pub const TEST_ACCOUNT_PASSPHRASE: &str = "deterministic integration account enc
 pub const VALID_PRIVATE_KEY: &str =
     "0x0000000000000000000000000000000000000000000000000000000000000009";
 
-/// Variables the CLI's HTTP stack reads that are not in `settings::env`.
-/// `reqwest` honors the proxy families and does not bypass loopback, so a proxy
-/// in the shell would swallow every request to a mock server.
-pub const PROCESS_ENV_OUTSIDE_SETTINGS: &[&str] = &[
-    "HTTP_PROXY",
-    "http_proxy",
-    "HTTPS_PROXY",
-    "https_proxy",
-    "ALL_PROXY",
-    "all_proxy",
-    "NO_PROXY",
-    "no_proxy",
-    "RUST_BACKTRACE",
-];
-
 /// Hosts the CLI must reach directly even when a proxy variable is set.
 pub const LOOPBACK_NO_PROXY: &str = "127.0.0.1,localhost,::1";
+
+/// Where a hermetic command's proxy variables lead: a loopback port nothing
+/// listens on. With loopback exempt ([`LOOPBACK_NO_PROXY`]), a mock server is
+/// reached directly and any other host, the public API included, is refused at
+/// once. A proxy, not an `HYPERLIQUID_API_BASE_URL` pointed at a dead port: an
+/// API override makes the CLI probe it before every network command, which
+/// would fail the tests that check validation happens before any request.
+pub const CLOSED_PROXY_URL: &str = "http://127.0.0.1:1";
 
 /// A directory nothing can be created under, so a command run without an
 /// [`IsolatedHome`] fails to write instead of touching the developer's files.
@@ -65,19 +64,37 @@ fn point_platform_dirs_at(command: &mut Command, root: &Path) {
         .env("LOCALAPPDATA", root.join("data"));
 }
 
+/// The CLI's config directory as the platform lookup finds it for a process
+/// whose `HOME` is `home` and `XDG_CONFIG_HOME` is `xdg_config_home`:
+/// `~/Library/Application Support` on macOS, the XDG directory elsewhere.
+pub fn platform_config_dir(home: &Path, xdg_config_home: &Path) -> PathBuf {
+    let base = if cfg!(target_os = "macos") {
+        home.join("Library").join("Application Support")
+    } else {
+        xdg_config_home.to_path_buf()
+    };
+    base.join("hyperliquid")
+}
+
 /// The CLI under test, cut off from the machine it runs on: every setting the
 /// CLI reads from the environment and every proxy variable is cleared,
-/// loopback bypasses proxies, and the platform home points at a directory that
-/// cannot be written. Behavior must come from each test, not from CI, an agent
-/// harness or the developer's shell. This is the only place the binary is
-/// spawned; `tests/hermetic_harness.rs` fails the suite when a test does it
-/// by hand.
+/// loopback bypasses proxies, the platform home points at a directory that
+/// cannot be written, and every other host leads to a closed port
+/// ([`CLOSED_PROXY_URL`]). Behavior must come from each test, not from CI, an
+/// agent harness, the developer's shell or the network; a test that talks to an
+/// API points `HYPERLIQUID_API_BASE_URL` at its mock server. This is the only
+/// place the binary is spawned; `tests/hermetic_harness.rs` fails the suite
+/// when a test does it by hand.
 pub fn hermetic_command() -> Command {
     let mut command = Command::cargo_bin("hyperliquid").unwrap();
-    for name in env::ALL.iter().chain(PROCESS_ENV_OUTSIDE_SETTINGS) {
+    for name in env::ALL {
         command.env_remove(name);
     }
-    command.env("NO_PROXY", LOOPBACK_NO_PROXY);
+    command
+        .env("NO_PROXY", LOOPBACK_NO_PROXY)
+        .env("HTTP_PROXY", CLOSED_PROXY_URL)
+        .env("HTTPS_PROXY", CLOSED_PROXY_URL)
+        .env("ALL_PROXY", CLOSED_PROXY_URL);
     point_platform_dirs_at(&mut command, Path::new(UNWRITABLE_ROOT));
     command
 }
@@ -140,6 +157,14 @@ impl IsolatedHome {
         &self.platform
     }
 
+    /// Where the platform's own config-directory lookup leads, which the CLI
+    /// reaches only when no `HYPERLIQUID_CONFIG_DIR` override is set. It stays
+    /// empty; a test that wants a config the CLI finds that way builds its own
+    /// home and uses [`platform_config_dir`].
+    pub fn platform_config_dir(&self) -> PathBuf {
+        platform_config_dir(&self.platform.join("home"), &self.platform.join("config"))
+    }
+
     /// The directory the CLI keeps `config.json` and `last_error.json` in.
     pub fn config_dir(&self) -> PathBuf {
         self.config.join("hyperliquid")
@@ -150,10 +175,24 @@ impl IsolatedHome {
         self.data.join("hyperliquid")
     }
 
+    /// The CLI with its directories in this home and human-readable output.
+    ///
+    /// The format is forced to `pretty` because stdout is piped under test and
+    /// the CLI answers JSON whenever stdout is not a terminal: without it a
+    /// test of the human output would silently read JSON. A JSON test passes
+    /// `--format json`, which outranks the variable, or starts from
+    /// [`Self::live_json`].
     pub fn command(&self) -> Command {
         let mut command = hermetic_command();
         self.point_at(&mut command, &self.home, &self.data_dir());
         command.env(FORMAT_ENV, "pretty");
+        command
+    }
+
+    /// [`Self::command`] printing JSON.
+    pub fn json_command(&self) -> Command {
+        let mut command = self.command();
+        command.args(["--format", "json"]);
         command
     }
 
@@ -224,6 +263,44 @@ impl IsolatedHome {
         command
     }
 
+    /// [`Self::live_command`] on the testnet with JSON output: what a test of
+    /// a signed request starts from. The test adds the subcommand and reads
+    /// the receipt with [`run_json`].
+    pub fn live_json(&self, server: &MockServer) -> Command {
+        let mut command = self.live_command(server);
+        command.args(["--format", "json", "--testnet"]);
+        command
+    }
+
+    /// A command against `server` signed by this home's stored default account,
+    /// on the testnet with JSON output: what a test of a stored wallet
+    /// starts from, as [`Self::live_json`] is for a bare key.
+    pub fn stored_json(&self, server: &MockServer) -> Command {
+        let mut command = self.account_command_without_passphrase();
+        command
+            .env(API_OVERRIDE_ENV, server.uri())
+            .args(["--format", "json", "--testnet"]);
+        command
+    }
+
+    /// This home with `alias` stored as its default account, holding
+    /// `private_key`: a plain wallet, or an API wallet of `master` when one is
+    /// given. Run it with [`Self::account_command_without_passphrase`].
+    pub fn with_stored_account(self, alias: &str, private_key: &str, master: Option<&str>) -> Self {
+        let address = expected_address(private_key);
+        let row = legacy_accounts_fixture::Row::new(alias, &address, private_key).default_account();
+        let row = match master {
+            Some(master) => row.agent_of(master),
+            None => row,
+        };
+        legacy_accounts_fixture::create_accounts_db_with_key_file(
+            &self.accounts_db(),
+            &self.legacy_accounts_key(),
+            &[row],
+        );
+        self
+    }
+
     pub fn account_command_with_server(&self, passphrase: &str, server: &MockServer) -> Command {
         let mut command = self.account_command(passphrase);
         command.env(API_OVERRIDE_ENV, server.uri());
@@ -243,20 +320,8 @@ impl IsolatedHome {
         command
     }
 
-    /// Where `config.json` lives. `config_file_candidates` and `config_file_path`
-    /// predate the exact path and are kept for the tests that still call them.
     pub fn config_file(&self) -> PathBuf {
         self.config_dir().join("config.json")
-    }
-
-    pub fn config_file_candidates(&self) -> Vec<PathBuf> {
-        vec![self.config_file()]
-    }
-
-    pub fn config_file_path(&self) -> PathBuf {
-        let path = self.config_file();
-        assert!(path.exists(), "config.json should exist");
-        path
     }
 
     pub fn last_error_file(&self) -> PathBuf {
@@ -279,15 +344,9 @@ impl IsolatedHome {
         self.data_dir().join("accounts.db")
     }
 
-    pub fn accounts_db_candidates(&self) -> Vec<PathBuf> {
-        vec![self.accounts_db()]
-    }
-
-    pub fn data_dir_path(&self) -> PathBuf {
-        self.data_dir()
-    }
-
-    pub fn legacy_accounts_key_path(&self) -> PathBuf {
+    /// The plain key file that releases before the OS keychain kept beside the
+    /// accounts database.
+    pub fn legacy_accounts_key(&self) -> PathBuf {
         self.data_dir().join("accounts.key")
     }
 
@@ -296,19 +355,9 @@ impl IsolatedHome {
         self.home.join(".hyperliquid")
     }
 
-    pub fn ows_vault_candidates(&self) -> Vec<PathBuf> {
-        vec![self.ows_vault()]
-    }
-
-    pub fn ows_vault_path(&self) -> PathBuf {
-        let path = self.ows_vault();
-        assert!(path.exists(), "OWS vault should exist");
-        path
-    }
-
     /// The removed account-data key file the CLI must not recreate.
-    pub fn deprecated_config_key_candidates(&self) -> Vec<PathBuf> {
-        vec![self.config_dir().join("account-data.key")]
+    pub fn removed_account_data_key(&self) -> PathBuf {
+        self.config_dir().join("account-data.key")
     }
 }
 
@@ -343,6 +392,20 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Every `.rs` file under `dir`, recursively, for the tests that scan source.
+pub fn rust_files(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(rust_files(&path));
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            found.push(path);
+        }
+    }
+    found
+}
+
 pub fn expected_address(private_key: &str) -> String {
     private_key
         .parse::<hypersdk::hypercore::PrivateKeySigner>()
@@ -373,14 +436,39 @@ pub fn unix_millis() -> u64 {
         .as_millis() as u64
 }
 
-/// The JSON document a command printed on stdout.
+/// Parse captured stdout as one JSON document. With [`json_stdout`], the only
+/// way a test reads a command's JSON.
+pub fn stdout_json(stdout: &[u8]) -> serde_json::Value {
+    serde_json::from_slice(stdout).expect("stdout should be one JSON document")
+}
+
+/// The JSON document a finished command printed on stdout.
 pub fn json_stdout(assert: &assert_cmd::assert::Assert) -> serde_json::Value {
     stdout_json(&assert.get_output().stdout)
 }
 
-/// Parse captured stdout as one JSON document.
-pub fn stdout_json(stdout: &[u8]) -> serde_json::Value {
-    serde_json::from_slice(stdout).expect("stdout should be one JSON document")
+/// What a finished command printed on stderr.
+pub fn stderr_text(assert: &assert_cmd::assert::Assert) -> String {
+    String::from_utf8(assert.get_output().stderr.clone()).expect("stderr should be UTF-8")
+}
+
+/// Run `command`, require success, and return the JSON it printed.
+pub fn run_json(command: &mut Command) -> serde_json::Value {
+    json_stdout(&command.assert().success())
+}
+
+/// Run `command`, require it to exit with `code`, and return the JSON error
+/// envelope it printed.
+pub fn run_json_failure(command: &mut Command, code: i32) -> serde_json::Value {
+    json_stdout(&command.assert().failure().code(code))
+}
+
+/// [`hermetic_command`] printing JSON, for a test of the JSON output that
+/// needs no home.
+pub fn json_command() -> Command {
+    let mut command = hermetic_command();
+    command.args(["--format", "json"]);
+    command
 }
 
 /// Every body `server` received on `path`, in arrival order. A body that is
@@ -410,200 +498,14 @@ pub async fn exchange_bodies(server: &MockServer) -> Vec<serde_json::Value> {
     request_bodies(server, "/exchange").await
 }
 
-/// The `action` of every `/exchange` request `server` received.
+/// The `action` of every `/exchange` request `server` received. For a server
+/// that is not an [`exchange::ExchangeFixture`], which has the same accessor.
 pub async fn exchange_actions(server: &MockServer) -> Vec<serde_json::Value> {
     exchange_bodies(server)
         .await
         .into_iter()
         .map(|body| body["action"].clone())
         .collect()
-}
-
-pub fn fixture_all_mids() -> serde_json::Value {
-    serde_json::json!({
-        "BTC": "50000",
-        "ETH": "3000"
-    })
-}
-
-/// One perpetual in a `meta` universe.
-pub fn fixture_perp(name: &str, sz_decimals: u32, max_leverage: u32) -> serde_json::Value {
-    serde_json::json!({
-        "name": name,
-        "szDecimals": sz_decimals,
-        "maxLeverage": max_leverage,
-        "onlyIsolated": false,
-        "marginMode": null,
-        "growthMode": "disabled"
-    })
-}
-
-/// A `meta` reply for `universe`, collateralized in token 0 (USDC).
-pub fn fixture_perp_meta(universe: Vec<serde_json::Value>) -> serde_json::Value {
-    serde_json::json!({ "universe": universe, "collateralToken": 0 })
-}
-
-pub fn fixture_perp_meta_btc_eth() -> serde_json::Value {
-    fixture_perp_meta(vec![fixture_perp("BTC", 5, 50), fixture_perp("ETH", 4, 25)])
-}
-
-pub fn fixture_perp_meta_btc_only() -> serde_json::Value {
-    fixture_perp_meta(vec![fixture_perp("BTC", 5, 50)])
-}
-
-pub fn fixture_spot_meta_usdc_only() -> serde_json::Value {
-    serde_json::json!({
-        "universe": [],
-        "tokens": [
-            {
-                "name": "USDC",
-                "index": 0,
-                "tokenId": "0x00000000000000000000000000000000",
-                "szDecimals": 6,
-                "weiDecimals": 6,
-                "evmContract": null
-            }
-        ]
-    })
-}
-
-/// Spot metadata whose second pair references a missing token.
-pub fn fixture_malformed_spot_meta() -> serde_json::Value {
-    serde_json::json!({
-        "universe": [
-            {
-                "name": "PURR/USDC",
-                "index": 0,
-                "tokens": [1, 0]
-            },
-            {
-                "name": "BROKEN/USDC",
-                "index": 1,
-                "tokens": [9, 0]
-            }
-        ],
-        "tokens": [
-            {
-                "name": "USDC",
-                "index": 0,
-                "tokenId": "0x00000000000000000000000000000000",
-                "szDecimals": 6,
-                "weiDecimals": 6,
-                "evmContract": null
-            },
-            {
-                "name": "PURR",
-                "index": 1,
-                "tokenId": "0x00000000000000000000000000000001",
-                "szDecimals": 0,
-                "weiDecimals": 0,
-                "evmContract": null
-            }
-        ]
-    })
-}
-
-pub fn fixture_basic_order(coin: &str, oid: u64) -> serde_json::Value {
-    fixture_basic_order_with_cloid(coin, oid, None)
-}
-
-pub fn fixture_basic_order_with_cloid(
-    coin: &str,
-    oid: u64,
-    cloid: Option<&str>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "timestamp": 1700000000000_u64,
-        "coin": coin,
-        "side": "B",
-        "limitPx": "50000",
-        "sz": "0.1",
-        "oid": oid,
-        "origSz": "0.1",
-        "cloid": cloid,
-        "orderType": "Limit",
-        "tif": "Gtc",
-        "reduceOnly": false
-    })
-}
-
-pub fn fixture_fill(coin: &str, oid: u64) -> serde_json::Value {
-    serde_json::json!({
-        "coin": coin,
-        "px": "50000",
-        "sz": "0.1",
-        "side": "B",
-        "time": 1700000000000_u64,
-        "startPosition": "0",
-        "dir": "Open Long",
-        "closedPnl": "0",
-        "hash": "0xabc",
-        "oid": oid,
-        "crossed": true,
-        "fee": "0.01",
-        "tid": 43_u64,
-        "cloid": null,
-        "feeToken": "USDC",
-        "liquidation": null
-    })
-}
-
-/// A clearinghouse state with one BTC position.
-pub fn fixture_clearinghouse_state(withdrawable: &str, leverage: u32) -> serde_json::Value {
-    serde_json::json!({
-        "marginSummary": {
-            "accountValue": "10000",
-            "totalNtlPos": "5000",
-            "totalRawUsd": "10000",
-            "totalMarginUsed": "1000"
-        },
-        "crossMarginSummary": {
-            "accountValue": "10000",
-            "totalNtlPos": "5000",
-            "totalRawUsd": "10000",
-            "totalMarginUsed": "1000"
-        },
-        "crossMaintenanceMarginUsed": "100",
-        "withdrawable": withdrawable,
-        "assetPositions": [
-            {
-                "type": "oneWay",
-                "position": {
-                    "coin": "BTC",
-                    "szi": "0.1",
-                    "leverage": {"type": "cross", "value": leverage},
-                    "entryPx": "50000",
-                    "positionValue": "5100",
-                    "unrealizedPnl": "100",
-                    "returnOnEquity": "0.1",
-                    "liquidationPx": null,
-                    "marginUsed": "1000",
-                    "maxLeverage": 50,
-                    "cumFunding": {"allTime": "0", "sinceOpen": "0", "sinceChange": "0"}
-                }
-            }
-        ],
-        "time": 1700000000000_u64
-    })
-}
-
-pub fn fixture_order_success_response(oid: u64) -> serde_json::Value {
-    serde_json::json!({
-        "status": "ok",
-        "response": {
-            "type": "order",
-            "data": {
-                "statuses": [
-                    {
-                        "resting": {
-                            "oid": oid,
-                            "cloid": null
-                        }
-                    }
-                ]
-            }
-        }
-    })
 }
 
 /// Answer the API-override probe, an unscoped `allMids` read, and nothing
@@ -633,49 +535,6 @@ pub async fn mock_all_mids_server() -> MockServer {
 pub async fn mock_all_mids_server_with_prices(btc: &str, eth: &str) -> MockServer {
     let server = MockServer::start().await;
     mount_all_mids(&server, btc, eth).await;
-    server
-}
-
-pub async fn mount_market_meta(server: &MockServer, body: serde_json::Value) {
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_string_contains(r#""type":"meta""#))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .mount(server)
-        .await;
-}
-
-pub async fn mount_spot_meta(server: &MockServer, body: serde_json::Value) {
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_string_contains(r#""type":"spotMeta""#))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .mount(server)
-        .await;
-}
-
-pub async fn mount_perp_dexs(server: &MockServer, body: serde_json::Value) {
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_string_contains(r#""type":"perpDexs""#))
-        .respond_with(ResponseTemplate::new(200).set_body_json(body))
-        .mount(server)
-        .await;
-}
-
-/// Mount the public reads most read-only commands need.
-pub async fn mount_common_public_endpoints(server: &MockServer) {
-    mount_override_healthcheck(server).await;
-    mount_market_meta(server, fixture_perp_meta_btc_eth()).await;
-    mount_spot_meta(server, fixture_spot_meta_usdc_only()).await;
-    mount_perp_dexs(server, serde_json::json!([])).await;
-}
-
-pub async fn mock_market_server() -> MockServer {
-    let server = MockServer::start().await;
-    mount_override_healthcheck(&server).await;
-    mount_market_meta(&server, fixture_perp_meta_btc_eth()).await;
-    mount_spot_meta(&server, fixture_spot_meta_usdc_only()).await;
     server
 }
 
@@ -710,7 +569,7 @@ pub async fn mount_account_state(
         ))
         .respond_with(
             ResponseTemplate::new(200)
-                .set_body_json(fixture_clearinghouse_state(withdrawable, leverage)),
+                .set_body_json(wire::clearinghouse_state(withdrawable, leverage)),
         )
         .mount(server)
         .await;

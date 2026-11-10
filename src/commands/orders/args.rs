@@ -1,32 +1,30 @@
-use std::fmt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use hypersdk::Decimal;
-use hypersdk::hypercore::types::{LeverageType, OrderGrouping, TimeInForce, TpSl};
-use serde::{Deserialize, Serialize};
 
+use super::vocab::{
+    CreateOrderType, DEFAULT_MARKET_ORDER_SLIPPAGE_BPS, MAX_MARKET_ORDER_SLIPPAGE_BPS,
+    MIN_MARKET_ORDER_SLIPPAGE_BPS, OrderSide, TifArg, TpslGroupingArg,
+};
+use crate::assets::DexArg;
+use crate::clock::parse_lifetime;
 use crate::errors::CliError;
+use crate::margin::MarginModeArg;
+use crate::quantity::not_positive;
 
-/// Default maximum time to track a resting order or ALO chase quote (5 minutes).
 pub(super) const DEFAULT_TRACKING_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// [`DEFAULT_TRACKING_TIMEOUT`] as a clap default value.
 const DEFAULT_TRACKING_TIMEOUT_TEXT: &str = "300s";
 
 /// The largest order write priority rate, in 1/100,000,000 of notional: 100%.
-pub(super) const MAX_PRIORITY_RATE: u32 = 100_000_000;
+const MAX_PRIORITY_RATE: u32 = 100_000_000;
 
-/// `--priority-rate`: a whole rate from 1 to [`MAX_PRIORITY_RATE`].
 fn priority_rate_parser() -> clap::builder::RangedI64ValueParser<u32> {
     clap::value_parser!(u32).range(1..=i64::from(MAX_PRIORITY_RATE))
 }
-
-pub(super) const DEFAULT_MARKET_ORDER_SLIPPAGE_BPS: u16 = 500;
-pub(super) const MIN_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1;
-pub(super) const MAX_MARKET_ORDER_SLIPPAGE_BPS: u16 = 1_000;
 
 /// Arguments for `orders create`.
 #[derive(Args, Debug, Clone)]
@@ -304,7 +302,7 @@ pub struct CancelAllArgs {
 
     /// HIP-3 DEX for the --coin filter
     #[arg(long, requires = "coin")]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
 
     /// Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id
     #[arg(long)]
@@ -414,7 +412,7 @@ pub struct TwapCancelArgs {
 #[derive(Args, Debug, Clone)]
 pub struct ScheduleCancelArgs {
     /// Relative duration before cancel-all triggers (for example: 5m, 30s, 1h)
-    #[arg(long = "in", value_parser = parse_relative_duration)]
+    #[arg(long = "in", value_parser = parse_lifetime)]
     pub in_duration: Option<Duration>,
 
     /// Remove an existing scheduled cancel trigger instead of setting one
@@ -446,145 +444,6 @@ pub struct StatusArgs {
     pub cloid: Option<String>,
 }
 
-/// Buy/sell order side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum OrderSide {
-    Buy,
-    Sell,
-}
-
-/// Explicit perpetual margin-mode intent for order flows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum MarginModeArg {
-    Cross,
-    Isolated,
-}
-
-impl MarginModeArg {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Cross => "cross",
-            Self::Isolated => "isolated",
-        }
-    }
-}
-
-impl From<LeverageType> for MarginModeArg {
-    fn from(leverage_type: LeverageType) -> Self {
-        match leverage_type {
-            LeverageType::Cross => Self::Cross,
-            LeverageType::Isolated => Self::Isolated,
-        }
-    }
-}
-
-impl fmt::Display for MarginModeArg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl OrderSide {
-    pub(super) fn is_buy(self) -> bool {
-        matches!(self, Self::Buy)
-    }
-
-    pub(super) fn opposite(self) -> Self {
-        match self {
-            Self::Buy => Self::Sell,
-            Self::Sell => Self::Buy,
-        }
-    }
-}
-
-impl fmt::Display for OrderSide {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Buy => write!(f, "buy"),
-            Self::Sell => write!(f, "sell"),
-        }
-    }
-}
-
-/// Supported `orders create --type` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CreateOrderType {
-    Limit,
-    Market,
-    StopLoss,
-    TakeProfit,
-    StopLimit,
-    TakeLimit,
-}
-
-impl fmt::Display for CreateOrderType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Limit => write!(f, "limit"),
-            Self::Market => write!(f, "market"),
-            Self::StopLoss => write!(f, "stop-loss"),
-            Self::TakeProfit => write!(f, "take-profit"),
-            Self::StopLimit => write!(f, "stop-limit"),
-            Self::TakeLimit => write!(f, "take-limit"),
-        }
-    }
-}
-
-impl CreateOrderType {
-    pub(super) fn is_trigger(self) -> bool {
-        matches!(
-            self,
-            Self::StopLoss | Self::TakeProfit | Self::StopLimit | Self::TakeLimit
-        )
-    }
-
-    pub(super) fn market_trigger(tpsl: TpSl) -> Self {
-        match tpsl {
-            TpSl::Tp => Self::TakeProfit,
-            TpSl::Sl => Self::StopLoss,
-        }
-    }
-
-    pub(super) fn limit_trigger(tpsl: TpSl) -> Self {
-        match tpsl {
-            TpSl::Tp => Self::TakeLimit,
-            TpSl::Sl => Self::StopLimit,
-        }
-    }
-}
-
-/// CLI-facing TIF values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, ValueEnum, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TifArg {
-    Gtc,
-    Alo,
-    Ioc,
-}
-
-impl From<TifArg> for TimeInForce {
-    fn from(value: TifArg) -> Self {
-        match value {
-            TifArg::Gtc => Self::Gtc,
-            TifArg::Alo => Self::Alo,
-            TifArg::Ioc => Self::Ioc,
-        }
-    }
-}
-
-impl fmt::Display for TifArg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Gtc => write!(f, "gtc"),
-            Self::Alo => write!(f, "alo"),
-            Self::Ioc => write!(f, "ioc"),
-        }
-    }
-}
-
 /// CLI-facing `orders create` TP/SL grouping values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum CreateTpslGroupingArg {
@@ -594,14 +453,6 @@ pub enum CreateTpslGroupingArg {
 /// CLI-facing `orders tpsl` TP/SL grouping values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum PositionTpslGroupingArg {
-    PositionTpsl,
-}
-
-/// How an order batch groups its TP/SL legs. The two CLI enums above are the
-/// values each command accepts; this is the one place that names a grouping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TpslGroupingArg {
-    NormalTpsl,
     PositionTpsl,
 }
 
@@ -621,34 +472,6 @@ impl From<PositionTpslGroupingArg> for TpslGroupingArg {
     }
 }
 
-impl From<TpslGroupingArg> for OrderGrouping {
-    fn from(value: TpslGroupingArg) -> Self {
-        match value {
-            TpslGroupingArg::NormalTpsl => Self::NormalTpsl,
-            TpslGroupingArg::PositionTpsl => Self::PositionTpsl,
-        }
-    }
-}
-
-impl TpslGroupingArg {
-    pub(super) fn wire_value(self) -> &'static str {
-        match self {
-            Self::NormalTpsl => "normalTpsl",
-            Self::PositionTpsl => "positionTpsl",
-        }
-    }
-}
-
-impl fmt::Display for TpslGroupingArg {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NormalTpsl => write!(f, "normal-tpsl"),
-            Self::PositionTpsl => write!(f, "position-tpsl"),
-        }
-    }
-}
-
-/// One leg of `orders batch-create`, read from the orders file by `parse_batch_leg`.
 #[derive(Debug, Clone)]
 pub struct BatchCreateOrder {
     pub(super) coin: String,
@@ -670,8 +493,6 @@ pub enum TriggerPriceSpec {
 }
 
 impl TriggerPriceSpec {
-    /// Resolve a trigger spec against a position entry price.
-    ///
     /// `position_side` is the direction of the position being protected (the
     /// entry side), not the close side. Percent specs are directional: `+N%`
     /// always means N% in the position's favor and `-N%` N% against it, so a
@@ -696,6 +517,14 @@ impl TriggerPriceSpec {
         }
     }
 
+    /// The price, when it does not depend on a position's entry.
+    pub fn absolute(&self) -> Option<Decimal> {
+        match self {
+            Self::Absolute(price) => Some(*price),
+            Self::Percent(_) | Self::Entry => None,
+        }
+    }
+
     pub fn display(&self) -> String {
         match self {
             Self::Absolute(price) => price.to_string(),
@@ -717,39 +546,9 @@ pub fn parse_trigger_price_spec(raw: &str) -> Result<TriggerPriceSpec, String> {
     }
     let price = Decimal::from_str(trimmed).map_err(|_| format!("invalid trigger price '{raw}'"))?;
     if price <= Decimal::ZERO {
-        return Err("trigger price must be greater than zero".to_string());
+        return Err(not_positive("trigger price"));
     }
     Ok(TriggerPriceSpec::Absolute(price))
-}
-pub(crate) fn parse_relative_duration(input: &str) -> Result<Duration, String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Err("duration cannot be empty".to_string());
-    }
-
-    let (number_part, multiplier, unit_name) = match trimmed.chars().last().unwrap() {
-        's' | 'S' => (&trimmed[..trimmed.len() - 1], 1_u64, "seconds"),
-        'm' | 'M' => (&trimmed[..trimmed.len() - 1], 60_u64, "minutes"),
-        'h' | 'H' => (&trimmed[..trimmed.len() - 1], 60 * 60, "hours"),
-        'd' | 'D' => (&trimmed[..trimmed.len() - 1], 24 * 60 * 60, "days"),
-        ch if ch.is_ascii_digit() => (trimmed, 1_u64, "seconds"),
-        _ => {
-            return Err(
-                "duration must be a positive integer with optional s/m/h/d suffix".to_string(),
-            );
-        }
-    };
-
-    let value = number_part
-        .parse::<u64>()
-        .map_err(|_| format!("duration {unit_name} must be a positive integer"))?;
-    if value == 0 {
-        return Err("duration must be greater than zero".to_string());
-    }
-    value
-        .checked_mul(multiplier)
-        .map(Duration::from_secs)
-        .ok_or_else(|| "duration is too large".to_string())
 }
 
 #[cfg(test)]
@@ -802,14 +601,12 @@ mod trigger_price_spec_tests {
     #[test]
     fn resolve_percent_inverts_for_short_entry() {
         let entry = Decimal::from(100);
-        // +10% take-profit on a short resolves below entry (favorable move).
         assert_eq!(
             TriggerPriceSpec::Percent(Decimal::from(10))
                 .resolve(entry, OrderSide::Sell)
                 .unwrap(),
             Decimal::from(90)
         );
-        // -5% stop-loss on a short resolves above entry (adverse move).
         assert_eq!(
             TriggerPriceSpec::Percent(Decimal::from(-5))
                 .resolve(entry, OrderSide::Sell)
@@ -929,10 +726,10 @@ pub struct ChaseArgs {
     #[arg(long, default_value_t = 5)]
     pub offset: u32,
     /// Max time to chase. Required in agent/non-TTY mode.
-    #[arg(long, value_parser = parse_relative_duration)]
+    #[arg(long, value_parser = parse_lifetime)]
     pub timeout: Option<Duration>,
     /// Requote interval
-    #[arg(long, default_value = "2s", value_parser = parse_relative_duration)]
+    #[arg(long, default_value = "2s", value_parser = parse_lifetime)]
     pub interval: Duration,
     /// Max distance from the first mid, in basis points
     #[arg(long, default_value_t = 100)]
@@ -971,7 +768,7 @@ pub struct BracketArgs {
     pub take_profit: TriggerPriceSpec,
     #[arg(long, allow_hyphen_values = true, value_parser = parse_trigger_price_spec)]
     pub stop_loss: TriggerPriceSpec,
-    #[arg(long, default_value = DEFAULT_TRACKING_TIMEOUT_TEXT, value_parser = parse_relative_duration)]
+    #[arg(long, default_value = DEFAULT_TRACKING_TIMEOUT_TEXT, value_parser = parse_lifetime)]
     pub entry_timeout: Duration,
     #[arg(long)]
     pub on_behalf_of: Option<String>,
@@ -987,37 +784,90 @@ pub struct BracketArgs {
     pub yes: bool,
 }
 
-#[cfg(test)]
-mod duration_tests {
-    use super::*;
+/// Arguments for `orders trailing-stop`.
+#[derive(Args, Debug, Clone)]
+pub struct TrailingStopArgs {
+    /// Perpetual coin (for example: BTC, ETH, SOL). Spot and outcome markets are not supported
+    #[arg(long)]
+    pub coin: String,
 
-    #[test]
-    fn a_relative_duration_is_a_positive_whole_number_of_seconds_or_more() {
-        for (input, expected) in [
-            ("30", 30),
-            ("30s", 30),
-            ("5m", 300),
-            ("2h", 7_200),
-            ("1d", 86_400),
-        ] {
-            assert_eq!(
-                parse_relative_duration(input),
-                Ok(Duration::from_secs(expected)),
-                "{input}"
-            );
-        }
-        // Zero and sub-second values cannot reach a command: a zero timeout or a
-        // sub-second requote interval is refused here, not defended against later.
-        for input in ["0", "0s", "100ms", "1.5s", "", "s"] {
-            assert!(parse_relative_duration(input).is_err(), "{input}");
-        }
-    }
+    /// HIP-3 DEX to trade on (equivalent to --coin dex:COIN)
+    #[arg(long)]
+    pub dex: Option<String>,
+
+    /// Order side. A sell closes a long and trails the highest mark price; a buy closes a short and trails the lowest
+    #[arg(long, value_enum)]
+    pub side: OrderSide,
+
+    /// Base-asset size
+    #[arg(long, allow_hyphen_values = true)]
+    pub size: Decimal,
+
+    /// Retracement from the best mark price as a percent, above 0 and below 100 (for example 5 or 5%). Use this or --retracement-px
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        value_parser = parse_retracement_pct,
+        conflicts_with = "retracement_px",
+        required_unless_present = "retracement_px"
+    )]
+    pub retracement_pct: Option<Decimal>,
+
+    /// Retracement from the best mark price as a price distance, above 0. Use this or --retracement-pct
+    #[arg(
+        long,
+        allow_hyphen_values = true,
+        conflicts_with = "retracement_pct",
+        required_unless_present = "retracement_pct"
+    )]
+    pub retracement_px: Option<Decimal>,
+
+    /// Mark price at which the stop starts tracking. Omit to start tracking immediately
+    #[arg(long, allow_hyphen_values = true)]
+    pub activation_price: Option<Decimal>,
+
+    /// Only reduce an existing perpetual position
+    #[arg(long)]
+    pub reduce_only: bool,
+
+    /// Acting-account selector for vaultAddress: subaccount/vault address, stored account alias, or stored account id
+    #[arg(long)]
+    pub on_behalf_of: Option<String>,
+
+    /// Skip the mainnet confirmation prompt for deliberate automation
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+}
+
+/// Parse `5`, `5.5`, or `5%` as a percent value.
+pub(super) fn parse_retracement_pct(value: &str) -> Result<Decimal, String> {
+    let trimmed = value.trim();
+    let digits = trimmed.strip_suffix('%').unwrap_or(trimmed).trim_end();
+    Decimal::from_str(digits)
+        .map_err(|_| format!("`{value}` is not a percent. Use a number such as 5 or 5%"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn the_tracking_timeout_default_text_is_the_default_timeout() {
         assert_eq!(
-            parse_relative_duration(DEFAULT_TRACKING_TIMEOUT_TEXT),
+            parse_lifetime(DEFAULT_TRACKING_TIMEOUT_TEXT),
             Ok(DEFAULT_TRACKING_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn a_grouping_goes_on_the_wire_as_the_sdk_spells_it() {
+        assert_eq!(
+            TpslGroupingArg::NormalTpsl.wire_value(),
+            serde_json::json!("normalTpsl")
+        );
+        assert_eq!(
+            TpslGroupingArg::PositionTpsl.wire_value(),
+            serde_json::json!("positionTpsl")
         );
     }
 }

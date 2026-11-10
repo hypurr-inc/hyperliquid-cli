@@ -4,32 +4,25 @@
 //! after the order is sent. Reading `maxBuilderFee` first turns that into an
 //! early failure with the command that fixes it.
 
-use std::io::Write;
-
 use hypersdk::Address;
 
-use super::exchange::OrderBuilderFee;
-use crate::builder_fee::percent_from_tenths_bps;
+use crate::builder_fee::{BuilderFee, max_builder_fee, percent_from_tenths_bps};
 use crate::errors::CliError;
+use crate::hints;
 use crate::http_api::ApiClient;
 use crate::mode::Mode;
-use crate::prompt;
-use crate::wire::InfoRequest;
+use crate::output::Notice;
 
-/// What the exchange says about a builder fee the account is asked to pay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum BuilderApproval {
-    /// The approved maximum covers the fee.
     Covered { approved_tenths_bps: u64 },
-    /// The approved maximum is below the fee.
     Short { approved_tenths_bps: u64 },
-    /// The maximum could not be read: the request failed.
     Unread { reason: String },
 }
 
 impl BuilderApproval {
-    pub(super) fn judge(fee: &OrderBuilderFee, approved_tenths_bps: u64) -> Self {
-        if approved_tenths_bps >= fee.f {
+    pub(super) fn judge(fee: &BuilderFee, approved_tenths_bps: u64) -> Self {
+        if approved_tenths_bps >= fee.tenths_bps() {
             Self::Covered {
                 approved_tenths_bps,
             }
@@ -40,8 +33,7 @@ impl BuilderApproval {
         }
     }
 
-    /// The check as a dry-run preview reports it.
-    pub(super) fn to_json(&self, user: Address, fee: &OrderBuilderFee) -> serde_json::Value {
+    pub(super) fn to_json(&self, user: Address, fee: &BuilderFee) -> serde_json::Value {
         let (status, approved, reason) = match self {
             Self::Covered {
                 approved_tenths_bps,
@@ -54,39 +46,40 @@ impl BuilderApproval {
         serde_json::json!({
             "status": status,
             "account": user.to_string(),
-            "builder": fee.b,
-            "requested_tenths_bps": fee.f,
+            "builder": fee.address_wire(),
+            "requested_tenths_bps": fee.tenths_bps(),
             "approved_tenths_bps": approved,
             "reason": reason,
         })
     }
 
     /// The error a live order fails with, or `None` when it may go on.
-    fn refusal(&self, user: Address, fee: &OrderBuilderFee) -> Option<CliError> {
+    fn refusal(&self, user: Address, fee: &BuilderFee) -> Option<CliError> {
         let Self::Short {
             approved_tenths_bps,
         } = self
         else {
             return None;
         };
-        let requested = percent_from_tenths_bps(fee.f);
+        let requested = percent_from_tenths_bps(fee.tenths_bps());
         Some(CliError::Unsupported(format!(
-            "Account {user} has approved builder {} for a max fee of {} ({approved_tenths_bps} tenths of a basis point), below the {requested} this order carries. Approve at least that with the main wallet, which an API wallet cannot do:\n    hyperliquid builder approve --builder {} --max-fee-rate {requested}",
-            fee.b,
+            "Account {user} has approved builder {} for a max fee of {} ({approved_tenths_bps} tenths of a basis point), below the {requested} this order carries. Approve at least that with the main wallet, which an API wallet cannot do:\n    {}",
+            fee.address_wire(),
             percent_from_tenths_bps(*approved_tenths_bps),
-            fee.b,
+            hints::builder_approve_command(fee.address_wire(), &requested),
         )))
     }
 }
 
-/// Read what `user` approved for the builder and judge `fee` against it.
-pub(super) async fn check(
-    api: &ApiClient,
-    user: Address,
-    fee: &OrderBuilderFee,
-) -> BuilderApproval {
-    let request = InfoRequest::user("maxBuilderFee", user).field("builder", fee.b.clone());
-    match api.info::<u64>(&request, "loading max builder fee").await {
+/// The account whose approval a builder fee needs: the signer's own. Acting
+/// for a vault or subaccount, which account must have approved the builder is
+/// not documented, so no account is checked then.
+pub(super) fn approver(vault_address: Option<Address>, signer_account: Address) -> Option<Address> {
+    vault_address.is_none().then_some(signer_account)
+}
+
+pub(super) async fn check(api: &ApiClient, user: Address, fee: &BuilderFee) -> BuilderApproval {
+    match max_builder_fee(api, user, fee.address()).await {
         Ok(approved_tenths_bps) => BuilderApproval::judge(fee, approved_tenths_bps),
         Err(err) => BuilderApproval::Unread {
             reason: err.to_string(),
@@ -101,9 +94,9 @@ pub(super) async fn ensure_approved(
     api: &ApiClient,
     mode: &Mode,
     user: Address,
-    fee: &OrderBuilderFee,
+    fee: &BuilderFee,
 ) -> Result<(), CliError> {
-    if fee.f == 0 {
+    if fee.tenths_bps() == 0 {
         return Ok(());
     }
     let approval = check(api, user, fee).await;
@@ -111,13 +104,12 @@ pub(super) async fn ensure_approved(
         return Err(refusal);
     }
     if let (BuilderApproval::Unread { reason }, true) = (&approval, mode.person_on_stderr()) {
-        let notice = prompt::warning(&format!(
+        Notice::Caution(format!(
             "Couldn't check that builder {} is approved for {}: {reason}. Sending the order anyway; the exchange rejects it if the fee is not approved.",
-            fee.b,
-            percent_from_tenths_bps(fee.f),
-        ));
-        // A notice that cannot be written must not stop an order.
-        let _ = writeln!(std::io::stderr(), "{notice}");
+            fee.address_wire(),
+            percent_from_tenths_bps(fee.tenths_bps()),
+        ))
+        .eprint();
     }
     Ok(())
 }
@@ -128,12 +120,8 @@ mod tests {
 
     const USER: Address = Address::repeat_byte(0x11);
 
-    fn fee(f: u64) -> OrderBuilderFee {
-        OrderBuilderFee {
-            b: "0x2222222222222222222222222222222222222222".to_string(),
-            f,
-            s: Vec::new(),
-        }
+    fn fee(tenths_bps: u64) -> BuilderFee {
+        BuilderFee::new(Address::repeat_byte(0x22), tenths_bps, Vec::new())
     }
 
     #[test]

@@ -1,9 +1,8 @@
 //! The dry-run preview envelope: what a command prints under `--dry-run`.
 //!
 //! Dry-run output is a public CLI contract. Commands do not build envelopes
-//! themselves; `commands::support::print_dry_run` assembles one from the
-//! invocation (command name, payload, network, signer) and the command's
-//! `would_execute` name and `args`.
+//! themselves: the shared dry-run printer assembles one from the invocation
+//! and the command's `would_execute` name and `args`.
 
 use serde::Serialize;
 

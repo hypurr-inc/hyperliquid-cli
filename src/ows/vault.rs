@@ -9,10 +9,13 @@ use hypersdk::Address;
 use ows_lib::types::{AccountInfo, WalletInfo};
 
 use super::{EVM_CAIP2, HYPERLIQUID_CAIP2, HYPERLIQUID_CHAIN_ALIAS, map_ows_error};
+use crate::env;
 use crate::errors::CliError;
-use crate::settings::{Settings, env};
-
-const SET_DEFAULT_HINT: &str = "hyperliquid account set-default <WALLET>";
+use crate::hints::wallet::{SET_DEFAULT, WALLET_CREATE};
+use crate::output::Notice;
+use crate::resolvers::parse_hex_address;
+use crate::settings::Settings;
+use crate::wire::selector_address;
 
 #[derive(Clone, Default)]
 pub struct Vault {
@@ -87,13 +90,18 @@ impl Vault {
             |path| path.join("wallets").display().to_string(),
         );
         let passphrase_env = env::OWS_PASSPHRASE;
-        eprintln!(
-            "! {passphrase_env} isn't set, so this wallet is encrypted with an empty passphrase."
-        );
-        eprintln!(
-            "  Anyone who can read {vault} can recover the key. To use a passphrase, delete the wallet and recreate it with:"
-        );
-        eprintln!("    {passphrase_env}=<passphrase> hyperliquid wallet create");
+        Notice::Advice {
+            headline: format!(
+                "{passphrase_env} isn't set, so this wallet is encrypted with an empty passphrase."
+            ),
+            lines: vec![
+                format!(
+                    "  Anyone who can read {vault} can recover the key. To use a passphrase, delete the wallet and recreate it with:"
+                ),
+                format!("    {passphrase_env}=<passphrase> {WALLET_CREATE}"),
+            ],
+        }
+        .eprint();
     }
 
     /// Whether the vault's wallet directory exists. Reads must not create it.
@@ -129,7 +137,7 @@ impl Vault {
     /// address in any letter case. A vault that holds no such wallet is
     /// `OwsWalletNotFound`; a name shared by several wallets is ambiguous.
     pub fn select(&self, selector: &str) -> Result<WalletInfo, CliError> {
-        if selector.parse::<Address>().is_err() {
+        if selector_address(selector).is_none() {
             return self.get(selector);
         }
         self.list()?
@@ -202,7 +210,7 @@ impl Vault {
                 wallet: wallet.name.clone(),
                 caip2: HYPERLIQUID_CAIP2.to_string(),
             })?;
-        let address = account.address.parse::<Address>().map_err(|_| {
+        let address = parse_hex_address(&account.address, false).map_err(|_| {
             CliError::InvalidAuth(format!(
                 "ows_malformed_response: OWS wallet '{}' returned invalid EVM address '{}'",
                 wallet.name, account.address
@@ -258,34 +266,47 @@ impl Vault {
     /// used. An empty vault is `AuthRequired`; several wallets with no default is
     /// an error that asks for `account set-default`.
     pub fn default_wallet(&self, configured: Option<&str>) -> Result<WalletInfo, CliError> {
-        let mut wallets = self.hyperliquid_wallets()?;
+        let mut wallets: Vec<WalletInfo> = self
+            .signing_wallets()?
+            .into_iter()
+            .map(|(wallet, _)| wallet)
+            .collect();
         let defaults = Self::default_indices(&wallets, configured);
         match (configured, defaults.as_slice()) {
             (_, [index]) => Ok(wallets.swap_remove(*index)),
             (Some(id), []) => match self.get(id) {
                 Ok(_) => Err(CliError::InvalidAuth(format!(
-                    "Default wallet {id} has no Hyperliquid account.\nPick another:\n    {SET_DEFAULT_HINT}"
+                    "Default wallet {id} has no Hyperliquid account.\nPick another:\n    {SET_DEFAULT}"
                 ))),
                 Err(CliError::OwsWalletNotFound { .. }) => Err(CliError::InvalidAuth(format!(
-                    "Default wallet {id} isn't in the vault.\nPick another:\n    {SET_DEFAULT_HINT}"
+                    "Default wallet {id} isn't in the vault.\nPick another:\n    {SET_DEFAULT}"
                 ))),
                 Err(err) => Err(err),
             },
             (Some(id), many) => Err(super::ambiguous_wallet(id, many.len())),
             (None, _) if wallets.is_empty() => Err(CliError::AuthRequired),
             (None, _) => Err(CliError::InvalidAuth(format!(
-                "No default wallet is set and the vault holds {} wallets.\nPick one:\n    {SET_DEFAULT_HINT}",
+                "No default wallet is set and the vault holds {} wallets.\nPick one:\n    {SET_DEFAULT}",
                 wallets.len()
             ))),
         }
     }
 
-    pub fn hyperliquid_wallets(&self) -> Result<Vec<WalletInfo>, CliError> {
-        Ok(self
-            .list()?
-            .into_iter()
-            .filter(|wallet| Self::hyperliquid_account(wallet).is_ok())
-            .collect())
+    /// The wallets that can sign for Hyperliquid, each with its account. Only a
+    /// wallet that genuinely lacks a Hyperliquid/EVM account is left out;
+    /// a malformed address or a vault failure is an error, never a silent
+    /// miss. Signing (the default wallet) and listings both ask this, so they
+    /// can never disagree about which wallets count.
+    pub fn signing_wallets(&self) -> Result<Vec<(WalletInfo, HyperliquidAccount)>, CliError> {
+        let mut signing = Vec::new();
+        for wallet in self.list()? {
+            match Self::hyperliquid_account(&wallet) {
+                Ok(account) => signing.push((wallet, account)),
+                Err(CliError::OwsNoChainAccount { .. }) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(signing)
     }
 }
 
@@ -400,7 +421,7 @@ mod tests {
         import_test_wallet(tmp.path(), "second");
         let err = vault.default_wallet(None).unwrap_err();
         assert!(err.to_string().contains("holds 2 wallets"));
-        assert!(err.to_string().contains(SET_DEFAULT_HINT));
+        assert!(err.to_string().contains(SET_DEFAULT));
         assert_eq!(vault.default_wallet(Some(&first.id)).unwrap().name, "first");
     }
 
@@ -409,11 +430,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let vault = Vault::at(tmp.path());
         let first = import_test_wallet(tmp.path(), "first");
-        let wallets = vault.hyperliquid_wallets().unwrap();
+        let wallets = signing_infos(&vault);
         assert_eq!(Vault::default_markers(&wallets, None), [true]);
 
         let second = import_test_wallet(tmp.path(), "second");
-        let wallets = vault.hyperliquid_wallets().unwrap();
+        let wallets = signing_infos(&vault);
         assert_eq!(Vault::default_markers(&wallets, None), [false, false]);
 
         for configured in [first.name.as_str(), first.id.as_str(), second.name.as_str()] {
@@ -431,6 +452,40 @@ mod tests {
             Vault::default_markers(&wallets, Some("gone")),
             [false, false]
         );
+    }
+
+    fn signing_infos(vault: &Vault) -> Vec<WalletInfo> {
+        vault
+            .signing_wallets()
+            .unwrap()
+            .into_iter()
+            .map(|(wallet, _)| wallet)
+            .collect()
+    }
+
+    #[test]
+    fn a_malformed_wallet_address_is_an_error_for_listing_and_signing_alike() {
+        let tmp = TempDir::new().unwrap();
+        let vault = Vault::at(tmp.path());
+        let wallet = import_test_wallet(tmp.path(), "broken");
+        let file = tmp
+            .path()
+            .join("wallets")
+            .join(format!("{}.json", wallet.id));
+        let address = Vault::hyperliquid_account(&wallet).unwrap().address_text;
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains(&address), "the fixture must hold the address");
+        std::fs::write(&file, text.replace(&address, "not-an-address")).unwrap();
+
+        for err in [
+            vault.signing_wallets().unwrap_err(),
+            vault.default_wallet(None).unwrap_err(),
+        ] {
+            assert!(
+                err.to_string().contains("ows_malformed_response"),
+                "a malformed address must not be skipped silently: {err}"
+            );
+        }
     }
 
     #[test]

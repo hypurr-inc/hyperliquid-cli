@@ -8,18 +8,15 @@ use clap::Args;
 use hypersdk::hypercore::types::Action;
 use serde::Serialize;
 
+use crate::cli_command::CliCommand;
 use crate::clock;
-use crate::command_spec::{CliCommand, CommandSpec, Risk, arg};
-use crate::commands::actions::send_l1_action;
-use crate::commands::rows::{One, Row};
-use crate::commands::support::print_dry_run;
+use crate::command_spec::{CommandSpec, Risk, arg};
+use crate::commands::common::rows::{One, Row};
+use crate::commands::common::support::print_dry_run;
 use crate::errors::CliError;
+use crate::exchange::actions::send_default_l1_action_with_nonce;
 use crate::invocation::Invocation;
-
-/// The exchange accepts a nonce within `(T - 2 days, T + 1 day)` of its clock.
-/// Outside it the nonce can neither be in flight nor be burnt.
-const NONCE_PAST_MS: u64 = 2 * 24 * 60 * 60 * 1000;
-const NONCE_FUTURE_MS: u64 = 24 * 60 * 60 * 1000;
+use crate::nonce::{WINDOW_FUTURE_MS, WINDOW_PAST_MS, window_phrase};
 
 /// Arguments for `account invalidate-nonce`.
 #[derive(Args, Debug, Clone)]
@@ -48,13 +45,17 @@ impl Row for InvalidatedNonce {
     }
 }
 
-/// The nonce, once it is one the exchange could hold.
 fn validate_nonce(nonce: u64, now_ms: u64) -> Result<u64, CliError> {
-    if nonce <= now_ms.saturating_sub(NONCE_PAST_MS)
-        || nonce >= now_ms.saturating_add(NONCE_FUTURE_MS)
+    if nonce <= now_ms.saturating_sub(WINDOW_PAST_MS)
+        || nonce >= now_ms.saturating_add(WINDOW_FUTURE_MS)
     {
         return Err(CliError::Unsupported(format!(
-            "nonce {nonce} is outside the window the exchange accepts (from 2 days before to 1 day after now, in milliseconds since the Unix epoch), so no request with it can be in flight"
+            concat!(
+                "nonce {} is outside the window the exchange accepts (from ",
+                window_phrase!(),
+                " now, in milliseconds since the Unix epoch), so no request with it can be in flight"
+            ),
+            nonce
         )));
     }
     Ok(nonce)
@@ -72,9 +73,11 @@ impl CliCommand for AccountInvalidateNonce {
         "Send a noop action that marks a nonce as used, so a signed request still in flight with that nonce is rejected. Sign with the same wallet as the request; the nonce is printed when a request's outcome is unknown. Moves no funds.",
     )
     .risk(Risk::AccountState)
-    .args(&[arg("nonce").describe(
-        "Millisecond timestamp nonce of the request to invalidate; within 2 days before to 1 day after now.",
-    )]);
+    .args(&[arg("nonce").describe(concat!(
+        "Millisecond timestamp nonce of the request to invalidate; within ",
+        window_phrase!(),
+        " now."
+    ))]);
 
     async fn run(inv: &Invocation, args: &InvalidateNonceArgs) -> Result<(), anyhow::Error> {
         let nonce = validate_nonce(args.nonce, clock::now_ms())?;
@@ -82,7 +85,8 @@ impl CliCommand for AccountInvalidateNonce {
             return print_dry_run(inv, "invalidate_nonce", serde_json::json!({"nonce": nonce}));
         }
         let signer = inv.resolve_signer()?;
-        send_l1_action(inv.remote()?.api(), &signer, Action::Noop, nonce).await?;
+        send_default_l1_action_with_nonce(inv.remote()?.api(), &signer, Action::Noop, nonce)
+            .await?;
         inv.print(&One::new(InvalidatedNonce {
             action: "invalidate_nonce",
             status: "confirmed",
@@ -101,9 +105,9 @@ mod tests {
     #[test]
     fn only_nonces_inside_the_exchange_window_can_be_burnt() {
         assert!(validate_nonce(NOW, NOW).is_ok());
-        assert!(validate_nonce(NOW - NONCE_PAST_MS + 1, NOW).is_ok());
-        assert!(validate_nonce(NOW + NONCE_FUTURE_MS - 1, NOW).is_ok());
-        for outside in [NOW - NONCE_PAST_MS, NOW + NONCE_FUTURE_MS, 1, u64::MAX] {
+        assert!(validate_nonce(NOW - WINDOW_PAST_MS + 1, NOW).is_ok());
+        assert!(validate_nonce(NOW + WINDOW_FUTURE_MS - 1, NOW).is_ok());
+        for outside in [NOW - WINDOW_PAST_MS, NOW + WINDOW_FUTURE_MS, 1, u64::MAX] {
             assert!(
                 matches!(validate_nonce(outside, NOW), Err(CliError::Unsupported(_))),
                 "{outside}"

@@ -8,10 +8,10 @@ use super::release::{
 };
 use crate::errors::CliError;
 use crate::invocation::Invocation;
-use crate::output::{OutputFormat, TableData};
+use crate::output::{TableData, sink};
 use crate::private_fs;
+use crate::terminal::OutputFormat;
 
-const TEMP_DIR_ATTEMPTS: u32 = 16;
 const EXECUTABLE_MODE: u32 = 0o755;
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,11 +146,10 @@ impl Drop for TempDir {
 }
 
 fn create_temp_dir() -> Result<TempDir, anyhow::Error> {
-    for _ in 0..TEMP_DIR_ATTEMPTS {
+    for _ in 0..private_fs::TEMP_NAME_ATTEMPTS {
         let path = std::env::temp_dir().join(format!(
-            "hyperliquid-update-{}-{:032x}",
-            std::process::id(),
-            rand::random::<u128>()
+            "hyperliquid-update-{}",
+            private_fs::unique_suffix()
         ));
         match private_fs::create_new_dir(&path) {
             Ok(()) => return Ok(TempDir { path }),
@@ -213,9 +212,8 @@ fn replace_current_binary(current_exe: &Path, new_binary: &Path) -> Result<(), a
         ))
     })?;
     let tmp_path = parent.join(format!(
-        ".hyperliquid-update-{}-{:016x}",
-        std::process::id(),
-        rand::random::<u64>()
+        ".hyperliquid-update-{}",
+        private_fs::unique_suffix()
     ));
     if let Err(err) = copy_to_new_executable(new_binary, &tmp_path) {
         if err.kind() != std::io::ErrorKind::AlreadyExists {
@@ -262,12 +260,12 @@ impl TableData for UpdateResult {
 fn print_update_result(inv: &Invocation, result: &UpdateResult) {
     match inv.format() {
         OutputFormat::Json | OutputFormat::Table => inv.print_untimed(result),
-        OutputFormat::Pretty => match result.status {
-            "updated" => println!("Updated hyperliquid {} -> {}", result.from, result.to),
-            "would_update" => println!("Would update hyperliquid {} -> {}", result.from, result.to),
-            "up_to_date" => println!("hyperliquid is up to date ({})", result.from),
-            status => println!("hyperliquid update status: {status}"),
-        },
+        OutputFormat::Pretty => sink::out_line(&match result.status {
+            "updated" => format!("Updated hyperliquid {} -> {}", result.from, result.to),
+            "would_update" => format!("Would update hyperliquid {} -> {}", result.from, result.to),
+            "up_to_date" => format!("hyperliquid is up to date ({})", result.from),
+            status => format!("hyperliquid update status: {status}"),
+        }),
     }
 }
 

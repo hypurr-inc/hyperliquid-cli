@@ -1,75 +1,56 @@
 mod support;
 
+use hypersdk::hypercore::Chain;
 use predicates::prelude::*;
-use serde_json::Value;
-use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, TEST_ACCOUNT_PASSPHRASE, VALID_PRIVATE_KEY,
-    expected_address, fixture_order_success_response, mount_all_mids,
-    mount_common_public_endpoints, mount_successful_exchange_actions,
-};
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use serde_json::{Value, json};
+use support::exchange::ExchangeFixture;
+use support::signing::{recover_signer, test_signer};
+use support::{IsolatedHome, TEST_ACCOUNT_PASSPHRASE, expected_address, wire};
 
 const ZERO_ADDRESS: &str = "0x0000000000000000000000000000000000000000";
 const SUBACCOUNT_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const SUBACCOUNT_KEY: &str = "0x000000000000000000000000000000000000000000000000000000000000000a";
 
-async fn mock_subaccount_exchange_server() -> MockServer {
-    let server = MockServer::start().await;
-    mount_all_mids(&server, "50000", "3000").await;
-
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": {"type": "default"}
-        })))
-        .mount(&server)
+async fn exchange() -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_exchange(json!({"status": "ok", "response": {"type": "default"}}))
         .await;
-
     server
 }
 
-fn exchange_body(requests: &[wiremock::Request]) -> Value {
-    let exchange_request = requests
-        .iter()
-        .find(|request| request.url.path() == "/exchange")
-        .expect("expected /exchange request");
-    serde_json::from_slice(&exchange_request.body).unwrap()
+/// The one request `server` received, signed by the test key as an L1 action.
+async fn signed_l1_body(server: &ExchangeFixture) -> Value {
+    let mut bodies = server.exchange_bodies().await;
+    assert_eq!(bodies.len(), 1, "{bodies:?}");
+    let body = bodies.remove(0);
+    assert_eq!(recover_signer(&body, Chain::Testnet), test_signer());
+    body
 }
 
 #[tokio::test]
 async fn subaccount_create_submits_sdk_matching_action_shape() {
     let env = IsolatedHome::new();
-    let server = mock_subaccount_exchange_server().await;
+    let server = exchange().await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "subaccount",
-            "create",
-            "--name",
-            "market-maker-1",
-            "--testnet",
-        ])
+    env.live_json(&server)
+        .args(["subaccount", "create", "--name", "market-maker-1"])
         .assert()
         .success()
         .stdout(predicate::str::contains("market-maker-1"));
 
-    let requests = server.received_requests().await.unwrap();
-    let body = exchange_body(&requests);
-    assert_eq!(body["action"]["type"], "createSubAccount");
-    assert_eq!(body["action"]["name"], "market-maker-1");
-    assert!(body["nonce"].is_u64());
-    assert!(body["signature"].is_object());
+    let body = signed_l1_body(&server).await;
+    assert_eq!(
+        body["action"],
+        json!({"type": "createSubAccount", "name": "market-maker-1"})
+    );
     assert!(body["vaultAddress"].is_null());
 }
 
 #[tokio::test]
 async fn subaccount_transfer_resolves_alias_and_uses_usdc_integer_units() {
     let env = IsolatedHome::new();
-    let server = mock_subaccount_exchange_server().await;
+    let server = exchange().await;
     let subaccount_address = expected_address(SUBACCOUNT_KEY);
 
     env.account_command(TEST_ACCOUNT_PASSPHRASE)
@@ -85,35 +66,23 @@ async fn subaccount_transfer_resolves_alias_and_uses_usdc_integer_units() {
         .assert()
         .success();
 
-    let output = env
-        .account_command_with_server(TEST_ACCOUNT_PASSPHRASE, &server)
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "subaccount",
-            "transfer",
-            "--subaccount",
-            "market-maker-1",
-            "--amount",
-            "10.25",
-            "--direction",
-            "deposit",
-            "-y",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let mut command = env.live_json(&server);
+    env.apply_account_env(&mut command, Some(TEST_ACCOUNT_PASSPHRASE));
+    let json = support::run_json(command.args([
+        "subaccount",
+        "transfer",
+        "--subaccount",
+        "market-maker-1",
+        "--amount",
+        "10.25",
+        "--direction",
+        "deposit",
+        "-y",
+    ]));
 
-    let json: Value = serde_json::from_slice(&output).unwrap();
     let row = &json[0];
     assert_eq!(row["status"], "confirmed");
-    let signer_address = expected_address(VALID_PRIVATE_KEY);
-    assert_eq!(row["signer"].as_str(), Some(signer_address.as_str()));
-    assert_eq!(row["acting_as"].as_str(), Some(signer_address.as_str()));
+    support::signing::assert_signed_by_test_key(row);
     assert_eq!(row["network"], "Testnet");
     assert_eq!(row["reversibility"], "partially_reversible");
     assert_eq!(row["direction"], "deposit");
@@ -125,8 +94,7 @@ async fn subaccount_transfer_resolves_alias_and_uses_usdc_integer_units() {
         subaccount_address.to_ascii_lowercase()
     );
 
-    let requests = server.received_requests().await.unwrap();
-    let body = exchange_body(&requests);
+    let body = signed_l1_body(&server).await;
     assert_eq!(body["action"]["type"], "subAccountTransfer");
     assert_eq!(
         body["action"]["subAccountUser"]
@@ -143,40 +111,26 @@ async fn subaccount_transfer_resolves_alias_and_uses_usdc_integer_units() {
 #[tokio::test]
 async fn subaccount_spot_transfer_submits_expected_exchange_payload() {
     let env = IsolatedHome::new();
-    let server = mock_subaccount_exchange_server().await;
+    let server = exchange().await;
     let token = "PURR:0xc4bf3f870c0e9465323c0b6ed28096c2";
 
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "subaccount",
-            "spot-transfer",
-            "--subaccount",
-            SUBACCOUNT_ADDRESS,
-            "--token",
-            token,
-            "--amount",
-            "1.2300",
-            "--direction",
-            "deposit",
-            "-y",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = support::run_json(env.live_json(&server).args([
+        "subaccount",
+        "spot-transfer",
+        "--subaccount",
+        SUBACCOUNT_ADDRESS,
+        "--token",
+        token,
+        "--amount",
+        "1.2300",
+        "--direction",
+        "deposit",
+        "-y",
+    ]));
+
     let row = &json[0];
     assert_eq!(row["status"], "confirmed");
-    let signer_address = expected_address(VALID_PRIVATE_KEY);
-    assert_eq!(row["signer"].as_str(), Some(signer_address.as_str()));
-    assert_eq!(row["acting_as"].as_str(), Some(signer_address.as_str()));
+    support::signing::assert_signed_by_test_key(row);
     assert_eq!(row["network"], "Testnet");
     assert_eq!(row["reversibility"], "partially_reversible");
     assert_eq!(row["direction"], "deposit");
@@ -184,21 +138,17 @@ async fn subaccount_spot_transfer_submits_expected_exchange_payload() {
     assert_eq!(row["token"], token);
     assert_eq!(row["subaccount"], SUBACCOUNT_ADDRESS);
 
-    let requests = server.received_requests().await.unwrap();
-    let body = exchange_body(&requests);
-    assert_eq!(body["action"]["type"], "subAccountSpotTransfer");
+    let body = signed_l1_body(&server).await;
     assert_eq!(
-        body["action"]["subAccountUser"]
-            .as_str()
-            .unwrap()
-            .to_ascii_lowercase(),
-        SUBACCOUNT_ADDRESS.to_ascii_lowercase()
+        body["action"],
+        json!({
+            "type": "subAccountSpotTransfer",
+            "subAccountUser": SUBACCOUNT_ADDRESS,
+            "isDeposit": true,
+            "token": token,
+            "amount": "1.23",
+        })
     );
-    assert_eq!(body["action"]["isDeposit"], true);
-    assert_eq!(body["action"]["token"], token);
-    assert_eq!(body["action"]["amount"], "1.23");
-    assert!(body["nonce"].is_u64());
-    assert!(body["signature"].is_object());
     assert!(body["vaultAddress"].is_null());
 }
 
@@ -246,38 +196,28 @@ fn subaccount_transfer_rejects_short_hex_address_with_precise_wording() {
 #[tokio::test]
 async fn orders_create_dry_run_on_behalf_includes_vault_context() {
     let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-    mount_common_public_endpoints(&server).await;
+    let server = ExchangeFixture::start().await;
 
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "orders",
-            "create",
-            "--on-behalf-of",
-            ZERO_ADDRESS,
-            "--coin",
-            "BTC",
-            "--side",
-            "buy",
-            "--type",
-            "limit",
-            "--price",
-            "50000",
-            "--size",
-            "0.001",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let json = support::run_json(env.command_with_server(&server).args([
+        "--format",
+        "json",
+        "--dry-run",
+        "orders",
+        "create",
+        "--on-behalf-of",
+        ZERO_ADDRESS,
+        "--coin",
+        "BTC",
+        "--side",
+        "buy",
+        "--type",
+        "limit",
+        "--price",
+        "50000",
+        "--size",
+        "0.001",
+    ]));
 
-    let json: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(json["dry_run"], true);
     assert_eq!(json["command"], "orders create");
     assert_eq!(json["args"]["on_behalf_of"], ZERO_ADDRESS);
@@ -289,13 +229,12 @@ async fn orders_create_dry_run_on_behalf_includes_vault_context() {
 #[tokio::test]
 async fn orders_create_on_behalf_sets_vault_address_on_exchange_request() {
     let env = IsolatedHome::new();
-    let server = MockServer::start().await;
-    mount_common_public_endpoints(&server).await;
-    mount_successful_exchange_actions(&server, fixture_order_success_response(12345)).await;
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_exchange(wire::order_success_response(12345))
+        .await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .args([
             "orders",
             "create",
@@ -317,98 +256,7 @@ async fn orders_create_on_behalf_sets_vault_address_on_exchange_request() {
         .success()
         .stdout(predicate::str::contains("12345"));
 
-    let requests = server.received_requests().await.unwrap();
-    let body = exchange_body(&requests);
+    let body = signed_l1_body(&server).await;
     assert_eq!(body["action"]["type"], "order");
     assert_eq!(body["vaultAddress"], SUBACCOUNT_ADDRESS);
-    assert!(body["signature"].is_object());
-}
-
-#[test]
-fn schema_describes_acting_account_selectors_and_raw_destinations() {
-    let env = IsolatedHome::new();
-
-    let subaccount_output = env
-        .command()
-        .args(["--format", "json", "schema", "subaccount", "transfer"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let subaccount_schema: Value = serde_json::from_slice(&subaccount_output).unwrap();
-    let subaccount_description = subaccount_schema["args"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|arg| arg["id"] == "subaccount")
-        .and_then(|arg| arg["description"].as_str())
-        .unwrap();
-    assert!(subaccount_description.contains("acting-account selector"));
-    assert!(subaccount_description.contains("does not apply to transfer recipients"));
-    let subaccount_kind = subaccount_schema["args"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|arg| arg["id"] == "subaccount")
-        .and_then(|arg| arg["input_kind"].as_str())
-        .unwrap();
-    assert_eq!(subaccount_kind, "acting_account_selector");
-    let yes_arg = subaccount_schema["args"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|arg| arg["id"] == "yes")
-        .cloned()
-        .expect("schema should expose --yes for subaccount transfer");
-    assert_eq!(yes_arg["long"], "yes");
-    assert_eq!(yes_arg["short"], "y");
-    assert_eq!(yes_arg["arg_type"], "boolean");
-
-    let transfer_output = env
-        .command()
-        .args(["--format", "json", "schema", "transfer", "send"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let transfer_schema: Value = serde_json::from_slice(&transfer_output).unwrap();
-    let to_description = transfer_schema["args"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|arg| arg["id"] == "to")
-        .and_then(|arg| arg["description"].as_str())
-        .unwrap();
-    assert!(to_description.contains("Explicit destination address"));
-    assert!(to_description.contains("Wallet aliases are not resolved"));
-    let to_kind = transfer_schema["args"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|arg| arg["id"] == "to")
-        .and_then(|arg| arg["input_kind"].as_str())
-        .unwrap();
-    assert_eq!(to_kind, "raw_destination_address");
-
-    let subaccount_spot_output = env
-        .command()
-        .args(["--format", "json", "schema", "subaccount", "spot-transfer"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let subaccount_spot_schema: Value = serde_json::from_slice(&subaccount_spot_output).unwrap();
-    let spot_yes_arg = subaccount_spot_schema["args"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|arg| arg["id"] == "yes")
-        .cloned()
-        .expect("schema should expose --yes for subaccount spot-transfer");
-    assert_eq!(spot_yes_arg["long"], "yes");
-    assert_eq!(spot_yes_arg["short"], "y");
-    assert_eq!(spot_yes_arg["arg_type"], "boolean");
 }

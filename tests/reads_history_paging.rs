@@ -6,25 +6,14 @@ mod support;
 
 use serde_json::{Value, json};
 use support::exchange::ExchangeFixture;
-use support::{IsolatedHome, fixture_fill};
+use support::reads::read;
+use support::{IsolatedHome, wire};
 
 const USER: &str = "0x0000000000000000000000000000000000000001";
 const START: u64 = 1_700_000_000_000;
 
-fn run(server: &ExchangeFixture, format: &str, args: &[&str]) -> assert_cmd::assert::Assert {
-    let env = IsolatedHome::new();
-    env.command_with_server(server)
-        .args(["--format", format])
-        .args(args)
-        .assert()
-}
-
-fn stdout(assert: &assert_cmd::assert::Assert) -> Value {
-    support::json_stdout(assert)
-}
-
 fn fill_at(time: u64) -> Value {
-    let mut fill = fixture_fill("BTC", 4242);
+    let mut fill = wire::fill("BTC", 4242);
     fill["time"] = json!(time);
     fill["tid"] = json!(time);
     fill
@@ -39,10 +28,6 @@ fn fills_request(start: u64) -> Value {
     json!({"type": "userFillsByTime", "user": USER, "startTime": start})
 }
 
-fn stderr_text(assert: &assert_cmd::assert::Assert) -> String {
-    String::from_utf8(assert.get_output().stderr.clone()).unwrap()
-}
-
 #[tokio::test]
 async fn a_full_fills_page_is_announced_with_the_start_that_continues() {
     let server = ExchangeFixture::start().await;
@@ -50,20 +35,19 @@ async fn a_full_fills_page_is_announced_with_the_start_that_continues() {
         .mount_info(fills_request(START), json!(fills(START, 2000)))
         .await;
 
-    let assert = run(
+    let assert = read(
         &server,
-        "json",
         &["account", "fills", USER, "--start", &START.to_string()],
     )
     .success();
 
-    let rows = stdout(&assert);
+    let rows = support::json_stdout(&assert);
     assert_eq!(
         rows.as_array().unwrap().len(),
         2000,
         "stdout stays the array"
     );
-    let warning: Value = serde_json::from_str(stderr_text(&assert).trim()).unwrap();
+    let warning: Value = serde_json::from_str(support::stderr_text(&assert).trim()).unwrap();
     assert_eq!(warning["warning"]["code"], "truncated");
     assert_eq!(warning["warning"]["returned"], 2000);
     assert_eq!(warning["warning"]["cap"], 2000);
@@ -77,14 +61,14 @@ async fn a_full_fills_page_in_a_human_format_says_so_in_words() {
         .mount_info(fills_request(START), json!(fills(START, 2000)))
         .await;
 
-    let assert = run(
-        &server,
-        "table",
-        &["account", "fills", USER, "--start", &START.to_string()],
-    )
-    .success();
+    let assert = IsolatedHome::new()
+        .command_with_server(&server)
+        .args(["--format", "table", "account", "fills", USER])
+        .args(["--start", &START.to_string()])
+        .assert()
+        .success();
 
-    let stderr = stderr_text(&assert);
+    let stderr = support::stderr_text(&assert);
     assert!(
         stderr.contains(&format!("Continue with --start {}", START + 1999)),
         "{stderr}"
@@ -99,14 +83,13 @@ async fn a_short_fills_page_is_not_announced() {
         .mount_info(fills_request(START), json!(fills(START, 1999)))
         .await;
 
-    let assert = run(
+    let assert = read(
         &server,
-        "json",
         &["account", "fills", USER, "--start", &START.to_string()],
     )
     .success();
 
-    assert_eq!(stderr_text(&assert), "");
+    assert_eq!(support::stderr_text(&assert), "");
 }
 
 #[tokio::test]
@@ -123,9 +106,8 @@ async fn all_reads_every_page_and_drops_the_rows_the_boundary_repeats() {
         )
         .await;
 
-    let assert = run(
+    let assert = read(
         &server,
-        "json",
         &[
             "account",
             "fills",
@@ -137,7 +119,7 @@ async fn all_reads_every_page_and_drops_the_rows_the_boundary_repeats() {
     )
     .success();
 
-    let rows = stdout(&assert);
+    let rows = support::json_stdout(&assert);
     let times: Vec<u64> = rows
         .as_array()
         .unwrap()
@@ -151,7 +133,7 @@ async fn all_reads_every_page_and_drops_the_rows_the_boundary_repeats() {
         1,
         "the repeated boundary row is dropped"
     );
-    assert_eq!(stderr_text(&assert), "");
+    assert_eq!(support::stderr_text(&assert), "");
     assert_eq!(server.info_requests("userFillsByTime").await.len(), 2);
 }
 
@@ -176,9 +158,8 @@ async fn all_steps_past_a_millisecond_the_api_keeps_repeating() {
         .mount_info(fills_request(START + 1), json!([fill_at(START + 1)]))
         .await;
 
-    let assert = run(
+    let assert = read(
         &server,
-        "json",
         &[
             "account",
             "fills",
@@ -192,7 +173,10 @@ async fn all_steps_past_a_millisecond_the_api_keeps_repeating() {
 
     // The same page comes back for the repeated start; it adds nothing, so the
     // reader moves one millisecond on instead of looping.
-    assert_eq!(stdout(&assert).as_array().unwrap().len(), 2001);
+    assert_eq!(
+        support::json_stdout(&assert).as_array().unwrap().len(),
+        2001
+    );
 }
 
 #[tokio::test]
@@ -205,9 +189,9 @@ async fn recent_fills_at_the_cap_say_earlier_ones_are_not_shown() {
         )
         .await;
 
-    let assert = run(&server, "json", &["account", "fills", USER]).success();
+    let assert = read(&server, &["account", "fills", USER]).success();
 
-    let warning: Value = serde_json::from_str(stderr_text(&assert).trim()).unwrap();
+    let warning: Value = serde_json::from_str(support::stderr_text(&assert).trim()).unwrap();
     assert_eq!(warning["warning"]["code"], "truncated");
     assert_eq!(warning["warning"]["next_start"], Value::Null);
     assert!(
@@ -235,7 +219,7 @@ async fn fills_carry_hash_builder_fee_liquidation_and_twap_and_survive_a_new_dir
         )
         .await;
 
-    let rows = stdout(&run(&server, "json", &["account", "fills", USER]).success());
+    let rows = support::json_stdout(&read(&server, &["account", "fills", USER]).success());
 
     let plain = &rows[0];
     assert_eq!(plain["hash"], "0xabc");
@@ -278,7 +262,7 @@ async fn spot_fills_name_the_pair_as_the_markets_list_it() {
         )
         .await;
 
-    let rows = stdout(&run(&server, "json", &["account", "fills", USER]).success());
+    let rows = support::json_stdout(&read(&server, &["account", "fills", USER]).success());
 
     assert_eq!(rows[0]["coin"], "HYPE/USDC");
     assert_eq!(rows[1]["coin"], "BTC");
@@ -292,28 +276,34 @@ fn funding_request(start: u64) -> Value {
     json!({"type": "userFunding", "user": USER, "startTime": start})
 }
 
-fn timed(count: u64) -> Vec<Value> {
+fn ledger_rows(count: u64) -> Vec<Value> {
     (0..count)
         .map(|offset| json!({"time": START + offset, "hash": format!("0x{offset:x}"), "delta": {"type": "deposit", "usdc": "1.0"}}))
         .collect()
+}
+
+fn funding_row(time: u64) -> Value {
+    json!({"time": time, "coin": "BTC", "usdc": "1.25", "szi": "0.5", "fundingRate": "0.0001"})
 }
 
 #[tokio::test]
 async fn a_full_ledger_page_is_announced_at_two_thousand_rows() {
     let server = ExchangeFixture::start().await;
     server
-        .mount_info(ledger_request(START), json!(timed(2000)))
+        .mount_info(ledger_request(START), json!(ledger_rows(2000)))
         .await;
 
-    let assert = run(
+    let assert = read(
         &server,
-        "json",
         &["account", "ledger", USER, "--start", &START.to_string()],
     )
     .success();
 
-    assert_eq!(stdout(&assert).as_array().unwrap().len(), 2000);
-    let warning: Value = serde_json::from_str(stderr_text(&assert).trim()).unwrap();
+    assert_eq!(
+        support::json_stdout(&assert).as_array().unwrap().len(),
+        2000
+    );
+    let warning: Value = serde_json::from_str(support::stderr_text(&assert).trim()).unwrap();
     assert_eq!(warning["warning"]["cap"], 2000);
     assert_eq!(warning["warning"]["next_start"], START + 1999);
 }
@@ -322,18 +312,20 @@ async fn a_full_ledger_page_is_announced_at_two_thousand_rows() {
 async fn a_full_funding_page_is_announced_at_five_hundred_rows() {
     let server = ExchangeFixture::start().await;
     server
-        .mount_info(funding_request(START), json!(timed(500)))
+        .mount_info(
+            funding_request(START),
+            json!((START..START + 500).map(funding_row).collect::<Vec<_>>()),
+        )
         .await;
 
-    let assert = run(
+    let assert = read(
         &server,
-        "json",
         &["account", "funding", USER, "--start", &START.to_string()],
     )
     .success();
 
-    assert_eq!(stdout(&assert).as_array().unwrap().len(), 500);
-    let warning: Value = serde_json::from_str(stderr_text(&assert).trim()).unwrap();
+    assert_eq!(support::json_stdout(&assert).as_array().unwrap().len(), 500);
+    let warning: Value = serde_json::from_str(support::stderr_text(&assert).trim()).unwrap();
     assert_eq!(warning["warning"]["cap"], 500);
     assert_eq!(warning["warning"]["next_start"], START + 499);
 }
@@ -342,21 +334,20 @@ async fn a_full_funding_page_is_announced_at_five_hundred_rows() {
 async fn all_pages_the_funding_history_too() {
     let server = ExchangeFixture::start().await;
     server
-        .mount_info(funding_request(START), json!(timed(500)))
+        .mount_info(
+            funding_request(START),
+            json!((START..START + 500).map(funding_row).collect::<Vec<_>>()),
+        )
         .await;
     server
         .mount_info(
             funding_request(START + 499),
-            json!([
-                {"time": START + 499, "hash": "0x1f3", "delta": {"type": "deposit", "usdc": "1.0"}},
-                {"time": START + 500, "hash": "0x1f4", "delta": {"type": "deposit", "usdc": "1.0"}}
-            ]),
+            json!([funding_row(START + 499), funding_row(START + 500)]),
         )
         .await;
 
-    let assert = run(
+    let assert = read(
         &server,
-        "json",
         &[
             "account",
             "funding",
@@ -368,6 +359,6 @@ async fn all_pages_the_funding_history_too() {
     )
     .success();
 
-    assert_eq!(stdout(&assert).as_array().unwrap().len(), 501);
-    assert_eq!(stderr_text(&assert), "");
+    assert_eq!(support::json_stdout(&assert).as_array().unwrap().len(), 501);
+    assert_eq!(support::stderr_text(&assert), "");
 }

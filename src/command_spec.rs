@@ -1,28 +1,44 @@
 //! One definition per command.
 //!
-//! A command is a type that implements [`CliCommand`]: its clap `Args`, its
-//! [`CommandSpec`] (the policy the schema, help notes and the run pipeline read)
-//! and its `run`. [`Entry::of`] erases the type; the list of entries in
-//! `commands::entries` is the only place a command is registered. The clap tree,
-//! the schema registry and dispatch are all derived from that list.
+//! A command's [`CommandSpec`]: the policy the schema, help notes and the run
+//! pipeline read, as data. A command type pairs it with its `run` in
+//! [`crate::cli_command::CliCommand`].
 
-use std::pin::Pin;
-
-use clap::{ArgMatches, Command, FromArgMatches};
+use clap::ArgMatches;
 use serde::Serialize;
 
 use crate::assets::{AssetQuery, parse_asset_query};
-use crate::bankr;
 use crate::errors::CliError;
 use crate::input_hardening::validate_resource_id;
-use crate::invocation::Invocation;
 use crate::network::Network;
-use crate::settings::env;
-use crate::signing::Signs;
+use crate::signable::{Signs, UserSigned};
+use crate::stream_bounds::StreamBound;
 
 /// The flag that answers a confirmation prompt. Every command with this arg and
 /// [`ConfirmationPolicy::Prompt`] accepts it in place of the prompt.
-pub const YES_ARG: &str = "yes";
+pub const YES_ARG: &str = crate::yes_arg!();
+
+/// The flag as typed, for messages and prompts that name it.
+pub const YES_FLAG: &str = crate::yes_flag!();
+
+/// `--yes` without a description of its own.
+pub const YES: ArgSpec = arg(YES_ARG).kind(InputKind::Boolean);
+/// `--yes` for commands whose prompt is skipped for deliberate automation.
+pub const YES_FOR_AUTOMATION: ArgSpec =
+    YES.describe("Skip confirmation prompt for deliberate automation.");
+/// `--yes` for commands that only ever act on a live account.
+pub const YES_FOR_LIVE_EXECUTION: ArgSpec =
+    YES.describe("Skip confirmation prompt for live execution.");
+
+/// `--on-behalf-of`, hardened: the acting-account selector of a command that
+/// sends for a vault or subaccount.
+pub const ON_BEHALF_OF: ArgSpec = arg("on_behalf_of")
+    .kind(InputKind::ActingAccountSelector)
+    .resource_id("on-behalf-of selector");
+/// [`ON_BEHALF_OF`] with the description the schema gives it.
+pub const ON_BEHALF_OF_DESCRIBED: ArgSpec = ON_BEHALF_OF.describe(
+    "Acting-account selector for vaultAddress: subaccount/vault address, wallet name, or wallet id.",
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -107,8 +123,6 @@ pub enum InputKind {
     Amount,
     FilePath,
     Duration,
-    JsonObject,
-    Url,
     Identifier,
 }
 
@@ -123,100 +137,24 @@ pub enum Mutability {
     LiveMutating,
 }
 
+/// Whether and how a command reaches the Hyperliquid API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkUse {
+    /// Never: the run resolves no endpoint and its dry-run preview names no network.
+    None,
+    /// Maybe: the endpoint is resolved, but the run may finish without it, so
+    /// a configured API override is not probed up front.
+    Optional,
+    /// Always: the endpoint is resolved and a configured override is probed
+    /// before the command starts.
+    Required,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
     CliProcess,
     CliInteractive,
-}
-
-/// How a command bounds its output in machine contexts. One definition: the
-/// schema, the pipeline's check and the environment fallback all read it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamBound {
-    /// `--watch` needs `--max-ticks` (or `HYPERLIQUID_WATCH_MAX_TICKS`).
-    SnapshotWatch,
-    /// Needs `--max-events`, `--idle-timeout-ms` or `HYPERLIQUID_SUBSCRIBE_MAX_EVENTS`.
-    Subscribe,
-    /// A polling alert stream. Needs `--max-events` or `--idle-timeout-ms`; no environment fallback.
-    Polled,
-}
-
-/// What `0` means in a bound's environment variable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EnvZero {
-    /// Not a bound: the variable is ignored, as if unset.
-    Unbounded,
-    /// A real bound of zero items: the stream stops right after it starts.
-    StopImmediately,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StreamEnv {
-    pub name: &'static str,
-    pub zero: EnvZero,
-}
-
-impl StreamBound {
-    #[must_use]
-    pub const fn cli_args(self) -> &'static [&'static str] {
-        match self {
-            Self::SnapshotWatch => &["max_ticks"],
-            Self::Subscribe | Self::Polled => &["max_events", "idle_timeout_ms"],
-        }
-    }
-
-    /// The boolean arg that makes the bound apply; the bound always applies when `None`.
-    #[must_use]
-    pub const fn required_when(self) -> Option<&'static str> {
-        match self {
-            Self::SnapshotWatch => Some("watch"),
-            Self::Subscribe | Self::Polled => None,
-        }
-    }
-
-    #[must_use]
-    pub const fn env(self) -> Option<StreamEnv> {
-        match self {
-            Self::SnapshotWatch => Some(StreamEnv {
-                name: env::WATCH_MAX_TICKS,
-                zero: EnvZero::Unbounded,
-            }),
-            Self::Subscribe => Some(StreamEnv {
-                name: env::SUBSCRIBE_MAX_EVENTS,
-                zero: EnvZero::StopImmediately,
-            }),
-            Self::Polled => None,
-        }
-    }
-
-    /// What a machine-context run is told when it declares no stop condition:
-    /// the flags and the environment variable that would bound it.
-    #[must_use]
-    pub fn unbounded_message(self) -> String {
-        let subject = match self {
-            Self::SnapshotWatch => "watch",
-            Self::Subscribe => "subscribe",
-            Self::Polled => {
-                return "watch risk requires --max-events or --idle-timeout-ms in agent mode.\n  \
-                        hyperliquid --format json watch risk --user 0x0000000000000000000000000000000000000001 --max-events 20"
-                    .to_string();
-            }
-        };
-        let mut ways: Vec<String> = self
-            .cli_args()
-            .iter()
-            .map(|id| format!("--{} <N>", id.replace('_', "-")))
-            .collect();
-        ways.extend(self.env().map(|env| env.name.to_string()));
-        let last = ways.pop().unwrap_or_default();
-        let joined = match ways.len() {
-            0 => last,
-            1 => format!("{} or {last}", ways[0]),
-            _ => format!("{}, or {last}", ways.join(", ")),
-        };
-        format!("JSON {subject} output must be bounded with {joined}")
-    }
 }
 
 /// Rejects a malformed value before the command runs.
@@ -354,9 +292,11 @@ pub struct CommandSpec {
     pub testnet_unprompted: bool,
     /// The confirmation prompt applies only when this arg is present.
     pub confirms_with_arg: Option<&'static str>,
-    /// Runs without resolving the network, signer or API endpoint, so its
-    /// dry-run preview names neither.
-    pub local: bool,
+    /// Whether and how the run reaches the API; the pipeline resolves the
+    /// endpoint, signer and override probe from this alone.
+    pub network: NetworkUse,
+    /// The MCP server never offers the command as a tool (it is the server).
+    pub hidden_from_mcp: bool,
     /// The command is itself the update: the passive update check stays off.
     pub skips_update_check: bool,
     pub stream: Option<StreamBound>,
@@ -399,7 +339,8 @@ impl CommandSpec {
             ows_signer: OwsSupport::NotRequired,
             testnet_unprompted: false,
             confirms_with_arg: None,
-            local: false,
+            network: NetworkUse::Required,
+            hidden_from_mcp: false,
             skips_update_check: false,
             stream: None,
             dry_run_refusal: None,
@@ -411,6 +352,20 @@ impl CommandSpec {
         }
     }
 
+    /// A read that runs on this machine alone: no network, signer or API
+    /// endpoint.
+    #[must_use]
+    pub const fn local_read(
+        path: &'static [&'static str],
+        category: &'static str,
+        about: &'static str,
+        description: &'static str,
+    ) -> Self {
+        let mut spec = Self::read(path, category, about, description);
+        spec.network = NetworkUse::None;
+        spec
+    }
+
     /// An interactive command that runs on this machine alone: no network,
     /// signer or API endpoint, and no risk until [`Self::risk`] says otherwise.
     #[must_use]
@@ -420,9 +375,8 @@ impl CommandSpec {
         about: &'static str,
         description: &'static str,
     ) -> Self {
-        let mut spec = Self::read(path, category, about, description);
+        let mut spec = Self::local_read(path, category, about, description);
         spec.lifecycle = Lifecycle::InteractiveLocal;
-        spec.local = true;
         spec
     }
 
@@ -452,7 +406,7 @@ impl CommandSpec {
     #[must_use]
     pub fn bankr_signer(&self) -> SignerSupport {
         match self.signs {
-            Some(signs) if bankr::covers(signs) => SignerSupport::Supported,
+            Some(signs) if signs.bankr_covers() => SignerSupport::Supported,
             Some(_) => SignerSupport::Unsupported,
             None if self.auth_required => SignerSupport::Supported,
             None => SignerSupport::NotRequired,
@@ -463,6 +417,22 @@ impl CommandSpec {
     pub const fn signs(mut self, signs: Signs<'static>) -> Self {
         self.signs = Some(signs);
         self
+    }
+
+    /// Signs the user-signed action `T`, which only the master account may
+    /// sign: a stored API wallet is refused, naming `T`'s tag.
+    #[must_use]
+    pub const fn user_signed<T: UserSigned>(self) -> Self {
+        self.signs(Signs::user_signed::<T>())
+            .master_only(T::ACTION_TYPE)
+    }
+
+    /// Signs the user-signed `action` by digest, hypersdk not exposing its
+    /// document, and only the master account may: a stored API wallet is
+    /// refused, naming `action`.
+    #[must_use]
+    pub const fn digest_signed(self, action: &'static str) -> Self {
+        self.signs(Signs::Digest).master_only(action)
     }
 
     /// Refuse a stored API wallet for `action`, which only the master account
@@ -534,8 +504,14 @@ impl CommandSpec {
     }
 
     #[must_use]
-    pub const fn local(mut self) -> Self {
-        self.local = true;
+    pub const fn network(mut self, network: NetworkUse) -> Self {
+        self.network = network;
+        self
+    }
+
+    #[must_use]
+    pub const fn hidden_from_mcp(mut self) -> Self {
+        self.hidden_from_mcp = true;
         self
     }
 
@@ -635,30 +611,45 @@ impl CommandSpec {
     /// A command that reads public data only: nothing about the account, the
     /// exchange state or local secrets. The MCP server exposes these by default.
     #[must_use]
-    pub const fn is_public_read(&self) -> bool {
+    const fn is_public_read(&self) -> bool {
         matches!(self.lifecycle, Lifecycle::ReadOnly) && matches!(self.risk, Risk::None)
     }
 
-    /// Whether running the command talks to the API. A [`Self::local`] command
-    /// never reaches the pipeline step that asks.
+    /// Whether the MCP server offers the command as a tool: public reads by
+    /// default, and every command but the ones hidden from it when the
+    /// operator opts in. Tool discovery and tool calls both ask this.
     #[must_use]
-    pub const fn uses_api(&self) -> bool {
-        !matches!(self.mutability(), Mutability::LocalOnly)
+    pub const fn exposed_to_mcp(&self, allow_unsafe: bool) -> bool {
+        !self.hidden_from_mcp && (allow_unsafe || self.is_public_read())
     }
 
-    /// Whether a `--dry-run` preview of the command names the signer.
+    /// Whether running the command may reach the API at all, so a preview
+    /// names the network it would use.
+    #[must_use]
+    pub const fn uses_network(&self) -> bool {
+        !matches!(self.network, NetworkUse::None)
+    }
+
     #[must_use]
     pub const fn dry_run_names_signer(&self) -> bool {
         self.auth_required && matches!(self.lifecycle, Lifecycle::LiveMutating)
     }
 
-    /// Whether a run on `network` asks for confirmation. `--testnet` and
-    /// `HYPERLIQUID_NETWORK=testnet` both resolve to the network; neither is
-    /// treated differently.
-    #[must_use]
-    pub fn prompts_on(&self, network: Network) -> bool {
-        self.confirmation == ConfirmationPolicy::Prompt
-            && !(self.testnet_unprompted && network == Network::Testnet)
+    /// Whether the command asks for confirmation. `network` is read only by a
+    /// command that skips the testnet prompt, so the others need no connection
+    /// to decide. `--testnet` and `HYPERLIQUID_NETWORK=testnet` both resolve to
+    /// the network; neither is treated differently.
+    pub fn prompts_on(
+        &self,
+        network: impl FnOnce() -> Result<Network, CliError>,
+    ) -> Result<bool, CliError> {
+        if self.confirmation != ConfirmationPolicy::Prompt {
+            return Ok(false);
+        }
+        if !self.testnet_unprompted {
+            return Ok(true);
+        }
+        Ok(network()? != Network::Testnet)
     }
 }
 
@@ -708,66 +699,6 @@ impl GroupSpec {
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct NoArgs;
 
-pub type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + 'a>>;
-
-pub trait CliCommand: 'static {
-    type Args: clap::Args + FromArgMatches + 'static;
-
-    const SPEC: CommandSpec;
-
-    /// Rejections that need more than a per-arg [`Check`]. Runs right after them.
-    fn validate(_args: &Self::Args) -> Result<(), CliError> {
-        Ok(())
-    }
-
-    fn run<'a>(
-        inv: &'a Invocation,
-        args: &'a Self::Args,
-    ) -> impl Future<Output = Result<(), anyhow::Error>> + 'a;
-}
-
-/// The parsed args of the selected command.
-pub trait Bound {
-    fn validate(&self) -> Result<(), CliError>;
-    fn run<'a>(&'a self, inv: &'a Invocation) -> RunFuture<'a>;
-}
-
-struct Parsed<C: CliCommand>(C::Args);
-
-impl<C: CliCommand> Bound for Parsed<C> {
-    fn validate(&self) -> Result<(), CliError> {
-        C::validate(&self.0)
-    }
-
-    fn run<'a>(&'a self, inv: &'a Invocation) -> RunFuture<'a> {
-        Box::pin(C::run(inv, &self.0))
-    }
-}
-
-/// A registered command with its type erased.
-pub struct Entry {
-    pub spec: &'static CommandSpec,
-    augment: fn(Command) -> Command,
-    bind: fn(&ArgMatches) -> Result<Box<dyn Bound>, clap::Error>,
-}
-
-impl Entry {
-    #[must_use]
-    pub fn of<C: CliCommand>() -> Self {
-        Self {
-            spec: &C::SPEC,
-            augment: <C::Args as clap::Args>::augment_args,
-            bind: |matches| {
-                Ok(Box::new(Parsed::<C>(C::Args::from_arg_matches(matches)?)) as Box<dyn Bound>)
-            },
-        }
-    }
-
-    pub fn bind(&self, matches: &ArgMatches) -> Result<Box<dyn Bound>, clap::Error> {
-        (self.bind)(matches)
-    }
-}
-
 pub fn check_args(spec: &CommandSpec, matches: &ArgMatches) -> Result<(), CliError> {
     for arg in spec.args {
         let Some(check) = arg.check else { continue };
@@ -793,95 +724,4 @@ pub fn supplied_secrets<'a>(
     spec.args.iter().filter(move |arg| {
         arg.secret && matches.value_source(arg.id) == Some(clap::parser::ValueSource::CommandLine)
     })
-}
-
-struct Node<'a> {
-    name: &'static str,
-    entry: Option<&'a Entry>,
-    group: Option<&'a GroupSpec>,
-    children: Vec<Node<'a>>,
-}
-
-impl<'a> Node<'a> {
-    fn new(name: &'static str) -> Self {
-        Self {
-            name,
-            entry: None,
-            group: None,
-            children: Vec::new(),
-        }
-    }
-
-    fn at(&mut self, path: &[&'static str]) -> &mut Node<'a> {
-        let Some((first, rest)) = path.split_first() else {
-            return self;
-        };
-        let index = match self.children.iter().position(|child| child.name == *first) {
-            Some(index) => index,
-            None => {
-                self.children.push(Node::new(first));
-                self.children.len() - 1
-            }
-        };
-        self.children[index].at(rest)
-    }
-
-    fn command(&self) -> Command {
-        let mut command = Command::new(self.name);
-        if let Some(entry) = self.entry {
-            let spec = entry.spec;
-            command = (entry.augment)(command).about(spec.about);
-            if let Some(long_about) = spec.long_about {
-                command = command.long_about(long_about);
-            }
-            for alias in spec.cli_aliases {
-                command = command.alias(*alias);
-            }
-        } else if let Some(group) = self.group {
-            command = command.about(group.about);
-            if let Some(long_about) = group.long_about {
-                command = command.long_about(long_about);
-            }
-            for alias in group.aliases {
-                command = command.alias(*alias);
-            }
-            command = command
-                .subcommand_required(true)
-                .arg_required_else_help(true);
-        }
-        for (order, child) in self.children.iter().enumerate() {
-            command = command.subcommand(child.command().display_order(order));
-        }
-        command
-    }
-}
-
-/// The clap subcommand tree of `entries`, in registration order, under a bare
-/// `hyperliquid` command. Groups come from `groups`.
-#[must_use]
-pub fn command_tree(entries: &[Entry], groups: &[GroupSpec]) -> Command {
-    let mut root = Node::new("hyperliquid");
-    for entry in entries {
-        let node = root.at(entry.spec.path);
-        assert!(
-            node.entry.is_none(),
-            "command {} is registered twice",
-            entry.spec.key()
-        );
-        node.entry = Some(entry);
-    }
-    for group in groups {
-        let node = root.at(group.path);
-        assert!(
-            node.entry.is_none() && !node.children.is_empty(),
-            "group {} has no commands or is itself a command",
-            group.path.join(" ")
-        );
-        node.group = Some(group);
-    }
-    let mut command = Command::new("hyperliquid");
-    for (order, child) in root.children.iter().enumerate() {
-        command = command.subcommand(child.command().display_order(order));
-    }
-    command
 }

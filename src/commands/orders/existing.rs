@@ -1,100 +1,42 @@
-//! Orders that already exist: finding them, and planning their cancel or
-//! replacement.
-
-use either::Either;
 use hypersdk::hypercore::types::{
     Action, BasicOrder, BatchCancel, BatchCancelCloid, BatchModify, Cancel, CancelByCloid, Modify,
     OrderRequest, OrderType, OrderTypePlacement, Side, TimeInForce, TpSl,
 };
-use hypersdk::hypercore::{Cloid, HttpClient, OidOrCloid};
 use hypersdk::{Address, Decimal};
 
 use super::args::{BatchModifyArgs, CancelAllArgs, CancelArgs, ModifyArgs};
-use super::cloid::{parse_cloid, parse_lookup_cloid, wire_cloid};
+use super::cloid::{cloid_text, wire_cloid};
+use super::identifier::{BatchModifyOrder, OrderIdentifier};
 use super::live_order::CloidAsset;
-use super::planning::OrderDryRunPlan;
+use super::preview::OrderDryRunPlan;
 use super::rendering::ModifyConfirmation;
+use super::status::Status;
 use super::validation::MarketPrecision;
-use crate::assets::asset_id::{
-    outcome_coin, parse_spot_coin_key, spot_asset_index, spot_coin_key, spot_internal_coin_key,
-};
 use crate::assets::{
-    AssetQuery, AssetResolver, Market, canonical_dex, parse_asset_query, qualify_dex_asset,
+    AssetQuery, AssetResolver, ListedSpot, Market, outcome_coin, parse_asset_query,
+    qualify_dex_asset,
 };
-use crate::errors::{CliError, from_sdk};
-
-#[derive(Debug, Clone)]
-pub(super) enum OrderIdentifier {
-    Oid(u64),
-    Cloid { raw: String, parsed: Cloid },
-}
-
-impl OrderIdentifier {
-    /// The order a cancel names. A short or unprefixed CLOID is padded, like a
-    /// lookup.
-    pub(super) fn for_cancel(order_id: Option<u64>, cloid: Option<&str>) -> Result<Self, CliError> {
-        Self::from_flags(order_id, cloid, "cancel", parse_lookup_cloid)
-    }
-
-    /// The order a modify names. The CLOID must be exactly 16 bytes, since the
-    /// replacement is sent under it.
-    pub(super) fn for_modify(order_id: Option<u64>, cloid: Option<&str>) -> Result<Self, CliError> {
-        Self::from_flags(order_id, cloid, "modify", parse_cloid)
-    }
-
-    fn from_flags(
-        order_id: Option<u64>,
-        cloid: Option<&str>,
-        command: &str,
-        parse: fn(&str) -> Result<Cloid, CliError>,
-    ) -> Result<Self, CliError> {
-        if let Some(order_id) = order_id {
-            return Ok(Self::Oid(order_id));
-        }
-        let raw = cloid.ok_or_else(|| {
-            CliError::Configuration(format!("orders {command} requires ORDER_ID or --cloid"))
-        })?;
-        Ok(Self::Cloid {
-            raw: raw.to_string(),
-            parsed: parse(raw)?,
-        })
-    }
-
-    fn to_status_identifier(&self) -> OidOrCloid {
-        match self {
-            Self::Oid(oid) => Either::Left(*oid),
-            Self::Cloid { parsed, .. } => Either::Right(*parsed),
-        }
-    }
-
-    /// Whether both name the same order the way the exchange keys it: an
-    /// order id, or a client order id.
-    pub(super) fn names_same_order_as(&self, other: &Self) -> bool {
-        self.to_status_identifier() == other.to_status_identifier()
-    }
-    fn display(&self) -> String {
-        match self {
-            Self::Oid(oid) => oid.to_string(),
-            Self::Cloid { raw, .. } => raw.clone(),
-        }
-    }
-}
+use crate::errors::CliError;
+use crate::hints::{
+    CANCEL_ORDER_COMMAND, CANCEL_TWAP_COMMAND, CREATE_TWAP_COMMAND, TRAILING_STOP_COMMAND,
+};
+use crate::http_api::ApiClient;
+use crate::invocation::Invocation;
+use crate::quantity::require_positive_if_set;
 
 async fn lookup_order(
-    client: &HttpClient,
+    client: &ApiClient,
     user: Address,
     identifier: &OrderIdentifier,
 ) -> Result<BasicOrder, CliError> {
     let order = client
+        .sdk()
         .order_status(user, identifier.to_status_identifier())
-        .await
-        .map_err(from_sdk)?
+        .await?
         .ok_or_else(|| CliError::Unsupported(format!("unknown order {}", identifier.display())))?;
     Ok(order.order)
 }
 
-/// The protocol asset an existing order trades, and how its prices and sizes are
-/// constrained when the market is known.
 struct OrderAsset {
     index: usize,
     precision: Option<MarketPrecision>,
@@ -113,23 +55,18 @@ impl OrderAsset {
 }
 
 async fn order_asset(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     order: &BasicOrder,
 ) -> Result<OrderAsset, CliError> {
-    if let Some(internal_id) = parse_spot_coin_key(&order.coin) {
-        return Ok(
-            match resolver.spot_by_protocol_asset_id(spot_asset_index(internal_id)) {
-                Some(spot) => OrderAsset {
-                    index: spot.index,
-                    precision: Some(MarketPrecision::of(&Market::Spot(spot))),
-                },
-                None => OrderAsset {
-                    index: internal_id,
-                    precision: None,
-                },
+    if let Some(spot) = resolver.listed_spot(&order.coin) {
+        return Ok(OrderAsset {
+            index: spot.asset_index(),
+            precision: match spot {
+                ListedSpot::Known(spot) => Some(MarketPrecision::of(&Market::Spot(spot))),
+                ListedSpot::Unknown { .. } => None,
             },
-        );
+        });
     }
 
     let market = resolver.resolve_or_fetch(client, &order.coin).await?;
@@ -147,7 +84,7 @@ pub(super) struct CancelOrderPlan {
 }
 
 pub(super) async fn prepare_cancel_order_plan(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     user: Address,
     args: &CancelArgs,
@@ -185,7 +122,6 @@ pub(super) fn cancel_dry_run_plan(args: &CancelArgs) -> Result<OrderDryRunPlan, 
         serde_json::json!({
             "order_id": args.order_id,
             "cloid": args.cloid,
-            "on_behalf_of": args.on_behalf_of,
             "identifier": identifier.display(),
         }),
     ))
@@ -208,23 +144,24 @@ impl CoinFilter {
 /// market must exist: an unknown coin or dex fails here instead of listing an
 /// empty set of orders to cancel.
 pub(super) async fn resolve_cancel_all_coin_filter(
-    client: &HttpClient,
+    inv: &Invocation,
+    client: &ApiClient,
     resolver: &AssetResolver,
     args: &CancelAllArgs,
 ) -> Result<Option<CoinFilter>, CliError> {
     let Some(coin) = args.coin.as_deref() else {
         return Ok(None);
     };
-    if let Some(internal_id) = parse_spot_coin_key(coin) {
-        return Ok(Some(CoinFilter::on_default_dex(spot_internal_coin_key(
-            internal_id,
-        ))));
+    if let Some(spot) = resolver.listed_spot(coin) {
+        // `@N` is how a spot pair is listed, except PURR/USDC, which the
+        // exchange lists by name.
+        return Ok(Some(CoinFilter::on_default_dex(spot.info_coin())));
     }
 
     let query = match parse_asset_query(coin) {
         AssetQuery::Outcome(_) => coin.to_string(),
         _ => {
-            let dex = canonical_dex(client, args.dex.as_deref()).await?;
+            let dex = inv.dex_name(args.dex.as_ref()).await?;
             qualify_dex_asset(dex.as_deref(), coin)
         }
     };
@@ -234,7 +171,7 @@ pub(super) async fn resolve_cancel_all_coin_filter(
                 coin: perp.display_name(),
                 dex: perp.dex.clone(),
             },
-            Market::Spot(spot) => CoinFilter::on_default_dex(spot_coin_key(spot.index)),
+            Market::Spot(spot) => CoinFilter::on_default_dex(spot.info_coin()),
             Market::Outcome(outcome) => {
                 CoinFilter::on_default_dex(outcome_coin(outcome.parse()?.encoding))
             }
@@ -252,7 +189,6 @@ fn filter_orders_by_coin(orders: Vec<BasicOrder>, coin: Option<&str>) -> Vec<Bas
         .collect()
 }
 
-/// The open orders `cancel-all` will cancel, each with the asset to cancel it on.
 pub(super) struct CancelAllOrdersPlan {
     cancels: Vec<Cancel>,
     pub(super) summary_coin: String,
@@ -275,19 +211,20 @@ impl CancelAllOrdersPlan {
 }
 
 pub(super) async fn prepare_cancel_all_orders_plan(
-    client: &HttpClient,
+    inv: &Invocation,
+    client: &ApiClient,
     resolver: &AssetResolver,
     user: Address,
     args: &CancelAllArgs,
 ) -> Result<CancelAllOrdersPlan, CliError> {
-    let coin_filter = resolve_cancel_all_coin_filter(client, resolver, args).await?;
+    let coin_filter = resolve_cancel_all_coin_filter(inv, client, resolver, args).await?;
     let open_orders = client
+        .sdk()
         .open_orders(
             user,
             coin_filter.as_ref().and_then(|filter| filter.dex.clone()),
         )
-        .await
-        .map_err(from_sdk)?;
+        .await?;
     let orders = filter_orders_by_coin(
         open_orders,
         coin_filter.as_ref().map(|filter| filter.coin.as_str()),
@@ -308,17 +245,17 @@ pub(super) async fn prepare_cancel_all_orders_plan(
 }
 
 pub(super) async fn cancel_all_dry_run_plan(
-    client: &HttpClient,
+    inv: &Invocation,
+    client: &ApiClient,
     resolver: &AssetResolver,
     args: &CancelAllArgs,
 ) -> Result<OrderDryRunPlan, CliError> {
-    let coin_filter = resolve_cancel_all_coin_filter(client, resolver, args).await?;
+    let coin_filter = resolve_cancel_all_coin_filter(inv, client, resolver, args).await?;
     Ok(OrderDryRunPlan::new(
         "cancel_open_orders",
         serde_json::json!({
             "coin": args.coin,
             "dex": args.dex,
-            "on_behalf_of": args.on_behalf_of,
             "resolved_coin_filter": coin_filter.map(|filter| filter.coin),
         }),
     ))
@@ -329,13 +266,11 @@ pub(super) struct ModifyOrderPlan {
     pub(super) confirmation: ModifyConfirmation,
 }
 
-/// Check the flags of `orders modify` before anything is read, and name the
-/// order they modify.
 pub(super) fn validate_modify_args(args: &ModifyArgs) -> Result<OrderIdentifier, CliError> {
     let identifier = OrderIdentifier::for_modify(args.order_id, args.cloid.as_deref())?;
     super::validation::positive_price(args.price, "price")?;
     super::validation::positive_price(args.trigger_price, "trigger-price")?;
-    super::validation::positive_quantity(args.size, "size")?;
+    require_positive_if_set(args.size, "size")?;
     if args.price.is_none() && args.trigger_price.is_none() && args.size.is_none() {
         return Err(CliError::Configuration(
             "orders modify requires --price, --trigger-price, or --size".to_string(),
@@ -345,7 +280,7 @@ pub(super) fn validate_modify_args(args: &ModifyArgs) -> Result<OrderIdentifier,
 }
 
 pub(super) async fn prepare_modify_order_plan(
-    client: &HttpClient,
+    client: &ApiClient,
     resolver: &AssetResolver,
     user: Address,
     identifier: &OrderIdentifier,
@@ -399,12 +334,9 @@ pub(super) async fn prepare_modify_order_plan(
         },
         confirmation: ModifyConfirmation {
             coin,
-            status: "modified".to_string(),
+            status: Status::Modified,
             order_id: Some(order.oid),
-            cloid: args
-                .cloid
-                .clone()
-                .or_else(|| order.cloid.map(|cloid| format!("{cloid:#x}"))),
+            cloid: args.cloid.clone().or_else(|| order.cloid.map(cloid_text)),
             price: price.to_string(),
             size: size.to_string(),
         },
@@ -417,7 +349,6 @@ pub(super) fn modify_dry_run_plan(args: &ModifyArgs) -> OrderDryRunPlan {
         serde_json::json!({
             "order_id": args.order_id,
             "cloid": args.cloid,
-            "on_behalf_of": args.on_behalf_of,
             "price": args.price.map(|value| value.to_string()),
             "trigger_price": args.trigger_price.map(|value| value.to_string()),
             "size": args.size.map(|value| value.to_string()),
@@ -426,36 +357,6 @@ pub(super) fn modify_dry_run_plan(args: &ModifyArgs) -> OrderDryRunPlan {
     )
 }
 
-/// One modification of `orders batch-modify`, as the orders file names it.
-#[derive(Debug, Clone)]
-pub(super) struct BatchModifyOrder {
-    pub(super) identifier: OrderIdentifier,
-    pub(super) price: Option<Decimal>,
-    pub(super) trigger_price: Option<Decimal>,
-    pub(super) size: Option<Decimal>,
-}
-
-impl BatchModifyOrder {
-    /// The flags `orders modify` would have been given for this order, so a
-    /// batch leg is planned by the one modify planner.
-    pub(super) fn modify_args(&self, always_place: bool) -> ModifyArgs {
-        let (order_id, cloid) = match &self.identifier {
-            OrderIdentifier::Oid(oid) => (Some(*oid), None),
-            OrderIdentifier::Cloid { raw, .. } => (None, Some(raw.clone())),
-        };
-        ModifyArgs {
-            order_id,
-            cloid,
-            price: self.price,
-            trigger_price: self.trigger_price,
-            size: self.size,
-            always_place,
-            on_behalf_of: None,
-        }
-    }
-}
-
-/// The one `batchModify` action for several planned modifications.
 pub(super) fn batch_modify_action(modifies: Vec<Modify>, always_place: bool) -> Action {
     Action::BatchModify(BatchModify {
         modifies,
@@ -487,15 +388,12 @@ pub(super) fn batch_modify_dry_run_plan(
         serde_json::json!({
             "orders_file": args.orders_file,
             "order_count": orders.len(),
-            "on_behalf_of": args.on_behalf_of,
             "always_place": args.always_place,
             "modifications": modifications,
         }),
     )
 }
 
-/// The placement a modified order is replaced with: the order's own type, with
-/// any new trigger or limit price applied.
 pub(super) fn order_type_placement(
     order: &BasicOrder,
     trigger_price: Option<Decimal>,
@@ -512,8 +410,7 @@ pub(super) fn order_type_placement(
         tpsl,
     };
     match order.order_type {
-        // A generic `Trigger` order reports no TP/SL side; it has always been
-        // replaced as a stop.
+        // A generic `Trigger` order reports no TP/SL side, so it is replaced as a stop.
         OrderType::StopMarket | OrderType::Trigger => Ok(market_trigger(TpSl::Sl)),
         OrderType::TakeProfitMarket => Ok(market_trigger(TpSl::Tp)),
         OrderType::StopLimit => Ok(OrderTypePlacement::Trigger {
@@ -526,22 +423,18 @@ pub(super) fn order_type_placement(
             trigger_px: require_modify_trigger_price(trigger_price, "take-limit")?,
             tpsl: TpSl::Tp,
         }),
-        OrderType::TrailingStopMarket => Err(CliError::Unsupported(
-            "orders modify can't change a Trailing Stop Market order. Cancel it with `hyperliquid orders cancel <OID>`, then place a new one with `hyperliquid orders trailing-stop`."
-                .to_string(),
-        )),
-        OrderType::TwapSlice => Err(CliError::Unsupported(
-            "orders modify can't change a Twap Slice order. Cancel the TWAP with `hyperliquid orders twap-cancel`, then re-create it with `hyperliquid orders twap-create`."
-                .to_string(),
-        )),
-        OrderType::VaultClose => Err(CliError::Unsupported(
-            "orders modify can't change a Vault Close order. The exchange places it when a vault closes positions; cancel it with `hyperliquid orders cancel <OID>` and place a regular order instead."
-                .to_string(),
-        )),
-        OrderType::SpotDustConversion => Err(CliError::Unsupported(
-            "orders modify can't change a Spot Dust Conversion order. Cancel it with `hyperliquid orders cancel <OID>` and place a regular order instead."
-                .to_string(),
-        )),
+        OrderType::TrailingStopMarket => Err(CliError::Unsupported(format!(
+            "orders modify can't change a Trailing Stop Market order. Cancel it with `{CANCEL_ORDER_COMMAND} <OID>`, then place a new one with `{TRAILING_STOP_COMMAND}`."
+        ))),
+        OrderType::TwapSlice => Err(CliError::Unsupported(format!(
+            "orders modify can't change a Twap Slice order. Cancel the TWAP with `{CANCEL_TWAP_COMMAND}`, then re-create it with `{CREATE_TWAP_COMMAND}`."
+        ))),
+        OrderType::VaultClose => Err(CliError::Unsupported(format!(
+            "orders modify can't change a Vault Close order. The exchange places it when a vault closes positions; cancel it with `{CANCEL_ORDER_COMMAND} <OID>` and place a regular order instead."
+        ))),
+        OrderType::SpotDustConversion => Err(CliError::Unsupported(format!(
+            "orders modify can't change a Spot Dust Conversion order. Cancel it with `{CANCEL_ORDER_COMMAND} <OID>` and place a regular order instead."
+        ))),
         OrderType::Limit | OrderType::Market => {
             if trigger_price.is_some() {
                 return Err(CliError::Configuration(
@@ -614,35 +507,6 @@ mod tests {
             assert!(message.contains(name), "{message}");
             assert!(message.contains(hint), "{message}");
         }
-    }
-
-    #[test]
-    fn a_cancel_pads_a_short_cloid_and_a_modify_does_not() {
-        let padded = "0x000000000000000000000000deadbeef"
-            .parse::<Cloid>()
-            .unwrap();
-        match OrderIdentifier::for_cancel(None, Some("0xdeadbeef")).unwrap() {
-            OrderIdentifier::Cloid { raw, parsed } => {
-                assert_eq!(raw, "0xdeadbeef");
-                assert_eq!(parsed, padded);
-            }
-            OrderIdentifier::Oid(_) => panic!("a cloid names the order"),
-        }
-        let err = OrderIdentifier::for_modify(None, Some("0xdeadbeef")).unwrap_err();
-        assert!(err.to_string().contains("exactly 16 bytes"), "{err}");
-    }
-
-    #[test]
-    fn an_order_id_wins_over_a_cloid_and_one_of_them_is_required() {
-        assert!(matches!(
-            OrderIdentifier::for_modify(Some(5), Some("not-a-cloid")).unwrap(),
-            OrderIdentifier::Oid(5)
-        ));
-        let err = OrderIdentifier::for_cancel(None, None).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "Configuration error: orders cancel requires ORDER_ID or --cloid"
-        );
     }
 
     #[test]

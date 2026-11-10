@@ -9,8 +9,8 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::env::EnvSource;
 use crate::errors::{CliError, ErrorEnvelope};
-use crate::settings::EnvSource;
 
 /// The parts of the recorded envelope that an incident report quotes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

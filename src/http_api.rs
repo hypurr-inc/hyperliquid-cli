@@ -6,14 +6,15 @@
 //! URL for the API.
 //!
 //! `/info` reads retry transient failures (connect error, timeout, 5xx, 429)
-//! with jittered backoff. `/exchange` posts are sent exactly once: after the
+//! with jittered backoff, and so do the reads made through the SDK client
+//! ([`Sdk`], [`ApiClient::sdk`]). `/exchange` posts are sent exactly once: after the
 //! request leaves, a timeout, reset, 5xx, or unreadable reply is an unknown
 //! outcome ([`CliError::UnknownOutcome`]), never a reason to resend.
 
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use hypersdk::hypercore::{Chain, HttpClient};
+use hypersdk::hypercore::{self, Chain, HttpClient, WebSocket};
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde::Serialize;
@@ -24,11 +25,16 @@ use crate::errors::{
     network_error, transport_cause,
 };
 use crate::network::Network;
+use crate::nonce::NonceStore;
 use crate::response_sanitization::Untrusted;
+
+mod sdk;
+
+pub use sdk::Sdk;
 
 const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-/// The mainnet vault list is a ~14 MB file: allow for a slow link.
+/// The mainnet vault list is a large file: allow for a slow link.
 const STATS_TIMEOUT: Duration = Duration::from_secs(60);
 /// The public host of the exchange's stats datasets (`/<Network>/<dataset>`).
 const STATS_BASE_URL: &str = "https://stats-data.hyperliquid.xyz";
@@ -77,11 +83,91 @@ struct AttemptError {
     transient: bool,
 }
 
+/// What a failed read attempt tells the retry loop.
+struct Transient {
+    /// The status that made the attempt transient; `None` for a transport failure.
+    status: Option<StatusCode>,
+    /// `Retry-After` in whole seconds, when the server sent one.
+    retry_after: Option<u64>,
+}
+
+/// How a read is retried: the same rule for the `/info` client and for every
+/// `hypersdk` read, so a rate limit is waited out the same way on any path.
+#[derive(Clone, Copy)]
+struct ReadPolicy {
+    /// Wait before each automatic read retry; the read is retried once per entry.
+    backoff: &'static [Duration],
+    /// Wait before each read retry that follows a 429 without `Retry-After`.
+    rate_limit_backoff: &'static [Duration],
+    on_retry: Option<fn()>,
+}
+
+impl ReadPolicy {
+    const fn new() -> Self {
+        Self {
+            backoff: &READ_RETRY_BACKOFF,
+            rate_limit_backoff: &RATE_LIMIT_RETRY_BACKOFF,
+            on_retry: None,
+        }
+    }
+
+    /// The backoff table for the retry after `status`. A 429 that names its
+    /// own wait (`Retry-After`) is waited out by that wait; one that doesn't
+    /// gets the longer rate-limit backoff.
+    fn backoff_for(
+        self,
+        status: Option<StatusCode>,
+        retry_after: Option<u64>,
+    ) -> &'static [Duration] {
+        if status == Some(StatusCode::TOO_MANY_REQUESTS) && retry_after.is_none() {
+            self.rate_limit_backoff
+        } else {
+            self.backoff
+        }
+    }
+
+    /// Run `attempt` until it succeeds, fails for good, or runs out of retries
+    /// and wait budget; the last outcome is returned. An attempt reports a
+    /// transient failure alongside its outcome.
+    async fn retrying<R>(self, mut attempt: impl AsyncFnMut() -> (R, Option<Transient>)) -> R {
+        let mut waited = Duration::ZERO;
+        let mut retries = 0;
+        let mut announced = false;
+        loop {
+            let (outcome, transient) = attempt().await;
+            let Some(Transient {
+                status,
+                retry_after,
+            }) = transient
+            else {
+                return outcome;
+            };
+
+            let backoff = self.backoff_for(status, retry_after);
+            let Some(delay) = read_retry_delay(backoff, retries, retry_after) else {
+                return outcome;
+            };
+            if waited + delay > RETRY_TOTAL_BUDGET {
+                return outcome;
+            }
+            if !announced {
+                announced = true;
+                if let Some(observer) = self.on_retry {
+                    observer();
+                }
+            }
+            tokio::time::sleep(delay).await;
+            waited += delay;
+            retries += 1;
+        }
+    }
+}
+
 /// An answered `/info` read whose transport failures and rate limits are
 /// already classified. The status is left for the caller to read, because
 /// some endpoints say "unsupported request" with a 4xx.
 #[derive(Debug, Clone)]
-pub struct InfoReply {
+pub(crate) struct InfoReply {
     status: StatusCode,
     body: String,
 }
@@ -107,7 +193,7 @@ impl InfoReply {
 }
 
 pub struct ApiClient {
-    chain: Chain,
+    network: Network,
     base_url: reqwest::Url,
     /// The base URL as shown to users: the override as parsed, else the public endpoint.
     label: String,
@@ -115,21 +201,28 @@ pub struct ApiClient {
     sdk: HttpClient,
     http: OnceLock<Result<reqwest::Client, String>>,
     timeout: Duration,
-    /// Wait before each automatic read retry; the read is retried once per entry.
-    retry_backoff: &'static [Duration],
-    /// Wait before each read retry that follows a 429 without `Retry-After`.
-    rate_limit_backoff: &'static [Duration],
-    on_retry: Option<fn()>,
+    policy: ReadPolicy,
     /// `--expires-after`: how long after signing a signed action stays valid.
     request_lifetime: Option<Duration>,
+    /// Where the nonces of actions signed for this client are recorded.
+    nonces: NonceStore,
 }
 
 impl std::fmt::Debug for ApiClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApiClient")
-            .field("chain", &self.chain)
+            .field("chain", &self.network.chain())
             .field("base_url", &self.label)
             .finish_non_exhaustive()
+    }
+}
+
+/// The `hypersdk` info/exchange client, pointed at `api_override` when given.
+fn sdk_client(chain: Chain, api_override: Option<reqwest::Url>) -> HttpClient {
+    let client = HttpClient::new(chain);
+    match api_override {
+        Some(url) => client.with_url(url),
+        None => client,
     }
 }
 
@@ -142,17 +235,16 @@ impl ApiClient {
             None => (network.api_url(), network.api_base_url()),
         };
         Self {
-            chain: network.chain(),
+            network,
             base_url,
             label,
             has_override,
-            sdk: network.http_client(api_override),
+            sdk: sdk_client(network.chain(), api_override),
             http: OnceLock::new(),
             timeout: DEFAULT_API_TIMEOUT,
-            retry_backoff: &READ_RETRY_BACKOFF,
-            rate_limit_backoff: &RATE_LIMIT_RETRY_BACKOFF,
-            on_retry: None,
+            policy: ReadPolicy::new(),
             request_lifetime: None,
+            nonces: NonceStore::in_process(),
         }
     }
 
@@ -160,7 +252,7 @@ impl ApiClient {
     /// a person the wait is deliberate.
     #[must_use]
     pub fn on_retry(mut self, observer: fn()) -> Self {
-        self.on_retry = Some(observer);
+        self.policy.on_retry = Some(observer);
         self
     }
 
@@ -170,6 +262,18 @@ impl ApiClient {
     pub fn with_request_lifetime(mut self, lifetime: Option<Duration>) -> Self {
         self.request_lifetime = lifetime;
         self
+    }
+
+    /// Record the nonces of signed actions in `store`, so concurrent processes
+    /// of one machine never reuse one.
+    #[must_use]
+    pub(crate) fn with_nonce_store(mut self, store: NonceStore) -> Self {
+        self.nonces = store;
+        self
+    }
+
+    pub(crate) fn nonces(&self) -> &NonceStore {
+        &self.nonces
     }
 
     /// The `--expires-after` lifetime, when one was asked for.
@@ -186,40 +290,40 @@ impl ApiClient {
 
     #[cfg(test)]
     fn with_retry_backoff(mut self, backoff: &'static [Duration]) -> Self {
-        self.retry_backoff = backoff;
-        self.rate_limit_backoff = backoff;
+        self.policy.backoff = backoff;
+        self.policy.rate_limit_backoff = backoff;
         self
     }
 
     #[cfg(test)]
     fn with_rate_limit_backoff(mut self, backoff: &'static [Duration]) -> Self {
-        self.rate_limit_backoff = backoff;
+        self.policy.rate_limit_backoff = backoff;
         self
     }
 
-    /// The backoff table for the retry after `status`. A 429 that names its
-    /// own wait (`Retry-After`) is waited out by that wait; one that doesn't
-    /// gets the longer rate-limit backoff.
-    fn backoff_for(
-        &self,
-        status: Option<StatusCode>,
-        retry_after: Option<u64>,
-    ) -> &'static [Duration] {
-        if status == Some(StatusCode::TOO_MANY_REQUESTS) && retry_after.is_none() {
-            self.rate_limit_backoff
-        } else {
-            self.retry_backoff
-        }
+    #[must_use]
+    pub fn network(&self) -> Network {
+        self.network
     }
 
     #[must_use]
     pub fn chain(&self) -> Chain {
-        self.chain
+        self.network.chain()
+    }
+
+    /// A WebSocket for the network's public endpoint. The API endpoint
+    /// override does not apply to WebSockets.
+    #[must_use]
+    pub fn websocket(&self) -> WebSocket {
+        match self.network {
+            Network::Mainnet => hypercore::mainnet_ws(),
+            Network::Testnet => hypercore::testnet_ws(),
+        }
     }
 
     #[must_use]
-    pub fn sdk(&self) -> &HttpClient {
-        &self.sdk
+    pub fn sdk(&self) -> Sdk<'_> {
+        Sdk::new(&self.sdk, self.policy)
     }
 
     /// The URL this client talks to: the loopback override, else the public endpoint.
@@ -228,7 +332,6 @@ impl ApiClient {
         &self.label
     }
 
-    /// POST `request` to `/info` and decode the JSON answer.
     pub async fn info<T: DeserializeOwned>(
         &self,
         request: &impl Serialize,
@@ -238,7 +341,7 @@ impl ApiClient {
     }
 
     /// POST `request` to `/info` and return the answer without judging its status.
-    pub async fn info_raw(&self, request: &impl Serialize) -> Result<InfoReply, CliError> {
+    pub(crate) async fn info_raw(&self, request: &impl Serialize) -> Result<InfoReply, CliError> {
         let reply = self.read(request).await?;
         if let Some(err) = rate_limit_error(&reply, Disposition::Read) {
             return Err(err);
@@ -349,7 +452,7 @@ impl ApiClient {
     /// `<stats host>/<Network>/<dataset>`; under a loopback override the same
     /// path hangs off the override as `/stats-data/<Network>/<dataset>`.
     fn stats_endpoint(&self, dataset: &str) -> reqwest::Url {
-        let name = match Network::from(self.chain) {
+        let name = match self.network {
             Network::Mainnet => "Mainnet",
             Network::Testnet => "Testnet",
         };
@@ -403,40 +506,30 @@ impl ApiClient {
     async fn read(&self, request: &impl Serialize) -> Result<Reply, CliError> {
         let url = self.endpoint("/info");
 
-        let mut waited = Duration::ZERO;
-        let mut retries = 0;
-        let mut announced = false;
-        loop {
-            let (outcome, retry_after, status) = match self
-                .send_once(&url, request, self.timeout, Disposition::Read)
-                .await
-            {
-                Ok(reply) if is_transient_status(reply.status) => {
-                    let (retry_after, status) = (reply.retry_after, Some(reply.status));
-                    (Ok(reply), retry_after, status)
+        self.policy
+            .retrying(async || {
+                match self
+                    .send_once(&url, request, self.timeout, Disposition::Read)
+                    .await
+                {
+                    Ok(reply) if is_transient_status(reply.status) => {
+                        let transient = Transient {
+                            status: Some(reply.status),
+                            retry_after: reply.retry_after,
+                        };
+                        (Ok(reply), Some(transient))
+                    }
+                    Ok(reply) => (Ok(reply), None),
+                    Err(attempt) => {
+                        let transient = attempt.transient.then_some(Transient {
+                            status: None,
+                            retry_after: None,
+                        });
+                        (Err(attempt.error), transient)
+                    }
                 }
-                Ok(reply) => return Ok(reply),
-                Err(attempt) if attempt.transient => (Err(attempt.error), None, None),
-                Err(attempt) => return Err(attempt.error),
-            };
-
-            let backoff = self.backoff_for(status, retry_after);
-            let Some(delay) = read_retry_delay(backoff, retries, retry_after) else {
-                return outcome;
-            };
-            if waited + delay > RETRY_TOTAL_BUDGET {
-                return outcome;
-            }
-            if !announced {
-                announced = true;
-                if let Some(observer) = self.on_retry {
-                    observer();
-                }
-            }
-            tokio::time::sleep(delay).await;
-            waited += delay;
-            retries += 1;
-        }
+            })
+            .await
     }
 }
 
@@ -656,7 +749,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn info_read_gives_up_after_two_retries() {
+    async fn info_read_gives_up_after_two_retries_and_tells_the_observer_once() {
+        static NOTICES: AtomicUsize = AtomicUsize::new(0);
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/info"))
@@ -665,34 +759,17 @@ mod tests {
             .await;
 
         let err = client_for(&server.uri())
+            .on_retry(|| {
+                NOTICES.fetch_add(1, Ordering::SeqCst);
+            })
             .info::<serde_json::Value>(&json!({}), "testing")
             .await
             .expect_err("persistent 503 fails");
 
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
+        assert_eq!(NOTICES.load(Ordering::SeqCst), 1);
         assert_eq!(err.exit_code(), 12);
         assert!(matches!(err, CliError::ApiStatus { status: 503, .. }));
-    }
-
-    #[tokio::test]
-    async fn the_retry_observer_hears_of_a_retrying_read_once() {
-        static NOTICES: AtomicUsize = AtomicUsize::new(0);
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/info"))
-            .respond_with(ResponseTemplate::new(503))
-            .mount(&server)
-            .await;
-
-        let _ = client_for(&server.uri())
-            .on_retry(|| {
-                NOTICES.fetch_add(1, Ordering::SeqCst);
-            })
-            .info::<serde_json::Value>(&json!({}), "testing")
-            .await;
-
-        assert_eq!(server.received_requests().await.unwrap().len(), 3);
-        assert_eq!(NOTICES.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -727,13 +804,12 @@ mod tests {
     #[test]
     fn a_429_without_retry_after_gets_the_longer_backoff() {
         let client = ApiClient::new(Network::Mainnet, None);
-        let tables = |status, retry_after| client.backoff_for(status, retry_after);
+        let tables = |status, retry_after| client.policy.backoff_for(status, retry_after);
 
         assert_eq!(
             tables(Some(StatusCode::TOO_MANY_REQUESTS), None),
             &RATE_LIMIT_RETRY_BACKOFF
         );
-        // A 429 that names its wait is waited out by that wait.
         assert_eq!(
             tables(Some(StatusCode::TOO_MANY_REQUESTS), Some(2)),
             &READ_RETRY_BACKOFF

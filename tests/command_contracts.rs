@@ -1,11 +1,12 @@
 mod contract_support;
 mod support;
 
-use assert_cmd::Command;
+use hyperliquid_cli::env;
 use serde_json::Value;
 
 use contract_support::{command_path, schema_all};
-use support::IsolatedHome;
+use support::exchange::ExchangeFixture;
+use support::{IsolatedHome, hermetic_command, stdout_json};
 
 #[test]
 fn every_registered_command_resolves_to_cli_help() {
@@ -15,45 +16,48 @@ fn every_registered_command_resolves_to_cli_help() {
             .split_whitespace()
             .chain(["--help"])
             .collect::<Vec<_>>();
-        Command::cargo_bin("hyperliquid")
-            .unwrap()
-            .args(args)
-            .assert()
-            .success();
+        hermetic_command().args(args).assert().success();
     }
 }
 
-const ORDER: [&str; 11] = [
-    "--format", "json", "orders", "create", "--coin", "BTC", "--side", "buy", "--price", "50000",
-    "--size",
-];
-
-fn orders_create(home: &IsolatedHome, network: Option<&str>, testnet_flag: bool) -> Value {
-    let mut command = home.command();
-    command.env("CI", "1");
+fn orders_create(
+    home: &IsolatedHome,
+    server: &ExchangeFixture,
+    network: Option<&str>,
+    testnet_flag: bool,
+) -> Value {
+    let mut command = home.json_command();
+    command
+        .env(support::API_OVERRIDE_ENV, server.uri())
+        .env(env::CI, "1");
     if let Some(network) = network {
-        command.env("HYPERLIQUID_NETWORK", network);
+        command.env(env::NETWORK, network);
     }
     if testnet_flag {
         command.arg("--testnet");
     }
-    let output = command.args(ORDER).arg("0.1").output().unwrap();
-    serde_json::from_slice(&output.stdout).unwrap()
+    let output = command
+        .args(["orders", "create", "--coin", "BTC", "--side", "buy"])
+        .args(["--price", "50000", "--size", "0.1"])
+        .output()
+        .unwrap();
+    stdout_json(&output.stdout)
 }
 
-#[test]
-fn testnet_runs_skip_the_confirmation_check_however_the_network_was_chosen() {
+#[tokio::test]
+async fn testnet_runs_skip_the_confirmation_check_however_the_network_was_chosen() {
     let home = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
     for (network, flag) in [(Some("testnet"), false), (None, true)] {
-        let error = orders_create(&home, network, flag);
+        let error = orders_create(&home, &server, network, flag);
         assert_eq!(
             error["reason"], "auth_required",
             "past the confirmation check on testnet ({network:?}, --testnet {flag}): {error}"
         );
     }
-    let mainnet = orders_create(&home, Some("mainnet"), false);
+    let mainnet = orders_create(&home, &server, Some("mainnet"), false);
     assert_eq!(mainnet["reason"], "confirmation_required", "{mainnet}");
-    let default = orders_create(&home, None, false);
+    let default = orders_create(&home, &server, None, false);
     assert_eq!(default["reason"], "confirmation_required", "{default}");
 }
 
@@ -64,8 +68,8 @@ fn suggested_commands_never_repeat_a_secret_argument() {
     let home = IsolatedHome::new();
     let output = home
         .command()
-        .env("CI", "1")
-        .args(["--format", "pretty", "wallet", "import", SECRET_KEY])
+        .env(env::CI, "1")
+        .args(["wallet", "import", SECRET_KEY])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(13));
@@ -81,7 +85,7 @@ fn suggested_commands_never_repeat_a_secret_argument() {
 
     let output = home
         .command()
-        .env("CI", "1")
+        .env(env::CI, "1")
         .args([
             "--format",
             "pretty",

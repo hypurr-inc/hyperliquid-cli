@@ -1,24 +1,38 @@
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 
 use crate::invocation::Invocation;
-use crate::output::{OutputFormat, TableData};
+use crate::output::{TableData, serialize_row, sink};
+use crate::ows::WalletSource;
+use crate::ows::vault::{HyperliquidAccount, Vault};
+use crate::terminal::OutputFormat;
 use ows_lib::types::WalletInfo as VaultWalletInfo;
 
-use crate::ows::vault::{HyperliquidAccount, Vault};
-
+/// The `type` every `account ls` row reports: the vault is the only backend.
 const OWS_WALLET_TYPE: &str = "ows-wallet";
 
-/// One `account ls` row. The shape predates the vault: `id` is a 1-based
-/// display index.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+/// `id` is a 1-based display index, and `type` (always [`OWS_WALLET_TYPE`]) is only on
+/// the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRow {
     pub id: i64,
     pub alias: String,
     pub address: String,
-    #[serde(rename = "type")]
-    pub account_type: String,
     pub is_default: bool,
     pub created_at: String,
+}
+
+impl Serialize for AccountRow {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut row = serializer.serialize_struct("AccountRow", 6)?;
+        row.serialize_field("id", &self.id)?;
+        row.serialize_field("alias", &self.alias)?;
+        row.serialize_field("address", &self.address)?;
+        row.serialize_field("type", OWS_WALLET_TYPE)?;
+        row.serialize_field("is_default", &self.is_default)?;
+        row.serialize_field("created_at", &self.created_at)?;
+        row.end()
+    }
 }
 
 impl AccountRow {
@@ -32,7 +46,6 @@ impl AccountRow {
             id: display_index as i64,
             alias: wallet.name,
             address: account.address_text.clone(),
-            account_type: OWS_WALLET_TYPE.to_string(),
             is_default,
             created_at: wallet.created_at,
         }
@@ -51,14 +64,6 @@ impl AccountsOutput {
     }
 }
 
-fn account_type_label(account_type: &str) -> &str {
-    if account_type == OWS_WALLET_TYPE {
-        "OWS wallet"
-    } else {
-        account_type
-    }
-}
-
 impl TableData for AccountsOutput {
     fn headers(&self) -> Vec<&str> {
         vec!["ID", "Alias", "Address", "Type", "Default", "Created At"]
@@ -72,7 +77,7 @@ impl TableData for AccountsOutput {
                     account.id.to_string(),
                     account.alias.clone(),
                     account.address.clone(),
-                    account_type_label(&account.account_type).to_string(),
+                    WalletSource::Vault.label().to_string(),
                     if account.is_default { "yes" } else { "no" }.to_string(),
                     account.created_at.clone(),
                 ]
@@ -85,22 +90,43 @@ impl TableData for AccountsOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.accounts).unwrap_or_else(|_| serde_json::json!([]))
+        serialize_row(&self.accounts)
     }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct WalletReceipt {
-    message: String,
-    address: String,
-    alias: Option<String>,
-    source: String,
+pub(super) struct WalletReceipt {
+    pub message: String,
+    pub address: String,
+    pub alias: Option<String>,
+    pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    is_default: Option<bool>,
+    pub is_default: Option<bool>,
     config_path: String,
     vault_path: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    config_keys_written: Vec<String>,
+    pub config_keys_written: Vec<String>,
+}
+
+impl WalletReceipt {
+    pub fn new(
+        inv: &Invocation,
+        message: &str,
+        address: &str,
+        alias: Option<String>,
+        source: &str,
+    ) -> Self {
+        Self {
+            message: message.to_string(),
+            address: address.to_string(),
+            alias,
+            source: source.to_string(),
+            is_default: None,
+            config_path: inv.settings().config_path_display(),
+            vault_path: Vault::from_settings(inv.settings()).display_path(),
+            config_keys_written: Vec::new(),
+        }
+    }
 }
 
 impl TableData for WalletReceipt {
@@ -136,7 +162,7 @@ impl TableData for WalletReceipt {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        serialize_row(self)
     }
 }
 
@@ -155,7 +181,7 @@ impl TableData for WalletAddressOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        serialize_row(self)
     }
 }
 
@@ -175,44 +201,8 @@ impl TableData for StatusOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        serialize_row(self)
     }
-}
-
-pub(super) struct Receipt {
-    pub message: String,
-    pub address: String,
-    pub alias: Option<String>,
-    pub source: String,
-    pub is_default: Option<bool>,
-    pub config_keys_written: Vec<String>,
-}
-
-impl Receipt {
-    pub fn new(message: &str, address: &str, alias: Option<String>, source: &str) -> Self {
-        Self {
-            message: message.to_string(),
-            address: address.to_string(),
-            alias,
-            source: source.to_string(),
-            is_default: None,
-            config_keys_written: Vec::new(),
-        }
-    }
-}
-
-pub(super) fn print_receipt(inv: &Invocation, receipt: Receipt) {
-    let info = WalletReceipt {
-        message: receipt.message,
-        address: receipt.address,
-        alias: receipt.alias,
-        source: receipt.source,
-        is_default: receipt.is_default,
-        config_path: inv.settings().config_path_display(),
-        vault_path: Vault::from_settings(inv.settings()).display_path(),
-        config_keys_written: receipt.config_keys_written,
-    };
-    inv.print_untimed(&info);
 }
 
 pub(super) fn print_wallet_address(inv: &Invocation, address: &str) {
@@ -221,7 +211,7 @@ pub(super) fn print_wallet_address(inv: &Invocation, address: &str) {
             address: address.to_string(),
         });
     } else {
-        println!("{address}");
+        sink::out_line(address);
     }
 }
 
@@ -232,38 +222,43 @@ pub(super) fn print_status(inv: &Invocation, status: &str, message: &str) {
             message: message.to_string(),
         });
     } else {
-        println!("{message}");
+        sink::out_line(message);
     }
 }
 
-/// Report a declined confirmation. Human runs get a stderr note; JSON keeps its status document.
+/// Human runs get a stderr note; JSON keeps its status document.
 pub(super) fn print_declined(inv: &Invocation, message: &str) {
     if inv.format() == OutputFormat::Json {
         print_status(inv, "cancelled", message);
     } else {
-        eprintln!("{message}");
+        sink::err_line(message);
     }
 }
 
-pub(super) struct BankrReceipt {
-    pub status: &'static str,
-    pub message: String,
-    pub address: Option<String>,
-    pub api_url: Option<String>,
-    pub config_keys_written: Vec<String>,
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct BankrStatusOutput {
+pub(super) struct BankrStatusOutput {
     status: String,
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    address: Option<String>,
+    pub address: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    api_url: Option<String>,
+    pub api_url: Option<String>,
     config_path: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    config_keys_written: Vec<String>,
+    pub config_keys_written: Vec<String>,
+}
+
+impl BankrStatusOutput {
+    pub fn new(inv: &Invocation, status: &str, message: String) -> Self {
+        Self {
+            status: status.to_string(),
+            message,
+            address: None,
+            api_url: None,
+            config_path: inv.settings().config_path_display(),
+            config_keys_written: Vec::new(),
+        }
+    }
 }
 
 impl TableData for BankrStatusOutput {
@@ -293,22 +288,10 @@ impl TableData for BankrStatusOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        serialize_row(self)
     }
 }
 
-pub(super) fn print_bankr_receipt(inv: &Invocation, receipt: BankrReceipt) {
-    inv.print_untimed(&BankrStatusOutput {
-        status: receipt.status.to_string(),
-        message: receipt.message,
-        address: receipt.address,
-        api_url: receipt.api_url,
-        config_path: inv.settings().config_path_display(),
-        config_keys_written: receipt.config_keys_written,
-    });
-}
-
-/// Quote a value for display in a copy-pasteable shell command.
 pub(super) fn shell_arg(value: &str) -> String {
     let plain = !value.is_empty()
         && value

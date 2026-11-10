@@ -18,6 +18,32 @@ const EVM_CAIP2: &str = "eip155:1";
 
 const HYPERLIQUID_CHAIN_ALIAS: &str = "hyperliquid";
 
+/// How a vault wallet is named where its origin matters: in `wallet show`, the
+/// receipts of the wallet commands and `account ls`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletSource {
+    /// A wallet in the vault.
+    Vault,
+    /// A wallet this run just created or imported.
+    Stored,
+}
+
+impl WalletSource {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Vault => "OWS wallet",
+            Self::Stored => "stored OWS wallet",
+        }
+    }
+
+    /// `OWS wallet (<name>)`: how a signer backed by vault wallet `name` is described.
+    #[must_use]
+    pub fn describe(self, name: &str) -> String {
+        format!("{} ({name})", self.label())
+    }
+}
+
 /// A selector that names several wallets: the user must pick by id.
 pub(crate) fn ambiguous_wallet(selector: &str, count: usize) -> CliError {
     CliError::InvalidAuth(format!(

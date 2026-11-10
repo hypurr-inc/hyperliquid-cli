@@ -1,164 +1,61 @@
 mod support;
 
-use alloy::dyn_abi::{Eip712Types, Resolver, TypedData};
-use alloy::primitives::keccak256;
-use alloy::signers::SignerSync;
-use alloy::sol;
-use alloy::sol_types::SolStruct;
-use hyperliquid_cli::auth::parse_private_key;
-use hypersdk::Address;
 use hypersdk::hypercore::Chain;
-use hypersdk::hypercore::signing::sign_l1_action;
 use predicates::prelude::*;
 use serde::Serialize;
-use serde_json::{Map, Value};
-use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address,
-    mount_all_mids,
+use serde_json::{Value, json};
+use support::exchange::ExchangeFixture;
+use support::signing::user_signed::{C_DEPOSIT, C_WITHDRAW, LINK_STAKING_USER, TOKEN_DELEGATE};
+use support::signing::{
+    assert_signed_by_test_key, recover_raw_l1_signer, recover_user_signer, test_signer,
 };
-use wiremock::matchers::{body_partial_json, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use support::{IsolatedHome, run_json};
 
 const VALID_ADDRESS: &str = "0x0000000000000000000000000000000000000001";
 const VALIDATOR_ADDRESS: &str = "0x0000000000000000000000000000000000000002";
-const HYPERLIQUID_EIP_PREFIX: &str = "HyperliquidTransaction:";
 
-fn assert_signed_by_test_key(json: &Value) {
-    let signer = expected_address(VALID_PRIVATE_KEY);
-    assert_eq!(json["signer"], signer);
-    assert_eq!(json["acting_as"], signer);
+#[derive(Serialize)]
+struct ClaimRewards {
+    r#type: &'static str,
 }
 
-sol! {
-    struct TokenDelegate {
-        string hyperliquidChain;
-        address validator;
-        uint64 wei;
-        bool isUndelegate;
-        uint64 nonce;
-    }
-
-    struct CDeposit {
-        string hyperliquidChain;
-        uint64 wei;
-        uint64 nonce;
-    }
-
-    struct CWithdraw {
-        string hyperliquidChain;
-        uint64 wei;
-        uint64 nonce;
-    }
-
-    struct LinkStakingUser {
-        string hyperliquidChain;
-        address user;
-        bool isFinalize;
-        uint64 nonce;
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExpectedTokenDelegateMessage {
-    signature_chain_id: String,
-    hyperliquid_chain: Chain,
-    validator: Address,
-    wei: u64,
-    is_undelegate: bool,
-    nonce: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExpectedCDepositMessage {
-    signature_chain_id: String,
-    hyperliquid_chain: Chain,
-    wei: u64,
-    nonce: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExpectedCWithdrawMessage {
-    signature_chain_id: String,
-    hyperliquid_chain: Chain,
-    wei: u64,
-    nonce: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExpectedLinkStakingUserMessage {
-    hyperliquid_chain: Chain,
-    user: Address,
-    is_finalize: bool,
-    nonce: u64,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ExpectedClaimRewardsAction {
-    #[serde(rename = "type")]
-    action_type: &'static str,
-}
-
-async fn mount_override_healthcheck(server: &MockServer) {
-    mount_all_mids(server, "51000", "3000").await;
-}
-
-async fn mock_staking_public_server() -> MockServer {
-    let server = MockServer::start().await;
-    mount_override_healthcheck(&server).await;
-
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "delegatorSummary"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "delegated": "123.45",
-            "undelegated": "10",
-            "totalPendingWithdrawal": "5.5",
-            "nPendingWithdrawals": 2
-        })))
-        .mount(&server)
+async fn staking_public_server() -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_info_containing(
+            json!({"type": "delegatorSummary"}),
+            json!({
+                "delegated": "123.45",
+                "undelegated": "10",
+                "totalPendingWithdrawal": "5.5",
+                "nPendingWithdrawals": 2
+            }),
+        )
         .await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "delegations"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
+    server
+        .mount_info_containing(
+            json!({"type": "delegations"}),
+            json!([{
                 "validator": VALIDATOR_ADDRESS,
                 "amount": "100.0",
                 "lockedUntilTimestamp": 1700000000000_u64
-            }
-        ])))
-        .mount(&server)
+            }]),
+        )
         .await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "delegatorRewards"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
+    server
+        .mount_info_containing(
+            json!({"type": "delegatorRewards"}),
+            json!([{
                 "time": 1700000000000_u64,
                 "source": "staking",
                 "totalAmount": "1.25"
-            }
-        ])))
-        .mount(&server)
+            }]),
+        )
         .await;
-    Mock::given(method("POST"))
-        .and(path("/info"))
-        .and(body_partial_json(
-            serde_json::json!({"type": "validatorSummaries"}),
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {
+    server
+        .mount_info_containing(
+            json!({"type": "validatorSummaries"}),
+            json!([{
                 "validator": VALIDATOR_ADDRESS,
                 "signer": "0x0000000000000000000000000000000000000003",
                 "name": "Validator One",
@@ -172,124 +69,59 @@ async fn mock_staking_public_server() -> MockServer {
                 "stats": [
                     ["day", {"uptimeFraction": "1.0", "predictedApr": "0.025", "nSamples": 1440}]
                 ]
-            }
-        ])))
-        .mount(&server)
-        .await;
-
-    server
-}
-
-async fn mock_staking_action_server() -> MockServer {
-    let server = MockServer::start().await;
-    mount_override_healthcheck(&server).await;
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "ok",
-            "response": { "type": "default" }
-        })))
-        .mount(&server)
+            }]),
+        )
         .await;
     server
 }
 
-fn sorted_keys(object: &Map<String, Value>) -> Vec<&str> {
-    let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
-    keys.sort_unstable();
-    keys
+async fn staking_action_server() -> ExchangeFixture {
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_exchange(json!({"status": "ok", "response": {"type": "default"}}))
+        .await;
+    server
 }
 
-fn assert_object_keys(value: &Value, expected: &[&str]) {
-    let object = value.as_object().expect("expected JSON object");
-    let mut expected = expected.to_vec();
-    expected.sort_unstable();
-    assert_eq!(sorted_keys(object), expected);
-}
-
-fn exchange_bodies(requests: &[wiremock::Request]) -> Vec<Value> {
-    requests
-        .iter()
-        .filter(|request| request.url.path() == "/exchange")
-        .map(|request| serde_json::from_slice(&request.body).unwrap())
-        .collect()
-}
-
+/// The request envelope every signed action travels in, with no vault and no
+/// expiry. Returns the nonce.
 fn assert_signed_exchange_envelope(body: &Value) -> u64 {
-    assert_object_keys(
-        body,
-        &[
+    let mut keys: Vec<_> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
             "action",
             "expiresAfter",
             "nonce",
             "signature",
-            "vaultAddress",
-        ],
+            "vaultAddress"
+        ]
     );
     assert!(body["vaultAddress"].is_null());
     assert!(body["expiresAfter"].is_null());
-    assert_object_keys(&body["signature"], &["r", "s", "v"]);
     let nonce = body["nonce"].as_u64().expect("nonce is a u64");
     assert!(nonce > 0);
     nonce
 }
 
-fn typed_data<T: SolStruct>(message: &impl Serialize, chain: Chain) -> TypedData {
-    let mut resolver = Resolver::from_struct::<T>();
-    resolver
-        .ingest_string(T::eip712_encode_type())
-        .expect("failed to ingest EIP-712 type");
-
-    let mut types = Eip712Types::from(&resolver);
-    let primary_type = types.remove(T::NAME).expect("missing primary EIP-712 type");
-    types.insert(format!("{HYPERLIQUID_EIP_PREFIX}{}", T::NAME), primary_type);
-
-    TypedData {
-        domain: chain.domain(),
-        resolver: Resolver::from(types),
-        primary_type: format!("{HYPERLIQUID_EIP_PREFIX}{}", T::NAME),
-        message: serde_json::to_value(message).expect("serialize typed-data message"),
-    }
-}
-
-fn expected_user_action_signature<T: SolStruct>(message: &impl Serialize, chain: Chain) -> Value {
-    let signer = parse_private_key(VALID_PRIVATE_KEY).unwrap();
-    let signature = signer
-        .sign_dynamic_typed_data_sync(&typed_data::<T>(message, chain))
-        .unwrap();
-    serde_json::to_value(hypersdk::hypercore::types::Signature::from(signature)).unwrap()
-}
-
-fn raw_rmp_hash<T: Serialize>(value: &T, nonce: u64) -> alloy::primitives::B256 {
-    let mut bytes = rmp_serde::to_vec_named(value).unwrap();
-    bytes.extend(nonce.to_be_bytes());
-    bytes.push(0);
-    keccak256(bytes)
-}
-
-async fn expected_raw_l1_signature(action: &impl Serialize, nonce: u64, chain: Chain) -> Value {
-    let signer = parse_private_key(VALID_PRIVATE_KEY).unwrap();
-    let signature = sign_l1_action(&signer, chain, raw_rmp_hash(action, nonce))
-        .await
-        .unwrap();
-    serde_json::to_value(signature).unwrap()
-}
-
 #[tokio::test]
 async fn staking_summary_json_includes_balances_delegations_and_rewards() {
     let env = IsolatedHome::new();
-    let server = mock_staking_public_server().await;
+    let server = staking_public_server().await;
 
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args(["--format", "json", "staking", "summary", VALID_ADDRESS])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = run_json(env.command_with_server(&server).args([
+        "--format",
+        "json",
+        "staking",
+        "summary",
+        VALID_ADDRESS,
+    ]));
 
     assert_eq!(json["address"], VALID_ADDRESS);
     assert_eq!(json["delegated"], "123.45");
@@ -302,10 +134,9 @@ async fn staking_summary_json_includes_balances_delegations_and_rewards() {
 #[tokio::test]
 async fn staking_validators_lists_validator_names_and_addresses() {
     let env = IsolatedHome::new();
-    let server = mock_staking_public_server().await;
+    let server = staking_public_server().await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
+    env.command_with_server(&server)
         .args(["staking", "validators"])
         .assert()
         .success()
@@ -317,18 +148,15 @@ async fn staking_validators_lists_validator_names_and_addresses() {
 #[tokio::test]
 async fn staking_rewards_json_shows_reward_amounts() {
     let env = IsolatedHome::new();
-    let server = mock_staking_public_server().await;
+    let server = staking_public_server().await;
 
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .args(["--format", "json", "staking", "rewards", VALID_ADDRESS])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = run_json(env.command_with_server(&server).args([
+        "--format",
+        "json",
+        "staking",
+        "rewards",
+        VALID_ADDRESS,
+    ]));
 
     assert_eq!(json[0]["source"], "staking");
     assert_eq!(json[0]["total_amount"], "1.25");
@@ -371,23 +199,11 @@ async fn staking_actions_report_action_and_reversibility_in_json_output() {
         ),
         (&["claim-rewards"], "claim-rewards", "irreversible"),
     ];
-    let server = mock_staking_action_server().await;
+    let server = staking_action_server().await;
 
     for (args, action, reversibility) in cases {
         let env = IsolatedHome::new();
-        let output = env
-            .command()
-            .env(API_OVERRIDE_ENV, server.uri())
-            .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-            .args(["--format", "json", "staking"])
-            .args(args)
-            .arg("--testnet")
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        let json: Value = serde_json::from_slice(&output).unwrap();
+        let json = run_json(env.live_json(&server).arg("staking").args(args));
 
         assert_eq!(json["action"], action);
         assert_eq!(json["status"], "submitted", "{action}");
@@ -399,27 +215,13 @@ async fn staking_actions_report_action_and_reversibility_in_json_output() {
 #[tokio::test]
 async fn staking_withdraw_notes_seven_day_queue() {
     let env = IsolatedHome::new();
-    let server = mock_staking_action_server().await;
+    let server = staking_action_server().await;
 
-    let output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "staking",
-            "withdraw",
-            "--amount",
-            "2",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = run_json(
+        env.live_json(&server)
+            .args(["staking", "withdraw", "--amount", "2"]),
+    );
+
     assert_eq!(json["action"], "withdraw");
     assert_eq!(json["status"], "submitted");
     assert_eq!(json["network"], "Testnet");
@@ -434,12 +236,7 @@ async fn staking_withdraw_notes_seven_day_queue() {
     );
     assert_signed_by_test_key(&json);
 
-    let requests = server.received_requests().await.unwrap();
-    let exchange_request = requests
-        .iter()
-        .find(|request| request.url.path() == "/exchange")
-        .expect("expected /exchange request");
-    let body: Value = serde_json::from_slice(&exchange_request.body).unwrap();
+    let body = &server.exchange_bodies().await[0];
     assert_eq!(body["action"]["type"], "cWithdraw");
     assert_eq!(body["action"]["wei"], 200000000_u64);
 }
@@ -447,209 +244,101 @@ async fn staking_withdraw_notes_seven_day_queue() {
 #[tokio::test]
 async fn staking_action_payloads_and_signatures_match_hyperliquid_shapes() {
     let env = IsolatedHome::new();
-    let server = mock_staking_action_server().await;
+    let server = staking_action_server().await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "staking",
+    for args in [
+        &[
             "delegate",
             "--validator",
             VALIDATOR_ADDRESS,
             "--amount",
             "1.5",
-            "--testnet",
-        ])
-        .assert()
-        .success();
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "staking",
+        ][..],
+        &[
             "undelegate",
             "--validator",
             VALIDATOR_ADDRESS,
             "--amount",
             "4",
-            "--testnet",
-        ])
-        .assert()
-        .success();
+        ],
+        &["deposit", "--amount", "3"],
+        &["withdraw", "--amount", "2"],
+        &["claim-rewards"],
+    ] {
+        env.live_json(&server)
+            .arg("staking")
+            .args(args)
+            .assert()
+            .success();
+    }
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["staking", "deposit", "--amount", "3", "--testnet"])
-        .assert()
-        .success();
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["staking", "withdraw", "--amount", "2", "--testnet"])
-        .assert()
-        .success();
-
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["staking", "claim-rewards", "--testnet"])
-        .assert()
-        .success();
-
-    let requests = server.received_requests().await.unwrap();
-    let bodies = exchange_bodies(&requests);
+    let bodies = server.exchange_bodies().await;
     assert_eq!(bodies.len(), 5);
+    let nonces: Vec<u64> = bodies.iter().map(assert_signed_exchange_envelope).collect();
 
-    let delegate = &bodies[0];
-    let delegate_nonce = assert_signed_exchange_envelope(delegate);
-    assert_object_keys(
-        &delegate["action"],
-        &[
-            "hyperliquidChain",
-            "isUndelegate",
-            "nonce",
-            "signatureChainId",
-            "type",
-            "validator",
-            "wei",
-        ],
-    );
-    assert_eq!(delegate["action"]["type"], "tokenDelegate");
-    assert_eq!(delegate["action"]["signatureChainId"], "0x66eee");
-    assert_eq!(delegate["action"]["hyperliquidChain"], "Testnet");
-    assert_eq!(delegate["action"]["validator"], VALIDATOR_ADDRESS);
-    assert_eq!(delegate["action"]["wei"], 150000000_u64);
-    assert_eq!(delegate["action"]["isUndelegate"], false);
-    assert_eq!(delegate["action"]["nonce"], delegate_nonce);
-    assert_eq!(
-        delegate["signature"],
-        expected_user_action_signature::<TokenDelegate>(
-            &ExpectedTokenDelegateMessage {
-                signature_chain_id: "0x66eee".to_string(),
-                hyperliquid_chain: Chain::Testnet,
-                validator: VALIDATOR_ADDRESS.parse().unwrap(),
-                wei: 150000000,
-                is_undelegate: false,
-                nonce: delegate_nonce,
-            },
-            Chain::Testnet,
-        )
-    );
-
-    let undelegate = &bodies[1];
-    let undelegate_nonce = assert_signed_exchange_envelope(undelegate);
-    assert_object_keys(
-        &undelegate["action"],
-        &[
-            "hyperliquidChain",
-            "isUndelegate",
-            "nonce",
-            "signatureChainId",
-            "type",
-            "validator",
-            "wei",
-        ],
-    );
-    assert_eq!(undelegate["action"]["type"], "tokenDelegate");
-    assert_eq!(undelegate["action"]["signatureChainId"], "0x66eee");
-    assert_eq!(undelegate["action"]["hyperliquidChain"], "Testnet");
-    assert_eq!(undelegate["action"]["validator"], VALIDATOR_ADDRESS);
-    assert_eq!(undelegate["action"]["wei"], 400000000_u64);
-    assert_eq!(undelegate["action"]["isUndelegate"], true);
-    assert_eq!(undelegate["action"]["nonce"], undelegate_nonce);
-    assert_eq!(
-        undelegate["signature"],
-        expected_user_action_signature::<TokenDelegate>(
-            &ExpectedTokenDelegateMessage {
-                signature_chain_id: "0x66eee".to_string(),
-                hyperliquid_chain: Chain::Testnet,
-                validator: VALIDATOR_ADDRESS.parse().unwrap(),
-                wei: 400000000,
-                is_undelegate: true,
-                nonce: undelegate_nonce,
-            },
-            Chain::Testnet,
-        )
-    );
-
-    let deposit = &bodies[2];
-    let deposit_nonce = assert_signed_exchange_envelope(deposit);
-    assert_object_keys(
-        &deposit["action"],
-        &[
-            "hyperliquidChain",
-            "nonce",
-            "signatureChainId",
-            "type",
-            "wei",
-        ],
-    );
-    assert_eq!(deposit["action"]["type"], "cDeposit");
-    assert_eq!(deposit["action"]["signatureChainId"], "0x66eee");
-    assert_eq!(deposit["action"]["hyperliquidChain"], "Testnet");
-    assert_eq!(deposit["action"]["wei"], 300000000_u64);
-    assert_eq!(deposit["action"]["nonce"], deposit_nonce);
-    assert_eq!(
-        deposit["signature"],
-        expected_user_action_signature::<CDeposit>(
-            &ExpectedCDepositMessage {
-                signature_chain_id: "0x66eee".to_string(),
-                hyperliquid_chain: Chain::Testnet,
-                wei: 300000000,
-                nonce: deposit_nonce,
-            },
-            Chain::Testnet,
-        )
-    );
-
-    let withdraw = &bodies[3];
-    let withdraw_nonce = assert_signed_exchange_envelope(withdraw);
-    assert_object_keys(
-        &withdraw["action"],
-        &[
-            "hyperliquidChain",
-            "nonce",
-            "signatureChainId",
-            "type",
-            "wei",
-        ],
-    );
-    assert_eq!(withdraw["action"]["type"], "cWithdraw");
-    assert_eq!(withdraw["action"]["signatureChainId"], "0x66eee");
-    assert_eq!(withdraw["action"]["hyperliquidChain"], "Testnet");
-    assert_eq!(withdraw["action"]["wei"], 200000000_u64);
-    assert_eq!(withdraw["action"]["nonce"], withdraw_nonce);
-    assert_eq!(
-        withdraw["signature"],
-        expected_user_action_signature::<CWithdraw>(
-            &ExpectedCWithdrawMessage {
-                signature_chain_id: "0x66eee".to_string(),
-                hyperliquid_chain: Chain::Testnet,
-                wei: 200000000,
-                nonce: withdraw_nonce,
-            },
-            Chain::Testnet,
-        )
-    );
+    let user_signed = |type_string, action: Value| (type_string, action);
+    let expected = [
+        user_signed(
+            TOKEN_DELEGATE,
+            json!({
+                "type": "tokenDelegate",
+                "signatureChainId": "0x66eee",
+                "hyperliquidChain": "Testnet",
+                "validator": VALIDATOR_ADDRESS,
+                "wei": 150000000_u64,
+                "isUndelegate": false,
+                "nonce": nonces[0],
+            }),
+        ),
+        user_signed(
+            TOKEN_DELEGATE,
+            json!({
+                "type": "tokenDelegate",
+                "signatureChainId": "0x66eee",
+                "hyperliquidChain": "Testnet",
+                "validator": VALIDATOR_ADDRESS,
+                "wei": 400000000_u64,
+                "isUndelegate": true,
+                "nonce": nonces[1],
+            }),
+        ),
+        user_signed(
+            C_DEPOSIT,
+            json!({
+                "type": "cDeposit",
+                "signatureChainId": "0x66eee",
+                "hyperliquidChain": "Testnet",
+                "wei": 300000000_u64,
+                "nonce": nonces[2],
+            }),
+        ),
+        user_signed(
+            C_WITHDRAW,
+            json!({
+                "type": "cWithdraw",
+                "signatureChainId": "0x66eee",
+                "hyperliquidChain": "Testnet",
+                "wei": 200000000_u64,
+                "nonce": nonces[3],
+            }),
+        ),
+    ];
+    for (body, (type_string, action)) in bodies.iter().zip(expected) {
+        assert_eq!(body["action"], action);
+        assert_eq!(recover_user_signer(body, type_string), test_signer());
+    }
 
     let claim = &bodies[4];
-    let claim_nonce = assert_signed_exchange_envelope(claim);
-    assert_object_keys(&claim["action"], &["type"]);
-    assert_eq!(claim["action"]["type"], "claimRewards");
+    assert_eq!(claim["action"], json!({"type": "claimRewards"}));
     assert_eq!(
-        claim["signature"],
-        expected_raw_l1_signature(
-            &ExpectedClaimRewardsAction {
-                action_type: "claimRewards"
+        recover_raw_l1_signer(
+            claim,
+            &ClaimRewards {
+                r#type: "claimRewards"
             },
-            claim_nonce,
-            Chain::Testnet,
-        )
-        .await
+            Chain::Testnet
+        ),
+        test_signer()
     );
 }
 
@@ -696,28 +385,19 @@ fn staking_rejects_invalid_validators_and_amounts_before_auth() {
 #[tokio::test]
 async fn staking_link_dry_run_previews_verified_shape_and_warning() {
     let env = IsolatedHome::new();
-
-    let output = env
-        .command()
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
+    let server = staking_action_server().await;
+    let preview = |phase: &str| {
+        run_json(env.live_json(&server).args([
             "--dry-run",
             "staking",
             "link",
-            "initiate",
+            phase,
             "--user",
             VALID_ADDRESS,
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+        ]))
+    };
 
-    let json: Value = serde_json::from_slice(&output).unwrap();
+    let json = preview("initiate");
     assert_eq!(json["command"], "staking link initiate");
     assert_eq!(json["would_execute"], "link_staking_user");
     assert_eq!(json["args"]["phase"], "initiate");
@@ -729,7 +409,7 @@ async fn staking_link_dry_run_previews_verified_shape_and_warning() {
     assert_eq!(json["args"]["action"]["signatureChainId"], "0x66eee");
     assert_eq!(
         json["args"]["verified_shape"]["eip712_fields"],
-        serde_json::json!(["hyperliquidChain", "user", "isFinalize", "nonce"])
+        json!(["hyperliquidChain", "user", "isFinalize", "nonce"])
     );
     assert!(
         json["args"]["warning"]
@@ -740,57 +420,26 @@ async fn staking_link_dry_run_previews_verified_shape_and_warning() {
     assert_signed_by_test_key(&json);
     assert!(json["vault_address"].is_null());
 
-    let finalize_output = env
-        .command()
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "--dry-run",
-            "staking",
-            "link",
-            "finalize",
-            "--user",
-            VALID_ADDRESS,
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let finalize_json: Value = serde_json::from_slice(&finalize_output).unwrap();
-    assert_eq!(finalize_json["command"], "staking link finalize");
-    assert_eq!(finalize_json["args"]["phase"], "finalize");
-    assert_eq!(finalize_json["args"]["action"]["isFinalize"], true);
+    let finalize = preview("finalize");
+    assert_eq!(finalize["command"], "staking link finalize");
+    assert_eq!(finalize["args"]["phase"], "finalize");
+    assert_eq!(finalize["args"]["action"]["isFinalize"], true);
+    assert!(server.exchange_bodies().await.is_empty());
 }
 
 #[tokio::test]
 async fn staking_link_initiate_and_finalize_submit_verified_actions() {
     let env = IsolatedHome::new();
-    let server = mock_staking_action_server().await;
+    let server = staking_action_server().await;
 
-    let initiate_output = env
-        .command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args([
-            "--format",
-            "json",
-            "staking",
-            "link",
-            "initiate",
-            "--user",
-            VALID_ADDRESS,
-            "--yes",
-            "--testnet",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let initiate_json: Value = serde_json::from_slice(&initiate_output).unwrap();
+    let initiate_json = run_json(env.live_json(&server).args([
+        "staking",
+        "link",
+        "initiate",
+        "--user",
+        VALID_ADDRESS,
+        "--yes",
+    ]));
     assert_eq!(initiate_json["status"], "submitted");
     assert_eq!(initiate_json["action"], "staking-link");
     assert_eq!(initiate_json["phase"], "initiate");
@@ -806,9 +455,7 @@ async fn staking_link_initiate_and_finalize_submit_verified_actions() {
     );
     assert_signed_by_test_key(&initiate_json);
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .args([
             "staking",
             "link",
@@ -823,72 +470,31 @@ async fn staking_link_initiate_and_finalize_submit_verified_actions() {
         .stdout(predicate::str::contains("finalize"))
         .stdout(predicate::str::contains("staking-link"));
 
-    let requests = server.received_requests().await.unwrap();
-    let bodies = exchange_bodies(&requests);
+    let bodies = server.exchange_bodies().await;
     assert_eq!(bodies.len(), 2);
-
-    let initiate = &bodies[0];
-    let initiate_nonce = assert_signed_exchange_envelope(initiate);
-    assert_object_keys(
-        &initiate["action"],
-        &[
-            "hyperliquidChain",
-            "isFinalize",
-            "nonce",
-            "signatureChainId",
-            "type",
-            "user",
-        ],
-    );
-    assert_eq!(initiate["action"]["type"], "linkStakingUser");
-    assert_eq!(initiate["action"]["signatureChainId"], "0x66eee");
-    assert_eq!(initiate["action"]["hyperliquidChain"], "Testnet");
-    assert_eq!(initiate["action"]["user"], VALID_ADDRESS);
-    assert_eq!(initiate["action"]["isFinalize"], false);
-    assert_eq!(initiate["action"]["nonce"], initiate_nonce);
-    assert_eq!(
-        initiate["signature"],
-        expected_user_action_signature::<LinkStakingUser>(
-            &ExpectedLinkStakingUserMessage {
-                hyperliquid_chain: Chain::Testnet,
-                user: VALID_ADDRESS.parse().unwrap(),
-                is_finalize: false,
-                nonce: initiate_nonce,
-            },
-            Chain::Testnet,
-        )
-    );
-
-    let finalize = &bodies[1];
-    let finalize_nonce = assert_signed_exchange_envelope(finalize);
-    assert_eq!(finalize["action"]["type"], "linkStakingUser");
-    assert_eq!(finalize["action"]["signatureChainId"], "0x66eee");
-    assert_eq!(finalize["action"]["hyperliquidChain"], "Testnet");
-    assert_eq!(finalize["action"]["user"], VALID_ADDRESS);
-    assert_eq!(finalize["action"]["isFinalize"], true);
-    assert_eq!(finalize["action"]["nonce"], finalize_nonce);
-    assert_eq!(
-        finalize["signature"],
-        expected_user_action_signature::<LinkStakingUser>(
-            &ExpectedLinkStakingUserMessage {
-                hyperliquid_chain: Chain::Testnet,
-                user: VALID_ADDRESS.parse().unwrap(),
-                is_finalize: true,
-                nonce: finalize_nonce,
-            },
-            Chain::Testnet,
-        )
-    );
+    for (body, is_finalize) in bodies.iter().zip([false, true]) {
+        let nonce = assert_signed_exchange_envelope(body);
+        assert_eq!(
+            body["action"],
+            json!({
+                "type": "linkStakingUser",
+                "signatureChainId": "0x66eee",
+                "hyperliquidChain": "Testnet",
+                "user": VALID_ADDRESS,
+                "isFinalize": is_finalize,
+                "nonce": nonce,
+            })
+        );
+        assert_eq!(recover_user_signer(body, LINK_STAKING_USER), test_signer());
+    }
 }
 
 #[tokio::test]
 async fn staking_link_requires_confirmation_without_yes() {
     let env = IsolatedHome::new();
-    let server = mock_staking_action_server().await;
+    let server = staking_action_server().await;
 
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+    env.live_command(&server)
         .args([
             "staking",
             "link",
@@ -902,8 +508,7 @@ async fn staking_link_requires_confirmation_without_yes() {
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("Can't continue without --yes"));
 
-    let requests = server.received_requests().await.unwrap();
-    assert!(exchange_bodies(&requests).is_empty());
+    assert!(server.exchange_bodies().await.is_empty());
 }
 
 #[test]

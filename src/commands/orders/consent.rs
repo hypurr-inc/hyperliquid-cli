@@ -1,62 +1,71 @@
-use std::io::{self, Write};
-
-use chrono::Utc;
 use hypersdk::hypercore::types::OrderGrouping;
 use hypersdk::{Address, Decimal};
 
-use super::context::OrderSubmissionContext;
-use super::exchange::OrderBuilderFee;
-use super::planning::{ScheduleCancelPlan, TwapCreatePlan};
+use super::planning::{ScheduleCancelPlan, TrailingStopPlan, TwapCreatePlan};
 use super::prepared::{
     PreparedOrder, PreparedOrderBatch, PreparedTpslBatch, QuoteAmount, TpslLegKind,
 };
+use crate::builder_fee::BuilderFee;
+use crate::clock;
+use crate::command_spec::YES_FLAG;
+use crate::consent::{self as policy, ConsentBlock, Tone};
 use crate::errors::CliError;
 use crate::mode::Mode;
 use crate::network::Network;
 use crate::output;
-use crate::prompt;
-use crate::quantity::Scale;
 use crate::signing::SelectedSigner;
 
-/// What the user is asked to approve. It names the error a decline fails with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ConsentKind {
-    Order,
-    Tpsl,
-    ScaleOrders,
-    BatchOrders,
-    Twap,
-    ScheduleCancel,
-    TrailingStop,
-    ModifyOrders,
-    CancelAll,
+/// What a command asks approval for. It is the one place a request pairs the
+/// block the person is shown with the error a decline fails with, so neither
+/// can name another request's.
+pub(super) enum Consent<'a> {
+    Order(&'a PreparedOrder),
+    Tpsl(&'a PreparedTpslBatch),
+    Scale(&'a PreparedOrderBatch),
+    BatchCreate(&'a PreparedOrderBatch),
+    Twap(&'a TwapCreatePlan),
+    ScheduleCancel(&'a ScheduleCancelPlan),
+    TrailingStop(&'a TrailingStopPlan),
+    ModifyOrders { count: usize },
+    CancelAll { coin: Option<&'a str>, count: usize },
 }
 
-impl ConsentKind {
-    pub(super) fn declined(self) -> CliError {
+impl Consent<'_> {
+    /// The block and question shown to the person; whether they approved.
+    pub(super) fn ask(&self, target: &ConsentTarget<'_>) -> Result<bool, CliError> {
+        match self {
+            Self::Order(prepared) => confirm_order(prepared, target),
+            Self::Tpsl(batch) => confirm_tpsl_batch(batch, target),
+            Self::Scale(batch) => confirm_order_batch("scale", batch, target),
+            Self::BatchCreate(batch) => confirm_order_batch("batch-create", batch, target),
+            Self::Twap(plan) => confirm_twap(plan, target),
+            Self::ScheduleCancel(plan) => confirm_schedule_cancel(plan, target),
+            Self::TrailingStop(plan) => confirm_trailing_stop(plan, target),
+            Self::ModifyOrders { count } => confirm_batch_modify(*count, target),
+            Self::CancelAll { coin, count } => confirm_cancel_all(*coin, *count, target),
+        }
+    }
+
+    /// The error a decline fails with.
+    pub(super) fn declined(&self) -> CliError {
         let (label, cancelled) = match self {
-            Self::Order => ("order", "order placement"),
-            Self::Tpsl => ("TP/SL", "order placement"),
-            Self::ScaleOrders => ("scale order", "order placement"),
-            Self::BatchOrders => ("batch order", "order placement"),
-            Self::Twap => ("TWAP", "TWAP creation"),
-            Self::ScheduleCancel => ("schedule-cancel", "action"),
-            Self::TrailingStop => ("trailing stop", "trailing stop placement"),
-            Self::ModifyOrders => ("batch modify", "order modification"),
-            Self::CancelAll => {
-                return CliError::Configuration("cancel-all aborted".to_string());
-            }
+            Self::Order(_) => ("order", "order placement"),
+            Self::Tpsl(_) => ("TP/SL", "order placement"),
+            Self::Scale(_) => ("scale order", "order placement"),
+            Self::BatchCreate(_) => ("batch order", "order placement"),
+            Self::Twap(_) => ("TWAP", "TWAP creation"),
+            Self::ScheduleCancel(_) => ("schedule-cancel", "action"),
+            Self::TrailingStop(_) => ("trailing stop", "trailing stop placement"),
+            Self::ModifyOrders { .. } => ("batch modify", "order modification"),
+            Self::CancelAll { .. } => return policy::declined("cancel-all aborted"),
         };
-        CliError::Configuration(format!(
-            "Mainnet {label} confirmation required; {cancelled} cancelled. Rerun with --yes for deliberate automation."
+        policy::declined(format!(
+            "Mainnet {label} confirmation required; {cancelled} cancelled. Rerun with {YES_FLAG} for deliberate automation."
         ))
     }
 }
 
-pub(super) fn confirm_mainnet_batch_modify(
-    count: usize,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
+fn confirm_batch_modify(count: usize, target: &ConsentTarget<'_>) -> Result<bool, CliError> {
     let orders = output::format::noun(count, "order", "orders");
     ask_confirmation(
         target,
@@ -65,7 +74,7 @@ pub(super) fn confirm_mainnet_batch_modify(
     )
 }
 
-pub(super) fn confirm_cancel_all(
+fn confirm_cancel_all(
     coin: Option<&str>,
     count: usize,
     target: &ConsentTarget<'_>,
@@ -79,11 +88,11 @@ pub(super) fn confirm_cancel_all(
     ask_confirmation(target, &[], &question)
 }
 
-pub(super) fn confirm_mainnet_schedule_cancel(
+fn confirm_schedule_cancel(
     plan: &ScheduleCancelPlan,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
-    let question = if let Some(scheduled) = plan.scheduled(Utc::now()) {
+    let question = if let Some(scheduled) = plan.scheduled(clock::now_utc()) {
         format!(
             "Schedule cancel-all for {} on {}?",
             scheduled.at.to_rfc3339(),
@@ -95,10 +104,7 @@ pub(super) fn confirm_mainnet_schedule_cancel(
     ask_confirmation(target, &[], &question)
 }
 
-pub(super) fn confirm_mainnet_order(
-    prepared: &PreparedOrder,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
+fn confirm_order(prepared: &PreparedOrder, target: &ConsentTarget<'_>) -> Result<bool, CliError> {
     let amount = prepared
         .amount
         .as_ref()
@@ -125,7 +131,7 @@ pub(super) fn confirm_mainnet_order(
         reduce_only
     )];
     if let Some(slippage_warning) = &prepared.warning {
-        details.push(prompt::warning(slippage_warning));
+        details.push(output::notice::caution(slippage_warning));
     }
     if let Some(rate) = prepared.priority_rate {
         details.push(priority_line(rate));
@@ -146,7 +152,7 @@ fn priority_line(rate: u32) -> String {
     )
 }
 
-pub(super) fn confirm_mainnet_order_batch(
+fn confirm_order_batch(
     label: &str,
     prepared: &PreparedOrderBatch,
     target: &ConsentTarget<'_>,
@@ -164,7 +170,7 @@ pub(super) fn confirm_mainnet_order_batch(
     )
 }
 
-pub(super) fn confirm_mainnet_tpsl_batch(
+fn confirm_tpsl_batch(
     prepared: &PreparedTpslBatch,
     target: &ConsentTarget<'_>,
 ) -> Result<bool, CliError> {
@@ -198,7 +204,7 @@ pub(super) fn confirm_mainnet_tpsl_batch(
     let mut details = vec![summary];
     for leg in &prepared.legs {
         if let Some(warning) = &leg.warning {
-            details.push(prompt::warning(warning));
+            details.push(output::notice::caution(warning));
         }
     }
     ask_confirmation(
@@ -208,10 +214,7 @@ pub(super) fn confirm_mainnet_tpsl_batch(
     )
 }
 
-pub(super) fn confirm_mainnet_twap(
-    plan: &TwapCreatePlan,
-    target: &ConsentTarget<'_>,
-) -> Result<bool, CliError> {
+fn confirm_twap(plan: &TwapCreatePlan, target: &ConsentTarget<'_>) -> Result<bool, CliError> {
     let details = [format!(
         "TWAP: {} {} {} over {} seconds",
         plan.side, plan.size, plan.coin, plan.duration_seconds
@@ -223,24 +226,64 @@ pub(super) fn confirm_mainnet_twap(
     )
 }
 
+fn confirm_trailing_stop(
+    plan: &TrailingStopPlan,
+    target: &ConsentTarget<'_>,
+) -> Result<bool, CliError> {
+    let tracking = if plan.side().is_buy() {
+        "lowest"
+    } else {
+        "highest"
+    };
+    let activation = plan
+        .activation_px()
+        .map(|price| format!("Activation: {} (mark price)", price.normalize()))
+        .unwrap_or_else(|| "Activation: starts tracking immediately".to_string());
+    let details = [
+        format!("Trailing stop: {} market order when it fires", plan.side()),
+        format!("Coin: {}", plan.coin()),
+        format!("Side: {}", plan.side()),
+        format!("Size: {}", plan.size().normalize()),
+        format!(
+            "Retracement: {} from the {tracking} mark price",
+            plan.retracement_label()
+        ),
+        activation,
+        format!(
+            "Reduce-only: {}",
+            if plan.reduce_only() { "yes" } else { "no" }
+        ),
+    ];
+    ask_confirmation(
+        target,
+        &details,
+        &format!("Place this trailing stop on {}?", target.network()),
+    )
+}
+
+/// The network, the signer, the account it acts for and the builder fee that the
+/// approval block shows.
 pub(super) struct ConsentTarget<'a> {
     mode: &'a Mode,
     network: Network,
     signer: &'a SelectedSigner,
     vault_address: Option<Address>,
-    builder: Option<&'a OrderBuilderFee>,
+    builder: Option<&'a BuilderFee>,
 }
 
 impl<'a> ConsentTarget<'a> {
     pub(super) fn new(
-        submission: OrderSubmissionContext<'a>,
-        builder: Option<&'a OrderBuilderFee>,
+        mode: &'a Mode,
+        network: Network,
+        signer: &'a SelectedSigner,
+        vault_address: Option<Address>,
+        builder: Option<&'a BuilderFee>,
     ) -> Self {
         Self {
-            mode: submission.inv.mode(),
-            network: Network::from(submission.api.chain()),
-            signer: submission.signer,
-            vault_address: submission.vault_address,
+            mode,
+            network,
+            signer,
+            vault_address,
             builder,
         }
     }
@@ -249,96 +292,188 @@ impl<'a> ConsentTarget<'a> {
         self.network
     }
 
-    fn preview_lines(&self) -> Vec<String> {
-        let mut lines = vec![
-            format!("Network: {}", self.network()),
-            format!("Signer: {}", self.signer.address()),
-        ];
+    fn block(&self, details: &[String]) -> ConsentBlock {
+        let mut block = ConsentBlock::signed(self.network(), self.signer.address());
         if let Some(vault) = self.vault_address {
-            lines.push(format!("Acting as: {vault} (vault or subaccount)"));
+            block = block.field("Acting as", format!("{vault} (vault or subaccount)"));
         }
         if let Some(builder) = self.builder {
-            lines.push(format!(
-                "Builder: {} (max fee {}%)",
-                builder.b,
-                builder.percent()
-            ));
-            for sub in &builder.s {
-                lines.push(format!(
-                    "Sub-builder: {} ({}% of the builder fee)",
-                    sub.b,
-                    Scale::TENTHS_BPS_PER_PERCENT.amount(sub.s)
-                ));
+            block = block.field(
+                "Builder",
+                format!(
+                    "{} (max fee {}%)",
+                    builder.address_wire(),
+                    builder.percent()
+                ),
+            );
+            for sub in builder.subs() {
+                block = block.field(
+                    "Sub-builder",
+                    format!(
+                        "{} ({}% of the builder fee)",
+                        sub.address_wire(),
+                        sub.percent()
+                    ),
+                );
             }
         }
-        lines
+        block.texts(details)
     }
 }
 
-/// Print the consent preview block on stderr, then ask `question`.
-///
-/// Runs that can't prompt fail with `--yes` as the way to answer before the
-/// block is printed.
-pub(super) fn ask_confirmation(
+/// Runs that can't prompt fail with `--yes` as the way to answer before the block
+/// is printed.
+fn ask_confirmation(
     target: &ConsentTarget<'_>,
     details: &[String],
     question: &str,
 ) -> Result<bool, CliError> {
-    prompt::ensure_can_prompt(target.mode, "--yes")?;
-    let mut stderr = io::stderr();
-    for line in target.preview_lines().iter().chain(details) {
-        writeln!(stderr, "{line}").map_err(|err| CliError::Internal(anyhow::anyhow!(err)))?;
-    }
-    prompt::confirm_warning(target.mode, question, "--yes")
+    policy::ask(target.mode, &target.block(details), question, Tone::Warning)
 }
 
 #[cfg(test)]
 mod tests {
+    use hypersdk::hypercore::types::{
+        Action, OrderGrouping, OrderRequest, OrderTypePlacement, TimeInForce, TwapOrderParams,
+    };
+
     use super::*;
+    use crate::assets::test_support::perp;
+    use crate::assets::{Market, PerpAsset};
+    use crate::commands::orders::args::TrailingStopArgs;
+    use crate::commands::orders::planning::prepare_trailing_stop_plan;
+    use crate::commands::orders::prepared::order_batch;
+    use crate::commands::orders::vocab::{CreateOrderType, OrderSide, TpslGroupingArg};
+    use crate::margin::MarginPlan;
+
+    fn order() -> PreparedOrder {
+        let perp = perp("BTC", 0);
+        PreparedOrder {
+            request: OrderRequest {
+                asset: perp.index,
+                is_buy: true,
+                limit_px: Decimal::from(10),
+                sz: Decimal::ONE,
+                reduce_only: false,
+                order_type: OrderTypePlacement::Limit {
+                    tif: TimeInForce::Gtc,
+                },
+                cloid: Default::default(),
+            },
+            coin: perp.display_name(),
+            margin: None,
+            market: Market::Perp(perp),
+            side: OrderSide::Buy,
+            order_type: CreateOrderType::Limit,
+            tif: None,
+            trigger_price: None,
+            amount: None,
+            warning: None,
+            builder: None,
+            priority_rate: None,
+        }
+    }
+
+    fn twap(perp: PerpAsset) -> TwapCreatePlan {
+        TwapCreatePlan {
+            action: Action::TwapOrder {
+                twap: TwapOrderParams {
+                    a: perp.index,
+                    b: true,
+                    s: Decimal::ONE,
+                    r: false,
+                    m: 5,
+                    t: false,
+                },
+            },
+            coin: perp.display_name(),
+            side: "buy".to_string(),
+            size: Decimal::ONE,
+            duration_seconds: 300,
+            duration_minutes: 5,
+            randomize: false,
+            margin: MarginPlan::for_market(&perp, None).unwrap(),
+            perp,
+        }
+    }
 
     #[test]
     fn a_declined_approval_names_what_was_cancelled() {
-        for (kind, message) in [
+        let order = order();
+        let tpsl = PreparedTpslBatch {
+            batch: order_batch(Vec::new(), OrderGrouping::Na),
+            grouping: TpslGroupingArg::NormalTpsl,
+            legs: Vec::new(),
+        };
+        let batch = PreparedOrderBatch {
+            batch: order_batch(Vec::new(), OrderGrouping::Na),
+            legs: Vec::new(),
+        };
+        let twap = twap(perp("BTC", 0));
+        let schedule = ScheduleCancelPlan::Clear;
+        let trailing = prepare_trailing_stop_plan(
+            &perp("BTC", 0),
+            &TrailingStopArgs {
+                coin: "BTC".to_string(),
+                dex: None,
+                side: OrderSide::Sell,
+                size: Decimal::ONE,
+                retracement_pct: Some(Decimal::from(5)),
+                retracement_px: None,
+                activation_price: None,
+                reduce_only: false,
+                on_behalf_of: None,
+                yes: false,
+            },
+        )
+        .unwrap();
+        for (consent, message) in [
             (
-                ConsentKind::Order,
+                Consent::Order(&order),
                 "Mainnet order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::Tpsl,
+                Consent::Tpsl(&tpsl),
                 "Mainnet TP/SL confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::ScaleOrders,
+                Consent::Scale(&batch),
                 "Mainnet scale order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::BatchOrders,
+                Consent::BatchCreate(&batch),
                 "Mainnet batch order confirmation required; order placement cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::Twap,
+                Consent::Twap(&twap),
                 "Mainnet TWAP confirmation required; TWAP creation cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::ScheduleCancel,
+                Consent::ScheduleCancel(&schedule),
                 "Mainnet schedule-cancel confirmation required; action cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::TrailingStop,
+                Consent::TrailingStop(&trailing),
                 "Mainnet trailing stop confirmation required; trailing stop placement cancelled. Rerun with --yes for deliberate automation.",
             ),
             (
-                ConsentKind::ModifyOrders,
+                Consent::ModifyOrders { count: 2 },
                 "Mainnet batch modify confirmation required; order modification cancelled. Rerun with --yes for deliberate automation.",
             ),
-            (ConsentKind::CancelAll, "cancel-all aborted"),
+            (
+                Consent::CancelAll {
+                    coin: None,
+                    count: 2,
+                },
+                "cancel-all aborted",
+            ),
         ] {
-            let err = kind.declined();
-            assert_eq!(err.exit_code(), 2, "{kind:?}");
+            let err = consent.declined();
+            assert_eq!(err.exit_code(), 2, "{message}");
             assert_eq!(
                 err.to_string(),
                 format!("Configuration error: {message}"),
-                "{kind:?}"
+                "{message}"
             );
         }
     }

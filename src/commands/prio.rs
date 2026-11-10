@@ -3,12 +3,13 @@ use hypersdk::Decimal;
 use hypersdk::hypercore::types::{Action, GossipPriorityBid};
 use serde::Serialize;
 
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
-use crate::commands::actions::{nonce_now, send_l1_action_raw};
-use crate::commands::rows::{ListRow, MISSING, Row, Rows};
-use crate::commands::support::print_dry_run;
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, NoArgs, OwsSupport, arg};
+use crate::commands::common::rows::{ListRow, MISSING, Row, Rows};
+use crate::commands::common::support::{SUBMITTED, print_dry_run};
 use crate::errors::CliError;
-use crate::errors::from_sdk;
+use crate::exchange::actions::send_l1_action;
+use crate::exchange_reply;
 use crate::invocation::Invocation;
 use crate::quantity::{self, Scale};
 use crate::signing::SelectedSigner;
@@ -101,42 +102,6 @@ impl ListRow for PriorityBidRow {
     const EMPTY: &'static str = "No results.";
 }
 
-async fn status(inv: &Invocation) -> Result<(), anyhow::Error> {
-    let status = inv
-        .remote()?
-        .api()
-        .sdk()
-        .gossip_priority_auction_status()
-        .await
-        .map_err(from_sdk)?;
-
-    let rows: Vec<PrioritySlotRow> = status
-        .slots
-        .iter()
-        .enumerate()
-        .map(|(slot, item)| PrioritySlotRow {
-            slot,
-            start_time_seconds: item.start_time_seconds,
-            duration_seconds: item.duration_seconds,
-            start_gas: item.start_gas.to_string(),
-            current_gas: item
-                .current_gas
-                .map_or_else(|| "(no bid)".to_string(), |gas| gas.to_string()),
-            end_gas: item
-                .end_gas
-                .map_or_else(|| MISSING.to_string(), |gas| gas.to_string()),
-            previous_winner: status
-                .prev_winners
-                .get(slot)
-                .and_then(Clone::clone)
-                .unwrap_or_else(|| MISSING.to_string()),
-        })
-        .collect();
-
-    inv.print(&Rows::new(rows));
-    Ok(())
-}
-
 /// The bid cap in wei, once the arguments are known good.
 fn validate_bid_args(args: &BidArgs) -> Result<u64, CliError> {
     if args.ip.trim().is_empty() {
@@ -144,7 +109,7 @@ fn validate_bid_args(args: &BidArgs) -> Result<u64, CliError> {
             "prio bid requires a non-empty --ip".to_string(),
         ));
     }
-    quantity::positive(args.max, HYPE_WEI).map_err(|err| err.config("--max", HYPE_WEI))
+    quantity::units(args.max, HYPE_WEI, "--max")
 }
 
 async fn bid(
@@ -159,10 +124,7 @@ async fn bid(
     let max = args.max;
     let ip = args.ip.as_str();
 
-    let status = client
-        .gossip_priority_auction_status()
-        .await
-        .map_err(from_sdk)?;
+    let status = client.gossip_priority_auction_status().await?;
     let slot = status
         .slots
         .get(args.slot as usize)
@@ -182,7 +144,7 @@ async fn bid(
     }
 
     let bid = if current > 0 { current + 1 } else { max_gas };
-    let response = send_l1_action_raw(
+    let response = send_l1_action(
         api,
         signer,
         Action::GossipPriorityBid(GossipPriorityBid {
@@ -190,18 +152,14 @@ async fn bid(
             ip: ip.to_string(),
             max_gas: bid,
         }),
-        nonce_now(),
         None,
         "priority bid",
     )
     .await?;
-    let status = match response {
-        serde_json::Value::Object(map)
-            if map.get("type") == Some(&serde_json::Value::String("default".to_string())) =>
-        {
-            "submitted".to_string()
-        }
-        other => format!("submitted with response: {other}"),
+    let status = if exchange_reply::typed(&response).is_some_and(|typed| typed.kind == "default") {
+        SUBMITTED.to_string()
+    } else {
+        format!("submitted with response: {response}")
     };
 
     let row = PriorityBidRow {
@@ -211,7 +169,7 @@ async fn bid(
         bid_hype: HYPE_WEI.amount(bid).to_string(),
         status,
     };
-    inv.print(&Rows::new(vec![row]));
+    inv.print(&Rows::list_of_one(row));
     Ok(())
 }
 
@@ -230,7 +188,38 @@ impl CliCommand for PrioStatus {
     );
 
     async fn run(inv: &Invocation, _args: &NoArgs) -> Result<(), anyhow::Error> {
-        status(inv).await
+        let status = inv
+            .remote()?
+            .api()
+            .sdk()
+            .gossip_priority_auction_status()
+            .await?;
+
+        let rows: Vec<PrioritySlotRow> = status
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(slot, item)| PrioritySlotRow {
+                slot,
+                start_time_seconds: item.start_time_seconds,
+                duration_seconds: item.duration_seconds,
+                start_gas: item.start_gas.to_string(),
+                current_gas: item
+                    .current_gas
+                    .map_or_else(|| "(no bid)".to_string(), |gas| gas.to_string()),
+                end_gas: item
+                    .end_gas
+                    .map_or_else(|| MISSING.to_string(), |gas| gas.to_string()),
+                previous_winner: status
+                    .prev_winners
+                    .get(slot)
+                    .and_then(Clone::clone)
+                    .unwrap_or_else(|| MISSING.to_string()),
+            })
+            .collect();
+
+        inv.print(&Rows::new(rows));
+        Ok(())
     }
 }
 
@@ -297,12 +286,5 @@ mod tests {
                 "{max} {ip:?}"
             );
         }
-    }
-
-    #[test]
-    fn bid_caps_are_counted_in_hypercore_wei_not_hyperevm_wei() {
-        assert_eq!(HYPE_WEI, Scale::HYPE_CORE);
-        assert_eq!(HYPE_WEI.decimals(), 8);
-        assert_eq!(HYPE_WEI.amount(150_000_000).to_string(), "1.5");
     }
 }

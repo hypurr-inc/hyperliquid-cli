@@ -1,20 +1,18 @@
 use clap::Args;
-use futures::future::try_join_all;
 use hypersdk::Decimal;
-use hypersdk::hypercore::PerpMarket;
 use serde::{Deserialize, Serialize};
 
 use crate::assets::{
-    AssetQuery, MarginRule, canonical_dex, eq_asset_name, find_perp_dex, load_deployer_fee_scales,
-    load_hip3_market, normalize_dex, parse_asset_query, qualify_dex_asset,
+    AssetMetadata, AssetQuery, CoinDecimal, DeployerFeeScales, DexArg, PerpAsset, eq_asset_name,
+    load_perp_markets, parse_asset_query, qualify_dex_asset,
 };
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::commands::account::parse_time_millis;
-use crate::commands::meta::MarketFeeScaleRow;
-use crate::commands::paging;
-use crate::commands::rows::{ListRow, One, Row, Rows, or_missing};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::common::market_input::resolve_perp;
+use crate::commands::common::paging;
+use crate::commands::common::rows::{ListRow, One, Row, Rows, or_missing};
+use crate::commands::common::time_range::{parse_time_millis, validate_optional_time_range};
 use crate::errors::CliError;
-use crate::errors::from_sdk;
 use crate::invocation::Invocation;
 use crate::wire::InfoRequest;
 
@@ -22,7 +20,7 @@ use crate::wire::InfoRequest;
 pub struct PerpsListArgs {
     /// Query markets from a specific HIP-3 DEX
     #[arg(long)]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
 }
 
 #[derive(Args, Debug)]
@@ -55,23 +53,28 @@ pub struct PerpMarketRow {
     pub deployer_fee_scale: Option<Decimal>,
 }
 
-impl From<PerpMarket> for PerpMarketRow {
-    fn from(market: PerpMarket) -> Self {
-        let tick_size_at_price_1 = market
-            .tick_for(Decimal::from(1))
-            .map(|tick| tick.to_string());
-        Self {
-            margin_mode: MarginRule::of_market(&market).as_str(),
-            name: market.name,
-            index: market.index,
-            max_leverage: market.max_leverage,
-            sz_decimals: market.sz_decimals,
-            collateral: market.collateral.name,
-            isolated_margin: market.isolated_margin,
-            tick_size_at_price_1,
-            delisted: market.delisted,
-            deployer_fee_scale: market.deployer_fee_scale,
-        }
+impl TryFrom<PerpAsset> for PerpMarketRow {
+    type Error = CliError;
+
+    fn try_from(asset: PerpAsset) -> Result<Self, CliError> {
+        let max_leverage = asset.max_leverage.ok_or_else(|| {
+            CliError::Internal(anyhow::anyhow!(
+                "exchange metadata for {} has no maxLeverage",
+                asset.display_name()
+            ))
+        })?;
+        Ok(Self {
+            margin_mode: asset.margin_rule.as_str(),
+            tick_size_at_price_1: asset.tick_size_at_price_1(),
+            name: asset.display_name(),
+            index: asset.index,
+            max_leverage,
+            sz_decimals: i64::from(asset.sz_decimals),
+            collateral: asset.collateral,
+            isolated_margin: asset.only_isolated,
+            delisted: asset.delisted,
+            deployer_fee_scale: asset.deployer_fee_scale,
+        })
     }
 }
 
@@ -110,56 +113,34 @@ impl ListRow for PerpMarketRow {
 }
 
 async fn list(inv: &Invocation, args: &PerpsListArgs) -> Result<(), anyhow::Error> {
-    let client = inv.remote()?.api().sdk();
-    let markets = if let Some(dex_name) = normalize_dex(args.dex.as_deref()) {
-        let dex = find_perp_dex(client, dex_name).await?;
-        client.perps_from(dex).await.map_err(from_sdk)?
-    } else {
-        client.perps().await.map_err(from_sdk)?
-    };
-    let markets = markets.into_iter().map(PerpMarketRow::from).collect();
+    let api = inv.remote()?.api();
+    let dex = inv.dex(args.dex.as_ref()).await?;
+    let markets = load_perp_markets(api, dex)
+        .await?
+        .into_iter()
+        .map(PerpMarketRow::try_from)
+        .collect::<Result<_, _>>()?;
     inv.print(&PerpMarketsOutput::new(markets));
     Ok(())
 }
 
 async fn get(inv: &Invocation, args: &PerpsGetArgs) -> Result<(), anyhow::Error> {
-    let client = inv.remote()?.api().sdk();
+    let api = inv.remote()?.api();
     let query = qualify_dex_asset(args.dex.as_deref(), &args.coin);
-    let market = if let AssetQuery::Hip3 {
-        dex: dex_name,
-        token,
-    } = parse_asset_query(&query)
-    {
-        load_hip3_market(client, &dex_name, &token)
-            .await?
-            .map(|(_, market)| market)
-            .ok_or_else(|| CliError::AssetNotFoundNoSuggestion {
-                asset: query.clone(),
-            })?
-    } else {
-        // The list already holds the market, so a hit needs no resolver. A
-        // miss asks the resolver why, for its suggestion or its outcome-notation
-        // error.
-        let symbol = query.trim();
-        let listed = client
-            .perps()
-            .await
-            .map_err(from_sdk)?
-            .into_iter()
-            .find(|market| eq_asset_name(&market.name, symbol));
-        match listed {
-            Some(market) => market,
-            None => {
-                return Err(match inv.asset_resolver().await?.resolve_perp(&query) {
-                    Err(err) => CliError::from(err),
-                    Ok(_) => CliError::AssetNotFoundNoSuggestion { asset: query },
-                }
-                .into());
-            }
-        }
+    // A HIP-3 name is looked up on its own dex. Any other input is resolved
+    // against the default dex's markets, which are the list the row is read
+    // from, so a miss gets its suggestion or outcome-notation error without a
+    // second read.
+    let markets = match parse_asset_query(&query) {
+        AssetQuery::Hip3 { .. } => Vec::new(),
+        _ => load_perp_markets(api, None).await?,
     };
+    let perp = inv
+        .resolver_over(AssetMetadata::from_assets(markets, Vec::new()))
+        .resolve_perp_or_fetch(api, &query)
+        .await?;
 
-    inv.print(&One::new(PerpMarketRow::from(market)));
+    inv.print(&One::new(PerpMarketRow::try_from(perp)?));
     Ok(())
 }
 
@@ -241,16 +222,15 @@ pub struct FundingPredictedArgs {
 pub struct AtOiCapArgs {
     /// Query a specific HIP-3 DEX. Defaults to the first dex.
     #[arg(long)]
-    pub dex: Option<String>,
+    pub dex: Option<DexArg>,
 }
 
 #[derive(Args, Debug)]
 pub struct DexLimitsArgs {
     /// HIP-3 DEX name (the first dex has no limits to read)
-    pub dex: String,
+    pub dex: DexArg,
 }
 
-/// One funding-rate record of `fundingHistory`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
 pub struct FundingRateRow {
@@ -279,7 +259,6 @@ impl ListRow for FundingRateRow {
     const EMPTY: &'static str = "No funding history.";
 }
 
-/// A funding rate one venue predicts for a coin.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PredictedFundingRow {
     pub coin: String,
@@ -364,10 +343,6 @@ impl ListRow for CoinRow {
     const EMPTY: &'static str = "No perpetuals are at their open interest cap.";
 }
 
-/// `[coin, "decimal"]`, the pair shape of the dex cap and multiplier lists.
-#[derive(Debug, Deserialize)]
-struct CoinDecimal(String, #[serde(with = "rust_decimal::serde::str")] Decimal);
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OiCapRow {
     pub coin: String,
@@ -382,7 +357,6 @@ pub struct FundingMultiplierRow {
     pub multiplier: Decimal,
 }
 
-/// A builder-deployed perp dex as `perpDexs` lists it.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DexInfoRow {
     pub name: String,
@@ -392,12 +366,8 @@ pub struct DexInfoRow {
     pub deployer: Option<String>,
     pub oracle_updater: Option<String>,
     pub fee_recipient: Option<String>,
-    /// The scale all of the dex's markets share; null when its markets differ
-    /// (then `deployer_fee_scale_by_market` lists them).
-    #[serde(with = "rust_decimal::serde::str_option")]
-    pub deployer_fee_scale: Option<Decimal>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub deployer_fee_scale_by_market: Vec<MarketFeeScaleRow>,
+    #[serde(flatten)]
+    pub fees: DeployerFeeScales,
     pub oi_caps: Vec<OiCapRow>,
     pub funding_multipliers: Vec<FundingMultiplierRow>,
 }
@@ -421,7 +391,7 @@ impl Row for DexInfoRow {
             or_missing(self.full_name.as_deref()),
             or_missing(self.deployer.as_deref()),
             or_missing(self.fee_recipient.as_deref()),
-            or_missing(self.deployer_fee_scale),
+            or_missing(self.fees.uniform),
             self.oi_caps.len().to_string(),
             self.funding_multipliers.len().to_string(),
         ]
@@ -432,25 +402,6 @@ impl ListRow for DexInfoRow {
     const EMPTY: &'static str = "No builder-deployed perp dexes.";
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawDexInfo {
-    name: String,
-    #[serde(default)]
-    full_name: Option<String>,
-    #[serde(default)]
-    deployer: Option<String>,
-    #[serde(default)]
-    oracle_updater: Option<String>,
-    #[serde(default)]
-    fee_recipient: Option<String>,
-    #[serde(default)]
-    asset_to_streaming_oi_cap: Option<Vec<CoinDecimal>>,
-    #[serde(default)]
-    asset_to_funding_multiplier: Option<Vec<CoinDecimal>>,
-}
-
-/// A dex's open-interest limits and net deposits.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DexLimitsRow {
     pub dex: String,
@@ -507,23 +458,20 @@ struct RawDexStatus {
     total_net_deposit: Decimal,
 }
 
-fn oi_caps(pairs: Option<Vec<CoinDecimal>>) -> Vec<OiCapRow> {
+fn oi_caps(pairs: &[CoinDecimal]) -> Vec<OiCapRow> {
     pairs
-        .unwrap_or_default()
-        .into_iter()
-        .map(|CoinDecimal(coin, oi_cap)| OiCapRow { coin, oi_cap })
+        .iter()
+        .map(|CoinDecimal(coin, oi_cap)| OiCapRow {
+            coin: coin.clone(),
+            oi_cap: *oi_cap,
+        })
         .collect()
 }
 
 async fn funding_history(inv: &Invocation, args: &FundingHistoryArgs) -> Result<(), anyhow::Error> {
-    crate::commands::account::validate_optional_time_range(Some(args.start), args.end)?;
+    validate_optional_time_range(Some(args.start), args.end)?;
     let api = inv.remote()?.api();
-    let perp = inv
-        .asset_resolver()
-        .await?
-        .resolve_perp_or_fetch(api.sdk(), &args.coin)
-        .await
-        .map_err(CliError::from)?;
+    let perp = resolve_perp(inv, &args.coin).await?;
     let coin = perp.display_name();
     let window = paging::read_window(
         api,
@@ -538,7 +486,7 @@ async fn funding_history(inv: &Invocation, args: &FundingHistoryArgs) -> Result<
         "loading funding history",
     )
     .await?;
-    paging::announce_truncation(inv, paging::FUNDING_HISTORY, &window, args.all);
+    paging::announce_truncation(inv, &window);
     let rows = window
         .rows
         .into_iter()
@@ -556,7 +504,7 @@ async fn funding_history(inv: &Invocation, args: &FundingHistoryArgs) -> Result<
 
 async fn at_oi_cap(inv: &Invocation, args: &AtOiCapArgs) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
-    let dex = canonical_dex(api.sdk(), args.dex.as_deref()).await?;
+    let dex = inv.dex_name(args.dex.as_ref()).await?;
     let coins: Vec<String> = api
         .info(
             &InfoRequest::new("perpsAtOpenInterestCap").field_if("dex", dex),
@@ -571,41 +519,37 @@ async fn at_oi_cap(inv: &Invocation, args: &AtOiCapArgs) -> Result<(), anyhow::E
 
 async fn dexs(inv: &Invocation) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
-    let listed: Vec<Option<RawDexInfo>> = api
-        .info(&InfoRequest::new("perpDexs"), "loading perp DEX metadata")
-        .await?;
-    let rows = try_join_all(listed.into_iter().enumerate().filter_map(|(index, dex)| {
-        let dex = dex?;
-        Some(async move {
-            let scales = load_deployer_fee_scales(api, &dex.name).await?;
-            let fees = crate::commands::meta::DexRow::new(dex.name.clone(), &scales);
-            Ok::<_, CliError>(DexInfoRow {
-                index,
-                full_name: dex.full_name,
-                deployer: dex.deployer,
-                oracle_updater: dex.oracle_updater,
-                fee_recipient: dex.fee_recipient,
-                deployer_fee_scale: fees.deployer_fee_scale,
-                deployer_fee_scale_by_market: fees.deployer_fee_scale_by_market,
-                oi_caps: oi_caps(dex.asset_to_streaming_oi_cap),
-                funding_multipliers: dex
-                    .asset_to_funding_multiplier
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|CoinDecimal(coin, multiplier)| FundingMultiplierRow { coin, multiplier })
-                    .collect(),
-                name: dex.name,
-            })
+    let dexes = inv.dex_list().await?;
+    let rows = dexes
+        .metas(api)
+        .await?
+        .into_iter()
+        .map(|(dex, meta)| DexInfoRow {
+            name: dex.name.clone(),
+            index: dex.slot,
+            full_name: dex.full_name.clone(),
+            deployer: dex.deployer.clone(),
+            oracle_updater: dex.oracle_updater.clone(),
+            fee_recipient: dex.fee_recipient.clone(),
+            fees: meta.fee_scales(),
+            oi_caps: oi_caps(&dex.oi_caps),
+            funding_multipliers: dex
+                .funding_multipliers
+                .iter()
+                .map(|CoinDecimal(coin, multiplier)| FundingMultiplierRow {
+                    coin: coin.clone(),
+                    multiplier: *multiplier,
+                })
+                .collect(),
         })
-    }))
-    .await?;
+        .collect();
     inv.print(&Rows::new(rows));
     Ok(())
 }
 
 async fn dex_limits(inv: &Invocation, args: &DexLimitsArgs) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
-    let Some(dex) = canonical_dex(api.sdk(), Some(&args.dex)).await? else {
+    let Some(dex) = inv.dex_name(Some(&args.dex)).await? else {
         return Err(CliError::Configuration("dex must not be empty".to_string()).into());
     };
     let limits: Option<RawDexLimits> = api
@@ -628,7 +572,7 @@ async fn dex_limits(inv: &Invocation, args: &DexLimitsArgs) -> Result<(), anyhow
         oi_sz_cap_per_perp: limits.oi_sz_cap_per_perp,
         max_transfer_ntl: limits.max_transfer_ntl,
         total_net_deposit: status.total_net_deposit,
-        oi_caps: oi_caps(limits.coin_to_oi_cap),
+        oi_caps: oi_caps(&limits.coin_to_oi_cap.unwrap_or_default()),
     }));
     Ok(())
 }

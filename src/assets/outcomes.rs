@@ -1,7 +1,7 @@
 //! Outcome markets as `outcomeMeta` lists them: one row per tradable side, one
 //! row per question, and the `settledOutcome` read.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -9,26 +9,51 @@ use serde_json::Value;
 
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
-use crate::output::warn;
 use crate::wire::InfoRequest;
 
 use super::asset_id::{outcome_asset_id, outcome_coin, outcome_encoding, outcome_token};
+use super::outcome_description::OutcomeDescription;
 use super::outcome_templates::{
-    TEMPLATE_PREFIX, TemplateList, description_values, interpolate, load_outcome_templates,
-    resolve_side_name,
+    TEMPLATE_PREFIX, TemplateList, interpolate, load_outcome_templates, resolve_side_name,
 };
 
-/// How a question lists an outcome.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionRole {
-    /// One of the question's named outcomes.
     Named,
     /// The outcome the protocol created for "none of the named outcomes".
     Fallback,
 }
 
-/// One side of an outcome market.
+impl QuestionRole {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Named => "named",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+/// Whether a settled outcome's question still has outcomes to settle: the
+/// outcomes of one question settle one at a time.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionState {
+    Active,
+    Settled,
+}
+
+impl QuestionState {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Settled => "settled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OutcomeSideRow {
     pub outcome: u64,
@@ -37,9 +62,9 @@ pub struct OutcomeSideRow {
     pub coin: String,
     pub token: String,
     pub asset_id: u64,
-    /// With the catalog loaders that read `outcomeTemplates`, a template
-    /// outcome's name is the template's text with the description's values
-    /// filled in; [`load_outcome_sides`] leaves the raw `template:<id>`.
+    /// A template outcome's name is the template's text with the description's
+    /// values filled in under [`Names::Resolved`], the raw `template:<id>` under
+    /// [`Names::Raw`].
     pub outcome_name: String,
     pub side_name: String,
     pub description: String,
@@ -51,7 +76,6 @@ pub struct OutcomeSideRow {
     pub deployer_fee_scale: Option<Decimal>,
     /// The template id when the outcome was deployed from a template.
     pub template: Option<String>,
-    /// The question this outcome belongs to, if any.
     pub question: Option<u64>,
     pub question_name: Option<String>,
     pub question_role: Option<QuestionRole>,
@@ -85,50 +109,69 @@ pub struct OutcomeCatalog {
     pub skipped: Vec<String>,
 }
 
-/// Every outcome side, ordered by outcome and side, with names as the exchange
-/// sends them. An outcome that cannot become rows is reported on stderr, not
-/// dropped silently and not fatal: one odd outcome must not hide the rest.
-pub async fn load_outcome_sides(api: &ApiClient) -> Result<Vec<OutcomeSideRow>, CliError> {
-    let catalog = load_outcome_listing(api).await?;
-    report_skipped(&catalog.skipped);
-    Ok(catalog.sides)
-}
-
-/// [`load_outcome_sides`] plus questions, with template names and side names
-/// resolved. A failed `outcomeTemplates` read leaves the raw names and puts the
-/// reason in the `warnings` of every row it affects.
-pub async fn load_outcome_catalog(api: &ApiClient) -> Result<OutcomeCatalog, CliError> {
-    let mut catalog = load_outcome_listing(api).await?;
-    let templates = load_outcome_templates(api).await;
-    let templates = match templates {
-        Ok(list) => {
-            report_skipped(&list.skipped);
-            Ok(list)
-        }
-        Err(err) => Err(err.to_string()),
-    };
-    catalog.resolve_templates(&templates);
-    report_skipped(&catalog.skipped);
-    Ok(catalog)
-}
-
-/// One stderr warning per entry a loader could not turn into rows.
-pub fn report_skipped(skipped: &[String]) {
-    for line in skipped {
-        warn(line);
-    }
-}
-
-/// The `outcomeMeta` listing as is: template names unresolved and unreadable
-/// entries left in `skipped` for the caller to report.
-pub async fn load_outcome_listing(api: &ApiClient) -> Result<OutcomeCatalog, CliError> {
-    let response = api
-        .info::<OutcomeMetaResponse>(&InfoRequest::new("outcomeMeta"), "loading outcome metadata")
-        .await?;
-    Ok(OutcomeCatalog::from_meta(response))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Names {
+    /// As the exchange sends them: a template outcome is named `template:<id>`.
+    Raw,
+    /// A template outcome's name is the template's text with the description's
+    /// values filled in, and its side names are resolved too. A failed
+    /// `outcomeTemplates` read leaves the raw names and puts the reason in the
+    /// `warnings` of every row it affects.
+    Resolved,
 }
 
 impl OutcomeCatalog {
+    /// `outcomeMeta` as rows. An entry that cannot become rows is named in
+    /// `skipped` (the `outcomeTemplates` entries that could not be read come
+    /// first), not dropped silently and not fatal: one odd outcome must not
+    /// hide the rest. The caller reports them.
+    pub async fn load(api: &ApiClient, names: Names) -> Result<Self, CliError> {
+        let response = api
+            .info::<OutcomeMetaResponse>(
+                &InfoRequest::new("outcomeMeta"),
+                "loading outcome metadata",
+            )
+            .await?;
+        let mut catalog = Self::from_meta(response);
+        if names == Names::Resolved {
+            let templates = load_outcome_templates(api)
+                .await
+                .map_err(|err| err.to_string());
+            catalog.resolve_templates(&templates);
+            if let Ok(list) = templates {
+                catalog.skipped.splice(0..0, list.skipped);
+            }
+        }
+        Ok(catalog)
+    }
+
+    /// The tradable side that asset encoding `encoding` names.
+    #[must_use]
+    pub fn side(&self, encoding: u64) -> Option<&OutcomeSideRow> {
+        self.sides.iter().find(|row| row.encoding == encoding)
+    }
+
+    /// Whether `outcomeMeta` lists any side of `outcome`.
+    #[must_use]
+    pub fn has_outcome(&self, outcome: u64) -> bool {
+        self.sides.iter().any(|row| row.outcome == outcome)
+    }
+
+    #[must_use]
+    pub fn question(&self, question: u64) -> Option<&OutcomeQuestionRow> {
+        self.questions.iter().find(|row| row.question == question)
+    }
+
+    /// The tokens `outcomes` are quoted in.
+    #[must_use]
+    pub fn quote_tokens(&self, outcomes: &[u64]) -> BTreeSet<String> {
+        self.sides
+            .iter()
+            .filter(|row| outcomes.contains(&row.outcome))
+            .filter_map(|row| row.quote_token.clone())
+            .collect()
+    }
+
     fn from_meta(response: OutcomeMetaResponse) -> Self {
         let mut catalog = Self::default();
 
@@ -202,6 +245,7 @@ impl OutcomeCatalog {
         }
         let member = memberships.first();
         let template = name.strip_prefix(TEMPLATE_PREFIX).map(str::to_string);
+        let parsed_description = OutcomeDescription::parse(&description);
 
         for (side, side_spec) in side_specs.into_iter().take(2).enumerate() {
             let side = side as u64;
@@ -222,7 +266,7 @@ impl OutcomeCatalog {
                     continue;
                 }
             };
-            let (side_name, side_warning) = resolve_side_name(&side_spec.name, &description);
+            let (side_name, side_warning) = resolve_side_name(&side_spec.name, &parsed_description);
             let mut warnings = shared_warnings.clone();
             warnings.extend(side_warning);
             self.sides.push(OutcomeSideRow {
@@ -276,7 +320,8 @@ impl OutcomeCatalog {
     /// `outcomeTemplates` list, or why it could not be read.
     pub fn resolve_templates(&mut self, templates: &Result<TemplateList, String>) {
         for question in &mut self.questions {
-            let resolved = resolve_name(&question.name, &question.description, templates);
+            let description = OutcomeDescription::parse(&question.description);
+            let resolved = resolve_name(&question.name, &description, templates);
             question.name = resolved.text;
             question.warnings.extend(resolved.warnings);
         }
@@ -286,7 +331,8 @@ impl OutcomeCatalog {
             .map(|question| (question.question, question.name.as_str()))
             .collect();
         for row in &mut self.sides {
-            let resolved = resolve_name(&row.outcome_name, &row.description, templates);
+            let description = OutcomeDescription::parse(&row.description);
+            let resolved = resolve_name(&row.outcome_name, &description, templates);
             row.outcome_name = resolved.text;
             row.warnings.extend(resolved.warnings);
             if let Some(name) = row.question.and_then(|id| question_names.get(&id)) {
@@ -356,7 +402,7 @@ struct ResolvedName {
 /// filled in; any other name unchanged.
 fn resolve_name(
     name: &str,
-    description: &str,
+    description: &OutcomeDescription,
     templates: &Result<TemplateList, String>,
 ) -> ResolvedName {
     let Some(id) = name.strip_prefix(TEMPLATE_PREFIX) else {
@@ -382,7 +428,7 @@ fn resolve_name(
             "name '{name}' left as is: template '{id}' is not in outcomeTemplates"
         ));
     };
-    let (text, missing) = interpolate(&template.name, &description_values(description));
+    let (text, missing) = interpolate(&template.name, description);
     let warnings = if missing.is_empty() {
         Vec::new()
     } else {
@@ -437,7 +483,6 @@ struct RawQuestion {
     settled_named_outcomes: Vec<u64>,
 }
 
-/// How an outcome settled, from `settledOutcome`.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SettledOutcomeRow {
     pub outcome: u64,
@@ -455,8 +500,8 @@ pub struct SettledOutcomeRow {
     /// Settlement details from the deployer, such as `price:76876.9`.
     pub details: String,
     pub question: Option<u64>,
-    /// `active` or `settled`: outcomes of one question settle one at a time.
-    pub question_state: Option<String>,
+    /// Whether the question still has outcomes to settle.
+    pub question_state: Option<QuestionState>,
     pub question_name: Option<String>,
     pub warnings: Vec<String>,
 }
@@ -489,12 +534,20 @@ struct RawSettledQuestion {
     description: String,
 }
 
+/// A settled outcome and the `outcomeTemplates` entries that could not be
+/// read while naming it, for the caller to report.
+#[derive(Debug)]
+pub struct SettledOutcome {
+    pub row: SettledOutcomeRow,
+    pub skipped: Vec<String>,
+}
+
 /// How `outcome` settled; `None` when it has not (the exchange answers `null`
 /// for an outcome that is still trading and for an unknown id alike).
 pub async fn load_settled_outcome(
     api: &ApiClient,
     outcome: u64,
-) -> Result<Option<SettledOutcomeRow>, CliError> {
+) -> Result<Option<SettledOutcome>, CliError> {
     let raw = api
         .info::<Option<RawSettled>>(
             &InfoRequest::new("settledOutcome").field("outcome", outcome),
@@ -510,30 +563,34 @@ pub async fn load_settled_outcome(
             .as_ref()
             .is_some_and(|question| question.name.starts_with(TEMPLATE_PREFIX));
     let templates = if needs_templates {
-        match load_outcome_templates(api).await {
-            Ok(list) => {
-                report_skipped(&list.skipped);
-                Ok(list)
-            }
-            Err(err) => Err(err.to_string()),
-        }
+        load_outcome_templates(api)
+            .await
+            .map_err(|err| err.to_string())
     } else {
         Ok(TemplateList::default())
     };
-    Ok(Some(settled_row(raw, &templates)))
+    let skipped = templates
+        .as_ref()
+        .map(|list| list.skipped.clone())
+        .unwrap_or_default();
+    Ok(Some(SettledOutcome {
+        row: settled_row(raw, &templates),
+        skipped,
+    }))
 }
 
 fn settled_row(raw: RawSettled, templates: &Result<TemplateList, String>) -> SettledOutcomeRow {
     let mut warnings = Vec::new();
     let spec = raw.spec;
     let template = spec.name.strip_prefix(TEMPLATE_PREFIX).map(str::to_string);
-    let name = resolve_name(&spec.name, &spec.description, templates);
+    let description = OutcomeDescription::parse(&spec.description);
+    let name = resolve_name(&spec.name, &description, templates);
     warnings.extend(name.warnings);
     let side_names = spec
         .side_specs
         .iter()
         .map(|side| {
-            let (text, warning) = resolve_side_name(&side.name, &spec.description);
+            let (text, warning) = resolve_side_name(&side.name, &description);
             warnings.extend(warning);
             text
         })
@@ -545,13 +602,14 @@ fn settled_row(raw: RawSettled, templates: &Result<TemplateList, String>) -> Set
 
     let (mut question, mut question_state, mut question_name) = (None, None, None);
     if let Some(raw_question) = raw.question {
-        let resolved = resolve_name(&raw_question.name, &raw_question.description, templates);
+        let description = OutcomeDescription::parse(&raw_question.description);
+        let resolved = resolve_name(&raw_question.name, &description, templates);
         warnings.extend(resolved.warnings);
         question_name = Some(resolved.text);
         match question_state_of(&raw_question.question) {
             Some((state, id)) => {
                 question = Some(id);
-                question_state = Some(state.to_string());
+                question_state = Some(state);
             }
             None => warnings.push(format!(
                 "unrecognized question state {}",
@@ -579,12 +637,12 @@ fn settled_row(raw: RawSettled, templates: &Result<TemplateList, String>) -> Set
 }
 
 /// `{"active": N}` or `{"settled": N}`.
-fn question_state_of(value: &Value) -> Option<(&'static str, u64)> {
+fn question_state_of(value: &Value) -> Option<(QuestionState, u64)> {
     let map = value.as_object().filter(|map| map.len() == 1)?;
     let (state, id) = map.iter().next()?;
     let state = match state.as_str() {
-        "active" => "active",
-        "settled" => "settled",
+        "active" => QuestionState::Active,
+        "settled" => QuestionState::Settled,
         _ => return None,
     };
     Some((state, id.as_u64()?))
@@ -826,7 +884,7 @@ mod tests {
             "question": {"question": {"settled": 32}, "name": "World Cup", "description": ""}
         }));
         assert_eq!(row.question, Some(32));
-        assert_eq!(row.question_state.as_deref(), Some("settled"));
+        assert_eq!(row.question_state, Some(QuestionState::Settled));
         assert_eq!(row.question_name.as_deref(), Some("World Cup"));
         assert!(row.warnings[0].contains("outside 0..=1"));
 

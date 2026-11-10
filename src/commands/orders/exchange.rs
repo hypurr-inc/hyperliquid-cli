@@ -1,5 +1,6 @@
-//! What the exchange said about orders: one reading of an order, cancel or
-//! modify status list, and the one wire shape of a builder fee.
+//! What the exchange said about orders: how each send is worded, one reading
+//! of an answer (order, cancel, modify, TWAP and trailing-stop statuses), and
+//! the one action the SDK cannot express.
 //!
 //! Placement rows, chase, and bracket all ask [`Placement`] what a status
 //! means. The wire decode stays here so a new waiting status is handled once.
@@ -7,27 +8,25 @@
 
 use std::fmt;
 
-use hypersdk::hypercore::types::{
-    Action, BatchOrder, OrderGrouping, OrderRequest, OrderResponseStatus,
-};
-use hypersdk::{Address, Decimal};
+use hypersdk::Decimal;
+use hypersdk::hypercore::types::api::{TwapCancelStatus, TwapOrderStatus};
+use hypersdk::hypercore::types::{OkResponse, OrderResponseStatus};
 use serde::{Serialize, Serializer};
 
-use crate::commands::actions;
+use super::status::Status;
 use crate::errors::{CliError, Rejection, classify_rejection};
-use crate::http_api::ApiClient;
-use crate::quantity::Scale;
+use crate::exchange_reply;
+use crate::hints;
 use crate::response_sanitization::labelled_untrusted_text;
-use crate::signing::SelectedSigner;
 
 /// The exchange's own words for refusing an order or a cancel. Remote text, so
 /// it is only ever shown sanitized and labelled: in a result row's `error` and
 /// in the [`CliError`] [`rejection_error`] builds.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Rejected(String);
+pub(super) struct Rejected(String);
 
 impl Rejected {
-    pub(crate) fn new(text: impl Into<String>) -> Self {
+    pub(super) fn new(text: impl Into<String>) -> Self {
         Self(text.into())
     }
 
@@ -36,7 +35,7 @@ impl Rejected {
     }
 
     /// The exchange's text as received. For building an error, never for display.
-    pub(crate) fn raw(&self) -> &str {
+    pub(super) fn raw(&self) -> &str {
         &self.0
     }
 }
@@ -54,16 +53,15 @@ impl Serialize for Rejected {
 }
 
 /// The error for a rejected status. Every class [`Rejection::into_error`]
-/// names keeps its own error and exit code (a rate limit 11, rejected
-/// credentials 10, a recognised refusal 13 with its own reason); any other
-/// rejection reads as `lead` followed by the exchange's text and exits 13.
-pub(crate) fn rejection_error(lead: impl fmt::Display, rejected: &Rejected) -> CliError {
+/// names keeps its own error (a rate limit, rejected credentials, a recognised
+/// refusal with its own reason); any other rejection reads as `lead` followed
+/// by the exchange's text.
+pub(super) fn rejection_error(lead: impl fmt::Display, rejected: &Rejected) -> CliError {
     rejected.classify().into_error_after(lead)
 }
 
-/// [`rejection_error`] for text read straight from a response. `action`
-/// completes "Couldn't ...", such as `cancel order`.
-pub(crate) fn status_error(action: &str, text: &str) -> CliError {
+/// `action` completes "Couldn't ...", such as `cancel order`.
+pub(super) fn status_error(action: &str, text: &str) -> CliError {
     rejection_error(
         format!("Couldn't {action}. Exchange said: "),
         &Rejected::new(text),
@@ -77,7 +75,7 @@ pub(crate) fn status_error(action: &str, text: &str) -> CliError {
 /// decides the exit code; otherwise the legs are listed with their numbers,
 /// and the error carries a refusal's reason when every entry is that same
 /// refusal.
-pub(crate) fn rejected_all(action: &str, failures: &[Rejected]) -> CliError {
+pub(super) fn rejected_all(action: &str, failures: &[Rejected]) -> CliError {
     let mut distinct: Vec<(&Rejected, Vec<usize>)> = Vec::new();
     for (index, failure) in failures.iter().enumerate() {
         match distinct.iter_mut().find(|(seen, _)| *seen == failure) {
@@ -90,13 +88,7 @@ pub(crate) fn rejected_all(action: &str, failures: &[Rejected]) -> CliError {
     }
     let decisive = distinct
         .iter()
-        .find_map(|(failure, _)| match failure.classify() {
-            Rejection::RateLimited => Some(CliError::rate_limited()),
-            Rejection::AddressRateLimited(remote) => Some(CliError::AddressRateLimited(remote)),
-            Rejection::AuthRejected(remote) => Some(CliError::AuthRejected(remote)),
-            Rejection::SignerNotRegistered(remote) => Some(CliError::SignerNotRegistered(remote)),
-            Rejection::Refused(..) | Rejection::UserState(_) | Rejection::Other(_) => None,
-        });
+        .find_map(|(failure, _)| failure.classify().decisive());
     decisive.unwrap_or_else(|| {
         let lines = distinct
             .iter()
@@ -129,11 +121,11 @@ pub(crate) fn rejected_all(action: &str, failures: &[Rejected]) -> CliError {
     })
 }
 
-pub(crate) enum Placement {
+pub(super) enum Placement {
     /// Accepted, waiting, or resting. `oid` is set only when the exchange
     /// assigned one (`resting`).
     Open {
-        label: &'static str,
+        status: Status,
         oid: Option<u64>,
     },
     Filled {
@@ -145,22 +137,22 @@ pub(crate) enum Placement {
 }
 
 impl Placement {
-    pub(crate) fn classify(status: OrderResponseStatus) -> Self {
+    pub(super) fn classify(status: OrderResponseStatus) -> Self {
         match status {
             OrderResponseStatus::Success => Self::Open {
-                label: "accepted",
+                status: Status::Accepted,
                 oid: None,
             },
             OrderResponseStatus::WaitingForTrigger => Self::Open {
-                label: "waiting_for_trigger",
+                status: Status::WaitingForTrigger,
                 oid: None,
             },
             OrderResponseStatus::WaitingForFill => Self::Open {
-                label: "waiting_for_fill",
+                status: Status::WaitingForFill,
                 oid: None,
             },
             OrderResponseStatus::Resting { oid, .. } => Self::Open {
-                label: "resting",
+                status: Status::Resting,
                 oid: Some(oid),
             },
             OrderResponseStatus::Filled {
@@ -176,15 +168,15 @@ impl Placement {
         }
     }
 
-    pub(crate) fn label(&self) -> &'static str {
+    pub(super) fn status(&self) -> Status {
         match self {
-            Self::Open { label, .. } => label,
-            Self::Filled { .. } => "filled",
-            Self::Rejected(_) => "rejected",
+            Self::Open { status, .. } => *status,
+            Self::Filled { .. } => Status::Filled,
+            Self::Rejected(_) => Status::Rejected,
         }
     }
 
-    pub(crate) fn oid(&self) -> Option<u64> {
+    pub(super) fn oid(&self) -> Option<u64> {
         match self {
             Self::Open { oid, .. } => *oid,
             Self::Filled { oid, .. } => Some(*oid),
@@ -193,44 +185,162 @@ impl Placement {
     }
 }
 
-/// The statuses of an order, cancel or modify response, in request order.
-/// `what` names the action in the error when the exchange answers something
-/// else.
-pub(crate) fn decode_statuses(
-    response: serde_json::Value,
-    what: &str,
-) -> Result<Vec<OrderResponseStatus>, CliError> {
-    let body = || labelled_untrusted_text(&response.to_string());
-    if !matches!(
-        response.get("type").and_then(serde_json::Value::as_str),
-        Some("order" | "cancel")
-    ) {
-        return Err(CliError::Internal(anyhow::anyhow!(
-            "{what} response had unexpected type: {}",
-            body()
-        )));
+/// How a send reads in errors: `rejected` names the action when the exchange
+/// refuses it ("cancel failed"), `reply` names it when the exchange answers
+/// something this CLI cannot read ("cancel response had unexpected type").
+/// Every send in `orders` is worded here, once.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Wording {
+    pub(super) rejected: &'static str,
+    reply: &'static str,
+}
+
+impl Wording {
+    const fn new(rejected: &'static str, reply: &'static str) -> Self {
+        Self { rejected, reply }
     }
-    let statuses = response
-        .get("data")
-        .and_then(|data| data.get("statuses"))
-        .cloned()
-        .ok_or_else(|| {
+
+    /// For an action whose answer nobody reads, so `reply` is never shown.
+    const fn unread(rejected: &'static str) -> Self {
+        Self::new(rejected, rejected)
+    }
+
+    pub(super) const PLACEMENT: Self = Self::new("order placement failed", "order placement");
+    pub(super) const CHASE_QUOTE: Self = Self::new("chase quote failed", "order placement");
+    pub(super) const CHASE_CANCEL: Self = Self::unread("chase cancel failed");
+    pub(super) const BRACKET_ENTRY_CANCEL: Self = Self::unread("bracket entry cancel failed");
+    pub(super) const CANCEL: Self = Self::new("cancel failed", "cancel");
+    pub(super) const CANCEL_ALL: Self = Self::new("cancel-all failed", "cancel-all");
+    pub(super) const MODIFY: Self = Self::new("modify failed", "modify");
+    pub(super) const BATCH_MODIFY: Self = Self::new("batch modify failed", "batch modify");
+    pub(super) const TWAP_CREATE: Self = Self::new("twap-create rejected", "twap-create");
+    pub(super) const TWAP_CANCEL: Self = Self::new("twap-cancel rejected", "twap-cancel");
+    pub(super) const TRAILING_STOP: Self = Self::unread("trailing stop rejected");
+    pub(super) const SCHEDULE_CANCEL: Self = Self::unread("schedule-cancel rejected");
+    pub(super) const SCHEDULE_CANCEL_CLEAR: Self = Self::unread("schedule-cancel clear rejected");
+}
+
+/// What the exchange answered `ok` to a send: the payload, read by the one
+/// accessor that matches the action sent. Each decodes through the SDK's
+/// [`OkResponse`] and keeps this CLI's own error for a reply of another shape.
+#[derive(Debug)]
+pub(super) struct Answer {
+    payload: serde_json::Value,
+    wording: Wording,
+}
+
+impl Answer {
+    pub(super) fn new(payload: serde_json::Value, wording: Wording) -> Self {
+        Self { payload, wording }
+    }
+
+    fn body(&self) -> String {
+        labelled_untrusted_text(&self.payload.to_string())
+    }
+
+    /// The statuses of an order, modify or cancel answer.
+    pub(super) fn statuses(self) -> Result<Vec<OrderResponseStatus>, CliError> {
+        let what = self.wording.reply;
+        let unexpected_type = || {
             CliError::Internal(anyhow::anyhow!(
-                "{what} response missing statuses: {}",
-                body()
+                "{what} response had unexpected type: {}",
+                self.body()
             ))
-        })?;
-    serde_json::from_value(statuses).map_err(|err| {
-        CliError::Internal(anyhow::anyhow!(
-            "{what} response decode failed: {err}; body={}",
-            body()
-        ))
-    })
+        };
+        match exchange_reply::ok_response(&self.payload) {
+            Ok(OkResponse::Order { statuses } | OkResponse::Cancel { statuses }) => Ok(statuses),
+            Ok(_) => Err(unexpected_type()),
+            Err(err) => {
+                let Some(typed) = exchange_reply::typed(&self.payload)
+                    .filter(|typed| matches!(typed.kind, "order" | "cancel"))
+                else {
+                    return Err(unexpected_type());
+                };
+                let Some(statuses) = typed.data.and_then(|data| data.get("statuses")) else {
+                    return Err(CliError::Internal(anyhow::anyhow!(
+                        "{what} response missing statuses: {}",
+                        self.body()
+                    )));
+                };
+                // The statuses' own decode error: the SDK enum wraps the same
+                // failure in other words, and this text is part of the contract.
+                let err = serde_json::from_value::<Vec<OrderResponseStatus>>(statuses.clone())
+                    .err()
+                    .unwrap_or(err);
+                Err(CliError::Internal(anyhow::anyhow!(
+                    "{what} response decode failed: {err}; body={}",
+                    self.body()
+                )))
+            }
+        }
+    }
+
+    /// The ID of the TWAP a `twapOrder` started.
+    pub(super) fn twap_id(self) -> Result<u64, CliError> {
+        match exchange_reply::ok_response(&self.payload) {
+            Ok(OkResponse::TwapOrder {
+                status: TwapOrderStatus::Running { twap_id },
+            }) => Ok(twap_id),
+            Ok(OkResponse::TwapOrder {
+                status: TwapOrderStatus::Error(text),
+            }) => Err(status_error("create TWAP", &text)),
+            _ => Err(CliError::Internal(anyhow::anyhow!(
+                "{} returned unexpected response: {}",
+                self.wording.reply,
+                self.payload
+            ))),
+        }
+    }
+
+    /// A `twapCancel` the exchange carried out.
+    pub(super) fn twap_cancelled(self) -> Result<(), CliError> {
+        match exchange_reply::ok_response(&self.payload) {
+            Ok(OkResponse::TwapCancel {
+                status: TwapCancelStatus::Success,
+            }) => Ok(()),
+            Ok(OkResponse::TwapCancel {
+                status: TwapCancelStatus::Error(text),
+            }) => Err(status_error("cancel TWAP", &text)),
+            _ => Err(match self.payload.pointer("/data/status") {
+                Some(status) => CliError::Internal(anyhow::anyhow!(
+                    "{} returned unexpected status: {status}",
+                    self.wording.reply
+                )),
+                None => CliError::Internal(anyhow::anyhow!(
+                    "{} returned unexpected response: {}",
+                    self.wording.reply,
+                    self.payload
+                )),
+            }),
+        }
+    }
+
+    /// The ID of the order a trailing stop placed. The SDK types only the
+    /// accepted answer; a refusal's `error` is read where the exchange puts
+    /// it, and any other answer leaves the outcome unknown.
+    pub(super) fn trailing_stop_oid(self) -> Result<u64, CliError> {
+        if let Ok(OkResponse::TrailingStop { oid }) = exchange_reply::ok_response(&self.payload) {
+            return Ok(oid);
+        }
+        if let Some(error) = self
+            .payload
+            .pointer("/data/error")
+            .or_else(|| self.payload.pointer("/data/status/error"))
+            .and_then(serde_json::Value::as_str)
+        {
+            return Err(status_error("place trailing stop", error));
+        }
+        Err(CliError::unknown_outcome(format!(
+            "The exchange answered ok without an order ID ({}). Check `{}` before placing another trailing stop",
+            self.body(),
+            hints::CHECK_LIVE_COMMAND
+        )))
+    }
 }
 
 /// Fail on the first rejected status, with the exchange text sanitized and
 /// labelled. `action` completes "Couldn't ...", such as `cancel order`.
-pub(crate) fn ensure_action_statuses_ok(
+pub(super) fn ensure_action_statuses_ok(
     statuses: &[OrderResponseStatus],
     action: &str,
 ) -> Result<(), CliError> {
@@ -240,107 +350,13 @@ pub(crate) fn ensure_action_statuses_ok(
     }
 }
 
-pub(crate) fn modification_result_oid(statuses: &[OrderResponseStatus]) -> Option<u64> {
+pub(super) fn modification_result_oid(statuses: &[OrderResponseStatus]) -> Option<u64> {
     statuses.iter().find_map(OrderResponseStatus::oid)
 }
 
-/// What Hyperliquid wants in a builder fee `{ b, f, s }`: the builder's address,
-/// the fee in tenths of a basis point (0.001%), and the optional sub-builders
-/// that split the fee. This is the one place the unit is named; the percent
-/// form comes from [`OrderBuilderFee::percent`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(super) struct OrderBuilderFee {
-    pub(super) b: String,
-    pub(super) f: u64,
-    /// Left off the wire when empty, so a plain builder fee keeps its `{ b, f }` shape.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(super) s: Vec<SubBuilder>,
-}
-
-/// A sub-builder `{ b, s }`: an existing user that receives `s` of the
-/// builder's fee, in units of 0.001% (100,000 is all of it). The builder keeps
-/// the remainder.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(super) struct SubBuilder {
-    pub(super) b: String,
-    pub(super) s: u64,
-}
-
-impl OrderBuilderFee {
-    /// The most a perpetual order may pay a builder: 0.1%.
-    pub(super) const PERP_MAX_TENTHS_BPS: u64 = 100;
-    /// At most this many sub-builders share one builder fee.
-    pub(super) const MAX_SUB_BUILDERS: usize = 5;
-    /// The sub-builder shares sum to at most this: 100%.
-    pub(super) const MAX_SUB_BUILDER_SHARES: u64 = 100_000;
-
-    /// The fee as a percent, such as `0.01`.
-    pub(super) fn percent(&self) -> Decimal {
-        Scale::TENTHS_BPS_PER_PERCENT.amount(self.f)
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct BuilderOrderAction {
-    #[serde(rename = "type")]
-    action_type: &'static str,
-    orders: Vec<OrderRequest>,
-    grouping: OrderGrouping,
-    builder: OrderBuilderFee,
-}
-
-/// Send `batch` and return one status per order. A builder fee goes in the
-/// raw action `{ type: "order", orders, grouping, builder: { b, f, s } }`. The
-/// SDK's `BatchOrder.builder` carries only `{ b, f }`, which cannot express
-/// sub-builders, so every builder order is sent this one way; without a
-/// builder the SDK action is sent.
-pub(super) async fn place_orders(
-    api: &ApiClient,
-    signer: &SelectedSigner,
-    batch: BatchOrder,
-    builder: Option<&OrderBuilderFee>,
-    vault_address: Option<Address>,
-) -> Result<Vec<OrderResponseStatus>, CliError> {
-    let response = match builder {
-        Some(builder) => {
-            let action = BuilderOrderAction {
-                action_type: "order",
-                orders: batch.orders,
-                grouping: batch.grouping,
-                builder: builder.clone(),
-            };
-            actions::send_raw_l1_json_action(
-                api,
-                signer,
-                &action,
-                actions::RawL1ActionMetadata::new(actions::nonce_now())
-                    .with_vault_address(vault_address),
-                "order placement failed",
-            )
-            .await?
-        }
-        None => {
-            actions::send_l1_action_raw(
-                api,
-                signer,
-                Action::Order(batch),
-                actions::nonce_now(),
-                vault_address,
-                "order placement failed",
-            )
-            .await?
-        }
-    };
-    decode_statuses(response, "order placement")
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub(super) enum TwapExchangeAction {
-    TwapOrder { twap: TwapOrderAction },
-    TwapCancel { a: usize, t: u64 },
-}
-
+/// The `scheduleCancel` that clears the switch. The SDK's `ScheduleCancel`
+/// serializes `time: null`, and the exchange takes the clear without the key,
+/// so this action omits it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ScheduleCancelRawAction {
@@ -348,56 +364,6 @@ pub(super) struct ScheduleCancelRawAction {
     pub(super) action_type: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) time: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct TwapOrderAction {
-    pub(super) a: usize,
-    pub(super) b: bool,
-    pub(super) s: String,
-    pub(super) r: bool,
-    pub(super) m: u64,
-    pub(super) t: bool,
-}
-
-pub(super) fn parse_twap_create_response(response: serde_json::Value) -> Result<u64, CliError> {
-    if let Some(error) = response
-        .pointer("/data/status/error")
-        .and_then(serde_json::Value::as_str)
-    {
-        return Err(status_error("create TWAP", error));
-    }
-
-    response
-        .pointer("/data/status/running/twapId")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| {
-            CliError::Internal(anyhow::anyhow!(
-                "twap-create returned unexpected response: {}",
-                response
-            ))
-        })
-}
-
-pub(super) fn parse_twap_cancel_response(response: serde_json::Value) -> Result<(), CliError> {
-    let status = response.pointer("/data/status").ok_or_else(|| {
-        CliError::Internal(anyhow::anyhow!(
-            "twap-cancel returned unexpected response: {}",
-            response
-        ))
-    })?;
-
-    if status.as_str() == Some("success") {
-        return Ok(());
-    }
-
-    if let Some(error) = status.get("error").and_then(serde_json::Value::as_str) {
-        return Err(status_error("cancel TWAP", error));
-    }
-
-    Err(CliError::Internal(anyhow::anyhow!(
-        "twap-cancel returned unexpected status: {status}"
-    )))
 }
 
 #[cfg(test)]
@@ -443,7 +409,7 @@ mod tests {
         ];
         for (status, label, oid) in cases {
             let placed = Placement::classify(status);
-            assert_eq!(placed.label(), label);
+            assert_eq!(placed.status().as_str(), label);
             assert_eq!(placed.oid(), oid);
         }
     }
@@ -460,7 +426,9 @@ mod tests {
                 ]
             }
         });
-        let statuses = decode_statuses(response, "order placement").unwrap();
+        let statuses = Answer::new(response, Wording::PLACEMENT)
+            .statuses()
+            .unwrap();
         assert!(matches!(
             statuses.as_slice(),
             [
@@ -472,13 +440,14 @@ mod tests {
         ensure_action_statuses_ok(&statuses, "place order").unwrap();
         assert_eq!(modification_result_oid(&statuses), Some(12345));
 
-        let waiting_only = decode_statuses(
+        let waiting_only = Answer::new(
             serde_json::json!({
                 "type": "order",
                 "data": { "statuses": ["waitingForTrigger", "waitingForFill"] }
             }),
-            "order placement",
+            Wording::PLACEMENT,
         )
+        .statuses()
         .unwrap();
         ensure_action_statuses_ok(&waiting_only, "place order").unwrap();
         assert_eq!(modification_result_oid(&waiting_only), None);
@@ -486,36 +455,142 @@ mod tests {
 
     #[test]
     fn the_decoder_reads_cancel_responses_and_names_the_action_when_the_shape_is_wrong() {
-        let cancelled = decode_statuses(
+        let cancelled = Answer::new(
             serde_json::json!({"type": "cancel", "data": {"statuses": ["success"]}}),
-            "cancel",
+            Wording::CANCEL,
         )
+        .statuses()
         .unwrap();
         assert!(matches!(
             cancelled.as_slice(),
             [OrderResponseStatus::Success]
         ));
 
-        for (response, what, fragment) in [
+        // The whole text is the CLI's contract: the decode error is the one a
+        // direct read of the statuses gives, not the SDK enum's wrapper.
+        let statuses_error =
+            serde_json::from_value::<Vec<OrderResponseStatus>>(serde_json::json!([42]))
+                .unwrap_err();
+        for (response, wording, text) in [
             (
                 serde_json::json!({"type": "default"}),
-                "cancel",
-                "cancel response had unexpected type",
+                Wording::CANCEL,
+                "cancel response had unexpected type: ".to_string()
+                    + &labelled_untrusted_text(r#"{"type":"default"}"#),
+            ),
+            (
+                serde_json::json!({"type": "twapOrder", "data": {"status": {"error": "x"}}}),
+                Wording::CANCEL,
+                "cancel response had unexpected type: ".to_string()
+                    + &labelled_untrusted_text(
+                        r#"{"data":{"status":{"error":"x"}},"type":"twapOrder"}"#,
+                    ),
+            ),
+            (
+                serde_json::json!({"data": {"statuses": []}}),
+                Wording::CANCEL,
+                "cancel response had unexpected type: ".to_string()
+                    + &labelled_untrusted_text(r#"{"data":{"statuses":[]}}"#),
             ),
             (
                 serde_json::json!({"type": "order"}),
-                "modify",
-                "modify response missing statuses",
+                Wording::MODIFY,
+                "modify response missing statuses: ".to_string()
+                    + &labelled_untrusted_text(r#"{"type":"order"}"#),
+            ),
+            (
+                serde_json::json!({"type": "cancel", "data": {"other": 1}}),
+                Wording::CANCEL,
+                "cancel response missing statuses: ".to_string()
+                    + &labelled_untrusted_text(r#"{"data":{"other":1},"type":"cancel"}"#),
             ),
             (
                 serde_json::json!({"type": "order", "data": {"statuses": [42]}}),
-                "cancel-all",
-                "cancel-all response decode failed",
+                Wording::CANCEL_ALL,
+                format!(
+                    "cancel-all response decode failed: {statuses_error}; body={}",
+                    labelled_untrusted_text(r#"{"data":{"statuses":[42]},"type":"order"}"#)
+                ),
             ),
         ] {
-            let err = decode_statuses(response, what).unwrap_err();
-            assert!(err.to_string().contains(fragment), "{err}");
+            let err = Answer::new(response, wording).statuses().unwrap_err();
+            assert_eq!(err.to_string(), text);
         }
+    }
+
+    #[test]
+    fn a_twap_answer_is_its_id_or_the_exchange_text_and_anything_else_is_unexpected() {
+        let twap = |status: serde_json::Value| {
+            Answer::new(
+                serde_json::json!({"type": "twapOrder", "data": {"status": status}}),
+                Wording::TWAP_CREATE,
+            )
+        };
+        assert_eq!(
+            twap(serde_json::json!({"running": {"twapId": 77_738_308}}))
+                .twap_id()
+                .unwrap(),
+            77_738_308
+        );
+        let err = twap(serde_json::json!({"error": "Invalid TWAP duration"}))
+            .twap_id()
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert!(err.to_string().contains("Couldn't create TWAP"), "{err}");
+        assert!(err.to_string().contains("[untrusted remote data]"), "{err}");
+
+        let odd = Answer::new(serde_json::json!({"type": "default"}), Wording::TWAP_CREATE);
+        assert_eq!(
+            odd.twap_id().unwrap_err().to_string(),
+            r#"twap-create returned unexpected response: {"type":"default"}"#
+        );
+
+        let cancel = |status: serde_json::Value| {
+            Answer::new(
+                serde_json::json!({"type": "twapCancel", "data": {"status": status}}),
+                Wording::TWAP_CANCEL,
+            )
+        };
+        cancel(serde_json::json!("success"))
+            .twap_cancelled()
+            .unwrap();
+        let err = cancel(serde_json::json!({"error": "TWAP was never placed"}))
+            .twap_cancelled()
+            .unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert!(err.to_string().contains("Couldn't cancel TWAP"), "{err}");
+        assert_eq!(
+            cancel(serde_json::json!("weird"))
+                .twap_cancelled()
+                .unwrap_err()
+                .to_string(),
+            r#"twap-cancel returned unexpected status: "weird""#
+        );
+        assert_eq!(
+            Answer::new(serde_json::json!({"type": "default"}), Wording::TWAP_CANCEL)
+                .twap_cancelled()
+                .unwrap_err()
+                .to_string(),
+            r#"twap-cancel returned unexpected response: {"type":"default"}"#
+        );
+    }
+
+    #[test]
+    fn a_trailing_stop_answer_is_its_oid_or_labelled_rejection_or_an_unknown_outcome() {
+        let answer = |payload| Answer::new(payload, Wording::TRAILING_STOP);
+        let ok = serde_json::json!({"type": "trailingStop", "data": {"oid": 77738308}});
+        assert_eq!(answer(ok).trailing_stop_oid().unwrap(), 77_738_308);
+
+        let rejected = serde_json::json!({"type": "trailingStop", "data": {"error": "Bad stop"}});
+        let err = answer(rejected).trailing_stop_oid().unwrap_err();
+        assert_eq!(err.exit_code(), 13);
+        assert!(err.to_string().contains("[untrusted remote data]"), "{err}");
+
+        let odd = serde_json::json!({"type": "default"});
+        assert!(matches!(
+            answer(odd).trailing_stop_oid().unwrap_err(),
+            CliError::UnknownOutcome(_)
+        ));
     }
 
     #[test]
@@ -527,21 +602,6 @@ mod tests {
         let err = ensure_action_statuses_ok(&statuses, "cancel order").unwrap_err();
         assert!(err.to_string().contains("Couldn't cancel order"), "{err}");
         assert!(err.to_string().contains("Order has invalid size."), "{err}");
-    }
-
-    #[test]
-    fn a_builder_fee_is_tenths_of_a_basis_point_and_reads_as_a_percent() {
-        let fee = |f| OrderBuilderFee {
-            b: "0xabc".to_string(),
-            f,
-            s: Vec::new(),
-        };
-        assert_eq!(fee(10).percent(), Decimal::new(1, 2));
-        assert_eq!(
-            fee(OrderBuilderFee::PERP_MAX_TENTHS_BPS).percent(),
-            Decimal::new(1, 1)
-        );
-        assert_eq!(fee(0).percent(), Decimal::ZERO);
     }
 
     #[test]

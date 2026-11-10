@@ -1,8 +1,8 @@
 //! The persisted config file.
 //!
-//! The file is created by `setup` and the wallet commands that choose a default
-//! wallet or write builder/referral defaults (`wallet create|import|import-mnemonic|reset`,
-//! `account add --default|set-default|remove`). A missing file is not an error.
+//! The file is created by `setup` and the wallet and account commands that
+//! choose a default wallet or write builder/referral defaults. A missing file
+//! is not an error.
 //! Layering with environment variables and flags, and every read-modify-write of
 //! the file, happens in [`crate::settings`].
 
@@ -11,9 +11,13 @@ use std::time::Duration;
 
 use hypersdk::Address;
 
+use crate::env::nonblank;
 use crate::errors::CliError;
+use crate::hints::wallet::{WALLET_IMPORT, WALLET_LOGIN};
 use crate::network::Network;
+use crate::output::Notice;
 use crate::private_fs::{self, FileLock, LockError};
+use crate::resolvers::parse_hex_address;
 
 const LOCK_WAIT: Duration = Duration::from_secs(10);
 
@@ -107,18 +111,12 @@ impl BankrLogin {
         let Some(text) = nonblank(self.address.as_deref()) else {
             return Ok(None);
         };
-        text.parse::<Address>().map(Some).map_err(|_| {
+        parse_hex_address(text, false).map(Some).map_err(|_| {
             CliError::Configuration(format!(
-                "invalid bankr_address in the config file: '{text}' is not an EVM address. Run `hyperliquid wallet login` again."
+                "invalid bankr_address in the config file: '{text}' is not an EVM address. Run `{WALLET_LOGIN}` again."
             ))
         })
     }
-}
-
-/// The value trimmed, or `None` when it is absent or blank: what every
-/// setting layer means by "not set".
-pub(crate) fn nonblank(value: Option<&str>) -> Option<&str> {
-    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
 impl std::fmt::Debug for BankrLogin {
@@ -232,33 +230,38 @@ impl ConfigFile {
         self.read_text()?.map(|text| self.parse(&text)).transpose()
     }
 
-    /// Stderr lines for a parsed config that stores a plaintext key or is
-    /// readable by other users. Empty when the file is fine.
+    /// Advice for a parsed config that stores a plaintext key or is readable
+    /// by other users. Empty when the file is fine.
     #[must_use]
-    pub fn hygiene_warnings(&self, has_plaintext_key: bool) -> Vec<String> {
+    pub fn hygiene_warnings(&self, has_plaintext_key: bool) -> Vec<Notice> {
         let path = self.path.display();
-        let mut lines = Vec::new();
+        let mut notices = Vec::new();
         if has_plaintext_key {
-            lines.push(format!(
-                "! Config file {path} stores a plaintext private key."
-            ));
-            lines.push(
-                "  Import it into the vault, then remove private_key from the file:".to_string(),
-            );
-            lines.push("    hyperliquid wallet import".to_string());
+            notices.push(Notice::Advice {
+                headline: format!("Config file {path} stores a plaintext private key."),
+                lines: vec![
+                    "  Import it into the vault, then remove private_key from the file:"
+                        .to_string(),
+                    format!("    {WALLET_IMPORT}"),
+                ],
+            });
         }
         if let Some(mode) = private_fs::loose_mode(&self.path) {
-            lines.push(format!(
-                "! Config file {path} is readable by other users (mode {mode:04o})."
-            ));
-            lines.push("  Restrict it:".to_string());
-            lines.push(format!("    chmod 600 {path}"));
+            notices.push(Notice::Advice {
+                headline: format!(
+                    "Config file {path} is readable by other users (mode {mode:04o})."
+                ),
+                lines: vec![
+                    "  Restrict it:".to_string(),
+                    format!("    chmod 600 {path}"),
+                ],
+            });
         }
-        lines
+        notices
     }
 
     /// Hold the lock for a config read-modify-write so concurrent CLI processes
-    /// can't lose each other's keys. Waits up to 10 seconds. Writing the file
+    /// can't lose each other's keys. Waits up to `LOCK_WAIT`. Writing the file
     /// takes the guard, so a write can't happen without it.
     pub fn lock(&self) -> Result<FileLock, CliError> {
         FileLock::acquire(&self.path, LOCK_WAIT).map_err(|err| match err {
@@ -317,27 +320,21 @@ mod tests {
     }
 
     #[test]
-    fn save_then_read_roundtrips_and_skips_unset_fields() {
+    fn every_field_survives_a_save_and_read_and_unset_ones_are_not_written() {
         let tmp = TempDir::new().unwrap();
         let file = file_in(&tmp);
-        let config = Config {
+        let sparse = Config {
             network: Network::Testnet,
             default_wallet_id: Some("wallet-1".to_string()),
             ..Config::default()
         };
-        save(&file, &config);
-
-        assert_eq!(file.read().unwrap(), Some(config));
+        save(&file, &sparse);
+        assert_eq!(file.read().unwrap(), Some(sparse));
         let text = std::fs::read_to_string(file.path()).unwrap();
         assert!(!text.contains("private_key"));
         assert!(!text.contains("default_builder"));
-    }
 
-    #[test]
-    fn every_field_survives_a_save_and_read() {
-        let tmp = TempDir::new().unwrap();
-        let file = file_in(&tmp);
-        let config = Config {
+        let full = Config {
             private_key: Some("0xkey".to_string()),
             network: Network::Testnet,
             default_wallet_id: Some("wallet".to_string()),
@@ -346,14 +343,8 @@ mod tests {
             default_referral_code: Some("CODE".to_string()),
             ..Config::default()
         };
-        save(&file, &config);
-        assert_eq!(file.read().unwrap(), Some(config));
-    }
-
-    #[test]
-    fn network_names_in_the_file_are_case_insensitive() {
-        let config: Config = serde_json::from_str(r#"{"network":"TESTNET"}"#).unwrap();
-        assert_eq!(config.network, Network::Testnet);
+        save(&file, &full);
+        assert_eq!(file.read().unwrap(), Some(full));
     }
 
     #[test]
@@ -367,17 +358,6 @@ mod tests {
         let err = file.read().unwrap_err();
         assert!(matches!(err, CliError::Configuration(_)));
         assert!(err.to_string().contains("invalid config file"));
-    }
-
-    #[test]
-    fn invalid_network_in_file_is_a_configuration_error_naming_the_value() {
-        let tmp = TempDir::new().unwrap();
-        let file = file_in(&tmp);
-        save(&file, &Config::default());
-        std::fs::write(file.path(), r#"{"network":"bogus"}"#).unwrap();
-        let err = file.read().unwrap_err();
-        assert!(matches!(err, CliError::Configuration(_)));
-        assert!(err.to_string().contains("bogus"), "{err}");
     }
 
     #[cfg(unix)]
@@ -403,9 +383,11 @@ mod tests {
             ..Config::default()
         };
         save(&file, &config);
-        let lines = file.hygiene_warnings(config.has_plaintext_key());
-        assert!(lines[0].contains("stores a plaintext private key"));
-        assert!(lines.iter().any(|line| line.contains("wallet import")));
+        let notices = file.hygiene_warnings(config.has_plaintext_key());
+        let text = notices[0].text();
+        assert!(text.starts_with("! Config file"), "{text}");
+        assert!(text.contains("stores a plaintext private key"));
+        assert!(text.contains("hyperliquid wallet import"));
     }
 
     #[test]

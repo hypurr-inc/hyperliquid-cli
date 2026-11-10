@@ -6,29 +6,25 @@ use hypersdk::hypercore::{Chain, PrivateKeySigner};
 use serde::Serialize;
 
 use crate::auth;
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
-use crate::commands::actions;
-
+use crate::cli_command::CliCommand;
+use crate::clock::{self, DurationError};
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, OwsSupport, Risk, arg};
+use crate::commands::common::support::{SUBMITTED, action_json};
 use crate::errors::CliError;
-use crate::errors::from_sdk;
+use crate::exchange::actions;
 use crate::input_hardening::validate_resource_id;
 use crate::invocation::Invocation;
-use crate::output::{OutputFormat, TableData};
-use crate::signing::{SelectedSigner, Signs};
+use crate::network::ChainExt;
+use crate::output::{TableData, serialize_row};
+use crate::quantity;
+use crate::signing::SelectedSigner;
+use crate::terminal::OutputFormat;
+use crate::wire::{AddressRole, address};
 
-/// Parse a raw address string strictly as an Ethereum 40-hex-character address.
-fn parse_address(raw: &str) -> Result<Address, CliError> {
-    raw.trim()
-        .parse::<Address>()
-        .map_err(|_| CliError::Unsupported(format!("Invalid address: {}", raw.trim())))
-}
-
-const MAX_AGENT_EXPIRATION_MS: u64 = 180 * 24 * 60 * 60 * 1000;
-const REVOKE_REPLACEMENT_EXPIRATION_MS: u64 = 60 * 1000;
+const MAX_AGENT_EXPIRATION_MS: u64 = clock::DAY.ms(180);
+const REVOKE_REPLACEMENT_EXPIRATION_MS: u64 = clock::MINUTE.ms(1);
 const MAX_AGENT_NAME_LEN: usize = 16;
 
-/// Which command is approving an agent: they differ in whether a key is
-/// generated unless an address is given, and in what they tell the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operation {
     Create,
@@ -45,7 +41,6 @@ impl Operation {
         }
     }
 
-    /// `create` generates a key unless `--agent-address` names one.
     fn generates_by_default(self) -> bool {
         self == Self::Create
     }
@@ -237,7 +232,7 @@ impl TableData for ApiWalletActionOutput {
     }
 
     fn to_json_value(&self) -> serde_json::Value {
-        serde_json::to_value(&self.row).unwrap_or_else(|_| serde_json::json!({}))
+        serialize_row(&self.row)
     }
 }
 
@@ -295,7 +290,7 @@ async fn create(inv: &Invocation, args: &CreateArgs) -> Result<(), anyhow::Error
             agent_address: args.agent_address.as_deref(),
             generate: args.generate,
         },
-        actions::nonce_now(),
+        clock::now_ms(),
     )?;
     approve_prepared(inv, Operation::Create, prepared).await
 }
@@ -309,7 +304,7 @@ async fn approve(inv: &Invocation, args: &ApproveArgs) -> Result<(), anyhow::Err
             agent_address: args.agent_address.as_deref(),
             generate: args.generate,
         },
-        actions::nonce_now(),
+        clock::now_ms(),
     )?;
     approve_prepared(inv, Operation::Approve, prepared).await
 }
@@ -320,8 +315,7 @@ async fn list(inv: &Invocation, master_address: Address) -> Result<(), anyhow::E
         .api()
         .sdk()
         .api_agents(master_address)
-        .await
-        .map_err(from_sdk)?
+        .await?
         .into_iter()
         .map(|agent| ApiAgentRow {
             name: agent.name,
@@ -337,7 +331,7 @@ async fn list(inv: &Invocation, master_address: Address) -> Result<(), anyhow::E
 }
 
 async fn revoke(inv: &Invocation, args: &RevokeArgs) -> Result<(), anyhow::Error> {
-    let prepared = prepare_revoke_replacement(args, actions::nonce_now())?;
+    let prepared = prepare_revoke_replacement(args, clock::now_ms())?;
     approve_prepared(inv, Operation::Revoke, prepared).await
 }
 
@@ -383,17 +377,10 @@ async fn approve_prepared(
 ) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let chain = remote.chain();
-    let nonce = actions::nonce_now();
-    let approval = approval_action(chain, &prepared, nonce);
-    let approval_value =
-        serde_json::to_value(Action::ApproveAgent(approval.clone())).map_err(|err| {
-            CliError::Internal(anyhow::anyhow!(
-                "failed to encode approveAgent action: {err}"
-            ))
-        })?;
 
     if inv.dry_run() {
-        let master_address = inv.preview_signer()?.ok().map(SelectedSigner::address);
+        let (_, approval_value) = approval_document(chain, &prepared, clock::now_ms())?;
+        let master_address = inv.dry_run_signer()?.map(SelectedSigner::address);
         let row = approval_dry_run_row(operation, master_address, &prepared, approval_value);
         print_action_output(inv, row);
         return Ok(());
@@ -402,7 +389,9 @@ async fn approve_prepared(
     ensure_generated_key_projection_is_safe(&prepared, inv)?;
 
     let signer = inv.resolve_signer()?;
-    actions::send_l1_action_raw(
+    let nonce = remote.api().nonces().next();
+    let (approval, approval_value) = approval_document(chain, &prepared, nonce)?;
+    actions::send_l1_action_with_nonce(
         remote.api(),
         &signer,
         Action::ApproveAgent(approval),
@@ -417,7 +406,7 @@ async fn approve_prepared(
     print_action_output(
         inv,
         ApiWalletActionRow {
-            status: "submitted".to_string(),
+            status: SUBMITTED.to_string(),
             action: operation.action().to_string(),
             master_address: Some(signer.address().to_string()),
             agent_address: prepared.agent_address.to_string(),
@@ -431,6 +420,16 @@ async fn approve_prepared(
         },
     );
     Ok(())
+}
+
+fn approval_document(
+    chain: Chain,
+    prepared: &PreparedAgentApproval,
+    nonce: u64,
+) -> Result<(ApproveAgent, serde_json::Value), CliError> {
+    let approval = approval_action(chain, prepared, nonce);
+    let value = action_json(&Action::ApproveAgent(approval.clone()))?;
+    Ok((approval, value))
 }
 
 fn approval_dry_run_row(
@@ -490,7 +489,7 @@ fn prepare_agent_approval(
 
     if let Some(agent_address) = input.agent_address {
         return Ok(PreparedAgentApproval {
-            agent_address: parse_address(agent_address)?,
+            agent_address: address(agent_address.trim(), AddressRole::Agent)?,
             generated_private_key: None,
             display_name,
             action_agent_name,
@@ -518,46 +517,33 @@ fn prepare_agent_approval(
 }
 
 fn parse_expires_in(raw: &str) -> Result<u64, CliError> {
+    let refuse = |message: &str| CliError::Configuration(message.to_string());
     let raw = raw.trim();
     if raw.len() < 2 {
-        return Err(CliError::Configuration(
-            "--expires-in must use a duration like 30d, 12h, or 1w".to_string(),
+        return Err(refuse(
+            "--expires-in must use a duration like 30d, 12h, or 1w",
         ));
     }
-    let (amount, unit) = raw.split_at(raw.len() - 1);
-    let amount = amount.parse::<u64>().map_err(|_| {
-        CliError::Configuration("--expires-in amount must be a positive integer".to_string())
-    })?;
-    if amount == 0 {
-        return Err(CliError::Configuration(
-            "--expires-in amount must be greater than zero".to_string(),
-        ));
+    let overflowed = || refuse("--expires-in duration overflowed");
+    let duration =
+        clock::parse_duration(raw, &clock::AGENT_EXPIRY).map_err(|fault| match fault {
+            DurationError::Empty | DurationError::Count(_) => {
+                refuse("--expires-in amount must be a positive integer")
+            }
+            DurationError::Zero => refuse(&quantity::not_positive("--expires-in amount")),
+            DurationError::Unit => refuse("--expires-in unit must be one of m, h, d, or w"),
+            DurationError::TooLarge => overflowed(),
+        })?;
+    let millis = u64::try_from(duration.as_millis()).map_err(|_| overflowed())?;
+    if millis > MAX_AGENT_EXPIRATION_MS {
+        return Err(refuse("--expires-in cannot exceed 180d"));
     }
-    let unit_ms = match unit {
-        "m" => 60 * 1000,
-        "h" => 60 * 60 * 1000,
-        "d" => 24 * 60 * 60 * 1000,
-        "w" => 7 * 24 * 60 * 60 * 1000,
-        _ => {
-            return Err(CliError::Configuration(
-                "--expires-in unit must be one of m, h, d, or w".to_string(),
-            ));
-        }
-    };
-    let duration = amount
-        .checked_mul(unit_ms)
-        .ok_or_else(|| CliError::Configuration("--expires-in duration overflowed".to_string()))?;
-    if duration > MAX_AGENT_EXPIRATION_MS {
-        return Err(CliError::Configuration(
-            "--expires-in cannot exceed 180d".to_string(),
-        ));
-    }
-    Ok(duration)
+    Ok(millis)
 }
 
 fn approval_action(chain: Chain, prepared: &PreparedAgentApproval, nonce: u64) -> ApproveAgent {
     ApproveAgent {
-        signature_chain_id: chain.arbitrum_id().to_owned(),
+        signature_chain_id: chain.signature_chain_id().to_owned(),
         hyperliquid_chain: chain,
         agent_address: prepared.agent_address,
         agent_name: prepared.action_agent_name.clone(),
@@ -623,8 +609,7 @@ impl CliCommand for ApiWalletCreate {
         "Generate or approve an API wallet",
         "Generate or approve a Hyperliquid API/agent wallet. When the CLI generates a local agent keypair, it prints the private key exactly once before approval.",
     )
-    .signs(Signs::Digest)
-    .master_only("approveAgent")
+    .digest_signed("approveAgent")
     .long_about("Generate or approve an API wallet.\n\
 \n\
 By default this command generates a new local API wallet keypair, signs an approveAgent action for that address with the selected master account, and prints the generated private key exactly once unless command is running in dry-run.")
@@ -655,8 +640,7 @@ impl CliCommand for ApiWalletApprove {
         "Approve an existing or generated API wallet address",
         "Approve an existing or generated API/agent wallet address for the selected master account.",
     )
-    .signs(Signs::Digest)
-    .master_only("approveAgent")
+    .digest_signed("approveAgent")
     .args(&[
         arg("name").describe("Optional API wallet name."),
         arg("expires_in").kind(InputKind::Duration).describe("Expiration duration such as 30d, 12h, or 1w. Requires name."),
@@ -712,8 +696,7 @@ impl CliCommand for ApiWalletRevoke {
         "Revoke an API wallet by replacing it with a throwaway agent",
         "Revoke a named API wallet by replacing it with a short-lived throwaway agent, or the unnamed API wallet (--unnamed) by replacing it with a throwaway agent whose key is discarded.",
     )
-    .signs(Signs::Digest)
-    .master_only("approveAgent")
+    .digest_signed("approveAgent")
     .one_of_required(&[&["name"], &["unnamed"]])
     .args(&[
         arg("name")
@@ -759,6 +742,35 @@ mod tests {
         assert!(parse_expires_in("0d").is_err());
         assert!(parse_expires_in("181d").is_err());
         assert!(parse_expires_in("5x").is_err());
+    }
+
+    #[test]
+    fn every_expires_in_fault_keeps_its_message_and_exit_class() {
+        let fault = |raw: &str| parse_expires_in(raw).unwrap_err();
+        for (raw, message) in [
+            ("", "--expires-in must use a duration like 30d, 12h, or 1w"),
+            ("d", "--expires-in must use a duration like 30d, 12h, or 1w"),
+            ("ad", "--expires-in amount must be a positive integer"),
+            ("1.5d", "--expires-in amount must be a positive integer"),
+            ("ax", "--expires-in amount must be a positive integer"),
+            ("0d", "--expires-in amount must be greater than zero"),
+            ("0x", "--expires-in amount must be greater than zero"),
+            ("05", "--expires-in amount must be greater than zero"),
+            ("5x", "--expires-in unit must be one of m, h, d, or w"),
+            ("5s", "--expires-in unit must be one of m, h, d, or w"),
+            ("30", "--expires-in unit must be one of m, h, d, or w"),
+            ("99999999999999999w", "--expires-in duration overflowed"),
+            ("181d", "--expires-in cannot exceed 180d"),
+            ("26w", "--expires-in cannot exceed 180d"),
+        ] {
+            let err = fault(raw);
+            assert!(
+                matches!(&err, CliError::Configuration(text) if text == message),
+                "{raw}: {err}"
+            );
+        }
+        assert_eq!(parse_expires_in(" 180d ").unwrap(), MAX_AGENT_EXPIRATION_MS);
+        assert_eq!(parse_expires_in("30m").unwrap(), 30 * 60 * 1000);
     }
 
     #[test]

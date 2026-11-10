@@ -6,15 +6,15 @@ use crate::settings::Settings;
 
 /// Hyperliquid accepts referral codes of up to 32 characters to apply, but
 /// caps the codes a user registers at 20.
-pub const MAX_REFERRAL_CODE_LEN: usize = 32;
-pub const MAX_REFERRER_CODE_LEN: usize = 20;
+const MAX_REFERRAL_CODE_LEN: usize = 32;
+const MAX_REFERRER_CODE_LEN: usize = 20;
 
 /// The referral code setup and wallet creation offer. Skips the config file and
 /// rejects a code that wouldn't be accepted by `referral set`.
 pub fn suggested_default_referral_code(
     settings: &Settings,
     is_testnet: bool,
-) -> Result<Option<String>, anyhow::Error> {
+) -> Result<Option<String>, CliError> {
     let code = settings.suggested_default_referral_code(is_testnet);
     if let Some(code) = code.as_deref() {
         validate_referral_code(code)?;
@@ -93,8 +93,8 @@ mod tests {
     fn suggested_referral_code_is_validated() {
         let settings = |code: &str| {
             Settings::detached(
-                crate::settings::EnvSource::fixed([(
-                    crate::settings::env::DEFAULT_REFERRAL_CODE,
+                crate::env::EnvSource::fixed([(
+                    crate::env::DEFAULT_REFERRAL_CODE,
                     code.to_string(),
                 )]),
                 None,

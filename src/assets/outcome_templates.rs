@@ -6,8 +6,6 @@
 //! outcomes are `template:` plus a side name that may hold placeholders too
 //! (`template:{shortNameA}`, `template:No`).
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -15,10 +13,11 @@ use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::wire::InfoRequest;
 
+use super::outcome_description::OutcomeDescription;
+
 /// What marks a name or side name as template-derived.
 pub const TEMPLATE_PREFIX: &str = "template:";
 
-/// One keyword a template takes, with the type its value must have.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct TemplateKeyword {
     pub keyword: String,
@@ -26,13 +25,38 @@ pub struct TemplateKeyword {
     pub kind: String,
 }
 
-/// One outcome template, as `outcomeTemplates` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateRole {
+    StandaloneOutcome,
+    Question,
+    QuestionOutcome,
+    /// Any other shape the exchange sends, kept as its raw JSON text and
+    /// reported in the template's `warnings`.
+    Unrecognized(String),
+}
+
+impl TemplateRole {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::StandaloneOutcome => "standalone_outcome",
+            Self::Question => "question",
+            Self::QuestionOutcome => "question_outcome",
+            Self::Unrecognized(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for TemplateRole {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OutcomeTemplate {
     pub id: String,
-    /// `standalone_outcome`, `question` or `question_outcome`; any other shape
-    /// the exchange sends is kept as its raw JSON text and reported in `warnings`.
-    pub role: String,
+    pub role: TemplateRole,
     /// The question template a `question_outcome` template belongs to.
     pub parent: Option<String>,
     /// Side names of a `standalone_outcome` template (placeholders unresolved).
@@ -67,6 +91,9 @@ impl TemplateList {
     }
 }
 
+/// The templates `outcomeTemplates` lists. Entries that could not be read are
+/// named in `skipped` for the caller to report: not dropped silently and not
+/// fatal.
 pub async fn load_outcome_templates(api: &ApiClient) -> Result<TemplateList, CliError> {
     let entries = api
         .info::<Vec<Value>>(
@@ -95,7 +122,7 @@ fn template_from_raw(raw: RawTemplate) -> OutcomeTemplate {
     let mut parent = None;
     let mut side_names = Vec::new();
     let role = match &raw.role {
-        Value::String(role) if role == "question" => "question".to_string(),
+        Value::String(role) if role == "question" => TemplateRole::Question,
         Value::Object(map) if map.len() == 1 => match map.iter().next() {
             Some((key, body)) if key == "standaloneOutcome" => {
                 side_names = body
@@ -108,14 +135,14 @@ fn template_from_raw(raw: RawTemplate) -> OutcomeTemplate {
                             .collect()
                     })
                     .unwrap_or_default();
-                "standalone_outcome".to_string()
+                TemplateRole::StandaloneOutcome
             }
             Some((key, body)) if key == "questionOutcome" => {
                 parent = body
                     .get("parent")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                "question_outcome".to_string()
+                TemplateRole::QuestionOutcome
             }
             _ => unknown_role(&raw.role, &mut warnings),
         },
@@ -137,28 +164,15 @@ fn template_from_raw(raw: RawTemplate) -> OutcomeTemplate {
     }
 }
 
-fn unknown_role(role: &Value, warnings: &mut Vec<String>) -> String {
+fn unknown_role(role: &Value, warnings: &mut Vec<String>) -> TemplateRole {
     warnings.push(format!("unrecognized template role {role}"));
-    role.to_string()
-}
-
-/// The `key:value` pairs of an outcome or question description. The first
-/// occurrence of a key wins; parts without a colon are not pairs.
-#[must_use]
-pub fn description_values(description: &str) -> HashMap<&str, &str> {
-    let mut values = HashMap::new();
-    for part in description.split('|') {
-        if let Some((key, value)) = part.split_once(':') {
-            values.entry(key).or_insert(value);
-        }
-    }
-    values
+    TemplateRole::Unrecognized(role.to_string())
 }
 
 /// `text` with every `{key}` that `values` has replaced, and the keys it
 /// lacked (left in the text as written).
 #[must_use]
-pub fn interpolate(text: &str, values: &HashMap<&str, &str>) -> (String, Vec<String>) {
+pub fn interpolate(text: &str, values: &OutcomeDescription) -> (String, Vec<String>) {
     let mut out = String::with_capacity(text.len());
     let mut missing = Vec::new();
     let mut rest = text;
@@ -200,11 +214,14 @@ fn is_keyword(candidate: &str) -> bool {
 /// from the outcome's description. `None` in the second slot when nothing was
 /// missing.
 #[must_use]
-pub fn resolve_side_name(side_name: &str, description: &str) -> (String, Option<String>) {
+pub fn resolve_side_name(
+    side_name: &str,
+    description: &OutcomeDescription,
+) -> (String, Option<String>) {
     let Some(pattern) = side_name.strip_prefix(TEMPLATE_PREFIX) else {
         return (side_name.to_string(), None);
     };
-    let (text, missing) = interpolate(pattern, &description_values(description));
+    let (text, missing) = interpolate(pattern, description);
     let warning = (!missing.is_empty()).then(|| {
         format!(
             "side name '{side_name}' has no value for {} in the description",
@@ -218,8 +235,8 @@ pub fn resolve_side_name(side_name: &str, description: &str) -> (String, Option<
 mod tests {
     use super::*;
 
-    fn values(description: &str) -> HashMap<&str, &str> {
-        description_values(description)
+    fn values(description: &str) -> OutcomeDescription {
+        OutcomeDescription::parse(description)
     }
 
     #[test]
@@ -236,8 +253,8 @@ mod tests {
     #[test]
     fn values_keep_colons_and_text_without_keywords_is_untouched() {
         let pairs = values("time:20261110-0200|label:a:b");
-        assert_eq!(pairs["time"], "20261110-0200");
-        assert_eq!(pairs["label"], "a:b");
+        assert_eq!(pairs.get("time"), Some("20261110-0200"));
+        assert_eq!(pairs.get("label"), Some("a:b"));
         let (text, missing) = interpolate("price {not a keyword} {} {", &pairs);
         assert_eq!(text, "price {not a keyword} {} {");
         assert!(missing.is_empty());
@@ -246,15 +263,18 @@ mod tests {
     #[test]
     fn side_names_drop_the_template_prefix_and_report_missing_keywords() {
         assert_eq!(
-            resolve_side_name("template:{shortNameA}", "shortNameA:PHX"),
+            resolve_side_name("template:{shortNameA}", &values("shortNameA:PHX")),
             ("PHX".to_string(), None)
         );
         assert_eq!(
-            resolve_side_name("template:No", ""),
+            resolve_side_name("template:No", &values("")),
             ("No".to_string(), None)
         );
-        assert_eq!(resolve_side_name("Yes", ""), ("Yes".to_string(), None));
-        let (text, warning) = resolve_side_name("template:{shortNameB}", "shortNameA:PHX");
+        assert_eq!(
+            resolve_side_name("Yes", &values("")),
+            ("Yes".to_string(), None)
+        );
+        let (text, warning) = resolve_side_name("template:{shortNameB}", &values("shortNameA:PHX"));
         assert_eq!(text, "{shortNameB}");
         assert!(warning.unwrap().contains("shortNameB"));
     }
@@ -285,10 +305,32 @@ mod tests {
                 ("x", r#"{"scalar":1}"#, None),
             ]
         );
+        assert_eq!(list.templates[0].role, TemplateRole::StandaloneOutcome);
         assert_eq!(list.templates[0].side_names, ["Yes", "No"]);
         assert_eq!(list.templates[0].keywords[0].kind, "hlPerp");
         assert!(list.templates[3].warnings[0].contains("unrecognized"));
         assert_eq!(list.skipped.len(), 1);
         assert!(list.skipped[0].contains("broken"), "{:?}", list.skipped);
+    }
+
+    #[test]
+    fn a_template_role_serializes_as_its_name() {
+        let json = serde_json::to_value([
+            TemplateRole::StandaloneOutcome,
+            TemplateRole::Question,
+            TemplateRole::QuestionOutcome,
+            TemplateRole::Unrecognized("{\"scalar\":1}".to_string()),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!([
+                "standalone_outcome",
+                "question",
+                "question_outcome",
+                "{\"scalar\":1}"
+            ])
+        );
     }
 }

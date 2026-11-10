@@ -1,11 +1,14 @@
-//! `subscribe` kinds against a local WebSocket server.
+//! `subscribe` against a local WebSocket server and against fake event streams.
 //!
 //! The CLI always connects to the public endpoint, so the process-level tests
 //! stop at the `subscribed` line (`--max-events 0`) and check validation and
 //! resolution. What goes on the wire, and how each channel's frames come back
 //! through the SDK, is checked in-process: [`stream_target`] runs the same code
 //! as the command, against a socket pointed at a mock server that records the
-//! subscribe frames it receives and answers with captured frame shapes.
+//! subscribe frames it receives and answers with captured frame shapes. The
+//! stream rules that need no socket (what counts toward `--max-events`, the
+//! gap warning after a reconnect, projection) run [`stream_subscription_events`]
+//! on a list of events.
 
 mod support;
 
@@ -16,25 +19,24 @@ use std::thread;
 use std::time::Duration;
 
 use base64::Engine;
+use futures::stream;
 use hyperliquid_cli::output::JsonRenderOptions;
-use hyperliquid_cli::stream::{StreamBounds, SubscribeTarget, stream_target};
+use hyperliquid_cli::stream::{SubscribeTarget, stream_subscription_events, stream_target};
+use hyperliquid_cli::stream_bounds::StreamBounds;
 use hyperliquid_cli::ws::BookAggregationArgs;
 use hypersdk::Address;
-use hypersdk::hypercore::WebSocket;
+use hypersdk::hypercore::ws::Event as WsEvent;
+use hypersdk::hypercore::{Incoming, WebSocket};
 use predicates::prelude::*;
 use serde_json::{Value, json};
-use support::IsolatedHome;
 use support::exchange::{ExchangeFixture, Hip3Dex};
+use support::{IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address};
 
 const USER: &str = "0xdfc24b077bc1425ad1dea75bcb6f8158e10df303";
 
 fn user() -> Address {
     USER.parse().unwrap()
 }
-
-// ---------------------------------------------------------------------------
-// A just-enough WebSocket server: one connection, text frames only.
-// ---------------------------------------------------------------------------
 
 fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [
@@ -238,16 +240,25 @@ fn subscribe_frame(subscription: Value) -> Value {
     json!({"method": "subscribe", "subscription": subscription})
 }
 
-// ---------------------------------------------------------------------------
-// Captured frame shapes (mainnet, read-only), trimmed.
-// ---------------------------------------------------------------------------
-
 fn fill() -> Value {
     json!({"coin":"BTC","px":"74513.0","sz":"0.00043","side":"B","time":1794233663114u64,
         "startPosition":"0.024","dir":"Open Long","closedPnl":"0.0",
         "hash":"0x9bb24f76663e33439d2c04486bcfcd020172005c013152153f7afac925320d2e",
         "oid":599569989334u64,"crossed":false,"fee":"0.004806","tid":555633606799470u64,
         "feeToken":"USDC","twapId":null})
+}
+
+fn trades_frame(coin: &str) -> Value {
+    json!({"channel":"trades","data":[{"coin":coin,"side":"B","px":"74511.0","sz":"0.1",
+        "time":1794233553742u64,
+        "hash":"0x5d8f0b6c7a2e4f1d9b3a8c6e0f2d4b7a1c3e5f7092b4d6e8a0c2e4f6b8d0a2c4",
+        "tid":873012345678901u64,
+        "users":[USER,"0x0000000000000000000000000000000000000001"]}]})
+}
+
+fn candle_frame(coin: &str, interval: &str) -> Value {
+    json!({"channel":"candle","data":{"t":1794233520000u64,"T":1794233579999u64,"s":coin,
+        "i":interval,"o":"74500.0","c":"74511.0","h":"74520.0","l":"74495.0","v":"12.5","n":42}})
 }
 
 fn snapshot_frame(channel: &str, list_key: &str) -> Value {
@@ -405,13 +416,47 @@ fn kinds() -> Vec<Kind> {
             frame: json!({"channel":"orderUpdates","data":[{"order":{"coin":"BTC","side":"B","limitPx":"74510.0","sz":"0.37","oid":599570053978u64,"timestamp":1794233664760u64,"origSz":"0.37","cloid":"0x0000000000000000000001a1bd313f9a"},"status":"open","statusTimestamp":1794233664760u64}]}),
             channel: "orderUpdates",
         },
+        Kind {
+            name: "trades",
+            target: SubscribeTarget::trades("BTC".into()),
+            subscriptions: vec![json!({"type": "trades", "coin": "BTC"})],
+            frame: trades_frame("BTC"),
+            channel: "trades",
+        },
+        Kind {
+            name: "trades of a HIP-3 market",
+            target: SubscribeTarget::trades("xyz:XYZ100".into()),
+            subscriptions: vec![json!({"type": "trades", "coin": "xyz:XYZ100"})],
+            frame: trades_frame("xyz:XYZ100"),
+            channel: "trades",
+        },
+        Kind {
+            name: "candles",
+            target: SubscribeTarget::candles("BTC".into(), "1m".into()),
+            subscriptions: vec![json!({"type": "candle", "coin": "BTC", "interval": "1m"})],
+            frame: candle_frame("BTC", "1m"),
+            channel: "candle",
+        },
+        Kind {
+            name: "orderbook of a HIP-3 market",
+            target: SubscribeTarget::orderbook("xyz:XYZ100".into(), BookAggregationArgs::default()),
+            subscriptions: vec![json!({"type": "l2Book", "coin": "xyz:XYZ100"})],
+            frame: json!({"channel":"l2Book","data":{"coin":"xyz:XYZ100","time":1794233553742u64,"levels":[[{"n":3,"px":"123.4","sz":"10.0"}],[{"n":2,"px":"123.6","sz":"8.5"}]]}}),
+            channel: "l2Book",
+        },
     ]
 }
 
 #[tokio::test]
 async fn every_subscribe_kind_sends_its_documented_frame_and_streams_its_channel() {
     for kind in kinds() {
-        let (lines, subscribes) = drive(&kind.target, std::slice::from_ref(&kind.frame), 1).await;
+        // A frame of an unrelated channel comes first and must not be streamed.
+        let unrelated = if kind.channel == "allMids" {
+            trades_frame("BTC")
+        } else {
+            json!({"channel":"allMids","data":{"mids":{"BTC":"50000"}}})
+        };
+        let (lines, subscribes) = drive(&kind.target, &[unrelated, kind.frame.clone()], 1).await;
 
         let expected: Vec<Value> = kind
             .subscriptions
@@ -540,10 +585,6 @@ async fn skip_snapshot_does_not_affect_live_fills_delivered_as_user_events() {
     assert_eq!(lines[1]["data"]["channel"], "userEvents");
 }
 
-// ---------------------------------------------------------------------------
-// Process level: validation, resolution and the `subscribed` line.
-// ---------------------------------------------------------------------------
-
 fn subscribed_line(assert: &assert_cmd::assert::Assert) -> Value {
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     serde_json::from_str(stdout.lines().next().expect("a subscribed line")).unwrap()
@@ -594,9 +635,9 @@ fn user_streams_without_user_or_signer_need_authentication() {
 #[test]
 fn user_streams_default_to_the_selected_signer() {
     let home = IsolatedHome::new();
-    let mut command = home.command();
-    command.env(support::PRIVATE_KEY_ENV, support::VALID_PRIVATE_KEY);
-    let assert = command
+    let assert = home
+        .command()
+        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
         .args(["subscribe", "fills", "--max-events", "0"])
         .assert()
         .success();
@@ -605,16 +646,15 @@ fn user_streams_default_to_the_selected_signer() {
         .unwrap()
         .to_ascii_lowercase();
     assert!(
-        subscription
-            .contains(&support::expected_address(support::VALID_PRIVATE_KEY).to_ascii_lowercase()),
+        subscription.contains(&expected_address(VALID_PRIVATE_KEY).to_ascii_lowercase()),
         "{subscription}"
     );
 }
 
 #[test]
-fn skip_snapshot_is_offered_only_where_the_exchange_flags_a_snapshot() {
+fn skip_snapshot_is_accepted_only_where_the_exchange_flags_a_snapshot() {
     let home = IsolatedHome::new();
-    for (kind, offered) in [
+    for (kind, accepted) in [
         ("fills", true),
         ("user-fundings", true),
         ("twap-slice-fills", true),
@@ -622,16 +662,16 @@ fn skip_snapshot_is_offered_only_where_the_exchange_flags_a_snapshot() {
         ("user-events", false),
         ("clearinghouse-state", false),
     ] {
-        let output = home
+        let assert = home
             .command()
-            .args(["subscribe", kind, "--help"])
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        let help = String::from_utf8(output).unwrap();
-        assert_eq!(help.contains("--skip-snapshot"), offered, "{kind}");
+            .args(["subscribe", kind, "--user", USER, "--skip-snapshot"])
+            .args(["--max-events", "0"])
+            .assert();
+        if accepted {
+            assert.success();
+        } else {
+            assert.failure().code(2);
+        }
     }
 }
 
@@ -800,6 +840,63 @@ async fn dex_and_hip3_names_are_resolved_before_subscribing() {
 }
 
 #[tokio::test]
+async fn market_streams_look_a_hip3_market_up_on_its_dex_before_subscribing() {
+    let exchange = ExchangeFixture::start_with(vec![Hip3Dex::xyz()]).await;
+    let home = IsolatedHome::new();
+    let stream_args: [&[&str]; 3] = [
+        &["orderbook"],
+        &["trades"],
+        &["candles", "--interval", "1m"],
+    ];
+
+    for (index, kind) in stream_args.into_iter().enumerate() {
+        let run = |market: &str| {
+            home.command_with_server(&exchange)
+                .arg("subscribe")
+                .args(kind)
+                .args(["--asset", market, "--max-events", "0"])
+                .assert()
+        };
+
+        let assert = run("xyz:XYZ100").success();
+        let label = subscribed_line(&assert)["subscription"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(label.contains("xyz:XYZ100"), "{kind:?}: {label}");
+
+        run("xyz:NOPE").failure().code(13);
+
+        let dex_meta_reads = exchange
+            .info_requests("meta")
+            .await
+            .into_iter()
+            .filter(|body| body["dex"] == "xyz")
+            .count();
+        assert_eq!(
+            dex_meta_reads,
+            2 * (index + 1),
+            "{kind:?}: one read per run"
+        );
+    }
+}
+
+#[tokio::test]
+async fn repeated_dex_flags_are_validated_against_one_dex_listing() {
+    let exchange = ExchangeFixture::start_with(vec![Hip3Dex::xyz()]).await;
+    let home = IsolatedHome::new();
+
+    home.command_with_server(&exchange)
+        .args(["subscribe", "clearinghouse-state", "--user", USER])
+        .args(["--dex", "xyz", "--dex", "XYZ", "--dex", "xyz"])
+        .args(["--max-events", "0"])
+        .assert()
+        .success();
+
+    assert_eq!(exchange.info_requests("perpDexs").await.len(), 1);
+}
+
+#[tokio::test]
 async fn active_asset_data_is_for_perpetuals_only() {
     let exchange = ExchangeFixture::start().await;
     exchange
@@ -880,4 +977,248 @@ async fn a_command_cannot_subscribe_past_the_documented_subscription_limit() {
         .code(13)
         .stderr(predicate::str::contains("subscriptions requested").not())
         .stderr(predicate::str::contains("Unknown DEX"));
+}
+
+#[tokio::test]
+async fn projection_applies_to_the_subscribed_line() {
+    let target = SubscribeTarget::all_mids(None);
+    let select_label = JsonRenderOptions::from_cli(Some("subscription"), false, None);
+
+    let (result, lines) = replay(&target, max_events(0), &select_label, stream::empty()).await;
+
+    result.unwrap();
+    assert_eq!(lines, [json!({"subscription": "allMids(None)"})]);
+}
+
+fn all_mids_frame() -> Value {
+    json!({"channel":"allMids","data":{"mids":{"BTC":"50000","ETH":"3000","SOL":"100"}}})
+}
+
+fn event(frame: Value) -> WsEvent {
+    WsEvent::Message(serde_json::from_value::<Incoming>(frame).expect("a frame the SDK reads"))
+}
+
+/// What `target`'s stream writes, and how it ends, over `events`.
+async fn replay(
+    target: &SubscribeTarget,
+    bounds: StreamBounds,
+    projection: &JsonRenderOptions,
+    mut events: impl futures::Stream<Item = WsEvent> + Unpin,
+) -> (Result<(), anyhow::Error>, Vec<Value>) {
+    let mut output = Vec::new();
+    let result = stream_subscription_events(
+        &target.label(),
+        bounds,
+        |message| target.matches(message),
+        &mut events,
+        &mut output,
+        projection,
+        false,
+    )
+    .await;
+    let lines = String::from_utf8(output)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    (result, lines)
+}
+
+fn max_events(count: usize) -> StreamBounds {
+    StreamBounds {
+        max_items: Some(count),
+        idle: None,
+    }
+}
+
+fn subscribed(label: &str) -> Value {
+    json!({"type": "subscribed", "subscription": label})
+}
+
+#[tokio::test]
+async fn only_events_of_the_streams_channel_count_toward_max_events() {
+    let target = SubscribeTarget::trades("BTC".into());
+    let events = stream::iter([
+        WsEvent::Connected,
+        event(all_mids_frame()),
+        event(trades_frame("BTC")),
+        WsEvent::Disconnected,
+        event(trades_frame("BTC")),
+        event(trades_frame("BTC")),
+    ]);
+
+    let (result, lines) = replay(
+        &target,
+        max_events(2),
+        &JsonRenderOptions::default(),
+        events,
+    )
+    .await;
+
+    result.unwrap();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[0], subscribed("trades(BTC)"));
+    for line in &lines[1..] {
+        assert_eq!(line["type"], "event");
+        assert_eq!(line["subscription"], "trades(BTC)");
+        assert_eq!(line["data"]["channel"], "trades");
+    }
+}
+
+#[tokio::test]
+async fn zero_max_events_writes_only_the_subscribed_line() {
+    let target = SubscribeTarget::all_mids(None);
+    let events = stream::iter([event(all_mids_frame())]);
+
+    let (result, lines) = replay(
+        &target,
+        max_events(0),
+        &JsonRenderOptions::default(),
+        events,
+    )
+    .await;
+
+    result.unwrap();
+    assert_eq!(lines, [subscribed("allMids(None)")]);
+}
+
+#[tokio::test]
+async fn a_socket_that_closes_before_a_matching_event_is_an_error() {
+    let target = SubscribeTarget::trades("BTC".into());
+    let events = stream::iter([event(all_mids_frame())]);
+
+    let (result, lines) = replay(
+        &target,
+        max_events(1),
+        &JsonRenderOptions::default(),
+        events,
+    )
+    .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("WebSocket closed before receiving subscription events")
+    );
+    assert_eq!(lines, [subscribed("trades(BTC)")]);
+}
+
+#[tokio::test]
+async fn a_quiet_stream_ends_at_the_idle_timeout_even_with_events_left_to_wait_for() {
+    let target = SubscribeTarget::trades("BTC".into());
+    let bounds = StreamBounds {
+        max_items: Some(1),
+        idle: Some(Duration::from_millis(5)),
+    };
+
+    let (result, lines) = replay(
+        &target,
+        bounds,
+        &JsonRenderOptions::default(),
+        stream::pending::<WsEvent>(),
+    )
+    .await;
+
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Timed out waiting for subscription events after 5ms")
+    );
+    assert_eq!(lines, [subscribed("trades(BTC)")]);
+}
+
+#[tokio::test]
+async fn a_reconnect_is_marked_with_one_stream_gap_warning() {
+    let target = SubscribeTarget::trades("BTC".into());
+    let events = stream::iter([
+        WsEvent::Connected,
+        event(trades_frame("BTC")),
+        WsEvent::Disconnected,
+        WsEvent::Disconnected,
+        WsEvent::Connected,
+        event(trades_frame("BTC")),
+    ]);
+
+    let (result, lines) = replay(
+        &target,
+        max_events(2),
+        &JsonRenderOptions::default(),
+        events,
+    )
+    .await;
+
+    result.unwrap();
+    let types: Vec<&str> = lines
+        .iter()
+        .map(|line| line["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(types, ["subscribed", "event", "warning", "event"]);
+    assert_eq!(lines[2]["reason"], "stream_gap");
+    assert_eq!(lines[2]["subscription"], "trades(BTC)");
+    assert!(lines[2]["message"].as_str().unwrap().contains("missed"));
+}
+
+#[tokio::test]
+async fn projection_applies_to_events_but_never_hides_the_gap_warning() {
+    let target = SubscribeTarget::trades("BTC".into());
+    let events = stream::iter([
+        WsEvent::Disconnected,
+        WsEvent::Connected,
+        event(trades_frame("BTC")),
+    ]);
+    let select_data = JsonRenderOptions::from_cli(Some("data"), false, None);
+
+    let (result, lines) = replay(&target, max_events(1), &select_data, events).await;
+
+    result.unwrap();
+    assert!(lines.iter().any(|line| line["reason"] == "stream_gap"));
+}
+
+#[tokio::test]
+async fn projection_limits_a_nested_payload() {
+    let target = SubscribeTarget::all_mids(None);
+    let events = stream::iter([event(all_mids_frame())]);
+    let two_results = JsonRenderOptions::from_cli(None, false, Some(2));
+
+    let (result, lines) = replay(&target, max_events(1), &two_results, events).await;
+
+    result.unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[1]["type"], "event");
+    assert_eq!(
+        lines[1]["data"]["data"]["mids"].as_object().unwrap().len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn fills_ignore_the_other_user_events_until_a_fill_arrives() {
+    let target = SubscribeTarget::fills(user());
+    let user_event = |data: Value| event(json!({"channel": "user", "data": data}));
+    let events = stream::iter([
+        user_event(json!({"funding": {"time": 1, "coin": "BTC", "usdc": "0.25",
+            "szi": "0.1", "fundingRate": "0.000001"}})),
+        user_event(json!({"liquidation": {"lid": 7,
+            "liquidator": "0x0303030303030303030303030303030303030303",
+            "liquidatedUser": "0x0404040404040404040404040404040404040404",
+            "liquidatedNtlPos": "1000", "liquidatedAccountValue": "500"}})),
+        user_event(json!({"nonUserCancel": [{"coin": "BTC", "oid": 11}]})),
+        user_event(json!({"unexpectedFutureUserEvent": {"coin": "BTC"}})),
+        user_event(json!({"fills": [fill()]})),
+    ]);
+
+    let (result, lines) = replay(
+        &target,
+        max_events(1),
+        &JsonRenderOptions::default(),
+        events,
+    )
+    .await;
+
+    result.unwrap();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[1]["data"]["channel"], "userEvents");
+    assert!(lines[1]["data"]["data"].get("fills").is_some());
 }

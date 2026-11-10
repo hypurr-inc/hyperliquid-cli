@@ -1,15 +1,10 @@
-use hypersdk::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use futures::future::try_join_all;
-
-use crate::assets::{
-    DeployerFeeScales, SpotListing, load_deployer_fee_scales, load_raw_perp_dexes,
-    load_spot_markets,
-};
-use crate::command_spec::{CliCommand, CommandSpec, NoArgs};
-use crate::commands::rows::MISSING;
+use crate::assets::{DeployerFeeScales, SpotAsset, load_spot_markets};
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, NoArgs};
+use crate::commands::common::rows::MISSING;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
@@ -17,7 +12,6 @@ use crate::output::TableData;
 use crate::output::format::thousands;
 use crate::wire::InfoRequest;
 
-/// How many names a section's sample lists.
 const SAMPLE_LEN: usize = 5;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -29,14 +23,14 @@ pub struct MetaSpotRow {
     pub base_sz_decimals: i64,
 }
 
-impl From<SpotListing> for MetaSpotRow {
-    fn from(market: SpotListing) -> Self {
+impl From<SpotAsset> for MetaSpotRow {
+    fn from(market: SpotAsset) -> Self {
         Self {
             symbol: market.symbol,
             index: market.index,
             base: market.base,
             quote: market.quote,
-            base_sz_decimals: market.base_sz_decimals,
+            base_sz_decimals: i64::from(market.base_sz_decimals),
         }
     }
 }
@@ -59,41 +53,8 @@ impl AssetContextRow {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DexRow {
     pub name: String,
-    /// The deployer fee scale all of the dex's markets share; null when it
-    /// lists none or its markets differ (see `deployer_fee_scale_by_market`).
-    #[serde(with = "rust_decimal::serde::str_option")]
-    pub deployer_fee_scale: Option<Decimal>,
-    /// Each market's scale, listed only when the markets of the dex differ.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub deployer_fee_scale_by_market: Vec<MarketFeeScaleRow>,
-}
-
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub struct MarketFeeScaleRow {
-    pub coin: String,
-    #[serde(with = "rust_decimal::serde::str")]
-    pub deployer_fee_scale: Decimal,
-}
-
-impl DexRow {
-    pub(crate) fn new(name: String, scales: &DeployerFeeScales) -> Self {
-        let uniform = scales.uniform();
-        Self {
-            name,
-            deployer_fee_scale: uniform,
-            deployer_fee_scale_by_market: match uniform {
-                Some(_) => Vec::new(),
-                None => scales
-                    .by_market()
-                    .iter()
-                    .map(|(coin, scale)| MarketFeeScaleRow {
-                        coin: coin.clone(),
-                        deployer_fee_scale: *scale,
-                    })
-                    .collect(),
-            },
-        }
-    }
+    #[serde(flatten)]
+    pub fees: DeployerFeeScales,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -234,7 +195,7 @@ pub async fn show(inv: &Invocation) -> Result<(), anyhow::Error> {
     let api = inv.remote()?.api();
     let raw_meta_and_contexts = fetch_meta_and_asset_contexts(api).await?;
     let spot_universe = load_spot_universe(api).await?;
-    let dexes = fetch_dexes(api).await?;
+    let dexes = fetch_dexes(inv, api).await?;
     inv.print(&raw_meta_and_contexts.into_output(spot_universe, dexes)?);
     Ok(())
 }
@@ -247,13 +208,17 @@ async fn fetch_meta_and_asset_contexts(api: &ApiClient) -> Result<MetaAndAssetCo
     .await
 }
 
-async fn fetch_dexes(api: &ApiClient) -> Result<Vec<DexRow>, CliError> {
-    let dexes = load_raw_perp_dexes(api).await?;
-    try_join_all(dexes.into_iter().flatten().map(|dex| async move {
-        let scales = load_deployer_fee_scales(api, &dex.name).await?;
-        Ok(DexRow::new(dex.name, &scales))
-    }))
-    .await
+async fn fetch_dexes(inv: &Invocation, api: &ApiClient) -> Result<Vec<DexRow>, CliError> {
+    let dexes = inv.dex_list().await?;
+    Ok(dexes
+        .metas(api)
+        .await?
+        .into_iter()
+        .map(|(dex, meta)| DexRow {
+            name: dex.name.clone(),
+            fees: meta.fee_scales(),
+        })
+        .collect())
 }
 
 async fn load_spot_universe(api: &ApiClient) -> Result<Vec<MetaSpotRow>, CliError> {

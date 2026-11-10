@@ -1,6 +1,8 @@
 //! The Hyperliquid network a run targets.
 
-use hypersdk::hypercore::{self, Chain, HttpClient, WebSocket};
+use hypersdk::hypercore::{self, Chain};
+
+use std::net::IpAddr;
 
 use crate::errors::CliError;
 
@@ -48,26 +50,6 @@ impl Network {
         }
     }
 
-    /// An info/exchange client for this network, pointed at `api_override` when given.
-    #[must_use]
-    pub fn http_client(self, api_override: Option<reqwest::Url>) -> HttpClient {
-        let client = HttpClient::new(self.chain());
-        match api_override {
-            Some(url) => client.with_url(url),
-            None => client,
-        }
-    }
-
-    /// A WebSocket for this network's public endpoint. The API endpoint
-    /// override does not apply to WebSockets.
-    #[must_use]
-    pub fn websocket(self) -> WebSocket {
-        match self {
-            Self::Mainnet => hypercore::mainnet_ws(),
-            Self::Testnet => hypercore::testnet_ws(),
-        }
-    }
-
     /// The public API endpoint as a URL, before any loopback test override.
     #[must_use]
     pub fn api_url(self) -> reqwest::Url {
@@ -100,15 +82,6 @@ impl Network {
     }
 }
 
-impl From<Chain> for Network {
-    fn from(chain: Chain) -> Self {
-        match chain {
-            Chain::Mainnet => Self::Mainnet,
-            Chain::Testnet => Self::Testnet,
-        }
-    }
-}
-
 impl std::fmt::Display for Network {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
@@ -135,9 +108,72 @@ impl<'de> serde::Deserialize<'de> for Network {
     }
 }
 
+/// Whether `url` names this machine: `localhost` or a loopback address, IPv4 or
+/// IPv6 (URLs bracket IPv6 hosts).
+#[must_use]
+pub fn is_loopback_url(url: &reqwest::Url) -> bool {
+    let host = url
+        .host_str()
+        .unwrap_or_default()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+/// How the exchange names a [`Chain`]: the `hyperliquidChain` of a signed
+/// document, and the `network` that receipts and previews of funds commands
+/// print beside it (`Mainnet`, not the lowercase [`Network::name`]).
+pub trait ChainExt {
+    fn label(self) -> &'static str;
+    /// The `signatureChainId` of a user-signed document.
+    fn signature_chain_id(self) -> &'static str;
+}
+
+impl ChainExt for Chain {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Mainnet => "Mainnet",
+            Self::Testnet => "Testnet",
+        }
+    }
+
+    fn signature_chain_id(self) -> &'static str {
+        self.arbitrum_id()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chain_is_named_as_the_exchange_names_it() {
+        for chain in [Chain::Mainnet, Chain::Testnet] {
+            assert_eq!(chain.label(), chain.to_string());
+            assert_eq!(chain.signature_chain_id(), chain.arbitrum_id());
+        }
+        assert_eq!(Chain::Mainnet.signature_chain_id(), "0xa4b1");
+        assert_eq!(Chain::Testnet.signature_chain_id(), "0x66eee");
+    }
+
+    #[test]
+    fn loopback_urls_are_localhost_and_loopback_addresses_only() {
+        for loopback in ["http://LOCALHOST:1", "http://127.0.0.1:1", "http://[::1]:1"] {
+            assert!(
+                is_loopback_url(&reqwest::Url::parse(loopback).unwrap()),
+                "{loopback}"
+            );
+        }
+        for remote in ["http://[2001:db8::1]:1", "http://127.example.com"] {
+            assert!(
+                !is_loopback_url(&reqwest::Url::parse(remote).unwrap()),
+                "{remote}"
+            );
+        }
+    }
 
     #[test]
     fn every_network_has_one_spelling_everywhere() {
@@ -148,10 +184,14 @@ mod tests {
                 serde_json::to_string(&network).unwrap(),
                 format!("\"{name}\"")
             );
-            assert_eq!(Network::parse(&name.to_uppercase()), Some(network));
-            assert_eq!(Network::from(network.chain()), network);
+            let upper = name.to_uppercase();
+            assert_eq!(Network::parse(&upper), Some(network));
+            assert_eq!(
+                serde_json::from_str::<Network>(&format!("\"{upper}\"")).unwrap(),
+                network
+            );
+            assert_eq!(network.chain().is_mainnet(), !network.is_testnet());
         }
-        assert_eq!(Network::NAMES, ["mainnet", "testnet"]);
     }
 
     #[test]
@@ -164,24 +204,15 @@ mod tests {
     }
 
     #[test]
-    fn deserialization_is_case_insensitive() {
-        let parsed: Network = serde_json::from_str("\"TESTNET\"").unwrap();
-        assert_eq!(parsed, Network::Testnet);
-        let parsed: Network = serde_json::from_str("\"Mainnet\"").unwrap();
-        assert_eq!(parsed, Network::Mainnet);
-    }
-
-    #[test]
-    fn chain_and_url_mapping() {
-        assert!(Network::Mainnet.chain().is_mainnet());
-        assert!(!Network::Testnet.chain().is_mainnet());
-        assert_eq!(
+    fn api_base_url_is_the_api_url_without_its_trailing_slash() {
+        for network in Network::ALL {
+            let base = network.api_base_url();
+            assert!(!base.ends_with('/'), "{base}");
+            assert_eq!(format!("{base}/"), network.api_url().as_str());
+        }
+        assert_ne!(
             Network::Mainnet.api_base_url(),
-            "https://api.hyperliquid.xyz"
-        );
-        assert_eq!(
-            Network::Testnet.api_base_url(),
-            "https://api.hyperliquid-testnet.xyz"
+            Network::Testnet.api_base_url()
         );
     }
 

@@ -1,48 +1,56 @@
-pub mod abstraction;
+//! The commands: one module per command domain, each implementing
+//! [`CliCommand`](crate::cli_command::CliCommand) for its types and registered
+//! in [`entries`].
+//!
+//! Layer rule: a command module never imports another command module, and no
+//! library module outside `commands` imports `commands`: the contract registry
+//! ([`crate::command_registry`]) is plain data, built here by [`registry`] and
+//! handed to the commands that read it. What two commands share lives in [`common`]
+//! (presentation and reads), [`crate::exchange`] (sending actions) or a domain
+//! module below `commands`; `tests/architecture.rs` enforces this.
+
 pub mod account;
-pub(crate) mod actions;
+pub mod account_settings;
 pub mod api_wallet;
 pub mod asset;
 pub mod borrowlend;
 pub mod builder;
-pub(crate) mod confirm;
+pub mod common;
 pub mod feedback;
 pub mod invalidate_nonce;
-pub(crate) mod issue_report;
 pub mod mcp;
 pub mod meta;
 pub mod orderbook;
 pub mod orders;
 pub mod outcome_actions;
 pub mod outcomes;
-pub(crate) mod paging;
 pub mod perps;
 pub mod positions;
 pub mod prio;
 pub mod referral;
 pub mod report_incident;
 pub mod reserve_weight;
-pub mod rows;
 pub mod schema;
-pub mod selector;
 pub mod setup;
 pub mod spot;
-pub(crate) mod spot_balances;
 pub mod staking;
 pub mod status;
 pub mod subaccounts;
 pub mod subscribe;
-pub(crate) mod support;
 pub mod transfers;
 pub mod update;
-mod user_signed;
 pub mod vaults;
 pub mod wallet;
 pub mod watch_risk;
 
+#[cfg(test)]
+mod registry_tests;
+
 use std::sync::LazyLock;
 
-use crate::command_spec::{Entry, GroupSpec};
+use crate::cli_command::Entry;
+use crate::command_registry::CommandRegistry;
+use crate::command_spec::GroupSpec;
 
 /// Every command, in help order. Registering a command is one line here.
 pub fn entries() -> &'static [Entry] {
@@ -117,10 +125,10 @@ pub fn entries() -> &'static [Entry] {
             Entry::of::<account::AccountMultisigSigners>(),
             Entry::of::<account::AccountAssetData>(),
             Entry::of::<account::AccountAbstraction>(),
-            Entry::of::<account::AccountAbstractionSet>(),
+            Entry::of::<account_settings::AccountAbstractionSet>(),
             Entry::of::<invalidate_nonce::AccountInvalidateNonce>(),
             Entry::of::<reserve_weight::AccountReserveWeight>(),
-            Entry::of::<account::AccountEvmBigBlocks>(),
+            Entry::of::<account_settings::AccountEvmBigBlocks>(),
             Entry::of::<wallet::AccountAdd>(),
             Entry::of::<wallet::AccountLs>(),
             Entry::of::<wallet::AccountSetDefault>(),
@@ -216,8 +224,16 @@ pub fn entries() -> &'static [Entry] {
 /// consumers clone it to decorate or `build()` their copy.
 pub fn command_tree() -> &'static clap::Command {
     static TREE: LazyLock<clap::Command> =
-        LazyLock::new(|| crate::command_spec::command_tree(entries(), groups()));
+        LazyLock::new(|| crate::cli_command::command_tree(entries(), groups()));
     &TREE
+}
+
+/// The contract of every command, built once on first use from [`entries`],
+/// [`groups`] and [`command_tree`]. `schema`, `mcp` and the contract tests read it.
+pub fn registry() -> &'static CommandRegistry {
+    static REGISTRY: LazyLock<CommandRegistry> =
+        LazyLock::new(|| CommandRegistry::build(entries(), groups(), command_tree()));
+    &REGISTRY
 }
 
 /// The command groups: names with children and no behavior of their own.

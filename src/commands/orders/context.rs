@@ -1,11 +1,13 @@
-//! What a live order command runs against: the connection, the signer, the
-//! account it acts for, and whether the user still has to approve.
-
 use hypersdk::Address;
+use hypersdk::hypercore::types::Action;
+use serde::Serialize;
 
-use super::consent::{ConsentKind, ConsentTarget};
-use super::exchange::OrderBuilderFee;
+use super::consent::{Consent, ConsentTarget};
+use super::exchange::{Answer, Wording};
+use crate::builder_fee::BuilderFee;
+use crate::commands::common::support::acting_account;
 use crate::errors::CliError;
+use crate::exchange::actions;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::signing::SelectedSigner;
@@ -23,28 +25,62 @@ pub(super) struct OrderSubmissionContext<'a> {
 }
 
 impl<'a> OrderSubmissionContext<'a> {
-    /// The account whose orders and balances this run reads and changes.
     pub(super) fn account(self) -> Address {
-        self.vault_address
-            .unwrap_or_else(|| self.signer.query_address())
+        acting_account(self.vault_address, self.signer)
     }
 
-    /// Ask the user to approve an action before it is sent. A no-op when no
-    /// approval is required. A decline fails with `kind`'s error.
+    /// Sign and send `action` for the account this context acts for; the
+    /// exchange's answer, worded by `wording` where it is refused or cannot be
+    /// read.
+    pub(super) async fn send(self, action: Action, wording: Wording) -> Result<Answer, CliError> {
+        let payload = actions::send_l1_action(
+            self.api,
+            self.signer,
+            action,
+            self.vault_address,
+            wording.rejected,
+        )
+        .await?;
+        Ok(Answer::new(payload, wording))
+    }
+
+    /// [`send`](Self::send) for an action the SDK has no type for.
+    pub(super) async fn send_raw(
+        self,
+        action: &impl Serialize,
+        wording: Wording,
+    ) -> Result<Answer, CliError> {
+        let payload = actions::send_raw_l1_json_action(
+            self.api,
+            self.signer,
+            action,
+            self.vault_address,
+            wording.rejected,
+        )
+        .await?;
+        Ok(Answer::new(payload, wording))
+    }
+
+    /// A no-op when no approval is required. A decline fails with `consent`'s error.
     pub(super) fn consent(
         self,
-        kind: ConsentKind,
-        builder: Option<&OrderBuilderFee>,
-        ask: impl FnOnce(&ConsentTarget<'_>) -> Result<bool, CliError>,
+        consent: &Consent<'_>,
+        builder: Option<&BuilderFee>,
     ) -> Result<(), CliError> {
         if !self.requires_approval {
             return Ok(());
         }
-        let target = ConsentTarget::new(self, builder);
-        if ask(&target)? {
+        let target = ConsentTarget::new(
+            self.inv.mode(),
+            self.api.network(),
+            self.signer,
+            self.vault_address,
+            builder,
+        );
+        if consent.ask(&target)? {
             return Ok(());
         }
-        Err(kind.declined())
+        Err(consent.declined())
     }
 
     /// Refuse a command that cannot ask (it runs unattended for minutes) when
@@ -57,31 +93,8 @@ impl<'a> OrderSubmissionContext<'a> {
         command: &str,
     ) -> Result<(), CliError> {
         if self.requires_approval {
-            return Err(unattended_refusal(action, command));
+            return Err(crate::consent::unattended_refusal(action, command));
         }
         Ok(())
-    }
-}
-
-/// The error for an unattended command that still needs approval; see
-/// [`OrderSubmissionContext::refuse_unattended_without_yes`].
-pub(super) fn unattended_refusal(action: &str, command: &str) -> CliError {
-    CliError::Configuration(format!(
-        "Can't {action} on mainnet without --yes. Rerun with --yes once you approve it:\n    {command} --yes"
-    ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_refusal_names_the_action_and_the_command_to_rerun_with_yes() {
-        let err = unattended_refusal("chase", "hyperliquid --format json orders chase --coin ETH");
-        assert_eq!(err.exit_code(), 2);
-        assert_eq!(
-            err.to_string(),
-            "Configuration error: Can't chase on mainnet without --yes. Rerun with --yes once you approve it:\n    hyperliquid --format json orders chase --coin ETH --yes"
-        );
     }
 }

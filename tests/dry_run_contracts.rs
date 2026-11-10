@@ -1,122 +1,148 @@
+//! The `--dry-run` envelope of the commands that are not orders, pinned whole:
+//! what an agent reads to decide whether to run the command for real.
+
 mod contract_support;
 mod support;
 
 use serde_json::{Value, json};
 
 use contract_support::assert_json_fixture;
+use support::exchange::ExchangeFixture;
 use support::{
-    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address,
-    mock_market_server,
+    API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY, expected_address, run_json,
 };
 
+/// The preview of `args`, signed by the test key when `signer` is set, against
+/// `server` when the command resolves a market.
+///
+/// Every envelope names the network, and a signed action whose signer can't be
+/// resolved carries a `signer_warning`; both are checked or dropped here, so a
+/// test pins the rest of the envelope.
+fn dry_run(server: Option<&ExchangeFixture>, signer: bool, args: &[&str]) -> Value {
+    let home = IsolatedHome::new();
+    let mut command = home.json_command();
+    if let Some(server) = server {
+        command.env(API_OVERRIDE_ENV, server.uri());
+    }
+    if signer {
+        command.env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY);
+    }
+    let mut value = run_json(command.arg("--dry-run").args(args));
+    let envelope = value
+        .as_object_mut()
+        .expect("a dry-run envelope is an object");
+    let network = envelope.remove("network");
+    assert!(
+        matches!(
+            network.as_ref().and_then(Value::as_str),
+            Some("mainnet" | "testnet")
+        ),
+        "dry-run envelope is missing its network: {network:?}"
+    );
+    envelope.remove("signer_warning");
+    value
+}
+
+fn unsigned(args: &[&str]) -> Value {
+    dry_run(None, false, args)
+}
+
+fn signed(args: &[&str]) -> Value {
+    dry_run(None, true, args)
+}
+
+/// The envelope of a preview that names the signer: the signer is also who the
+/// command acts as, with no vault.
+fn signed_envelope(command: &str, would_execute: &str, args: Value) -> Value {
+    let signer = expected_address(VALID_PRIVATE_KEY);
+    json!({
+        "dry_run": true,
+        "command": command,
+        "would_execute": would_execute,
+        "args": args,
+        "signer": signer,
+        "acting_as": signer,
+        "vault_address": null
+    })
+}
+
+/// The envelope of a preview run without a signer.
+fn unsigned_envelope(command: &str, would_execute: &str, args: Value) -> Value {
+    json!({
+        "dry_run": true,
+        "command": command,
+        "would_execute": would_execute,
+        "args": args,
+        "signer": null,
+        "acting_as": null,
+        "vault_address": null
+    })
+}
+
 #[tokio::test]
-async fn dry_run_outputs_match_characterization_fixture() {
-    let server = mock_market_server().await;
-    let env = IsolatedHome::new();
+async fn orders_dry_runs_match_the_snapshot() {
+    let server = ExchangeFixture::start().await;
 
     let outputs = json!({
-        "orders_create_with_redacted_payload": run_json(
-            env.command()
-                .env(API_OVERRIDE_ENV, server.uri())
-                .args([
-                    "--format",
-                    "json",
-                    "--dry-run",
-                    "--payload-json",
-                    r#"{"api_key":"secret","nested":{"authorization":"Bearer token"}}"#,
-                    "orders",
-                    "create",
-                    "--coin",
-                    "BTC",
-                    "--side",
-                    "buy",
-                    "--price",
-                    "50000",
-                    "--size",
-                    "0.001",
-                ]),
-        ),
-        "orders_batch_create_file": run_json(
-            env.command()
-                .env(API_OVERRIDE_ENV, server.uri())
-                .args([
-                    "--format",
-                    "json",
-                    "--dry-run",
-                    "orders",
-                    "batch-create",
-                    "--orders-file",
-                    "tests/fixtures/orders_batch_create.json",
-                    "--testnet",
-                ]),
-        ),
+        "orders_create_with_redacted_payload": dry_run(Some(&server), false, &[
+            "--payload-json",
+            r#"{"api_key":"secret","nested":{"authorization":"Bearer token"}}"#,
+            "orders",
+            "create",
+            "--coin",
+            "BTC",
+            "--side",
+            "buy",
+            "--price",
+            "50000",
+            "--size",
+            "0.001",
+        ]),
+        "orders_batch_create_file": dry_run(Some(&server), false, &[
+            "orders",
+            "batch-create",
+            "--orders-file",
+            "tests/fixtures/orders_batch_create.json",
+            "--testnet",
+        ]),
     });
 
-    assert_json_fixture(
-        "dry_run_outputs.json",
-        &json!({
-            "characterization": true,
-            "review_required_to_update": true,
-            "outputs": outputs,
-        }),
-    );
+    assert_json_fixture("dry_run_outputs.json", &outputs);
 }
 
 #[test]
-fn subaccount_create_action_plan_preserves_public_dry_run_envelope() {
-    let env = IsolatedHome::new();
-    let output = run_json(env.command().args([
-        "--format",
-        "json",
-        "--dry-run",
-        "subaccount",
-        "create",
-        "--name",
-        "market-maker-1",
-    ]));
+fn subaccount_previews_are_unsigned_and_name_the_irreversibility() {
+    let sub = "0x0000000000000000000000000000000000000001";
 
     assert_eq!(
-        output,
-        json!({
-            "dry_run": true,
-            "command": "subaccount create",
-            "would_execute": "create_subaccount",
-            "args": {
+        unsigned(&["subaccount", "create", "--name", "market-maker-1"]),
+        unsigned_envelope(
+            "subaccount create",
+            "create_subaccount",
+            json!({
                 "name": "market-maker-1",
                 "network": "Mainnet",
                 "reversibility": "irreversible"
-            },
-            "signer": null,
-            "acting_as": null,
-            "vault_address": null
-        })
+            })
+        )
     );
-}
-
-#[test]
-fn subaccount_transfer_action_plans_preserve_public_dry_run_envelopes() {
-    let env = IsolatedHome::new();
 
     assert_eq!(
-        run_json(env.command().args([
-            "--format",
-            "json",
-            "--dry-run",
+        unsigned(&[
             "subaccount",
             "transfer",
             "--subaccount",
-            "0x0000000000000000000000000000000000000001",
+            sub,
             "--amount",
             "10",
             "--direction",
             "deposit",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "subaccount transfer",
-            "would_execute": "subaccount_usdc_transfer",
-            "args": {
-                "subaccount": "0x0000000000000000000000000000000000000001",
+        ]),
+        unsigned_envelope(
+            "subaccount transfer",
+            "subaccount_usdc_transfer",
+            json!({
+                "subaccount": sub,
                 "amount": "10",
                 "direction": "deposit",
                 "is_deposit": true,
@@ -124,35 +150,28 @@ fn subaccount_transfer_action_plans_preserve_public_dry_run_envelopes() {
                 "asset": "USDC",
                 "network": "Mainnet",
                 "reversibility": "partially_reversible"
-            },
-            "signer": null,
-            "acting_as": null,
-            "vault_address": null
-        })
+            })
+        )
     );
 
     assert_eq!(
-        run_json(env.command().args([
-            "--format",
-            "json",
-            "--dry-run",
+        unsigned(&[
             "subaccount",
             "spot-transfer",
             "--subaccount",
-            "0x0000000000000000000000000000000000000001",
+            sub,
             "--token",
             "PURR:0xc4bf3f870c0e9465323c0b6ed28096c2",
             "--amount",
             "1.2300",
             "--direction",
             "withdraw",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "subaccount spot-transfer",
-            "would_execute": "subaccount_spot_transfer",
-            "args": {
-                "subaccount": "0x0000000000000000000000000000000000000001",
+        ]),
+        unsigned_envelope(
+            "subaccount spot-transfer",
+            "subaccount_spot_transfer",
+            json!({
+                "subaccount": sub,
                 "token": "PURR:0xc4bf3f870c0e9465323c0b6ed28096c2",
                 "amount": "1.2300",
                 "direction": "withdraw",
@@ -160,41 +179,34 @@ fn subaccount_transfer_action_plans_preserve_public_dry_run_envelopes() {
                 "asset": "PURR:0xc4bf3f870c0e9465323c0b6ed28096c2",
                 "network": "Mainnet",
                 "reversibility": "partially_reversible"
-            },
-            "signer": null,
-            "acting_as": null,
-            "vault_address": null
-        })
+            })
+        )
     );
 }
 
 #[test]
-fn builder_and_referral_action_plans_preserve_public_dry_run_envelopes() {
-    let env = IsolatedHome::new();
+fn builder_and_referral_previews_carry_the_signed_action() {
     let signer = expected_address(VALID_PRIVATE_KEY);
+    let builder = "0x00000000000000000000000000000000000000bb";
 
     assert_eq!(
-        run_json(env.command().env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY).args([
-            "--format",
-            "json",
-            "--dry-run",
+        signed(&[
             "builder",
             "approve",
             "--builder",
-            "0x00000000000000000000000000000000000000bb",
+            builder,
             "--max-fee-rate",
             "0.001%",
             "--testnet",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "builder approve",
-            "would_execute": "approve_builder_fee",
-            "args": {
+        ]),
+        signed_envelope(
+            "builder approve",
+            "approve_builder_fee",
+            json!({
                 "network": "Testnet",
-                "signer": signer.clone(),
-                "query_address": signer.clone(),
-                "builder": "0x00000000000000000000000000000000000000bb",
+                "signer": signer,
+                "query_address": signer,
+                "builder": builder,
                 "max_fee_rate": "0.001%",
                 "max_fee_tenths_bps": 1,
                 "reversibility": "reversible",
@@ -202,208 +214,104 @@ fn builder_and_referral_action_plans_preserve_public_dry_run_envelopes() {
                     "type": "approveBuilderFee",
                     "hyperliquidChain": "Testnet",
                     "signatureChainId": "0x66eee",
-                    "builder": "0x00000000000000000000000000000000000000bb",
+                    "builder": builder,
                     "maxFeeRate": "0.001%"
                 }
-            },
-            "signer": signer.clone(),
-            "acting_as": signer.clone(),
-            "vault_address": null
-        })
+            })
+        )
     );
 
     assert_eq!(
-        run_json(env.command().env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY).args([
-            "--format",
-            "json",
-            "--dry-run",
-            "referral",
-            "set",
-            "TESTNET",
-            "--testnet",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "referral set",
-            "would_execute": "set_referral_code",
-            "args": {
+        signed(&["referral", "set", "TESTNET", "--testnet"]),
+        signed_envelope(
+            "referral set",
+            "set_referral_code",
+            json!({
                 "network": "Testnet",
-                "signer": signer.clone(),
-                "query_address": signer.clone(),
+                "signer": signer,
+                "query_address": signer,
                 "code": "TESTNET",
-                "action": {
-                    "type": "setReferrer",
-                    "code": "TESTNET"
-                },
+                "action": {"type": "setReferrer", "code": "TESTNET"},
                 "reversibility": "irreversible"
-            },
-            "signer": signer.clone(),
-            "acting_as": signer.clone(),
-            "vault_address": null
-        })
+            })
+        )
     );
 
     assert_eq!(
-        run_json(env.command().env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY).args([
-            "--format",
-            "json",
-            "--dry-run",
-            "referral",
-            "register",
-            "MYCODE",
-            "--testnet",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "referral register",
-            "would_execute": "register_referrer_code",
-            "args": {
+        signed(&["referral", "register", "MYCODE", "--testnet"]),
+        signed_envelope(
+            "referral register",
+            "register_referrer_code",
+            json!({
                 "network": "Testnet",
-                "signer": signer.clone(),
-                "query_address": signer.clone(),
+                "signer": signer,
+                "query_address": signer,
                 "code": "MYCODE",
-                "action": {
-                    "type": "registerReferrer",
-                    "code": "MYCODE"
-                },
+                "action": {"type": "registerReferrer", "code": "MYCODE"},
                 "reversibility": "irreversible"
-            },
-            "signer": signer.clone(),
-            "acting_as": signer,
-            "vault_address": null
-        })
+            })
+        )
     );
 }
 
 #[test]
-fn transfer_action_plans_preserve_public_dry_run_envelopes() {
-    let env = IsolatedHome::new();
+fn transfer_previews_are_unsigned_without_a_key() {
+    let to = "0x0000000000000000000000000000000000000001";
 
     assert_eq!(
-        run_json(env.command().args([
-            "--format",
-            "json",
-            "--dry-run",
-            "transfer",
-            "spot-to-perp",
-            "--amount",
-            "1.23",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "transfer spot-to-perp",
-            "would_execute": "transfer_spot_to_perp",
-            "args": {"amount": "1.23"},
-            "signer": null,
-            "acting_as": null,
-            "vault_address": null
-        })
+        unsigned(&["transfer", "spot-to-perp", "--amount", "1.23"]),
+        unsigned_envelope(
+            "transfer spot-to-perp",
+            "transfer_spot_to_perp",
+            json!({"amount": "1.23"})
+        )
     );
-
     assert_eq!(
-        run_json(env.command().args([
-            "--format",
-            "json",
-            "--dry-run",
-            "transfer",
-            "perp-to-spot",
-            "--amount",
-            "1.23",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "transfer perp-to-spot",
-            "would_execute": "transfer_perp_to_spot",
-            "args": {"amount": "1.23"},
-            "signer": null,
-            "acting_as": null,
-            "vault_address": null
-        })
+        unsigned(&["transfer", "perp-to-spot", "--amount", "1.23"]),
+        unsigned_envelope(
+            "transfer perp-to-spot",
+            "transfer_perp_to_spot",
+            json!({"amount": "1.23"})
+        )
     );
-
     assert_eq!(
-        run_json(env.command().args([
-            "--format",
-            "json",
-            "--dry-run",
-            "transfer",
-            "send",
-            "--to",
-            "0x0000000000000000000000000000000000000001",
-            "--amount",
-            "1.23",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "transfer send",
-            "would_execute": "send_usdc",
-            "args": {
-                "to": "0x0000000000000000000000000000000000000001",
-                "amount": "1.23"
-            },
-            "signer": null,
-            "acting_as": null,
-            "vault_address": null
-        })
+        unsigned(&["transfer", "send", "--to", to, "--amount", "1.23"]),
+        unsigned_envelope(
+            "transfer send",
+            "send_usdc",
+            json!({"to": to, "amount": "1.23"})
+        )
     );
-
     assert_eq!(
-        run_json(env.command().args([
-            "--format",
-            "json",
-            "--dry-run",
-            "transfer",
-            "withdraw",
-            "--to",
-            "0x0000000000000000000000000000000000000001",
-            "--amount",
-            "1.23",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "transfer withdraw",
-            "would_execute": "withdraw_usdc",
-            "args": {
-                "to": "0x0000000000000000000000000000000000000001",
-                "amount": "1.23"
-            },
-            "signer": null,
-            "acting_as": null,
-            "vault_address": null
-        })
+        unsigned(&["transfer", "withdraw", "--to", to, "--amount", "1.23"]),
+        unsigned_envelope(
+            "transfer withdraw",
+            "withdraw_usdc",
+            json!({"to": to, "amount": "1.23"})
+        )
     );
 }
 
 #[tokio::test]
-async fn position_action_previews_bind_validated_intent() {
-    let server = mock_market_server().await;
-    let env = IsolatedHome::new();
-    let signer = expected_address(VALID_PRIVATE_KEY);
+async fn position_previews_bind_the_validated_intent() {
+    let server = ExchangeFixture::start().await;
+    let preview = |args: &[&str]| dry_run(Some(&server), true, args);
 
     assert_eq!(
-        run_json(
-            env.command()
-                .env(API_OVERRIDE_ENV, server.uri())
-                .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-                .args([
-                    "--format",
-                    "json",
-                    "--dry-run",
-                    "positions",
-                    "update-leverage",
-                    "--coin",
-                    "BTC",
-                    "--leverage",
-                    "5",
-                    "--isolated",
-                    "--testnet",
-                ])
-        ),
-        json!({
-            "dry_run": true,
-            "command": "positions update-leverage",
-            "would_execute": "update_position_leverage",
-            "args": {
+        preview(&[
+            "positions",
+            "update-leverage",
+            "--coin",
+            "BTC",
+            "--leverage",
+            "5",
+            "--isolated",
+            "--testnet",
+        ]),
+        signed_envelope(
+            "positions update-leverage",
+            "update_position_leverage",
+            json!({
                 "coin": "BTC",
                 "resolved_coin": "BTC",
                 "asset": 0,
@@ -412,36 +320,24 @@ async fn position_action_previews_bind_validated_intent() {
                 "margin_mode": "isolated",
                 "is_cross": false,
                 "on_behalf_of": null
-            },
-            "signer": signer.clone(),
-            "acting_as": signer.clone(),
-            "vault_address": null
-        })
+            })
+        )
     );
 
     assert_eq!(
-        run_json(
-            env.command()
-                .env(API_OVERRIDE_ENV, server.uri())
-                .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-                .args([
-                    "--format",
-                    "json",
-                    "--dry-run",
-                    "positions",
-                    "update-margin",
-                    "--coin",
-                    "BTC",
-                    "--amount",
-                    "1000",
-                    "--testnet",
-                ])
-        ),
-        json!({
-            "dry_run": true,
-            "command": "positions update-margin",
-            "would_execute": "update_isolated_margin",
-            "args": {
+        preview(&[
+            "positions",
+            "update-margin",
+            "--coin",
+            "BTC",
+            "--amount",
+            "1000",
+            "--testnet",
+        ]),
+        signed_envelope(
+            "positions update-margin",
+            "update_isolated_margin",
+            json!({
                 "coin": "BTC",
                 "resolved_coin": "BTC",
                 "asset": 0,
@@ -451,27 +347,19 @@ async fn position_action_previews_bind_validated_intent() {
                 "direction": "add",
                 "margin_mode": "isolated",
                 "on_behalf_of": null
-            },
-            "signer": signer,
-            "acting_as": signer,
-            "vault_address": null
-        })
+            })
+        )
     );
 }
 
 #[tokio::test]
-async fn staking_vault_and_borrowlend_action_plans_preserve_public_dry_run_envelopes() {
-    let server = mock_market_server().await;
-    let env = IsolatedHome::new();
-    let signer = expected_address(VALID_PRIVATE_KEY);
+async fn staking_vault_and_borrowlend_previews_carry_the_verified_shape() {
+    let server = ExchangeFixture::start().await;
     let validator = "0x0000000000000000000000000000000000000002";
     let vault = "0x0000000000000000000000000000000000000003";
 
     assert_eq!(
-        run_json(env.command().env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY).args([
-            "--format",
-            "json",
-            "--dry-run",
+        signed(&[
             "staking",
             "delegate",
             "--validator",
@@ -479,53 +367,35 @@ async fn staking_vault_and_borrowlend_action_plans_preserve_public_dry_run_envel
             "--amount",
             "1.5",
             "--testnet",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "staking delegate",
-            "would_execute": "delegate_hype",
-            "args": {
+        ]),
+        signed_envelope(
+            "staking delegate",
+            "delegate_hype",
+            json!({
                 "validator": validator,
                 "amount": "1.5",
                 "asset": "HYPE",
                 "network": "Testnet",
                 "reversibility": "partially_reversible"
-            },
-            "signer": signer.clone(),
-            "acting_as": signer.clone(),
-            "vault_address": null
-        })
+            })
+        )
     );
 
     assert_eq!(
-        run_json(env.command().env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY).args([
-            "--format",
-            "json",
-            "--dry-run",
-            "staking",
-            "claim-rewards",
-            "--testnet",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "staking claim-rewards",
-            "would_execute": "claim_staking_rewards",
-            "args": {
+        signed(&["staking", "claim-rewards", "--testnet"]),
+        signed_envelope(
+            "staking claim-rewards",
+            "claim_staking_rewards",
+            json!({
                 "asset": "HYPE",
                 "network": "Testnet",
                 "reversibility": "irreversible"
-            },
-            "signer": signer.clone(),
-            "acting_as": signer.clone(),
-            "vault_address": null
-        })
+            })
+        )
     );
 
     assert_eq!(
-        run_json(env.command().env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY).args([
-            "--format",
-            "json",
-            "--dry-run",
+        signed(&[
             "vault",
             "deposit",
             "--vault",
@@ -533,12 +403,11 @@ async fn staking_vault_and_borrowlend_action_plans_preserve_public_dry_run_envel
             "--amount",
             "10",
             "--testnet",
-        ])),
-        json!({
-            "dry_run": true,
-            "command": "vault deposit",
-            "would_execute": "deposit_usdc_to_vault",
-            "args": {
+        ]),
+        signed_envelope(
+            "vault deposit",
+            "deposit_usdc_to_vault",
+            json!({
                 "action": "deposit",
                 "network": "Testnet",
                 "vault": vault,
@@ -553,34 +422,20 @@ async fn staking_vault_and_borrowlend_action_plans_preserve_public_dry_run_envel
                     "isDeposit": true,
                     "usd": 10_000_000_u64
                 }
-            },
-            "signer": signer.clone(),
-            "acting_as": signer.clone(),
-            "vault_address": null
-        })
+            })
+        )
     );
 
     assert_eq!(
-        run_json(
-            env.command()
-                .env(API_OVERRIDE_ENV, server.uri())
-                .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-                .args([
-                    "--format",
-                    "json",
-                    "--dry-run",
-                    "borrowlend",
-                    "withdraw",
-                    "USDC",
-                    "--max",
-                    "--testnet",
-                ])
+        dry_run(
+            Some(&server),
+            true,
+            &["borrowlend", "withdraw", "USDC", "--max", "--testnet"]
         ),
-        json!({
-            "dry_run": true,
-            "command": "borrowlend withdraw",
-            "would_execute": "withdraw_borrowlend",
-            "args": {
+        signed_envelope(
+            "borrowlend withdraw",
+            "withdraw_borrowlend",
+            json!({
                 "operation": "withdraw",
                 "encoded_operation": 1,
                 "token": "USDC",
@@ -608,11 +463,8 @@ async fn staking_vault_and_borrowlend_action_plans_preserve_public_dry_run_envel
                     "amount": null
                 },
                 "live_submission": "enabled: wallet-signed /exchange borrowLend action shape verified against @nktkas/hyperliquid v0.31.0"
-            },
-            "signer": signer.clone(),
-            "acting_as": signer,
-            "vault_address": null
-        })
+            })
+        )
     );
 }
 
@@ -621,7 +473,7 @@ async fn staking_vault_and_borrowlend_action_plans_preserve_public_dry_run_envel
 /// wherever else the command's own `args` mention the signer.
 #[test]
 fn signed_previews_name_the_acting_account_and_warn_about_a_missing_signer() {
-    let env = IsolatedHome::new();
+    let home = IsolatedHome::new();
     let signer = expected_address(VALID_PRIVATE_KEY);
     let to = "0x0000000000000000000000000000000000000001";
     let builder = "0x00000000000000000000000000000000000000bb";
@@ -641,34 +493,27 @@ fn signed_previews_name_the_acting_account_and_warn_about_a_missing_signer() {
     ];
 
     for command in commands {
-        let run = |key: Option<&str>| {
-            let mut cmd = env.command();
-            if let Some(key) = key {
-                cmd.env(PRIVATE_KEY_ENV, key);
-            }
-            let output = cmd
-                .args(["--format", "json", "--dry-run", "--testnet"])
-                .args(command)
-                .assert()
-                .success()
-                .get_output()
-                .stdout
-                .clone();
-            serde_json::from_slice::<Value>(&output).unwrap()
-        };
+        let with_key = run_json(
+            home.json_command()
+                .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
+                .args(["--dry-run", "--testnet"])
+                .args(command),
+        );
+        assert_eq!(with_key["signer"], signer, "{command:?}");
+        assert_eq!(with_key["acting_as"], signer, "{command:?}");
+        assert!(with_key["vault_address"].is_null(), "{command:?}");
+        assert!(with_key.get("signer_warning").is_none(), "{command:?}");
 
-        let signed = run(Some(VALID_PRIVATE_KEY));
-        assert_eq!(signed["signer"], signer, "{command:?}");
-        assert_eq!(signed["acting_as"], signer, "{command:?}");
-        assert!(signed["vault_address"].is_null(), "{command:?}");
-        assert!(signed.get("signer_warning").is_none(), "{command:?}");
-
-        let unsigned = run(None);
-        assert!(unsigned["signer"].is_null(), "{command:?}");
-        assert!(unsigned["acting_as"].is_null(), "{command:?}");
-        assert!(unsigned["vault_address"].is_null(), "{command:?}");
+        let without = run_json(
+            home.json_command()
+                .args(["--dry-run", "--testnet"])
+                .args(command),
+        );
+        assert!(without["signer"].is_null(), "{command:?}");
+        assert!(without["acting_as"].is_null(), "{command:?}");
+        assert!(without["vault_address"].is_null(), "{command:?}");
         assert!(
-            unsigned["signer_warning"].as_str().is_some(),
+            without["signer_warning"].as_str().is_some(),
             "a null signer carries its warning: {command:?}"
         );
     }
@@ -677,47 +522,18 @@ fn signed_previews_name_the_acting_account_and_warn_about_a_missing_signer() {
 /// `--dry-run` previews the command that ran, not the command a shortcut expands to.
 #[tokio::test]
 async fn shortcut_orders_preview_under_their_own_command_name() {
-    let server = mock_market_server().await;
-    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
 
-    for (command, side) in [("buy", "buy"), ("sell", "sell")] {
-        let output = run_json(env.command().env(API_OVERRIDE_ENV, server.uri()).args([
-            "--format",
-            "json",
-            "--dry-run",
-            command,
-            "--coin",
-            "BTC",
-            "--price",
-            "50000",
-            "--size",
-            "0.001",
-        ]));
+    for command in ["buy", "sell"] {
+        let output = dry_run(
+            Some(&server),
+            false,
+            &[
+                command, "--coin", "BTC", "--price", "50000", "--size", "0.001",
+            ],
+        );
         assert_eq!(output["command"], command);
         assert_eq!(output["would_execute"], "submit_order");
-        assert_eq!(output["args"]["side"], side);
+        assert_eq!(output["args"]["side"], command);
     }
-}
-
-/// Run a dry-run command and return its envelope without the run context.
-///
-/// Every dry-run envelope names the network, and a signed action whose signer
-/// can't be resolved without prompting carries a `signer_warning`. Those two
-/// keys are checked here; the contract fixtures pin the rest of the envelope.
-fn run_json(command: &mut assert_cmd::Command) -> Value {
-    let output = command.assert().success().get_output().stdout.clone();
-    let mut value: Value = serde_json::from_slice(&output).unwrap();
-    let object = value
-        .as_object_mut()
-        .expect("dry-run envelope is an object");
-    let network = object.remove("network");
-    assert!(
-        matches!(
-            network.as_ref().and_then(Value::as_str),
-            Some("mainnet" | "testnet")
-        ),
-        "dry-run envelope is missing its network: {network:?}"
-    );
-    object.remove("signer_warning");
-    value
 }

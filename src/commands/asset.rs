@@ -5,19 +5,20 @@ use serde::Serialize;
 use serde_json::Value;
 use strsim::levenshtein;
 
-use crate::assets::asset_id::{
-    self, AssetIdLayout, MAX_OUTCOME_SIDE, outcome_coin, outcome_token, split_outcome_encoding,
-};
 use crate::assets::{
-    AssetResolver, OutcomeSideRow, PerpAsset, SpotAsset, load_outcome_sides, normalize_asset_name,
+    AssetIdLayout, AssetMetadata, AssetResolver, MAX_OUTCOME_SIDE, Names, OutcomeCatalog,
+    OutcomeDescription, OutcomeSideRow, PerpAsset, SpotAsset, classify, normalize_asset_name,
+    outcome_coin, outcome_token, split_outcome_encoding,
 };
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::commands::rows::or_missing;
+use crate::cli_command::CliCommand;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::common::rows::or_missing;
+use crate::commands::common::support;
 use crate::errors::CliError;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::{TableData, json_cell, serialize_row, warn};
-use crate::stream::parse_positive_usize;
+use crate::quantity::parse_positive_usize;
 
 #[derive(Args, Debug, Clone)]
 pub struct AssetDecodeArgs {
@@ -71,7 +72,6 @@ pub struct AssetSearchArgs {
     pub limit: usize,
 }
 
-/// What an asset id's range says it is: the layout's name, as the JSON `kind`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AssetIdKind {
     #[default]
@@ -142,9 +142,8 @@ impl Serialize for LookupStatus {
     }
 }
 
-/// One asset id as `asset decode` and `asset search` print it. Unknown fields
-/// are left out of the JSON; `cli_input` is always present, `null` when no
-/// selector reproduces the id.
+/// Unknown fields are left out of the JSON; `cli_input` is always present, `null`
+/// when no selector reproduces the id.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct DecodedAssetId {
     pub asset_id: u64,
@@ -340,7 +339,7 @@ pub async fn decode(inv: &Invocation, args: &AssetDecodeArgs) -> Result<(), anyh
     match decoded.kind {
         AssetIdKind::Outcome => enrich_outcome(api, &mut decoded).await,
         AssetIdKind::Perp | AssetIdKind::Spot | AssetIdKind::Hip3Perp => {
-            enrich_from_resolver(api, &mut decoded).await
+            enrich_from_resolver(inv, &mut decoded).await
         }
     }
 
@@ -351,6 +350,7 @@ pub async fn decode(inv: &Invocation, args: &AssetDecodeArgs) -> Result<(), anyh
 pub async fn search(inv: &Invocation, args: &AssetSearchArgs) -> Result<(), anyhow::Error> {
     let remote = inv.remote()?;
     let rows = search_assets(
+        inv,
         remote.api(),
         &remote.network().to_string(),
         &args.query,
@@ -365,7 +365,7 @@ pub async fn search(inv: &Invocation, args: &AssetSearchArgs) -> Result<(), anyh
 
 #[must_use]
 pub fn decode_asset_id(asset_id: u64, network: &str) -> DecodedAssetId {
-    let layout = asset_id::classify(asset_id);
+    let layout = classify(asset_id);
     let kind = AssetIdKind::from(layout);
     let mut decoded = DecodedAssetId {
         asset_id,
@@ -410,16 +410,25 @@ fn decode_outcome_fields(decoded: &mut DecodedAssetId, encoding: u64) {
     }
 }
 
-/// Metadata only enriches an asset id: when a source is down the command still
-/// answers from the id's own layout. The answer says so on stderr instead of
-/// looking like a complete one.
+/// `None` when the source failed: the answer falls back to the id's own layout and
+/// says so on stderr rather than looking complete.
 fn or_warn<T>(what: &str, loaded: Result<T, CliError>) -> Option<T> {
     loaded
         .map_err(|err| warn(&format!("{what} unavailable, results are limited: {err}")))
         .ok()
 }
 
+/// Names are the ones the exchange sends: `asset search` and `asset decode` show
+/// template outcomes as `template:<id>`.
+async fn load_outcome_catalog(api: &ApiClient) -> Option<OutcomeCatalog> {
+    or_warn(
+        "outcome metadata",
+        support::load_outcome_catalog(api, Names::Raw).await,
+    )
+}
+
 async fn search_assets(
+    inv: &Invocation,
     api: &ApiClient,
     network: &str,
     query: &str,
@@ -428,14 +437,14 @@ async fn search_assets(
 ) -> Vec<DecodedAssetId> {
     let mut candidates = Vec::new();
 
-    let resolver = load_resolver(api).await;
+    let resolver = load_resolver(inv).await;
     if let Some(resolver) = resolver.as_ref() {
         candidates.extend(search_resolver_assets(resolver, network));
     }
 
-    let outcome_rows = or_warn("outcome metadata", load_outcome_sides(api).await);
-    if let Some(rows) = outcome_rows.as_ref() {
-        candidates.extend(rows.iter().cloned().filter_map(|row| {
+    let outcome_catalog = load_outcome_catalog(api).await;
+    if let Some(catalog) = outcome_catalog.as_ref() {
+        candidates.extend(catalog.sides.iter().cloned().filter_map(|row| {
             let asset_id = row.asset_id;
             let mut decoded = decode_asset_id(asset_id, network);
             apply_outcome_row(&mut decoded, row);
@@ -447,12 +456,9 @@ async fn search_assets(
         let mut decoded = decode_asset_id(asset_id, network);
         match decoded.kind {
             AssetIdKind::Outcome => {
-                if let Some(row) = outcome_rows
-                    .as_ref()
-                    .and_then(|rows| {
-                        rows.iter()
-                            .find(|row| Some(row.encoding) == decoded.encoding)
-                    })
+                if let Some(row) = decoded
+                    .encoding
+                    .and_then(|encoding| outcome_catalog.as_ref()?.side(encoding))
                     .cloned()
                 {
                     apply_outcome_row(&mut decoded, row);
@@ -562,20 +568,24 @@ fn fuzzy_search_threshold(query: &str) -> usize {
     if query.len() <= 3 { 1 } else { 2 }
 }
 
-/// The raw-metadata resolver, which lists every HIP-3 market. A dex that failed
-/// to load is named on stderr: its markets are missing from the answer.
-async fn load_resolver(api: &ApiClient) -> Option<AssetResolver> {
-    let resolver = or_warn("asset metadata", AssetResolver::load_raw(api).await)?;
-    for dex in resolver.unavailable_dexes() {
+/// A dex that failed to load is named on stderr, with the reason: its markets
+/// are missing from the answer.
+async fn load_resolver(inv: &Invocation) -> Option<AssetResolver> {
+    let loaded =
+        async { AssetMetadata::load_with_hip3(inv.remote()?.api(), inv.dex_list().await?).await }
+            .await;
+    let metadata = or_warn("asset metadata", loaded)?;
+    for dex in metadata.unavailable_dexes() {
         warn(&format!(
-            "HIP-3 dex {dex} metadata unavailable, results are limited"
+            "HIP-3 dex {} metadata unavailable, results are limited: {}",
+            dex.name, dex.reason
         ));
     }
-    Some(resolver)
+    Some(inv.resolver_over(metadata))
 }
 
-async fn enrich_from_resolver(api: &ApiClient, decoded: &mut DecodedAssetId) {
-    let Some(resolver) = load_resolver(api).await else {
+async fn enrich_from_resolver(inv: &Invocation, decoded: &mut DecodedAssetId) {
+    let Some(resolver) = load_resolver(inv).await else {
         return;
     };
     enrich_from_loaded_resolver(&resolver, decoded);
@@ -624,10 +634,10 @@ async fn enrich_outcome(api: &ApiClient, decoded: &mut DecodedAssetId) {
     let Some(encoding) = decoded.encoding else {
         return;
     };
-    let Some(rows) = or_warn("outcome metadata", load_outcome_sides(api).await) else {
+    let Some(catalog) = load_outcome_catalog(api).await else {
         return;
     };
-    let Some(row) = rows.into_iter().find(|row| row.encoding == encoding) else {
+    let Some(row) = catalog.side(encoding).cloned() else {
         return;
     };
 
@@ -644,182 +654,16 @@ fn apply_outcome_row(decoded: &mut DecodedAssetId, row: OutcomeSideRow) {
     let side_name = row.side_name;
     decoded.side_name = Some(side_name.clone());
     decoded.outcome_name = Some(row.outcome_name.clone());
-    let description = row.description;
-    let parts = parse_outcome_description(&description);
-    decoded.market_title = outcome_market_title(&parts, &side_name, &row.outcome_name);
-    decoded.slug = outcome_slug(&parts, &side_name);
-    decoded.condition = parts.condition;
-    decoded.condition_class = parts.condition_class;
-    decoded.underlying = parts.underlying;
-    decoded.expiry = parts.expiry;
-    decoded.target_price = parts.target_price;
-    decoded.period = parts.period;
-    decoded.description = Some(description);
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct OutcomeDescriptionParts {
-    condition: Option<String>,
-    condition_class: Option<String>,
-    underlying: Option<String>,
-    expiry: Option<String>,
-    target_price: Option<String>,
-    period: Option<String>,
-}
-
-impl OutcomeDescriptionParts {
-    /// `(underlying, target_price, expiry)` of a fully described price-binary market.
-    fn price_binary(&self) -> Option<(&str, &str, &str)> {
-        self.condition_class
-            .as_deref()
-            .filter(|class| class.eq_ignore_ascii_case("priceBinary"))?;
-        Some((
-            self.underlying.as_deref()?,
-            self.target_price.as_deref()?,
-            self.expiry.as_deref()?,
-        ))
-    }
-}
-
-fn parse_outcome_description(description: &str) -> OutcomeDescriptionParts {
-    let mut parts = OutcomeDescriptionParts::default();
-
-    for segment in description.split('|') {
-        let Some((raw_key, raw_value)) = segment.split_once(':') else {
-            continue;
-        };
-        let key = raw_key.trim();
-        let value = raw_value.trim();
-        if value.is_empty() {
-            continue;
-        }
-        match key {
-            "class" => parts.condition_class = Some(value.to_string()),
-            "underlying" => parts.underlying = Some(value.to_string()),
-            "expiry" => parts.expiry = Some(value.to_string()),
-            "targetPrice" | "target_price" => parts.target_price = Some(value.to_string()),
-            "period" => parts.period = Some(value.to_string()),
-            _ => {}
-        }
-    }
-
-    parts.condition = outcome_condition_summary(&parts);
-    parts
-}
-
-fn outcome_condition_summary(parts: &OutcomeDescriptionParts) -> Option<String> {
-    if let Some((underlying, target_price, expiry)) = parts.price_binary() {
-        let expiry = format_expiry_display(expiry).unwrap_or_else(|| expiry.to_string());
-        return Some(format!("{underlying} above {target_price} at {expiry}"));
-    }
-
-    let mut fields = Vec::new();
-    if let Some(condition_class) = parts.condition_class.as_deref() {
-        fields.push(condition_class.to_string());
-    }
-    if let Some(underlying) = parts.underlying.as_deref() {
-        fields.push(format!("underlying={underlying}"));
-    }
-    if let Some(target_price) = parts.target_price.as_deref() {
-        fields.push(format!("target_price={target_price}"));
-    }
-    if let Some(expiry) = parts.expiry.as_deref() {
-        fields.push(format!("expiry={expiry}"));
-    }
-    if let Some(period) = parts.period.as_deref() {
-        fields.push(format!("period={period}"));
-    }
-
-    (!fields.is_empty()).then(|| fields.join("; "))
-}
-
-fn outcome_market_title(
-    parts: &OutcomeDescriptionParts,
-    side_name: &str,
-    fallback_name: &str,
-) -> Option<String> {
-    if let Some((underlying, target_price, expiry)) = parts.price_binary() {
-        let expiry = format_expiry_display(expiry).unwrap_or_else(|| expiry.to_string());
-        return Some(format!(
-            "{underlying} above {target_price} {side_name} {expiry}"
-        ));
-    }
-
-    (!fallback_name.trim().is_empty()).then(|| fallback_name.to_string())
-}
-
-fn outcome_slug(parts: &OutcomeDescriptionParts, side_name: &str) -> Option<String> {
-    let (underlying, target_price, expiry) = parts.price_binary()?;
-    let expiry_slug = format_expiry_slug(expiry)?;
-    Some(format!(
-        "{}-above-{}-{}-{expiry_slug}",
-        slug_token(underlying),
-        slug_token(target_price),
-        slug_token(side_name)
-    ))
-}
-
-fn format_expiry_display(raw: &str) -> Option<String> {
-    let (_, month, day, hour, minute) = parse_expiry_parts(raw)?;
-    let month = month_name(month)?;
-    Some(format!("{month} {day} {hour}:{minute}"))
-}
-
-fn format_expiry_slug(raw: &str) -> Option<String> {
-    let (_, month, day, hour, minute) = parse_expiry_parts(raw)?;
-    let month = month_name(month)?.to_ascii_lowercase();
-    Some(format!("{month}-{day}-{hour}{minute}"))
-}
-
-fn parse_expiry_parts(raw: &str) -> Option<(&str, &str, &str, &str, &str)> {
-    let raw = raw.trim();
-    if raw.len() != 13 || raw.as_bytes().get(8) != Some(&b'-') {
-        return None;
-    }
-    let year = raw.get(0..4)?;
-    let month = raw.get(4..6)?;
-    let day = raw.get(6..8)?;
-    let hour = raw.get(9..11)?;
-    let minute = raw.get(11..13)?;
-    [year, month, day, hour, minute]
-        .into_iter()
-        .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
-        .then_some((year, month, day, hour, minute))
-}
-
-fn month_name(month: &str) -> Option<&'static str> {
-    match month {
-        "01" => Some("Jan"),
-        "02" => Some("Feb"),
-        "03" => Some("Mar"),
-        "04" => Some("Apr"),
-        "05" => Some("May"),
-        "06" => Some("Jun"),
-        "07" => Some("Jul"),
-        "08" => Some("Aug"),
-        "09" => Some("Sep"),
-        "10" => Some("Oct"),
-        "11" => Some("Nov"),
-        "12" => Some("Dec"),
-        _ => None,
-    }
-}
-
-fn slug_token(raw: &str) -> String {
-    raw.trim()
-        .chars()
-        .filter_map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                Some(ch.to_ascii_lowercase())
-            } else if ch.is_whitespace() || matches!(ch, '_' | ':') {
-                Some('-')
-            } else {
-                None
-            }
-        })
-        .collect::<String>()
-        .trim_matches('-')
-        .to_string()
+    let parsed = OutcomeDescription::parse(&row.description);
+    decoded.market_title = parsed.market_title(&side_name, &row.outcome_name);
+    decoded.slug = parsed.slug(&side_name);
+    decoded.condition = parsed.condition_summary();
+    decoded.condition_class = parsed.class().map(str::to_string);
+    decoded.underlying = parsed.underlying().map(str::to_string);
+    decoded.expiry = parsed.expiry().map(str::to_string);
+    decoded.target_price = parsed.target_price().map(str::to_string);
+    decoded.period = parsed.period().map(str::to_string);
+    decoded.description = Some(row.description);
 }
 
 pub fn parse_asset_id(raw: &str) -> Result<u64, String> {

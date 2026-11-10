@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::errors::CliError;
-use crate::settings::{EnvSource, env};
+use crate::env::{self, EnvSource};
+use crate::errors::{CliError, network_error};
+use crate::paths;
 
 /// The GitHub repository, as `owner/name`: the one spelling every release,
 /// download and issue URL derives from. Must match the repository and archive
@@ -32,10 +33,12 @@ impl ReleaseClient {
             .map_err(|err| CliError::Unavailable(format!("update check failed: {err}")))
     }
 
+    /// GET `url`, failing on a non-2xx status. Every transport failure on the
+    /// way, sending or reading the body, reads the same as an API one
+    /// ([`network_error`]); `timeout` is named when it was the cause.
     async fn get(
         &self,
         url: &str,
-        failure: &str,
         timeout: Option<Duration>,
     ) -> Result<reqwest::Response, CliError> {
         let mut request = self.client.get(url);
@@ -45,7 +48,7 @@ impl ReleaseClient {
         let response = request
             .send()
             .await
-            .map_err(|err| CliError::Unavailable(format!("{failure}: {err}")))?;
+            .map_err(|err| network_error(&err, timeout))?;
         let status = response.status();
         if status.is_success() {
             return Ok(response);
@@ -58,13 +61,18 @@ impl ReleaseClient {
         let release = self
             .get(
                 &format!("https://api.github.com/repos/{REPO}/releases/latest"),
-                "update check failed",
                 Some(FETCH_TIMEOUT),
             )
             .await?
             .json::<ReleaseInfo>()
             .await
-            .map_err(|err| CliError::Unavailable(format!("invalid update response: {err}")))?;
+            .map_err(|err| {
+                if err.is_decode() {
+                    CliError::Unavailable(format!("invalid update response: {err}"))
+                } else {
+                    network_error(&err, Some(FETCH_TIMEOUT))
+                }
+            })?;
         Ok(release.tag_name)
     }
 
@@ -73,12 +81,12 @@ impl ReleaseClient {
         url: &str,
         timeout: Option<Duration>,
     ) -> Result<Vec<u8>, CliError> {
-        self.get(url, "download failed", timeout)
+        self.get(url, timeout)
             .await?
             .bytes()
             .await
             .map(|bytes| bytes.to_vec())
-            .map_err(|err| CliError::Unavailable(format!("download failed: {err}")))
+            .map_err(|err| network_error(&err, timeout))
     }
 
     pub async fn download_text(
@@ -86,11 +94,11 @@ impl ReleaseClient {
         url: &str,
         timeout: Option<Duration>,
     ) -> Result<String, CliError> {
-        self.get(url, "download failed", timeout)
+        self.get(url, timeout)
             .await?
             .text()
             .await
-            .map_err(|err| CliError::Unavailable(format!("download failed: {err}")))
+            .map_err(|err| network_error(&err, timeout))
     }
 }
 
@@ -165,7 +173,7 @@ pub(super) enum InstallMethod {
 
 impl InstallMethod {
     pub fn detect(exe: &Path, source: &EnvSource) -> Self {
-        let home = dirs::home_dir();
+        let home = paths::home_dir(source);
         let cargo_home = source.get_os(env::CARGO_HOME).map(PathBuf::from);
         let resolved = std::fs::canonicalize(exe).ok();
         [Some(exe), resolved.as_deref()]
@@ -213,6 +221,45 @@ impl InstallMethod {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_unreachable_release_host_reads_like_an_unreachable_api() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let client = ReleaseClient::new().unwrap();
+
+        let error = client
+            .get(&format!("http://{addr}/latest"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.reason(), "network_error");
+        assert_eq!(error.exit_code(), 12);
+        assert_eq!(
+            error.to_string(),
+            format!("Couldn't reach {addr}. Connection refused.")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_silent_release_host_names_the_timeout_that_was_in_force() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = ReleaseClient::new().unwrap();
+
+        let error = client
+            .download_text(
+                &format!("http://{addr}/asset"),
+                Some(Duration::from_millis(100)),
+            )
+            .await
+            .unwrap_err();
+        drop(listener);
+        assert_eq!(
+            error.to_string(),
+            format!("Couldn't reach {addr}. Timed out after 100ms.")
+        );
+    }
 
     #[test]
     fn version_compare_orders_numerically_and_ignores_v_prefix() {
@@ -304,6 +351,16 @@ mod tests {
         assert_eq!(
             classify("/usr/local/bin/hyperliquid", None),
             InstallMethod::Standalone
+        );
+    }
+
+    #[test]
+    fn install_method_reads_the_home_the_environment_names() {
+        let source = EnvSource::fixed([(env::HOME_DIR, "/pinned-home")]);
+
+        assert_eq!(
+            InstallMethod::detect(Path::new("/pinned-home/.cargo/bin/hyperliquid"), &source),
+            InstallMethod::Cargo
         );
     }
 }

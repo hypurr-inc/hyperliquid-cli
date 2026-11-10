@@ -1,213 +1,37 @@
 //! Environment variable names and the layered settings built from flags,
 //! environment and the config file.
 //!
-//! Every environment variable the CLI reads is a constant in [`env`]; the root
-//! help text and the test harness's list of variables to clear are generated
-//! from the same table. [`Settings`] reads the environment through an
-//! [`EnvSource`] and parses the config file at most once, lazily, so a flag that
-//! settles a question never touches a broken config file. Every write to the
-//! config file goes through [`Settings::update_config`], which owns the
-//! lock, fresh read, edit and save sequence.
+//! Every environment variable the CLI reads is a constant in [`env`].
+//! [`Settings`] reads the environment through an [`EnvSource`] and parses the
+//! config file at most once, lazily, so a flag that settles a question never
+//! touches a broken config file. Every write to the config file goes through
+//! [`Settings::update_config`], which owns the lock, fresh read, edit and save
+//! sequence.
 
-use std::collections::HashMap;
-use std::ffi::OsString;
-use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 
-use crate::config::{BankrLogin, Config, ConfigFile, nonblank};
+use crate::config::{BankrLogin, Config, ConfigFile};
+use crate::env::{self, EnvSource, nonblank};
 use crate::errors::CliError;
-use crate::network::Network;
+use crate::network::{Network, is_loopback_url};
 use crate::private_fs::FileLock;
 
-/// One row per environment variable, in the order the root help lists them. A
-/// row with empty help is read by the CLI but not advertised.
-macro_rules! env_vars {
-    ($($(#[$meta:meta])* $name:ident = $value:literal => $help:literal $(, build $build:ident)?;)*) => {
-        pub mod env {
-            $($(#[$meta])* pub const $name: &str = $value;)*
-
-            pub const ALL: &[&str] = &[$($value),*];
-        }
-
-        const ENV_HELP: &[(&str, &str)] = &[$(($value, $help)),*];
-
-        // `option_env!` needs the literal name, so the table is the one place
-        // that spells a variable both as a runtime and as a build-time name.
-        $($(
-            const $build: &str = match option_env!($value) {
-                Some(value) => value,
-                None => "",
-            };
-        )?)*
-    };
-}
-
-env_vars! {
-    FORMAT = "HYPERLIQUID_FORMAT" => "Default output format: pretty, table, or json. --format overrides it.";
-    AGENT = "HYPERLIQUID_AGENT" => "Set to 1 for JSON output and no prompts.";
-    NETWORK = "HYPERLIQUID_NETWORK" => "Network to use: mainnet or testnet. --testnet overrides it.";
-    HOME_DIR = "HYPERLIQUID_HOME_DIR" => "Home used for Bankr credentials and the default OWS vault, instead of platform discovery.";
-    CONFIG_DIR = "HYPERLIQUID_CONFIG_DIR" => "Config directory, including the hyperliquid component, instead of platform discovery.";
-    DATA_DIR = "HYPERLIQUID_DATA_DIR" => "Data directory, including the hyperliquid component, instead of platform discovery.";
-    BANKR_API_KEY = "BANKR_API_KEY" => "Bankr API key for --bankr, shared with the Bankr CLI. `wallet login` stores one instead.";
-    BANKR_API_URL = "BANKR_API_URL" => "Bankr API host, for a local or alternate endpoint.";
-    PRIVATE_KEY = "HYPERLIQUID_PRIVATE_KEY" => "Private key for signing. Prefer it over --private-key.";
-    KEYSTORE_PASSWORD = "HYPERLIQUID_KEYSTORE_PASSWORD" => "Password for --keystore. Prefer it over --keystore-password.";
-    API_BASE_URL = "HYPERLIQUID_API_BASE_URL" => "Override the API endpoint. Loopback hosts only, for testing.";
-    MAINNET_API_BASE_URL = "HYPERLIQUID_MAINNET_API_BASE_URL" => "Same override, mainnet only.";
-    TESTNET_API_BASE_URL = "HYPERLIQUID_TESTNET_API_BASE_URL" => "Same override, testnet only.";
-    OWS_VAULT_PATH = "HYPERLIQUID_OWS_VAULT_PATH" => "OWS vault directory. Defaults to ~/.hyperliquid.";
-    OWS_PASSPHRASE = "OWS_PASSPHRASE" => "Passphrase for the OWS vault.";
-    ACCOUNT_KEY_PASSPHRASE = "HYPERLIQUID_ACCOUNT_KEY_PASSPHRASE" => "Passphrase that unlocks pre-vault stored accounts, instead of the OS keychain.";
-    ACCOUNT_KEYCHAIN_DISABLED = "HYPERLIQUID_ACCOUNT_KEYCHAIN_DISABLED" => "Set to skip the OS keychain when unlocking pre-vault stored accounts.";
-    /// Removed: it persisted raw account encryption keys. Setting it is an error.
-    ACCOUNT_KEY_STORE_DIR = "HYPERLIQUID_ACCOUNT_KEY_STORE_DIR" => "";
-    DEFAULT_BUILDER_ADDRESS = "HYPERLIQUID_DEFAULT_BUILDER_ADDRESS" => "Default builder address for orders and setup suggestions.", build BUILD_DEFAULT_BUILDER_ADDRESS;
-    DEFAULT_BUILDER_FEE_RATE = "HYPERLIQUID_DEFAULT_BUILDER_FEE_RATE" => "Default builder fee rate, a percent string such as 0.001%.", build BUILD_DEFAULT_BUILDER_FEE_RATE;
-    DEFAULT_REFERRAL_CODE = "HYPERLIQUID_DEFAULT_REFERRAL_CODE" => "Default referral code for `referral set` and setup.", build BUILD_DEFAULT_REFERRAL_CODE;
-    NO_UPDATE_CHECK = "HYPERLIQUID_NO_UPDATE_CHECK" => "Set to 1 to skip release update checks.";
-    NO_UPDATE_NOTIFIER = "NO_UPDATE_NOTIFIER" => "Set to a non-empty value to skip the update notice.";
-    AUTO_UPDATE = "HYPERLIQUID_AUTO_UPDATE" => "Set to 1 to automatically update binary in place when a newer release is detected.";
-    MCP_ALLOW_UNSAFE = "HYPERLIQUID_MCP_ALLOW_UNSAFE" => "Set to 1 to let `mcp` expose commands beyond the read-only set.";
-    MCP_TIMEOUT_MS = "HYPERLIQUID_MCP_TIMEOUT_MS" => "Execution deadline for `mcp` calls, in milliseconds (default 30000).";
-    WATCH_MAX_TICKS = "HYPERLIQUID_WATCH_MAX_TICKS" => "Tick bound for --watch when --max-ticks is not given.";
-    SUBSCRIBE_MAX_EVENTS = "HYPERLIQUID_SUBSCRIBE_MAX_EVENTS" => "Event bound for subscribe when no bound option is given.";
-    NO_COLOR = "NO_COLOR" => "Disable color when set to a non-empty value.";
-    FORCE_COLOR = "FORCE_COLOR" => "Force color on, or off when set to 0 or false.";
-    CI = "CI" => "Treat the run as non-interactive: no prompts.";
-    TERM = "TERM" => "";
-    CARGO_HOME = "CARGO_HOME" => "";
-}
-
-// Each `build` row above bakes the variable's value into the binary when it is
-// set at build time (`HYPERLIQUID_DEFAULT_BUILDER_ADDRESS=... cargo build`); a
-// runtime variable with the same name still overrides it. All are empty in the
-// upstream repo, meaning no default.
-
 const TESTNET_REFERRAL_FALLBACK: &str = "TESTNET";
-
-#[must_use]
-pub fn env_help_section() -> String {
-    let advertised = || {
-        ENV_HELP
-            .iter()
-            .filter(|(_, description)| !description.is_empty())
-    };
-    let width = advertised()
-        .map(|(name, _)| name.len())
-        .max()
-        .unwrap_or_default()
-        + 2;
-    let mut section = String::from("Environment:\n");
-    for (name, description) in advertised() {
-        section.push_str(&format!("  {name:<width$}{description}\n"));
-    }
-    section
-}
-
-/// Where environment variables come from. Tests inject a fixed map instead of
-/// mutating the process environment.
-#[derive(Debug, Clone, Default)]
-pub enum EnvSource {
-    #[default]
-    Process,
-    Fixed(HashMap<String, OsString>),
-}
-
-impl EnvSource {
-    pub fn fixed<K, V>(pairs: impl IntoIterator<Item = (K, V)>) -> Self
-    where
-        K: Into<String>,
-        V: Into<OsString>,
-    {
-        Self::Fixed(
-            pairs
-                .into_iter()
-                .map(|(key, value)| (key.into(), value.into()))
-                .collect(),
-        )
-    }
-
-    pub(crate) fn get_os(&self, name: &str) -> Option<OsString> {
-        match self {
-            Self::Process => std::env::var_os(name),
-            Self::Fixed(map) => map.get(name).cloned(),
-        }
-    }
-
-    /// The value when set and valid Unicode.
-    #[must_use]
-    pub fn get(&self, name: &str) -> Option<String> {
-        self.get_os(name).and_then(|value| value.into_string().ok())
-    }
-
-    #[must_use]
-    pub fn get_non_empty(&self, name: &str) -> Option<String> {
-        self.get(name).filter(|value| !value.is_empty())
-    }
-
-    #[must_use]
-    pub fn get_trimmed(&self, name: &str) -> Option<String> {
-        nonblank(self.get(name).as_deref()).map(str::to_string)
-    }
-
-    /// Whether the variable is set at all, even to an empty or non-Unicode value.
-    #[must_use]
-    pub fn is_set(&self, name: &str) -> bool {
-        self.get_os(name).is_some()
-    }
-
-    /// The value with invalid Unicode replaced, when set.
-    #[must_use]
-    pub fn get_lossy(&self, name: &str) -> Option<String> {
-        self.get_os(name)
-            .map(|value| value.to_string_lossy().into_owned())
-    }
-}
 
 /// A builder address/fee pair from one settings layer, not yet validated.
 /// The labels name the layer's fields in validation errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderDefaultSetting {
+pub(crate) struct BuilderDefaultSetting {
     pub address: Option<String>,
     pub fee_rate: Option<String>,
     pub address_label: &'static str,
     pub fee_label: &'static str,
 }
 
-/// Where the Bankr API key came from, which decides whether a stored address
-/// belongs to it: a key from the environment or the Bankr CLI is not the wallet
-/// that `wallet login` recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KeySource {
-    Environment,
-    Config,
-    BankrCli,
-}
-
-/// The Bankr API key of a run and the host to send it to; see
-/// [`Settings::bankr_credentials`].
-#[derive(Clone)]
-pub struct BankrCredentials {
-    pub api_key: String,
-    /// `None` means the public endpoint.
-    pub api_url: Option<String>,
-    pub source: KeySource,
-}
-
-impl std::fmt::Debug for BankrCredentials {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BankrCredentials")
-            .field("api_key", &"[redacted]")
-            .field("api_url", &self.api_url)
-            .field("source", &self.source)
-            .finish()
-    }
-}
-
 enum ConfigSource {
     File(ConfigFile),
+    #[cfg(test)]
     Preloaded(Option<Arc<Config>>),
     Absent,
 }
@@ -243,7 +67,7 @@ struct PrivateKeyOnly {
 /// A locked read-modify-write of the config file, begun by
 /// [`Settings::begin_config_update`]. Holding it holds the lock; the file is
 /// written only by [`Self::commit`].
-pub struct ConfigTransaction<'a> {
+pub(crate) struct ConfigTransaction<'a> {
     settings: &'a Settings,
     file: &'a ConfigFile,
     lock: FileLock,
@@ -253,10 +77,13 @@ pub struct ConfigTransaction<'a> {
 impl ConfigTransaction<'_> {
     /// Apply `edit`, save when it changed anything, and return the config keys
     /// it changed (set, changed or cleared).
-    pub fn commit(self, edit: impl FnOnce(&mut Config)) -> Result<Vec<String>, anyhow::Error> {
+    pub(crate) fn commit(
+        self,
+        edit: impl FnOnce(&mut Config),
+    ) -> Result<Vec<String>, anyhow::Error> {
         let mut after = self.before.clone();
         edit(&mut after);
-        let changed = changed_keys(&self.before, &after);
+        let changed = changed_keys(&self.before, &after)?;
         if !changed.is_empty() {
             self.file.save(&after, &self.lock)?;
         }
@@ -265,12 +92,17 @@ impl ConfigTransaction<'_> {
     }
 }
 
-fn changed_keys(before: &Config, after: &Config) -> Vec<String> {
-    let fields = |config: &Config| match serde_json::to_value(config) {
-        Ok(serde_json::Value::Object(fields)) => fields,
-        _ => serde_json::Map::new(),
-    };
-    let (before, after) = (fields(before), fields(after));
+/// The top-level keys whose value differs between the two configs, sorted.
+fn changed_keys(before: &Config, after: &Config) -> Result<Vec<String>, anyhow::Error> {
+    fn fields(
+        config: &Config,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, anyhow::Error> {
+        match serde_json::to_value(config)? {
+            serde_json::Value::Object(fields) => Ok(fields),
+            other => anyhow::bail!("the config serialized to {other}, not an object"),
+        }
+    }
+    let (before, after) = (fields(before)?, fields(after)?);
     let mut keys: Vec<String> = after
         .iter()
         .filter(|(key, value)| before.get(*key) != Some(*value))
@@ -283,7 +115,7 @@ fn changed_keys(before: &Config, after: &Config) -> Vec<String> {
         )
         .collect();
     keys.sort();
-    keys
+    Ok(keys)
 }
 
 impl Settings {
@@ -301,8 +133,9 @@ impl Settings {
     }
 
     /// Settings over `env` and an optional config file. Never prints hygiene warnings.
+    #[cfg(test)]
     #[must_use]
-    pub fn new(env: EnvSource, file: Option<ConfigFile>) -> Self {
+    pub(crate) fn new(env: EnvSource, file: Option<ConfigFile>) -> Self {
         Self::build(
             env,
             file.map_or(ConfigSource::Absent, ConfigSource::File),
@@ -311,8 +144,9 @@ impl Settings {
     }
 
     /// Settings over `env` with an in-memory config and no file.
+    #[cfg(test)]
     #[must_use]
-    pub fn detached(env: EnvSource, config: Option<Config>) -> Self {
+    pub(crate) fn detached(env: EnvSource, config: Option<Config>) -> Self {
         Self::build(env, ConfigSource::Preloaded(config.map(Arc::new)), false)
     }
 
@@ -342,7 +176,9 @@ impl Settings {
     pub fn config_file(&self) -> Option<&ConfigFile> {
         match &self.source {
             ConfigSource::File(file) => Some(file),
-            ConfigSource::Preloaded(_) | ConfigSource::Absent => None,
+            #[cfg(test)]
+            ConfigSource::Preloaded(_) => None,
+            ConfigSource::Absent => None,
         }
     }
 
@@ -354,7 +190,7 @@ impl Settings {
     /// The config file when it exists on disk. `Ok(None)` for a run with no
     /// config location and for a file that is genuinely absent; a file that
     /// can't be inspected is an error, never "absent".
-    pub fn existing_config_file(&self) -> Result<Option<&ConfigFile>, CliError> {
+    pub(crate) fn existing_config_file(&self) -> Result<Option<&ConfigFile>, CliError> {
         match self.config_file() {
             Some(file) if file.exists()? => Ok(Some(file)),
             _ => Ok(None),
@@ -363,7 +199,7 @@ impl Settings {
 
     /// Where the config file is, for messages.
     #[must_use]
-    pub fn config_path_display(&self) -> String {
+    pub(crate) fn config_path_display(&self) -> String {
         self.config_file().map_or_else(
             || "unavailable".to_string(),
             |file| file.path().display().to_string(),
@@ -372,7 +208,7 @@ impl Settings {
 
     /// Lock the config file and read it fresh, for an edit that another process
     /// may race.
-    pub fn begin_config_update(&self) -> Result<ConfigTransaction<'_>, anyhow::Error> {
+    pub(crate) fn begin_config_update(&self) -> Result<ConfigTransaction<'_>, anyhow::Error> {
         let file = self.require_config_file()?;
         let lock = file.lock()?;
         let before = file.read()?;
@@ -389,7 +225,7 @@ impl Settings {
 
     /// Edit the config under its lock. Returns the keys the edit changed; the
     /// file is untouched when it changed none.
-    pub fn update_config(
+    pub(crate) fn update_config(
         &self,
         edit: impl FnOnce(&mut Config),
     ) -> Result<Vec<String>, anyhow::Error> {
@@ -397,7 +233,7 @@ impl Settings {
     }
 
     /// Delete the config file under its lock. A file that is already gone is success.
-    pub fn remove_config(&self) -> Result<(), anyhow::Error> {
+    pub(crate) fn remove_config(&self) -> Result<(), anyhow::Error> {
         let file = self.require_config_file()?;
         let lock = file.lock()?;
         file.remove(&lock)?;
@@ -408,8 +244,8 @@ impl Settings {
     fn note_parsed(&self, file: &ConfigFile, has_plaintext_key: bool) {
         if let Some(announced) = &self.hygiene {
             announced.call_once(|| {
-                for line in file.hygiene_warnings(has_plaintext_key) {
-                    eprintln!("{line}");
+                for notice in file.hygiene_warnings(has_plaintext_key) {
+                    notice.eprint();
                 }
             });
         }
@@ -431,6 +267,7 @@ impl Settings {
     pub fn config(&self) -> Result<Option<Arc<Config>>, CliError> {
         let file = match &self.source {
             ConfigSource::File(file) => file,
+            #[cfg(test)]
             ConfigSource::Preloaded(config) => return Ok(config.clone()),
             ConfigSource::Absent => return Ok(None),
         };
@@ -463,6 +300,7 @@ impl Settings {
     fn file_private_key(&self) -> Result<Option<String>, CliError> {
         let file = match &self.source {
             ConfigSource::File(file) => file,
+            #[cfg(test)]
             ConfigSource::Preloaded(config) => {
                 return Ok(config
                     .as_ref()
@@ -514,7 +352,7 @@ impl Settings {
 
     /// The loopback-only API endpoint override for `network`. The network-specific
     /// variable wins over `HYPERLIQUID_API_BASE_URL`.
-    pub fn api_base_url_override(
+    pub(crate) fn api_base_url_override(
         &self,
         network: Network,
     ) -> Result<Option<reqwest::Url>, CliError> {
@@ -536,14 +374,14 @@ impl Settings {
             .and_then(|config| config.default_wallet_id.clone()))
     }
 
-    pub fn ows_vault_path(&self) -> Option<PathBuf> {
+    pub(crate) fn ows_vault_path(&self) -> Option<PathBuf> {
         self.env
             .get_non_empty(env::OWS_VAULT_PATH)
             .map(PathBuf::from)
             .or_else(|| crate::paths::default_vault_dir(&self.env))
     }
 
-    pub fn ows_passphrase(&self) -> Option<String> {
+    pub(crate) fn ows_passphrase(&self) -> Option<String> {
         self.env.get_non_empty(env::OWS_PASSPHRASE)
     }
 
@@ -552,69 +390,11 @@ impl Settings {
     }
 
     /// What `wallet login` stored for Bankr; empty when nothing is stored.
-    pub fn bankr_login(&self) -> Result<BankrLogin, CliError> {
+    pub(crate) fn bankr_login(&self) -> Result<BankrLogin, CliError> {
         Ok(self
             .config()?
             .map(|config| config.bankr.clone())
             .unwrap_or_default())
-    }
-
-    /// `BANKR_API_URL`, which overrides the host in every case.
-    #[must_use]
-    pub fn bankr_env_api_url(&self) -> Option<String> {
-        self.env.get_trimmed(env::BANKR_API_URL)
-    }
-
-    /// The Bankr credentials of this run: `BANKR_API_KEY` first, then this CLI's
-    /// config, then the Bankr CLI's own `~/.bankr/config.json`, so an existing
-    /// login works without repeating it. The host is `BANKR_API_URL`, else the
-    /// host stored beside the key; `None` means the public endpoint. `Ok(None)`
-    /// when no source holds a key.
-    pub fn bankr_credentials(&self) -> Result<Option<BankrCredentials>, CliError> {
-        let login = self.bankr_login()?;
-        let stored_url = login.api_url().map(str::to_string);
-        let (api_key, file_url, source) =
-            if let Some(key) = self.env.get_trimmed(env::BANKR_API_KEY) {
-                (key, stored_url, KeySource::Environment)
-            } else if let Some(key) = login.api_key() {
-                (key.to_string(), stored_url, KeySource::Config)
-            } else if let Some((key, url)) = self.bankr_cli_credentials()? {
-                (key, url.or(stored_url), KeySource::BankrCli)
-            } else {
-                return Ok(None);
-            };
-        Ok(Some(BankrCredentials {
-            api_key,
-            api_url: self.bankr_env_api_url().or(file_url),
-            source,
-        }))
-    }
-
-    /// The key and host in the Bankr CLI's own config. A missing file or key is
-    /// no credentials; a file that can't be read or parsed is an error.
-    fn bankr_cli_credentials(&self) -> Result<Option<(String, Option<String>)>, CliError> {
-        let Some(path) = crate::paths::bankr_cli_config(&self.env) else {
-            return Ok(None);
-        };
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => {
-                return Err(CliError::Configuration(format!(
-                    "failed to read the Bankr CLI config {}: {err}",
-                    path.display()
-                )));
-            }
-        };
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(|err| {
-            CliError::Configuration(format!(
-                "invalid Bankr CLI config {}: {err}",
-                path.display()
-            ))
-        })?;
-        let text_field = |name: &str| nonblank(value.get(name).and_then(serde_json::Value::as_str));
-        Ok(text_field("apiKey")
-            .map(|key| (key.to_string(), text_field("apiUrl").map(str::to_string))))
     }
 
     fn env_builder_default(&self) -> Option<BuilderDefaultSetting> {
@@ -655,8 +435,8 @@ impl Settings {
             })
             .or_else(|| {
                 layer(
-                    owned(Some(BUILD_DEFAULT_BUILDER_ADDRESS)),
-                    owned(Some(BUILD_DEFAULT_BUILDER_FEE_RATE)),
+                    owned(Some(env::BUILD_DEFAULT_BUILDER_ADDRESS)),
+                    owned(Some(env::BUILD_DEFAULT_BUILDER_FEE_RATE)),
                     env::DEFAULT_BUILDER_ADDRESS,
                     env::DEFAULT_BUILDER_FEE_RATE,
                 )
@@ -665,7 +445,7 @@ impl Settings {
 
     /// The default builder pair: environment, then config file, then the build-time default.
     /// The config file is only read when the environment sets neither value.
-    pub fn default_builder(&self) -> Result<Option<BuilderDefaultSetting>, CliError> {
+    pub(crate) fn default_builder(&self) -> Result<Option<BuilderDefaultSetting>, CliError> {
         if let Some(setting) = self.env_builder_default() {
             return Ok(Some(setting));
         }
@@ -676,7 +456,7 @@ impl Settings {
     /// The builder pair setup and wallet creation would offer: environment, then
     /// the build-time default. The config file is the thing being filled in, so it is skipped.
     #[must_use]
-    pub fn suggested_default_builder(&self) -> Option<BuilderDefaultSetting> {
+    pub(crate) fn suggested_default_builder(&self) -> Option<BuilderDefaultSetting> {
         self.layered_builder_default(None)
     }
 
@@ -687,7 +467,7 @@ impl Settings {
                 let stored = config.and_then(|config| config.default_referral_code.as_deref());
                 nonblank(stored).map(str::to_string)
             })
-            .or_else(|| nonblank(Some(BUILD_DEFAULT_REFERRAL_CODE)).map(str::to_string))
+            .or_else(|| nonblank(Some(env::BUILD_DEFAULT_REFERRAL_CODE)).map(str::to_string))
             .or_else(|| is_testnet.then(|| TESTNET_REFERRAL_FALLBACK.to_string()))
     }
 
@@ -700,7 +480,7 @@ impl Settings {
 
     /// The referral code setup and wallet creation would offer, without the config file.
     #[must_use]
-    pub fn suggested_default_referral_code(&self, is_testnet: bool) -> Option<String> {
+    pub(crate) fn suggested_default_referral_code(&self, is_testnet: bool) -> Option<String> {
         self.layered_referral_code(is_testnet, None)
     }
 }
@@ -710,21 +490,6 @@ fn configuration_message(err: CliError) -> String {
         CliError::Configuration(message) => message,
         other => other.to_string(),
     }
-}
-
-/// Whether `url` names this machine: `localhost` or a loopback address, IPv4 or
-/// IPv6 (URLs bracket IPv6 hosts).
-#[must_use]
-pub fn is_loopback_url(url: &reqwest::Url) -> bool {
-    let host = url
-        .host_str()
-        .unwrap_or_default()
-        .trim_start_matches('[')
-        .trim_end_matches(']');
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<IpAddr>()
-            .is_ok_and(|address| address.is_loopback())
 }
 
 /// Parse a hidden API endpoint override. Overrides are limited to loopback hosts
@@ -893,10 +658,6 @@ mod tests {
         assert!(settings.testnet(true).unwrap());
         assert_eq!(settings.private_key(None).unwrap().as_deref(), Some("env"));
         assert!(settings.testnet(false).is_err());
-        assert_eq!(
-            settings.private_key(Some("")).unwrap().as_deref(),
-            Some("env")
-        );
     }
 
     #[test]
@@ -958,14 +719,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_without_a_file_cannot_be_updated() {
-        let err = settings(&[], None)
-            .update_config(|config| config.default_wallet_id = Some("w".to_string()))
-            .unwrap_err();
-        assert!(err.to_string().contains("config directory"));
-    }
-
-    #[test]
     fn remove_config_deletes_the_file_and_forgets_its_contents() {
         let (tmp, settings) = file_settings(&[], r#"{"network":"testnet"}"#);
         assert!(settings.testnet(false).unwrap());
@@ -980,6 +733,7 @@ mod tests {
         let no_location = settings(&[], None)
             .update_config(|config| config.default_wallet_id = Some("w".to_string()))
             .unwrap_err();
+        assert!(no_location.to_string().contains("config directory"));
         assert_eq!(crate::errors::from_anyhow(no_location).exit_code(), 2);
 
         // A config whose parent "directory" is a file can't be written.
@@ -1039,101 +793,6 @@ mod tests {
                 "{result:?}"
             );
         }
-    }
-
-    fn bankr_settings(env: &[(&str, &str)], home: &TempDir, config: Option<Config>) -> Settings {
-        let home_dir = home.path().to_str().unwrap().to_string();
-        let mut vars: Vec<(&str, &str)> = vec![(env::HOME_DIR, home_dir.as_str())];
-        vars.extend_from_slice(env);
-        Settings::detached(EnvSource::fixed(vars), config)
-    }
-
-    fn write_bankr_cli_config(home: &TempDir, contents: &str) {
-        let dir = home.path().join(".bankr");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("config.json"), contents).unwrap();
-    }
-
-    #[test]
-    fn bankr_credentials_prefer_env_then_config_then_the_bankr_cli() {
-        let home = TempDir::new().unwrap();
-        write_bankr_cli_config(
-            &home,
-            r#"{"apiKey": " bk_cli ", "apiUrl": "https://cli.example"}"#,
-        );
-        let login = Config {
-            bankr: BankrLogin::new(
-                "bk_config",
-                Some("https://config.example"),
-                "0x0000000000000000000000000000000000000009"
-                    .parse()
-                    .unwrap(),
-            ),
-            ..Config::default()
-        };
-
-        let env_key = bankr_settings(
-            &[(env::BANKR_API_KEY, " bk_env ")],
-            &home,
-            Some(login.clone()),
-        )
-        .bankr_credentials()
-        .unwrap()
-        .unwrap();
-        assert_eq!(env_key.api_key, "bk_env");
-        assert_eq!(env_key.source, KeySource::Environment);
-        assert_eq!(env_key.api_url.as_deref(), Some("https://config.example"));
-
-        let stored = bankr_settings(&[], &home, Some(login))
-            .bankr_credentials()
-            .unwrap()
-            .unwrap();
-        assert_eq!(stored.api_key, "bk_config");
-        assert_eq!(stored.source, KeySource::Config);
-
-        let cli = bankr_settings(&[], &home, None)
-            .bankr_credentials()
-            .unwrap()
-            .unwrap();
-        assert_eq!(cli.api_key, "bk_cli");
-        assert_eq!(cli.source, KeySource::BankrCli);
-        assert_eq!(cli.api_url.as_deref(), Some("https://cli.example"));
-
-        let overridden = bankr_settings(
-            &[(env::BANKR_API_URL, " https://env.example ")],
-            &home,
-            None,
-        )
-        .bankr_credentials()
-        .unwrap()
-        .unwrap();
-        assert_eq!(overridden.api_url.as_deref(), Some("https://env.example"));
-    }
-
-    #[test]
-    fn no_bankr_credentials_is_none_but_an_unreadable_bankr_cli_file_is_an_error() {
-        let home = TempDir::new().unwrap();
-        assert!(
-            bankr_settings(&[], &home, None)
-                .bankr_credentials()
-                .unwrap()
-                .is_none()
-        );
-
-        write_bankr_cli_config(&home, r#"{"apiKey": "   "}"#);
-        assert!(
-            bankr_settings(&[], &home, None)
-                .bankr_credentials()
-                .unwrap()
-                .is_none()
-        );
-
-        write_bankr_cli_config(&home, "{not json");
-        let err = bankr_settings(&[], &home, None)
-            .bankr_credentials()
-            .unwrap_err();
-        assert!(matches!(err, CliError::Configuration(_)), "{err}");
-        assert!(err.to_string().contains("config.json"), "{err}");
     }
 
     #[test]
@@ -1231,7 +890,8 @@ mod tests {
         let suggestion = settings(&[], Some(config)).suggested_default_builder();
         assert_eq!(
             suggestion.is_some(),
-            !BUILD_DEFAULT_BUILDER_ADDRESS.is_empty() || !BUILD_DEFAULT_BUILDER_FEE_RATE.is_empty()
+            !env::BUILD_DEFAULT_BUILDER_ADDRESS.is_empty()
+                || !env::BUILD_DEFAULT_BUILDER_FEE_RATE.is_empty()
         );
     }
 
@@ -1258,7 +918,7 @@ mod tests {
                 .as_deref(),
             Some("FROMFILE")
         );
-        if BUILD_DEFAULT_REFERRAL_CODE.is_empty() {
+        if env::BUILD_DEFAULT_REFERRAL_CODE.is_empty() {
             assert_eq!(
                 settings(&[], None).default_referral_code(false).unwrap(),
                 None
@@ -1274,35 +934,11 @@ mod tests {
     }
 
     #[test]
-    fn every_variable_is_listed_once_and_the_vault_default_is_spelled_as_it_is_resolved() {
-        let mut names = env::ALL.to_vec();
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), env::ALL.len(), "duplicate variable name");
-
-        let vault_help = ENV_HELP
-            .iter()
-            .find(|(name, _)| *name == env::OWS_VAULT_PATH)
-            .unwrap()
-            .1;
-        assert!(vault_help.contains(&format!("~/{}", crate::paths::DEFAULT_VAULT_DIR)));
-    }
-
-    #[test]
-    fn api_override_accepts_ipv6_loopback_like_the_bankr_endpoint_does() {
+    fn api_override_accepts_ipv6_loopback() {
         let url = settings(&[(env::API_BASE_URL, "http://[::1]:4011")], None)
             .api_base_url_override(Network::Mainnet)
             .unwrap()
             .unwrap();
         assert_eq!(url.as_str(), "http://[::1]:4011/");
-        assert!(is_loopback_url(
-            &reqwest::Url::parse("http://LOCALHOST:1").unwrap()
-        ));
-        assert!(!is_loopback_url(
-            &reqwest::Url::parse("http://[2001:db8::1]:1").unwrap()
-        ));
-        assert!(!is_loopback_url(
-            &reqwest::Url::parse("http://127.example.com").unwrap()
-        ));
     }
 }

@@ -47,7 +47,6 @@ pub fn classify(asset_id: u64) -> AssetIdLayout {
     }
 }
 
-/// Protocol asset id of the spot universe entry `spot_index`.
 #[must_use]
 pub fn spot_asset_index(spot_index: usize) -> usize {
     SPOT_OFFSET + spot_index
@@ -59,19 +58,19 @@ pub fn spot_internal_id(asset_index: usize) -> usize {
     asset_index.saturating_sub(SPOT_OFFSET)
 }
 
-/// Info-endpoint coin key for a spot asset: `@N`.
+/// Info-endpoint coin key for a spot asset: `@N`. Callers ask
+/// [`SpotAsset::info_coin`](super::SpotAsset::info_coin), which knows the pair
+/// that is addressed by name instead.
 #[must_use]
-pub fn spot_coin_key(asset_index: usize) -> String {
+pub(crate) fn spot_coin_key(asset_index: usize) -> String {
     spot_internal_coin_key(spot_internal_id(asset_index))
 }
 
-/// Info-endpoint coin key for spot universe index `internal_id`: `@N`.
 #[must_use]
-pub fn spot_internal_coin_key(internal_id: usize) -> String {
+pub(crate) fn spot_internal_coin_key(internal_id: usize) -> String {
     format!("@{internal_id}")
 }
 
-/// Parse an info-endpoint spot coin key (`@N`) into its universe index.
 #[must_use]
 pub fn parse_spot_coin_key(input: &str) -> Option<usize> {
     input
@@ -80,7 +79,6 @@ pub fn parse_spot_coin_key(input: &str) -> Option<usize> {
         .and_then(|value| value.parse::<usize>().ok())
 }
 
-/// Protocol asset id of market `index` on HIP-3 DEX slot `dex_slot`.
 #[must_use]
 pub fn hip3_asset_index(dex_slot: usize, index: usize) -> usize {
     HIP3_OFFSET + dex_slot * HIP3_SLOT_SIZE + index
@@ -144,13 +142,11 @@ pub fn outcome_asset_id(encoding: u64) -> Result<u64, CliError> {
         .ok_or_else(|| CliError::Unsupported("outcome asset id overflowed".to_string()))
 }
 
-/// Info-endpoint coin key for an outcome side: `#<encoding>`.
 #[must_use]
 pub fn outcome_coin(encoding: u64) -> String {
     format!("#{encoding}")
 }
 
-/// Outcome token name for an outcome side: `+<encoding>`.
 #[must_use]
 pub fn outcome_token(encoding: u64) -> String {
     format!("+{encoding}")

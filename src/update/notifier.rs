@@ -2,17 +2,19 @@
 //! background, and a once-a-day stderr line when a newer release exists.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use super::release::{InstallMethod, ReleaseClient, is_newer_version, normalize_version};
+use crate::clock;
 use crate::mode::Mode;
-use crate::output::terminal;
-use crate::settings::{EnvSource, env};
+use crate::output::sink;
 
-const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(20 * 60 * 60);
-const NOTICE_INTERVAL_SECS: i64 = 24 * 60 * 60;
+use crate::env::{self, EnvSource};
+
+const UPDATE_CHECK_INTERVAL: Duration = clock::HOUR.of(20);
+const NOTICE_INTERVAL_SECS: i64 = clock::DAY.of(1).as_secs() as i64;
 /// Longest an automatic update may spend downloading.
 const AUTO_UPDATE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Longest a command waits for the background refresh before exiting.
@@ -89,8 +91,7 @@ impl Suppression {
     fn current(mode: &Mode, disabled: bool, source: &EnvSource) -> Self {
         Self {
             disabled,
-            no_update_check_env: terminal::env_flag(source, env::NO_UPDATE_CHECK)
-                == terminal::EnvFlag::On,
+            no_update_check_env: env::flag(source, env::NO_UPDATE_CHECK) == env::EnvFlag::On,
             no_update_notifier: source
                 .get_os(env::NO_UPDATE_NOTIFIER)
                 .is_some_and(|value| !value.is_empty()),
@@ -112,7 +113,7 @@ pub fn maybe_start_update_check(mode: &Mode, disabled: bool, source: &EnvSource)
     start_update_check(
         Suppression::current(mode, disabled, source),
         crate::paths::version_cache_file(source),
-        terminal::env_flag(source, env::AUTO_UPDATE) == terminal::EnvFlag::On,
+        env::flag(source, env::AUTO_UPDATE) == env::EnvFlag::On,
         source,
     )
 }
@@ -147,8 +148,8 @@ async fn settle_refresh(check: &mut UpdateCheck) {
 }
 
 /// Finish the passive check after a successful command: wait at most
-/// ~150 ms for the background refresh, then print the update notice on stderr
-/// when a newer release is cached and none was shown in the last 24 hours.
+/// [`REFRESH_GRACE`] for the background refresh, then print the update notice on stderr
+/// when a newer release is cached and none was shown within [`NOTICE_INTERVAL_SECS`].
 pub async fn flush_update_check(mut check: UpdateCheck) {
     settle_refresh(&mut check).await;
     if let Some(cache_path) = check.cache_path.as_deref() {
@@ -165,7 +166,7 @@ async fn maybe_auto_update(cache_path: &Path, source: &EnvSource) {
         return;
     };
     let current_version = env!("CARGO_PKG_VERSION");
-    if !crate::update::is_newer_version(&cache.latest_version, current_version) {
+    if !is_newer_version(&cache.latest_version, current_version) {
         return;
     }
     let now = now_unix_seconds();
@@ -185,11 +186,11 @@ async fn maybe_auto_update(cache_path: &Path, source: &EnvSource) {
     if !claim_auto_update_attempt(cache_path, now).unwrap_or(false) {
         return;
     }
-    eprintln!(
+    sink::err_line(&format!(
         "Automatically updating hyperliquid from {current_version} to {}...",
         cache.latest_version
-    );
-    if let Err(e) = crate::update::download_and_replace_binary(
+    ));
+    if let Err(e) = super::self_update::download_and_replace_binary(
         &client,
         &cache.latest_version,
         &current_exe,
@@ -197,12 +198,12 @@ async fn maybe_auto_update(cache_path: &Path, source: &EnvSource) {
     )
     .await
     {
-        eprintln!("Automatic update failed: {e}");
+        sink::err_line(&format!("Automatic update failed: {e}"));
     } else {
-        eprintln!(
+        sink::err_line(&format!(
             "Successfully updated hyperliquid to {}.",
             cache.latest_version
-        );
+        ));
     }
 }
 
@@ -257,7 +258,7 @@ fn notify_if_due(cache_path: &Path, source: &EnvSource) {
     else {
         return;
     };
-    eprintln!("{notice}");
+    sink::err_line(&notice);
     let _ = update_version_cache(cache_path, |cache| cache.last_notified_at = Some(now));
 }
 
@@ -304,17 +305,14 @@ fn cache_age(cache: &VersionCache) -> Duration {
 }
 
 fn now_unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+    (clock::now_ms() / clock::SECOND.ms(1)) as i64
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::output::OutputFormat;
-    use crate::output::terminal::Terminal;
+    use crate::terminal::OutputFormat;
+    use crate::terminal::Terminal;
     use tempfile::TempDir;
 
     fn allowing() -> Suppression {

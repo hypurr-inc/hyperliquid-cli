@@ -5,14 +5,14 @@
 use clap::ArgMatches;
 use clap::parser::MatchesError;
 use hyperliquid_cli::command_spec::{
-    CommandSpec, ConfirmationPolicy, DryRunPolicy, RawPayloadPolicy, YES_ARG, check_args,
+    CommandSpec, DryRunPolicy, NetworkUse, RawPayloadPolicy, YES_ARG, YES_FLAG, check_args,
     supplied_secrets,
 };
 use hyperliquid_cli::errors::CliError;
 use hyperliquid_cli::input_hardening::{validate_input_path, validate_resource_id};
 use hyperliquid_cli::invocation::{Invocation, InvocationFlags};
-use hyperliquid_cli::signing::ensure_supports_expires_after;
-use hyperliquid_cli::stream::require_bound;
+use hyperliquid_cli::signable::ensure_supports_expires_after;
+use hyperliquid_cli::stream_bounds::require_bound;
 
 use crate::cli_shell::{Redactions, Selected};
 
@@ -29,13 +29,20 @@ pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyho
     if mode.machine_context()
         && let Some(bound) = spec.stream
     {
-        require_bound(bound, &selected.matches, inv.settings().env())?;
+        require_bound(
+            spec.key().as_str(),
+            bound,
+            &selected.matches,
+            inv.settings().env(),
+        )?;
     }
 
     if inv.flags().has_payload() {
         validate_raw_payload_supported(spec)?;
     }
-    validate_prompt_policy(&inv, &selected)?;
+    let confirmation = Confirmation::from_matches(&selected.matches)?;
+    let inv = inv.with_confirmed(confirmation.given);
+    validate_prompt_policy(&inv, &selected, confirmation)?;
     if inv.dry_run() && spec.dry_run != DryRunPolicy::Optional {
         return Err(CliError::Unsupported(spec.dry_run_refusal.map_or_else(
             || "--dry-run is only supported for mutating commands with preview support".to_string(),
@@ -43,7 +50,7 @@ pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyho
         ))
         .into());
     }
-    if spec.local {
+    if spec.network == NetworkUse::None {
         return selected.bound.run(&inv).await;
     }
 
@@ -57,7 +64,7 @@ pub(super) async fn run(selected: Selected, inv: Invocation) -> Result<(), anyho
     }
 
     let api = inv.remote()?.api();
-    if spec.uses_api() {
+    if spec.network == NetworkUse::Required {
         api.probe_override().await?;
     }
 
@@ -84,7 +91,6 @@ fn validate_raw_payload_supported(spec: &CommandSpec) -> Result<(), CliError> {
     )))
 }
 
-/// What the command line said about `--yes` for the matched command.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Confirmation {
     /// The command has a `--yes` option.
@@ -105,13 +111,17 @@ impl Confirmation {
             }),
             Err(MatchesError::UnknownArgument { .. }) => Ok(Self::default()),
             Err(err) => Err(CliError::Internal(anyhow::anyhow!(
-                "--{YES_ARG} is not a flag: {err}"
+                "{YES_FLAG} is not a flag: {err}"
             ))),
         }
     }
 }
 
-fn validate_prompt_policy(inv: &Invocation, selected: &Selected) -> Result<(), CliError> {
+fn validate_prompt_policy(
+    inv: &Invocation,
+    selected: &Selected,
+    confirmation: Confirmation,
+) -> Result<(), CliError> {
     let spec = selected.entry.spec;
     let matches = &selected.matches;
     let mode = inv.mode();
@@ -121,18 +131,13 @@ fn validate_prompt_policy(inv: &Invocation, selected: &Selected) -> Result<(), C
                 .to_string(),
         ));
     }
-    let confirmation = Confirmation::from_matches(matches)?;
-    if inv.dry_run()
-        || mode.can_prompt()
-        || spec.confirmation != ConfirmationPolicy::Prompt
-        || confirmation.given
-        || !confirmation_applies(spec, matches)?
-    {
-        return Ok(());
-    }
     // Whether a testnet run is exempt depends on the resolved network, not on
     // which flag or variable selected it, so it is asked last.
-    if spec.testnet_unprompted && !spec.prompts_on(inv.remote()?.network()) {
+    if inv.dry_run()
+        || mode.can_prompt()
+        || !confirmation_applies(spec, matches)?
+        || !inv.requires_approval(confirmation.given)?
+    {
         return Ok(());
     }
 
@@ -166,7 +171,7 @@ fn confirmation_required_error(selected: &Selected, confirmation: Confirmation) 
     });
     let approve = confirmation.supported.then(|| {
         let mut argv = args.clone();
-        argv.push(format!("--{YES_ARG}"));
+        argv.push(YES_FLAG.to_string());
         replay_command(&argv)
     });
     CliError::ConfirmationRequired {
@@ -221,9 +226,10 @@ fn replay_command(args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Cli;
     use crate::cli_shell::try_parse_cli_from;
-    use crate::{Cli, SECRET_GLOBALS};
     use clap::CommandFactory;
+    use hyperliquid_cli::auth::SignerFlags;
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_string()).collect()
@@ -263,19 +269,16 @@ mod tests {
     #[test]
     fn global_secret_ids_are_global_options() {
         let cli = Cli::command();
-        for id in SECRET_GLOBALS {
+        for id in SignerFlags::SECRET {
             assert!(
                 cli.get_arguments()
                     .any(|arg| arg.get_id() == id && arg.get_long().is_some()),
                 "{id} is not a global long option"
             );
             let redacted = hyperliquid_cli::input_hardening::redact_sensitive_json(
-                serde_json::json!({ *id: "value" }),
+                serde_json::json!({ id: "value" }),
             );
-            assert_eq!(
-                redacted[*id], "[redacted]",
-                "{id} escapes payload redaction"
-            );
+            assert_eq!(redacted[id], "[redacted]", "{id} escapes payload redaction");
         }
     }
 

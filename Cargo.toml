@@ -29,7 +29,7 @@ alloy = { version = "2.0.4", features = ["dyn-abi", "eip712", "sol-types", "sign
 clap = { version = "4", features = ["derive"] }
 
 # Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "io-util", "signal", "sync"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

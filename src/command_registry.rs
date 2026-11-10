@@ -4,22 +4,24 @@
 //! [`CommandSpec`] supplies policy. Nothing here is written by hand per command.
 
 use std::collections::BTreeMap;
-use std::sync::LazyLock;
 
 use clap::builder::ValueParser;
 use clap::{Arg, ArgAction, Command};
 use serde::Serialize;
+use serde_json::{Value, json};
 
+use crate::cli_command::Entry;
 use crate::command_spec::{
     ArgSpec, CommandSpec, ConfirmationPolicy, DryRunPolicy, GroupSpec, InputKind, Lifecycle,
-    Mutability, OutputContract, OwsSupport, RawPayloadPolicy, Risk, SignerSupport, StreamBound,
-    Transport, YES_ARG,
+    Mutability, OutputContract, OwsSupport, RawPayloadPolicy, Risk, SignerSupport, Transport,
+    YES_ARG,
 };
-use crate::commands;
+use crate::output::serialize_row;
+use crate::stream_bounds::StreamBound;
 
 /// The order `schema`, the MCP tool list and the contract fixtures list commands
 /// in. Every registered command appears exactly once; a test fails when one does not.
-const SCHEMA_ORDER: &[&str] = &[
+pub(crate) const SCHEMA_ORDER: &[&str] = &[
     "status",
     "meta",
     "perps list",
@@ -187,16 +189,14 @@ pub struct CommandRegistry {
 }
 
 impl CommandRegistry {
-    pub fn get() -> &'static Self {
-        static REGISTRY: LazyLock<CommandRegistry> = LazyLock::new(CommandRegistry::build);
-        &REGISTRY
-    }
-
-    fn build() -> Self {
-        let groups = commands::groups();
-        let mut tree = commands::command_tree().clone();
+    /// The contract of every entry, in [`SCHEMA_ORDER`]. `tree` is the clap
+    /// tree of those entries; `commands::registry` is the one caller that
+    /// builds it from the registered commands.
+    #[must_use]
+    pub fn build(entries: &[Entry], groups: &[GroupSpec], tree: &Command) -> Self {
+        let mut tree = tree.clone();
         tree.build();
-        let mut contracts = commands::entries()
+        let mut contracts = entries
             .iter()
             .map(|entry| CommandContract::generate(&tree, entry.spec, groups))
             .collect::<Vec<_>>();
@@ -228,7 +228,7 @@ impl CommandRegistry {
 
 /// What the schema says about one command. Serializing it yields the entry
 /// `hyperliquid schema` prints, except `json_schema`, which
-/// [`crate::commands::schema`] derives from the same value.
+/// [`CommandContract::json_schema`] derives from the same value.
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandContract {
     pub command: String,
@@ -404,6 +404,74 @@ impl CommandContract {
     pub fn input(&self, id: &str) -> Option<&InputContract> {
         self.inputs.iter().find(|input| input.id == id)
     }
+
+    /// The name the MCP server offers the command under: the path joined with
+    /// `_`, dashes spelled `_` too. Discovery and calls both use it; a test
+    /// keeps the names unique.
+    pub fn mcp_tool_name(&self) -> String {
+        self.command_path.join("_").replace('-', "_")
+    }
+
+    /// The JSON schema of the command's inputs, with the contract's policy as
+    /// the `x-hyperliquid` extension. `schema` prints it beside the contract
+    /// and MCP offers it as the tool's input schema.
+    pub fn json_schema(&self) -> Value {
+        let mut properties = serde_json::Map::new();
+        let mut required = Vec::new();
+
+        for input in &self.inputs {
+            let scalar = match input.arg_type {
+                ArgType::Boolean => "boolean",
+                ArgType::Integer => "number",
+                ArgType::String => "string",
+            };
+            let mut prop = serde_json::Map::new();
+            if input.multiple {
+                prop.insert("type".into(), json!("array"));
+                prop.insert("items".into(), json!({"type": scalar}));
+            } else {
+                prop.insert("type".into(), json!(scalar));
+            }
+            if !input.enum_values.is_empty() {
+                prop.insert("enum".into(), json!(input.enum_values));
+            }
+            if let Some(description) = &input.description {
+                prop.insert("description".into(), json!(description));
+            }
+            if let Some(default) = &input.default {
+                prop.insert("default".into(), json!(default));
+            }
+            if let Some(kind) = input.kind {
+                prop.insert("input_kind".into(), serialize_row(&kind));
+            }
+            properties.insert(input.id.clone(), Value::Object(prop));
+            if input.required {
+                required.push(json!(input.id));
+            }
+        }
+
+        let mut schema = serde_json::Map::new();
+        schema.insert("type".into(), json!("object"));
+        schema.insert("properties".into(), Value::Object(properties));
+        if !required.is_empty() {
+            schema.insert("required".into(), Value::Array(required));
+        }
+        if !self.spec.one_of_required.is_empty() {
+            schema.insert(
+                "oneOf".into(),
+                Value::Array(
+                    self.spec
+                        .one_of_required
+                        .iter()
+                        .map(|required| json!({ "required": required }))
+                        .collect(),
+                ),
+            );
+        }
+        schema.insert("x-hyperliquid".into(), serialize_row(&self.policy));
+        schema.insert("additionalProperties".into(), json!(false));
+        Value::Object(schema)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -510,50 +578,5 @@ fn output_contract(spec: &CommandSpec) -> OutputContract {
         OutputContract::CommandResultOrDryRunEnvelope
     } else {
         OutputContract::JsonValue
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeSet;
-
-    use super::*;
-
-    #[test]
-    fn schema_order_lists_every_registered_command_exactly_once() {
-        let listed = SCHEMA_ORDER.iter().copied().collect::<BTreeSet<_>>();
-        assert_eq!(
-            listed.len(),
-            SCHEMA_ORDER.len(),
-            "SCHEMA_ORDER has a duplicate"
-        );
-        let registered = commands::entries()
-            .iter()
-            .map(|entry| entry.spec.key())
-            .collect::<BTreeSet<_>>();
-        let missing = registered
-            .iter()
-            .filter(|key| !listed.contains(key.as_str()))
-            .collect::<Vec<_>>();
-        assert!(missing.is_empty(), "not in SCHEMA_ORDER: {missing:?}");
-        let unknown = listed
-            .iter()
-            .filter(|key| !registered.contains(**key))
-            .collect::<Vec<_>>();
-        assert!(
-            unknown.is_empty(),
-            "SCHEMA_ORDER names no command: {unknown:?}"
-        );
-    }
-
-    #[test]
-    fn every_registered_command_has_exactly_one_contract() {
-        let contracts = CommandRegistry::get().commands();
-        let paths = contracts
-            .iter()
-            .map(|command| command.command_path.clone())
-            .collect::<BTreeSet<_>>();
-        assert_eq!(contracts.len(), commands::entries().len());
-        assert_eq!(paths.len(), contracts.len(), "two contracts share a path");
     }
 }

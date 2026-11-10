@@ -1,5 +1,6 @@
 use super::CliError;
-use crate::settings::env;
+use crate::env;
+use crate::hints::wallet as hints;
 
 /// A recovery command in the `next` list of an error envelope. `when` states
 /// the condition for running it, such as human approval.
@@ -30,15 +31,14 @@ pub struct Recovery {
 }
 
 impl CliError {
-    /// Recovery commands for this error, when one is known.
     #[must_use]
     pub fn recovery(&self) -> Option<Recovery> {
         match self {
             Self::AuthRequired => Some(Recovery {
                 instruction: "Set up a wallet:".into(),
                 commands: vec![
-                    NextCommand::new("hyperliquid setup"),
-                    NextCommand::new("hyperliquid wallet login"),
+                    NextCommand::new(hints::SETUP),
+                    NextCommand::new(hints::WALLET_LOGIN),
                 ],
                 note: Some(format!(
                     "Or set {}, or {} with --bankr, for this run.",
@@ -49,8 +49,8 @@ impl CliError {
             Self::UnknownOutcome(_) => Some(Recovery {
                 instruction: "Check open orders and recent fills:".into(),
                 commands: vec![
-                    NextCommand::new("hyperliquid orders open"),
-                    NextCommand::new("hyperliquid account fills"),
+                    NextCommand::new(crate::hints::CHECK_LIVE_COMMAND),
+                    NextCommand::new(crate::hints::ACCOUNT_FILLS_COMMAND),
                 ],
                 note: None,
             }),
@@ -71,7 +71,12 @@ impl CliError {
                         note: None,
                     }),
                     None => approve.map(|approve| Recovery {
-                        instruction: "After a human approves, rerun with --yes:".into(),
+                        instruction: concat!(
+                            "After a human approves, rerun with ",
+                            crate::yes_flag!(),
+                            ":"
+                        )
+                        .to_string(),
                         commands: vec![approve],
                         note: None,
                     }),

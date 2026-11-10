@@ -1,7 +1,7 @@
 mod support;
 
 use serde_json::{Value, json};
-use support::IsolatedHome;
+use support::{IsolatedHome, run_json};
 
 #[test]
 fn incident_context_excludes_remote_data_and_preserves_explicit_context() {
@@ -12,15 +12,7 @@ fn incident_context_excludes_remote_data_and_preserves_explicit_context() {
         "data": {"command": "mids", "http_status": 503,
             "remote_message": "secret remote message", "unknown": "secret unknown"}
     }));
-    let output = home
-        .command()
-        .args(["--json", "report-incident"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let report: Value = serde_json::from_slice(&output).unwrap();
+    let report = run_json(home.command().args(["--json", "report-incident"]));
     let body = report["body"].as_str().unwrap();
     assert!(!body.contains("secret"));
     assert!(body.contains("api / unavailable (exit 12)"), "{body}");
@@ -39,22 +31,15 @@ fn incident_context_excludes_remote_data_and_preserves_explicit_context() {
             "category": "api", "reason": "unavailable", "exit_code": 12
         })
     );
-    let output = home
-        .command()
-        .args([
-            "--json",
-            "report-incident",
-            "--context",
-            "explicit remote_message",
-            "--error",
-            "explicit error",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let report: Value = serde_json::from_slice(&output).unwrap();
+
+    let report = run_json(home.command().args([
+        "--json",
+        "report-incident",
+        "--context",
+        "explicit remote_message",
+        "--error",
+        "explicit error",
+    ]));
     let body = report["body"].as_str().unwrap();
     assert!(
         body.contains("```json\nexplicit remote_message\n```"),

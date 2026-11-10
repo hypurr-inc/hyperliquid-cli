@@ -6,47 +6,32 @@ use hypersdk::{Address, Decimal};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::command_spec::{CliCommand, CommandSpec, GroupSpec, InputKind, arg};
-use crate::commands::actions;
-use crate::commands::positions::PositionRow;
-use crate::commands::rows::{One, Row, or_missing};
-use crate::commands::support::print_dry_run;
+use crate::assets::USDC_NAME;
+use crate::cli_command::CliCommand;
+use crate::clock;
+use crate::command_spec::{CommandSpec, GroupSpec, InputKind, arg};
+use crate::commands::common::direction::TransferDirection;
+use crate::commands::common::position::PositionRow;
+use crate::commands::common::rows::{One, Row, or_missing};
+use crate::commands::common::support::{SUBMITTED, print_dry_run};
 use crate::dry_run::ActionReversibility;
 use crate::errors::CliError;
-use crate::errors::from_sdk;
+use crate::exchange::actions;
 use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
+use crate::network::ChainExt;
 use crate::output::{self, TableData};
-use crate::quantity::{self, Scale};
+use crate::quantity;
 use crate::wire::{AddressRole, InfoRequest, address};
+use crate::wire_decimal;
 
 const TRANSFER_REVERSIBILITY: ActionReversibility = ActionReversibility::PartiallyReversible;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VaultTransferActionKind {
-    Deposit,
-    Withdraw,
-}
-
-impl VaultTransferActionKind {
-    fn is_deposit(self) -> bool {
-        matches!(self, Self::Deposit)
-    }
-
-    fn action_name(self) -> &'static str {
-        if self.is_deposit() {
-            "deposit"
-        } else {
-            "withdraw"
-        }
-    }
-
-    fn would_execute(self) -> &'static str {
-        if self.is_deposit() {
-            "deposit_usdc_to_vault"
-        } else {
-            "withdraw_usdc_from_vault"
-        }
+fn would_execute(direction: TransferDirection) -> &'static str {
+    if direction.is_deposit() {
+        "deposit_usdc_to_vault"
+    } else {
+        "withdraw_usdc_from_vault"
     }
 }
 
@@ -112,15 +97,54 @@ pub enum VaultKindArg {
 }
 
 impl VaultKindArg {
-    fn matches(self, kind: &str) -> bool {
+    fn matches(self, kind: &VaultKind) -> bool {
         match self {
             Self::All => true,
-            Self::Protocol => kind.eq_ignore_ascii_case("normal"),
-            Self::User => kind.eq_ignore_ascii_case("child") || kind.eq_ignore_ascii_case("parent"),
-            Self::Normal | Self::Child | Self::Parent => self
-                .to_possible_value()
-                .is_some_and(|value| value.get_name().eq_ignore_ascii_case(kind)),
+            Self::Protocol | Self::Normal => *kind == VaultKind::Normal,
+            Self::User => matches!(kind, VaultKind::Child | VaultKind::Parent),
+            Self::Child => *kind == VaultKind::Child,
+            Self::Parent => *kind == VaultKind::Parent,
         }
+    }
+}
+
+/// How a vault relates to others, as `vault list` reports it: the vault's
+/// `relationship.type`, or `closed`/`normal` for a vault that states none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VaultKind {
+    Normal,
+    Child,
+    Parent,
+    Closed,
+    /// A relationship type this CLI does not know, as the exchange spells it.
+    Other(String),
+}
+
+impl VaultKind {
+    fn parse(raw: &str) -> Self {
+        match raw.to_ascii_lowercase().as_str() {
+            "normal" => Self::Normal,
+            "child" => Self::Child,
+            "parent" => Self::Parent,
+            "closed" => Self::Closed,
+            _ => Self::Other(raw.to_string()),
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Normal => "normal",
+            Self::Child => "child",
+            Self::Parent => "parent",
+            Self::Closed => "closed",
+            Self::Other(raw) => raw,
+        }
+    }
+}
+
+impl Serialize for VaultKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -214,7 +238,6 @@ struct VaultDetailsRow {
 /// exchange for a vault with thousands).
 const FOLLOWERS_LIST_CAP: usize = 100;
 
-/// One user's stake in a vault.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all(deserialize = "camelCase", serialize = "snake_case"))]
 struct FollowerStateRow {
@@ -240,7 +263,7 @@ struct VaultSummaryRow {
     #[serde(with = "rust_decimal::serde::str")]
     tvl: Decimal,
     age_days: Option<i64>,
-    kind: String,
+    kind: VaultKind,
     #[serde(with = "rust_decimal::serde::str_option")]
     user_deposit: Option<Decimal>,
 }
@@ -256,7 +279,7 @@ struct VaultTransferConfirmation {
     network: String,
     signer: String,
     acting_as: String,
-    reversibility: String,
+    reversibility: ActionReversibility,
     vault_address: String,
     #[serde(with = "rust_decimal::serde::str")]
     amount: Decimal,
@@ -314,7 +337,7 @@ impl TableData for VaultSummaryOutput {
                     row.apr.to_string(),
                     row.tvl.to_string(),
                     or_missing(row.age_days),
-                    row.kind.clone(),
+                    row.kind.as_str().to_string(),
                 ];
                 if show_user_deposit {
                     columns.push(or_missing(row.user_deposit));
@@ -353,7 +376,7 @@ impl Row for VaultTransferConfirmation {
             self.network.clone(),
             self.signer.clone(),
             self.acting_as.clone(),
-            self.reversibility.clone(),
+            self.reversibility.as_str().to_string(),
             self.vault_address.clone(),
             self.amount.to_string(),
             self.asset.clone(),
@@ -407,8 +430,7 @@ async fn positions(inv: &Invocation, address: &str) -> Result<(), anyhow::Error>
         .api()
         .sdk()
         .clearinghouse_state(vault, None)
-        .await
-        .map_err(from_sdk)?
+        .await?
         .asset_positions;
 
     inv.print(&VaultPositionsOutput {
@@ -421,23 +443,23 @@ async fn positions(inv: &Invocation, address: &str) -> Result<(), anyhow::Error>
 fn transfer_dry_run_value(
     chain: Chain,
     args: &VaultTransferArgs,
-    action_kind: VaultTransferActionKind,
+    direction: TransferDirection,
     vault: Address,
     usd: u64,
 ) -> serde_json::Value {
     serde_json::json!({
-        "action": action_kind.action_name(),
-        "network": chain.to_string(),
+        "action": direction.as_str(),
+        "network": chain.label(),
         "vault": vault.to_string(),
         "amount": args.amount.to_string(),
-        "asset": "USDC",
-        "is_deposit": action_kind.is_deposit(),
+        "asset": USDC_NAME,
+        "is_deposit": direction.is_deposit(),
         "usd": usd,
         "reversibility": TRANSFER_REVERSIBILITY,
         "verified_shape": {
             "type": "vaultTransfer",
             "vaultAddress": vault.to_string(),
-            "isDeposit": action_kind.is_deposit(),
+            "isDeposit": direction.is_deposit(),
             "usd": usd
         }
     })
@@ -445,9 +467,9 @@ fn transfer_dry_run_value(
 
 fn validate_list_args(args: &VaultListArgs) -> Result<Option<Address>, CliError> {
     if args.limit == 0 {
-        return Err(CliError::Configuration(
-            "vault list --limit must be greater than zero".to_string(),
-        ));
+        return Err(CliError::Configuration(quantity::not_positive(
+            "vault list --limit",
+        )));
     }
     parse_optional_user(args.user.as_deref())
 }
@@ -459,52 +481,50 @@ fn validate_search_args(args: &VaultSearchArgs) -> Result<Option<Address>, CliEr
         ));
     }
     if args.limit == 0 {
-        return Err(CliError::Configuration(
-            "vault search --limit must be greater than zero".to_string(),
-        ));
+        return Err(CliError::Configuration(quantity::not_positive(
+            "vault search --limit",
+        )));
     }
     parse_optional_user(args.user.as_deref())
 }
 
-/// Deposit USDC to a vault or withdraw it, previewing instead under `--dry-run`.
 async fn run_transfer(
     inv: &Invocation,
     args: &VaultTransferArgs,
-    action_kind: VaultTransferActionKind,
+    direction: TransferDirection,
 ) -> Result<(), anyhow::Error> {
     let vault = parse_address(&args.vault)?;
-    let usd = validate_usdc_amount(args.amount)?;
+    let usd: u64 = quantity::usdc_units(args.amount)?;
     if inv.dry_run() {
         return print_dry_run(
             inv,
-            action_kind.would_execute(),
-            transfer_dry_run_value(inv.remote()?.chain(), args, action_kind, vault, usd),
+            would_execute(direction),
+            transfer_dry_run_value(inv.remote()?.chain(), args, direction, vault, usd),
         );
     }
     let signer = inv.resolve_signer()?;
     let remote = inv.remote()?;
-    actions::send_l1_action(
+    actions::send_default_l1_action(
         remote.api(),
         &signer,
         Action::VaultTransfer(VaultTransfer {
             vault_address: vault,
-            is_deposit: action_kind.is_deposit(),
+            is_deposit: direction.is_deposit(),
             usd,
         }),
-        actions::nonce_now(),
     )
     .await?;
 
     inv.print(&One::new(VaultTransferConfirmation {
-        action: action_kind.action_name().to_string(),
-        status: "submitted".to_string(),
-        network: remote.chain().to_string(),
+        action: direction.as_str().to_string(),
+        status: SUBMITTED.to_string(),
+        network: remote.chain().label().to_string(),
         signer: signer.address().to_string(),
         acting_as: signer.query_address().to_string(),
-        reversibility: TRANSFER_REVERSIBILITY.as_str().to_string(),
+        reversibility: TRANSFER_REVERSIBILITY,
         vault_address: args.vault.clone(),
         amount: args.amount,
-        asset: "USDC".to_string(),
+        asset: USDC_NAME.to_string(),
     }));
     Ok(())
 }
@@ -527,8 +547,6 @@ async fn raw_vault_details_row(
     details.into_row(vault, user.is_some())
 }
 
-/// Every vault the exchange lists, from its public stats dataset.
-///
 /// `/info` `vaultSummaries` answers `[]` on both networks, so the list comes
 /// from the public stats dataset the exchange's own vault page reads. With a
 /// `user`, each vault row carries that user's deposit, read from their vault
@@ -582,10 +600,6 @@ fn parse_optional_user(raw: Option<&str>) -> Result<Option<Address>, CliError> {
 
 fn parse_address(input: &str) -> Result<Address, CliError> {
     address(input, AddressRole::Explicit(None))
-}
-
-fn validate_usdc_amount(amount: Decimal) -> Result<u64, CliError> {
-    quantity::positive(amount, Scale::USDC).map_err(|err| err.config("amount", Scale::USDC))
 }
 
 #[derive(Debug, Deserialize)]
@@ -652,8 +666,16 @@ impl RawVaultSummary {
             .relationship
             .get("type")
             .and_then(Value::as_str)
-            .unwrap_or(if self.is_closed { "closed" } else { "normal" })
-            .to_string();
+            .map_or_else(
+                || {
+                    if self.is_closed {
+                        VaultKind::Closed
+                    } else {
+                        VaultKind::Normal
+                    }
+                },
+                VaultKind::parse,
+            );
         Ok(VaultSummaryRow {
             vault_address: self.vault_address,
             name: self.name,
@@ -702,8 +724,8 @@ fn optional_decimal_field(value: &Value, field: &'static str) -> Result<Option<D
 }
 
 fn age_days_from_millis(create_time_millis: i64) -> i64 {
-    let now = chrono::Utc::now().timestamp_millis();
-    ((now - create_time_millis).max(0)) / 86_400_000
+    let now = i64::try_from(clock::now_ms()).unwrap_or(i64::MAX);
+    ((now - create_time_millis).max(0)) / i64::try_from(clock::DAY.ms(1)).unwrap_or(i64::MAX)
 }
 
 impl RawVaultDetails {
@@ -739,25 +761,15 @@ impl RawVaultDetails {
 }
 
 fn decimal_field(value: &Value, field: &'static str) -> Result<Decimal, CliError> {
-    let raw = match value {
-        Value::String(text) => text.clone(),
-        Value::Number(number) => number.to_string(),
-        _ => {
-            return Err(CliError::Internal(anyhow::anyhow!(
-                "decode failed while reading {field}: expected string or number"
-            )));
-        }
-    };
-    parse_decimal_text(&raw).map_err(|err| {
+    let failed = |reason: &dyn std::fmt::Display| {
         CliError::Internal(anyhow::anyhow!(
-            "decode failed while reading {field}: {err}"
+            "decode failed while reading {field}: {reason}"
         ))
-    })
-}
-
-fn parse_decimal_text(raw: &str) -> Result<Decimal, rust_decimal::Error> {
-    raw.parse::<Decimal>()
-        .or_else(|_| Decimal::from_scientific(raw))
+    };
+    if !matches!(value, Value::String(_) | Value::Number(_)) {
+        return Err(failed(&"expected string or number"));
+    }
+    wire_decimal::from_value(value).map_err(|err| failed(&err))
 }
 
 fn raw_portfolio_summary(portfolio: &Value) -> Result<(Vec<String>, Option<Decimal>), CliError> {
@@ -930,7 +942,7 @@ impl CliCommand for VaultDeposit {
     ]);
 
     async fn run(inv: &Invocation, args: &VaultTransferArgs) -> Result<(), anyhow::Error> {
-        run_transfer(inv, args, VaultTransferActionKind::Deposit).await
+        run_transfer(inv, args, TransferDirection::Deposit).await
     }
 }
 
@@ -955,7 +967,7 @@ impl CliCommand for VaultWithdraw {
     ]);
 
     async fn run(inv: &Invocation, args: &VaultTransferArgs) -> Result<(), anyhow::Error> {
-        run_transfer(inv, args, VaultTransferActionKind::Withdraw).await
+        run_transfer(inv, args, TransferDirection::Withdraw).await
     }
 }
 
@@ -965,12 +977,29 @@ mod tests {
 
     #[test]
     fn usdc_amount_validation_rejects_zero_negative_and_over_precise_amounts() {
-        assert!(validate_usdc_amount(Decimal::ZERO).is_err());
-        assert!(validate_usdc_amount("-1".parse::<Decimal>().unwrap()).is_err());
-        assert!(validate_usdc_amount("0.0000001".parse::<Decimal>().unwrap()).is_err());
-        assert_eq!(
-            validate_usdc_amount("1.5".parse::<Decimal>().unwrap()).unwrap(),
-            1_500_000
+        let usd = |amount: &str| quantity::usdc_units::<u64>(amount.parse().unwrap());
+        assert!(usd("0").is_err());
+        assert!(usd("-1").is_err());
+        assert!(usd("0.0000001").is_err());
+        assert_eq!(usd("1.5").unwrap(), 1_500_000);
+    }
+
+    #[test]
+    fn a_wire_decimal_reads_strings_numbers_and_scientific_notation_and_names_the_field() {
+        let read =
+            |value: serde_json::Value| decimal_field(&value, "apr").map_err(|e| e.to_string());
+        assert_eq!(read(serde_json::json!("1.5")), Ok(Decimal::new(15, 1)));
+        assert_eq!(read(serde_json::json!(2)), Ok(Decimal::from(2)));
+        assert_eq!(read(serde_json::json!("1e-7")), Ok(Decimal::new(1, 7)));
+        assert!(
+            read(serde_json::json!(null))
+                .unwrap_err()
+                .ends_with("decode failed while reading apr: expected string or number")
+        );
+        assert!(
+            read(serde_json::json!("abc"))
+                .unwrap_err()
+                .contains("decode failed while reading apr: ")
         );
     }
 }

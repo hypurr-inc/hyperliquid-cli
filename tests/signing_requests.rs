@@ -5,17 +5,14 @@
 
 mod support;
 
-use assert_cmd::Command;
-use hyperliquid_cli::settings::env;
+use hyperliquid_cli::env;
 use hypersdk::hypercore::Chain;
-use hypersdk::hypercore::types::ActionRequest;
 use predicates::prelude::*;
 use serde_json::{Value, json};
 use std::process::Stdio;
 use support::exchange::ExchangeFixture;
+use support::signing::{recover_signer, test_signer};
 use support::{IsolatedHome, VALID_PRIVATE_KEY, expected_address, json_stdout, unix_millis};
-use wiremock::matchers::{method, path};
-use wiremock::{Mock, ResponseTemplate};
 
 const OK: fn() -> Value = || json!({"status": "ok", "response": {"type": "default"}});
 const DESTINATION: &str = "0xAbCdEf0123456789aBcDeF0123456789AbCdEf01";
@@ -26,29 +23,11 @@ async fn exchange() -> ExchangeFixture {
     server
 }
 
-/// A signing command against `server` on the testnet, JSON output.
-fn signed(env: &IsolatedHome, server: &ExchangeFixture, args: &[&str]) -> Command {
-    let mut command = env.live_command(server);
-    command.args(["--format", "json", "--testnet"]).args(args);
-    command
-}
-
 fn nonces(bodies: &[Value]) -> Vec<u64> {
     bodies
         .iter()
         .map(|body| body["nonce"].as_u64().expect("nonce"))
         .collect()
-}
-
-/// The address that signed `body`, recovered by hypersdk from the action, the
-/// nonce, the vault and the expiry the request carries. It is the signer only
-/// if the CLI hashed those the way hypersdk does.
-fn recovered_signer(body: &Value, chain: Chain) -> String {
-    serde_json::from_value::<ActionRequest>(body.clone())
-        .expect("a request hypersdk can read")
-        .recover(chain)
-        .expect("a signature that recovers")
-        .to_string()
 }
 
 fn mark_file(env: &IsolatedHome) -> std::path::PathBuf {
@@ -70,8 +49,6 @@ fn read_mark(env: &IsolatedHome) -> u64 {
 
 const RESERVE_ONE: [&str; 5] = ["account", "reserve-weight", "--weight", "1", "--yes"];
 
-// ---- nonces -------------------------------------------------------------
-
 #[tokio::test]
 async fn concurrent_processes_never_sign_with_the_same_nonce() {
     let env = IsolatedHome::new();
@@ -79,7 +56,8 @@ async fn concurrent_processes_never_sign_with_the_same_nonce() {
 
     let children: Vec<_> = (0..24)
         .map(|_| {
-            let command = signed(&env, &server, &RESERVE_ONE);
+            let mut command = env.live_json(&server);
+            command.args(RESERVE_ONE);
             let mut child = support::std_command(&command);
             child.stdout(Stdio::null()).stderr(Stdio::null());
             child.spawn().unwrap()
@@ -103,7 +81,7 @@ async fn a_recorded_mark_ahead_of_the_clock_is_respected() {
     let mark = unix_millis() + 60 * 60 * 1000;
     write_mark(&env, mark);
 
-    signed(&env, &server, &RESERVE_ONE).assert().success();
+    env.live_json(&server).args(RESERVE_ONE).assert().success();
 
     assert_eq!(nonces(&server.exchange_bodies().await), vec![mark + 1]);
     assert_eq!(read_mark(&env), mark + 1);
@@ -116,7 +94,7 @@ async fn a_mark_more_than_twelve_hours_ahead_is_ignored() {
     write_mark(&env, unix_millis() + 20 * 60 * 60 * 1000);
 
     let before = unix_millis();
-    signed(&env, &server, &RESERVE_ONE).assert().success();
+    env.live_json(&server).args(RESERVE_ONE).assert().success();
     let after = unix_millis();
 
     let nonce = nonces(&server.exchange_bodies().await)[0];
@@ -131,12 +109,84 @@ async fn the_mark_and_its_directory_are_private() {
     let env = IsolatedHome::new();
     let server = exchange().await;
 
-    signed(&env, &server, &RESERVE_ONE).assert().success();
+    env.live_json(&server).args(RESERVE_ONE).assert().success();
 
     let mode =
         |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&mark_file(&env)), 0o600);
     assert_eq!(mode(&env.data_dir()), 0o700);
+}
+
+const DRY_RUN_APPROVALS: [&[&str]; 3] = [
+    &["api-wallet", "create", "--dry-run"],
+    &["api-wallet", "approve", "--generate", "--dry-run"],
+    &["api-wallet", "revoke", "--unnamed", "--dry-run"],
+];
+
+#[tokio::test]
+async fn a_dry_run_approval_consumes_no_nonce_and_writes_no_mark() {
+    let env = IsolatedHome::new();
+    let server = exchange().await;
+
+    for args in DRY_RUN_APPROVALS {
+        env.live_json(&server).args(args).assert().success();
+    }
+
+    assert!(
+        !mark_file(&env).exists(),
+        "a preview must not create the nonce mark"
+    );
+    assert!(server.exchange_bodies().await.is_empty());
+
+    let mark = unix_millis() + 60 * 60 * 1000;
+    write_mark(&env, mark);
+    for args in DRY_RUN_APPROVALS {
+        env.live_json(&server).args(args).assert().success();
+    }
+    assert_eq!(read_mark(&env), mark, "a preview must not raise the mark");
+}
+
+/// Commands that sign through the sender (`send_l1_action`,
+/// `send_raw_l1_json_action`) or a user-signed document: each allocates its
+/// nonce after the preview returns.
+const DRY_RUN_SENDS: [&[&str]; 6] = [
+    &["account", "reserve-weight", "--weight", "1", "--dry-run"],
+    &["account", "evm-big-blocks", "--enable", "--dry-run"],
+    &["subaccount", "create", "--name", "desk", "--dry-run"],
+    &["staking", "claim-rewards", "--dry-run"],
+    &["staking", "deposit", "--amount", "1", "--dry-run"],
+    &[
+        "transfer",
+        "send",
+        "--to",
+        DESTINATION,
+        "--amount",
+        "1",
+        "--dry-run",
+    ],
+];
+
+#[tokio::test]
+async fn a_dry_run_of_a_sending_command_consumes_no_nonce_and_writes_no_mark() {
+    let env = IsolatedHome::new();
+    let server = exchange().await;
+
+    for args in DRY_RUN_SENDS {
+        env.live_json(&server).args(args).assert().success();
+    }
+
+    assert!(
+        !mark_file(&env).exists(),
+        "a preview must not create the nonce mark"
+    );
+    assert!(server.exchange_bodies().await.is_empty());
+
+    let mark = unix_millis() + 60 * 60 * 1000;
+    write_mark(&env, mark);
+    for args in DRY_RUN_SENDS {
+        env.live_json(&server).args(args).assert().success();
+    }
+    assert_eq!(read_mark(&env), mark, "a preview must not raise the mark");
 }
 
 #[tokio::test]
@@ -146,7 +196,8 @@ async fn an_unwritable_data_directory_still_signs_and_says_so() {
     let blocker = env.tmp_path().join("blocker");
     std::fs::write(&blocker, b"").unwrap();
 
-    signed(&env, &server, &RESERVE_ONE)
+    env.live_json(&server)
+        .args(RESERVE_ONE)
         .env(env::DATA_DIR, blocker.join("hyperliquid"))
         .assert()
         .success()
@@ -157,15 +208,14 @@ async fn an_unwritable_data_directory_still_signs_and_says_so() {
     assert_eq!(server.exchange_bodies().await.len(), 1);
 }
 
-// ---- expiresAfter -------------------------------------------------------
-
 #[tokio::test]
 async fn expires_after_is_hashed_and_sent_for_hypersdk_actions() {
     let env = IsolatedHome::new();
     let server = exchange().await;
 
     let before = unix_millis();
-    signed(&env, &server, &RESERVE_ONE)
+    env.live_json(&server)
+        .args(RESERVE_ONE)
         .args(["--expires-after", "30s"])
         .assert()
         .success();
@@ -177,10 +227,7 @@ async fn expires_after_is_hashed_and_sent_for_hypersdk_actions() {
         (before + 30_000..=after + 30_000).contains(&expires),
         "{expires}"
     );
-    assert_eq!(
-        recovered_signer(body, Chain::Testnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
@@ -189,7 +236,8 @@ async fn expires_after_is_hashed_and_sent_for_raw_l1_actions() {
     let server = exchange().await;
 
     let before = unix_millis();
-    signed(&env, &server, &["subaccount", "create", "--name", "desk"])
+    env.live_json(&server)
+        .args(["subaccount", "create", "--name", "desk"])
         .args(["--expires-after", "5m"])
         .assert()
         .success();
@@ -202,10 +250,7 @@ async fn expires_after_is_hashed_and_sent_for_raw_l1_actions() {
         (before + 300_000..=after + 300_000).contains(&expires),
         "{expires}"
     );
-    assert_eq!(
-        recovered_signer(body, Chain::Testnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
@@ -213,18 +258,16 @@ async fn without_expires_after_the_wire_is_unchanged() {
     let env = IsolatedHome::new();
     let server = exchange().await;
 
-    signed(&env, &server, &RESERVE_ONE).assert().success();
-    signed(&env, &server, &["subaccount", "create", "--name", "desk"])
+    env.live_json(&server).args(RESERVE_ONE).assert().success();
+    env.live_json(&server)
+        .args(["subaccount", "create", "--name", "desk"])
         .assert()
         .success();
 
     for body in server.exchange_bodies().await {
         assert!(body["expiresAfter"].is_null(), "{body}");
         assert!(body.as_object().unwrap().contains_key("expiresAfter"));
-        assert_eq!(
-            recovered_signer(&body, Chain::Testnet),
-            expected_address(VALID_PRIVATE_KEY)
-        );
+        assert_eq!(recover_signer(&body, Chain::Testnet), test_signer());
     }
 }
 
@@ -234,21 +277,18 @@ async fn expires_after_is_refused_for_user_signed_commands_even_in_a_preview() {
     let server = exchange().await;
 
     for preview in [false, true] {
-        let mut command = signed(
-            &env,
-            &server,
-            &[
-                "transfer",
-                "send",
-                "--to",
-                "0x0000000000000000000000000000000000000001",
-                "--amount",
-                "1",
-                "--yes",
-                "--expires-after",
-                "30s",
-            ],
-        );
+        let mut command = env.live_json(&server);
+        command.args([
+            "transfer",
+            "send",
+            "--to",
+            "0x0000000000000000000000000000000000000001",
+            "--amount",
+            "1",
+            "--yes",
+            "--expires-after",
+            "30s",
+        ]);
         if preview {
             command.arg("--dry-run");
         }
@@ -298,10 +338,8 @@ async fn a_preview_shows_the_computed_expiry() {
 
     let before = unix_millis();
     let json = json_stdout(
-        &signed(
-            &env,
-            &server,
-            &[
+        &env.live_json(&server)
+            .args([
                 "--dry-run",
                 "--expires-after",
                 "30s",
@@ -309,10 +347,9 @@ async fn a_preview_shows_the_computed_expiry() {
                 "reserve-weight",
                 "--weight",
                 "10",
-            ],
-        )
-        .assert()
-        .success(),
+            ])
+            .assert()
+            .success(),
     );
     let after = unix_millis();
 
@@ -323,13 +360,10 @@ async fn a_preview_shows_the_computed_expiry() {
     );
 
     let without = json_stdout(
-        &signed(
-            &env,
-            &server,
-            &["--dry-run", "account", "reserve-weight", "--weight", "10"],
-        )
-        .assert()
-        .success(),
+        &env.live_json(&server)
+            .args(["--dry-run", "account", "reserve-weight", "--weight", "10"])
+            .assert()
+            .success(),
     );
     assert!(without.get("expires_after").is_none(), "{without}");
     assert!(server.exchange_bodies().await.is_empty());
@@ -339,13 +373,11 @@ async fn a_preview_shows_the_computed_expiry() {
 async fn an_unknown_outcome_names_the_nonce_and_expiry_to_burn() {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&server)
-        .await;
+    server.mount_exchange_failure(503, "").await;
 
-    let output = signed(&env, &server, &RESERVE_ONE)
+    let output = env
+        .live_json(&server)
+        .args(RESERVE_ONE)
         .args(["--expires-after", "1m"])
         .assert()
         .code(12)
@@ -380,13 +412,11 @@ async fn an_unknown_outcome_names_the_nonce_and_expiry_to_burn() {
 async fn an_unknown_outcome_without_an_expiry_names_only_the_nonce() {
     let env = IsolatedHome::new();
     let server = ExchangeFixture::start().await;
-    Mock::given(method("POST"))
-        .and(path("/exchange"))
-        .respond_with(ResponseTemplate::new(503))
-        .mount(&server)
-        .await;
+    server.mount_exchange_failure(503, "").await;
 
-    let output = signed(&env, &server, &RESERVE_ONE)
+    let output = env
+        .live_json(&server)
+        .args(RESERVE_ONE)
         .assert()
         .code(12)
         .get_output()
@@ -404,8 +434,6 @@ async fn an_unknown_outcome_without_an_expiry_names_only_the_nonce() {
     );
     assert!(!error.contains("expiring"), "{error}");
 }
-
-// ---- account invalidate-nonce -------------------------------------------
 
 #[tokio::test]
 async fn invalidate_nonce_sends_a_signed_noop_carrying_the_nonce_to_burn() {
@@ -436,10 +464,7 @@ async fn invalidate_nonce_sends_a_signed_noop_carrying_the_nonce_to_burn() {
     assert_eq!(body["nonce"], nonce);
     assert!(body["vaultAddress"].is_null());
     assert!(body["expiresAfter"].is_null());
-    assert_eq!(
-        recovered_signer(body, Chain::Mainnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Mainnet), test_signer());
 }
 
 #[tokio::test]
@@ -448,21 +473,15 @@ async fn invalidate_nonce_honors_expires_after() {
     let server = exchange().await;
     let nonce = unix_millis() - 5_000;
 
-    signed(
-        &env,
-        &server,
-        &["account", "invalidate-nonce", "--nonce", &nonce.to_string()],
-    )
-    .args(["--expires-after", "2m"])
-    .assert()
-    .success();
+    env.live_json(&server)
+        .args(["account", "invalidate-nonce", "--nonce", &nonce.to_string()])
+        .args(["--expires-after", "2m"])
+        .assert()
+        .success();
 
     let body = &server.exchange_bodies().await[0];
     assert!(body["expiresAfter"].as_u64().unwrap() > unix_millis());
-    assert_eq!(
-        recovered_signer(body, Chain::Testnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
@@ -472,19 +491,16 @@ async fn invalidate_nonce_previews_without_sending() {
     let nonce = unix_millis() - 5_000;
 
     let json = json_stdout(
-        &signed(
-            &env,
-            &server,
-            &[
+        &env.live_json(&server)
+            .args([
                 "--dry-run",
                 "account",
                 "invalidate-nonce",
                 "--nonce",
                 &nonce.to_string(),
-            ],
-        )
-        .assert()
-        .success(),
+            ])
+            .assert()
+            .success(),
     );
 
     assert_eq!(json["command"], "account invalidate-nonce");
@@ -503,11 +519,8 @@ async fn invalidate_nonce_refuses_a_nonce_the_exchange_could_not_hold() {
 
     for nonce in [1, too_old, too_new] {
         for preview in [false, true] {
-            let mut command = signed(
-                &env,
-                &server,
-                &["account", "invalidate-nonce", "--nonce", &nonce.to_string()],
-            );
+            let mut command = env.live_json(&server);
+            command.args(["account", "invalidate-nonce", "--nonce", &nonce.to_string()]);
             if preview {
                 command.arg("--dry-run");
             }
@@ -517,17 +530,42 @@ async fn invalidate_nonce_refuses_a_nonce_the_exchange_could_not_hold() {
                 .stdout(predicate::str::contains("outside the window"));
         }
     }
-    signed(
-        &env,
-        &server,
-        &["account", "invalidate-nonce", "--nonce", "0"],
-    )
-    .assert()
-    .code(2);
+    env.live_json(&server)
+        .args(["account", "invalidate-nonce", "--nonce", "0"])
+        .assert()
+        .code(2);
     assert!(server.exchange_bodies().await.is_empty());
 }
 
-// ---- account reserve-weight ---------------------------------------------
+/// An ok reply whose `type` is not `default`.
+fn cancel_reply() -> Value {
+    json!({"status": "ok", "response": {"type": "cancel", "data": {"statuses": ["success"]}}})
+}
+
+#[tokio::test]
+async fn an_action_with_nothing_to_report_refuses_an_ok_reply_that_is_not_default() {
+    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server.mount_exchange(cancel_reply()).await;
+
+    env.live_json(&server).args(["account", "evm-big-blocks", "--enable"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "exchange action: unexpected response type: [untrusted remote data] Ok(Cancel { statuses: [Success] })",
+        ));
+    assert_eq!(server.exchange_bodies().await.len(), 1);
+}
+
+#[tokio::test]
+async fn an_action_that_returns_its_payload_does_not_check_the_reply_type() {
+    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server.mount_exchange(cancel_reply()).await;
+
+    env.live_json(&server).args(RESERVE_ONE).assert().success();
+    assert_eq!(server.exchange_bodies().await.len(), 1);
+}
 
 #[tokio::test]
 async fn reserve_weight_signs_the_l1_action_for_the_signer() {
@@ -535,13 +573,10 @@ async fn reserve_weight_signs_the_l1_action_for_the_signer() {
     let server = exchange().await;
 
     let json = json_stdout(
-        &signed(
-            &env,
-            &server,
-            &["account", "reserve-weight", "--weight", "10", "--yes"],
-        )
-        .assert()
-        .success(),
+        &env.live_json(&server)
+            .args(["account", "reserve-weight", "--weight", "10", "--yes"])
+            .assert()
+            .success(),
     );
 
     assert_eq!(
@@ -560,10 +595,7 @@ async fn reserve_weight_signs_the_l1_action_for_the_signer() {
         json!({"type": "reserveRequestWeight", "weight": 10})
     );
     assert!(body["vaultAddress"].is_null());
-    assert_eq!(
-        recovered_signer(body, Chain::Testnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
@@ -571,10 +603,8 @@ async fn reserve_weight_hashes_the_destination_as_lowercase_hex() {
     let env = IsolatedHome::new();
     let server = exchange().await;
 
-    signed(
-        &env,
-        &server,
-        &[
+    env.live_json(&server)
+        .args([
             "account",
             "reserve-weight",
             "--weight",
@@ -582,10 +612,9 @@ async fn reserve_weight_hashes_the_destination_as_lowercase_hex() {
             "--destination",
             DESTINATION,
             "--yes",
-        ],
-    )
-    .assert()
-    .success();
+        ])
+        .assert()
+        .success();
 
     let body = &server.exchange_bodies().await[0];
     assert_eq!(
@@ -596,10 +625,7 @@ async fn reserve_weight_hashes_the_destination_as_lowercase_hex() {
             "destination": DESTINATION.to_lowercase()
         })
     );
-    assert_eq!(
-        recovered_signer(body, Chain::Testnet),
-        expected_address(VALID_PRIVATE_KEY)
-    );
+    assert_eq!(recover_signer(body, Chain::Testnet), test_signer());
 }
 
 #[tokio::test]
@@ -608,10 +634,8 @@ async fn reserve_weight_previews_its_cost_without_sending() {
     let server = exchange().await;
 
     let json = json_stdout(
-        &signed(
-            &env,
-            &server,
-            &[
+        &env.live_json(&server)
+            .args([
                 "--dry-run",
                 "account",
                 "reserve-weight",
@@ -619,10 +643,9 @@ async fn reserve_weight_previews_its_cost_without_sending() {
                 "1000",
                 "--destination",
                 DESTINATION,
-            ],
-        )
-        .assert()
-        .success(),
+            ])
+            .assert()
+            .success(),
     );
 
     assert_eq!(json["would_execute"], "reserve_request_weight");
@@ -672,7 +695,8 @@ async fn reserve_weight_refuses_malformed_input() {
             "0x0000000000000000000000000000000000000000",
         ],
     ] {
-        signed(&env, &server, &["account", "reserve-weight", "--yes"])
+        env.live_json(&server)
+            .args(["account", "reserve-weight", "--yes"])
             .args(&args)
             .assert()
             .code(2);

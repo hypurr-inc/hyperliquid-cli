@@ -1,38 +1,35 @@
 use std::time::{Duration, Instant};
 
 use hypersdk::Decimal;
-use hypersdk::hypercore::types::{Action, BatchOrder, OrderGrouping, OrderResponseStatus};
-use hypersdk::hypercore::{Cloid, HttpClient};
+use hypersdk::hypercore::Cloid;
+use hypersdk::hypercore::types::OrderResponseStatus;
 use serde_json::json;
 
 use crate::assets::{AssetResolver, Market};
 use crate::errors::CliError;
+use crate::hints::{CHASE_DRY_RUN, CHASE_LIVE};
+use crate::http_api::ApiClient;
 use crate::invocation::Invocation;
 use crate::output::TableData;
+use crate::quantity::not_positive;
 use crate::settings::Settings;
 
-use super::args::{ChaseArgs, DEFAULT_TRACKING_TIMEOUT, OrderSide, TifArg};
+use super::args::{ChaseArgs, DEFAULT_TRACKING_TIMEOUT};
 use super::cloid::generated_cloid;
 use super::context::OrderSubmissionContext;
-use super::exchange::{Placement, decode_statuses, rejection_error};
-use super::live_order::{CloidAsset, LiveOrder, elapsed_ms, send_tracked_action};
+use super::exchange::{Placement, Wording, rejection_error};
+use super::limits::MIN_NOTIONAL_USDC;
+use super::live_order::{CloidAsset, LiveOrder, elapsed_ms};
 use super::planning::{market_dex, market_mid_price, prepare_order_in, resolve_perp_market};
+use super::preview::OrderDryRunPlan;
 use super::rendering::single_status;
-use super::validation::{BPS_DENOMINATOR, OrderSpec};
+use super::status::Status;
+use super::submit::{Ungated, submit_orders};
+use super::validation::OrderSpec;
+use super::vocab::{BPS_DENOMINATOR, OrderSide, TifArg};
 
-/// Chase stops when the unfilled remainder is worth less than the exchange's
-/// minimum order value.
-const MIN_NOTIONAL_USDC: i64 = 10;
-
-/// The command a person reruns to try a chase, in the flags the help shows.
-const EXAMPLE: &str = "orders chase --coin ETH --side buy --size 0.5 --timeout 60s";
-
-fn dry_run_example() -> String {
-    format!("hyperliquid --format json --dry-run {EXAMPLE}")
-}
-
-/// The ALO quote a chase rests at `price`. The dry run and every live requote
-/// plan it through here, so the preview shows the price and size that are sent.
+/// The dry run and every live requote plan it through here, so the preview shows the
+/// price and size that are sent.
 fn quote_spec(
     args: &ChaseArgs,
     price: Decimal,
@@ -51,13 +48,13 @@ fn quote_spec(
     .with_cloid(cloid))
 }
 
-pub async fn chase_dry_run_plan(
-    client: &HttpClient,
+pub(super) async fn chase_dry_run_plan(
+    client: &ApiClient,
     resolver: &AssetResolver,
     settings: &Settings,
     args: &ChaseArgs,
     timeout: Duration,
-) -> Result<serde_json::Value, CliError> {
+) -> Result<OrderDryRunPlan, CliError> {
     let perp = resolve_perp_market(
         client,
         resolver,
@@ -80,7 +77,10 @@ pub async fn chase_dry_run_plan(
         )?,
     )
     .await?;
-    Ok(dry_run_document(args, timeout, first_quote.price()))
+    Ok(OrderDryRunPlan::unattributed(
+        "chase",
+        dry_run_document(args, timeout, first_quote.price()),
+    ))
 }
 
 fn dry_run_document(
@@ -104,17 +104,16 @@ fn dry_run_document(
     })
 }
 
-pub async fn chase(
+pub(super) async fn chase(
     context: OrderSubmissionContext<'_>,
     resolver: &AssetResolver,
     args: &ChaseArgs,
     timeout: Duration,
 ) -> Result<(), anyhow::Error> {
-    context
-        .refuse_unattended_without_yes("chase", &format!("hyperliquid --format json {EXAMPLE}"))?;
+    context.refuse_unattended_without_yes("chase", CHASE_LIVE)?;
 
     let started = Instant::now();
-    let client = context.api.sdk();
+    let client = context.api;
     let perp = resolve_perp_market(
         client,
         resolver,
@@ -129,11 +128,10 @@ pub async fn chase(
     let mid = || market_mid_price(client, &market, &args.coin, args.dex.as_deref());
     let start_mid = mid().await?;
     let mut remaining = args.size;
-    let mut status = "timeout";
+    let mut status = Status::Timeout;
     let mut working: Option<LiveOrder> = None;
     let mut seq: u64 = 0;
     let user = context.account();
-    // The timeout bounds the chase itself, not the lookups before it.
     let deadline = Instant::now() + timeout;
 
     let outcome: Result<(), CliError> = async {
@@ -143,17 +141,15 @@ pub async fn chase(
                 let traveled_bps =
                     ((mid - start_mid).abs() / start_mid) * Decimal::from(BPS_DENOMINATOR);
                 if traveled_bps > Decimal::from(args.max_chase) {
-                    status = "max_chase";
+                    status = Status::MaxChase;
                     break;
                 }
             }
             if remaining * mid < Decimal::from(MIN_NOTIONAL_USDC) {
-                status = "min_notional";
+                status = Status::MinNotional;
                 break;
             }
 
-            // Requote: cancel only the quote this chase placed, never other
-            // orders resting on the same market.
             if let Some(quote) = working.take() {
                 cancel_working_quote(context, &quote).await?;
             }
@@ -181,8 +177,6 @@ pub async fn chase(
 
             tokio::time::sleep(args.interval).await;
 
-            // Reconcile the working quote against open orders so partial fills
-            // shrink the next quote and a vanished quote counts as filled.
             if let Some(quote) = working.as_mut() {
                 let filled = quote.refresh(client, user, dex.clone()).await?;
                 remaining = (remaining - filled).max(Decimal::ZERO);
@@ -195,8 +189,6 @@ pub async fn chase(
     }
     .await;
 
-    // Final cleanup: never leave a live chase quote behind on timeout, bound
-    // breaks, or errors. Cleanup failures are propagated, not swallowed.
     if let Some(quote) = working.take()
         && let Err(cleanup) = cancel_working_quote(context, &quote).await
     {
@@ -208,19 +200,18 @@ pub async fn chase(
     outcome?;
 
     if remaining <= Decimal::ZERO {
-        status = "filled";
+        status = Status::Filled;
         remaining = Decimal::ZERO;
     }
 
     context.inv.print(&ChaseOutput {
-        status: status.to_string(),
+        status,
         remaining: remaining.to_string(),
         elapsed_ms: elapsed_ms(started),
     });
     Ok(())
 }
 
-/// Check the flags and return how long the chase may run.
 pub(super) fn chase_timeout(inv: &Invocation, args: &ChaseArgs) -> Result<Duration, CliError> {
     validate_chase_args(args)?;
     effective_timeout(args, requires_explicit_timeout(inv))
@@ -229,8 +220,8 @@ pub(super) fn chase_timeout(inv: &Invocation, args: &ChaseArgs) -> Result<Durati
 fn validate_chase_args(args: &ChaseArgs) -> Result<(), CliError> {
     if args.size <= Decimal::ZERO {
         return Err(CliError::Configuration(format!(
-            "orders chase --size must be greater than zero.\n  {}",
-            dry_run_example()
+            "{}.\n  {CHASE_DRY_RUN}",
+            not_positive("orders chase --size")
         )));
     }
     Ok(())
@@ -240,14 +231,13 @@ fn effective_timeout(args: &ChaseArgs, require_explicit: bool) -> Result<Duratio
     match args.timeout {
         Some(timeout) => Ok(timeout),
         None if require_explicit => Err(CliError::Configuration(format!(
-            "orders chase requires --timeout in agent mode.\n  {}",
-            dry_run_example()
+            "orders chase requires --timeout in agent mode.\n  {CHASE_DRY_RUN}"
         ))),
         None => Ok(DEFAULT_TRACKING_TIMEOUT),
     }
 }
 
-/// A run nobody watches live cannot assume the 300s default; the shared
+/// A run nobody watches live cannot assume the default timeout; the shared
 /// [`Mode`](crate::mode::Mode) decides that, not a local env read.
 fn requires_explicit_timeout(inv: &Invocation) -> bool {
     !inv.mode().live_display()
@@ -261,12 +251,13 @@ fn quote_price(mid: Decimal, side: OrderSide, offset_bps: u32) -> Decimal {
     }
 }
 
-/// Cancel one chase quote by cloid; unrelated orders are untouched.
 async fn cancel_working_quote(
     context: OrderSubmissionContext<'_>,
     quote: &LiveOrder,
 ) -> Result<(), CliError> {
-    send_tracked_action(context, quote.cancel_by_cloid(), "chase cancel failed").await?;
+    context
+        .send(quote.cancel_by_cloid(), Wording::CHASE_CANCEL)
+        .await?;
     Ok(())
 }
 
@@ -279,26 +270,19 @@ async fn place_chase_quote(
     cloid: Cloid,
 ) -> Result<OrderResponseStatus, anyhow::Error> {
     let spec = quote_spec(args, price, size, Some(cloid))?;
-    let prepared =
-        prepare_order_in(context.api.sdk(), market, context.inv.settings(), &spec).await?;
-    let response = send_tracked_action(
+    let prepared = prepare_order_in(context.api, market, context.inv.settings(), &spec).await?;
+    let statuses = submit_orders(
         context,
-        Action::Order(BatchOrder {
-            orders: vec![prepared.request],
-            grouping: OrderGrouping::Na,
-            builder: None,
-        }),
-        "chase quote failed",
+        &Ungated::Chase.cleared(),
+        prepared.batch(),
+        Wording::CHASE_QUOTE,
     )
     .await?;
-    Ok(single_status(decode_statuses(
-        response,
-        "order placement",
-    )?)?)
+    Ok(single_status(statuses)?)
 }
 
 struct ChaseOutput {
-    status: String,
+    status: Status,
     remaining: String,
     elapsed_ms: u64,
 }
@@ -310,7 +294,7 @@ impl TableData for ChaseOutput {
 
     fn rows(&self) -> Vec<Vec<String>> {
         vec![vec![
-            self.status.clone(),
+            self.status.to_string(),
             self.remaining.clone(),
             self.elapsed_ms.to_string(),
         ]]
@@ -372,7 +356,7 @@ mod tests {
         let unwatched = effective_timeout(&sample_args(None), true).unwrap_err();
         assert_eq!(unwatched.exit_code(), 2);
         assert!(unwatched.to_string().contains("requires --timeout"));
-        assert!(unwatched.to_string().contains(&dry_run_example()));
+        assert!(unwatched.to_string().contains(CHASE_DRY_RUN));
     }
 
     #[test]

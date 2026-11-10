@@ -9,8 +9,9 @@
 //! current-thread runtime on a scoped thread: the handler's own runtime is never
 //! blocked on a future it would have to poll. Async callers await the request.
 //!
-//! Bankr signs trading actions and spot-to-perp USDC moves; every other
-//! user-signed action is refused by [`covers`] before a request is sent. The
+//! Bankr signs trading actions and spot-to-perp USDC moves
+//! ([`Signs::bankr_covers`](crate::signable::Signs::bankr_covers)); every other
+//! user-signed action is refused before a request is sent. The
 //! signature a request returns is recovered against the payload's digest by
 //! the selected signer, so a Bankr reply can never sign for a different account
 //! than the one selected.
@@ -24,12 +25,17 @@ use hypersdk::hypercore::types::Signature as HyperliquidSignature;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::bankr_credentials::KeySource;
 use crate::config::BankrLogin;
+use crate::env;
 use crate::errors::{CliError, network_error};
+use crate::hints::wallet::WALLET_LOGIN;
+use crate::network::is_loopback_url;
+use crate::resolvers::parse_hex_address;
 use crate::response_sanitization::Untrusted;
-use crate::settings::{KeySource, Settings, env, is_loopback_url};
-use crate::signing::signature::Provider;
-use crate::signing::{Payload, Signs};
+use crate::settings::Settings;
+use crate::signable::Payload;
+use crate::signature::Provider;
 
 /// Bankr's public API, used when no other URL is configured.
 pub const DEFAULT_API_URL: &str = "https://api.bankr.bot";
@@ -71,33 +77,8 @@ struct SignRequest<'a> {
     typed_data: &'a Value,
 }
 
-/// The user-signed actions Bankr signs, by EIP-712 struct name: a spot↔perp
-/// USDC move. Every other user-signed action (withdrawals, sends, staking,
-/// approvals, multisig) is refused before a request is sent.
-const SIGNED_USER_ACTIONS: &[&str] = &["UsdClassTransfer"];
-
-/// Whether Bankr signs `signs`: trading actions and the user-signed actions in
-/// [`SIGNED_USER_ACTIONS`]. A command's spec and a payload about to be signed
-/// both ask this, so they can never disagree.
-#[must_use]
-pub fn covers(signs: Signs<'_>) -> bool {
-    match signs {
-        Signs::L1Action => true,
-        Signs::UserSigned(name) => SIGNED_USER_ACTIONS.contains(&name),
-        Signs::Digest => false,
-    }
-}
-
 /// The refusal for a signature Bankr does not cover, before a request is sent.
-pub fn ensure_covers(signs: Signs<'_>) -> Result<(), CliError> {
-    if covers(signs) {
-        Ok(())
-    } else {
-        Err(not_covered())
-    }
-}
-
-fn not_covered() -> CliError {
+pub fn not_covered() -> CliError {
     CliError::Unsupported(
         "Bankr signs trading actions (orders, cancels, modifies, leverage, margin, trailing stops, TWAP, vault and subaccount actions) and spot-to-perp USDC moves; this action needs a user-signed payload Bankr does not cover, so use a local key or an OWS wallet for it"
             .to_string(),
@@ -107,7 +88,9 @@ fn not_covered() -> CliError {
 /// The typed-data document Bankr is asked to sign for `payload`, or the refusal
 /// for a payload it does not cover.
 pub(crate) fn document(payload: &Payload<'_>) -> Result<Value, CliError> {
-    ensure_covers(payload.signs())?;
+    if !payload.signs().bankr_covers() {
+        return Err(not_covered());
+    }
     match payload {
         Payload::Agent {
             chain,
@@ -241,7 +224,7 @@ impl BankrClient {
         me.wallets
             .iter()
             .find(|wallet| wallet.chain.eq_ignore_ascii_case("evm"))
-            .and_then(|wallet| wallet.address.parse::<Address>().ok())
+            .and_then(|wallet| parse_hex_address(&wallet.address, false).ok())
             .ok_or_else(|| {
                 CliError::Unavailable("bankr has no EVM wallet linked to this API key".to_string())
             })
@@ -289,7 +272,7 @@ impl BankrClient {
             )));
         }
         if let Some(signer) = signed.signer.as_deref()
-            && let Ok(signer) = signer.parse::<Address>()
+            && let Ok(signer) = parse_hex_address(signer, false)
             && signer != expected
         {
             return Err(Provider::BANKR
@@ -317,7 +300,11 @@ async fn read_body(response: reqwest::Response) -> Result<String, CliError> {
 }
 
 /// The typed data Hyperliquid signs for an L1 action that carries no user-signed
-/// schema: the msgpack hash wrapped in the `Agent` struct.
+/// schema: the msgpack hash wrapped in the `Agent` struct. hypersdk builds this
+/// document only inside its private `solidity` module and exposes just the
+/// digest ([`hypersdk::hypercore::signing::agent_signing_hash`]), so the JSON
+/// is written out here; a test hashes it against that digest, and every Bankr
+/// signature is verified against the same digest at signing time.
 fn agent_document(chain: Chain, connection_id: B256) -> Value {
     json!({
         "types": {
@@ -388,7 +375,7 @@ fn credential_error(status: reqwest::StatusCode, body: &str) -> CliError {
         .unwrap_or_else(|| "no reason given".to_string());
     match status.as_u16() {
         401 | 403 => CliError::InvalidAuth(format!(
-            "bankr rejected the API key ({}): {}. Set {}, or run `hyperliquid wallet login` to store a bk_... key from https://bankr.bot/api-keys.",
+            "bankr rejected the API key ({}): {}. Set {}, or run `{WALLET_LOGIN}` to store a bk_... key from https://bankr.bot/api-keys.",
             status.as_u16(),
             Untrusted::from_remote(&message),
             env::BANKR_API_KEY
@@ -502,7 +489,8 @@ mod tests {
     fn blank_environment_keys_do_not_shadow_stored_credentials() {
         use crate::config::Config;
         const ADDRESS: &str = "0x0000000000000000000000000000000000000009";
-        use crate::settings::{EnvSource, Settings};
+        use crate::env::EnvSource;
+        use crate::settings::Settings;
 
         let config = Config {
             bankr: BankrLogin::new("bk_from_config", None, ADDRESS.parse().unwrap()),

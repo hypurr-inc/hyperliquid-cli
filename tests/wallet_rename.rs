@@ -3,7 +3,7 @@
 mod support;
 
 use serde_json::Value;
-use support::{IsolatedHome, TEST_ACCOUNT_PASSPHRASE, expected_address, json_stdout, stdout_json};
+use support::{IsolatedHome, TEST_ACCOUNT_PASSPHRASE, expected_address, json_stdout, run_json};
 
 const KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000007";
 const OTHER_KEY: &str = "0x0000000000000000000000000000000000000000000000000000000000000008";
@@ -28,15 +28,10 @@ fn import(env: &IsolatedHome, key: &str) -> String {
 
 /// `account ls` as `(alias, address, is_default)` rows.
 fn wallets(env: &IsolatedHome) -> Vec<(String, String, bool)> {
-    let output = env
-        .account_command(TEST_ACCOUNT_PASSPHRASE)
-        .args(["--format", "json", "account", "ls"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let Value::Array(rows) = stdout_json(&output) else {
+    let Value::Array(rows) = run_json(
+        env.account_command(TEST_ACCOUNT_PASSPHRASE)
+            .args(["--format", "json", "account", "ls"]),
+    ) else {
         panic!("account ls prints an array");
     };
     let mut wallets: Vec<_> = rows

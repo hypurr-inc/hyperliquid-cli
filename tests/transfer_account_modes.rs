@@ -5,28 +5,11 @@
 
 mod support;
 
-use serde_json::{Value, json};
+use serde_json::json;
 use support::exchange::ExchangeFixture;
-use support::{API_OVERRIDE_ENV, IsolatedHome, PRIVATE_KEY_ENV, VALID_PRIVATE_KEY};
+use support::{IsolatedHome, wire};
 
 const RECIPIENT: &str = "0x0000000000000000000000000000000000000001";
-
-fn perp_state(withdrawable: &str) -> Value {
-    json!({
-        "marginSummary": {
-            "accountValue": "10000", "totalNtlPos": "0",
-            "totalRawUsd": "10000", "totalMarginUsed": "0"
-        },
-        "crossMarginSummary": {
-            "accountValue": "10000", "totalNtlPos": "0",
-            "totalRawUsd": "10000", "totalMarginUsed": "0"
-        },
-        "crossMaintenanceMarginUsed": "0",
-        "withdrawable": withdrawable,
-        "assetPositions": [],
-        "time": 1_700_000_000_000_u64
-    })
-}
 
 /// An account in the raw `userAbstraction` mode with the given perp
 /// `withdrawable` and spot USDC `total` and `hold`.
@@ -43,7 +26,7 @@ async fn account_server(
     server
         .mount_info_containing(
             json!({"type": "clearinghouseState"}),
-            perp_state(withdrawable),
+            wire::perp_state(withdrawable, vec![]),
         )
         .await;
     server
@@ -82,15 +65,6 @@ fn spending_commands() -> [(&'static str, Vec<&'static str>); 3] {
     ]
 }
 
-fn run(env: &IsolatedHome, server: &ExchangeFixture, args: &[&str]) -> assert_cmd::assert::Assert {
-    env.command()
-        .env(API_OVERRIDE_ENV, server.uri())
-        .env(PRIVATE_KEY_ENV, VALID_PRIVATE_KEY)
-        .args(["--format", "json", "--testnet"])
-        .args(args)
-        .assert()
-}
-
 async fn exchange_posts(server: &ExchangeFixture) -> usize {
     server.exchange_actions().await.len()
 }
@@ -107,7 +81,7 @@ async fn a_pooled_account_spends_from_its_spot_balance_not_the_empty_perp_one() 
         for (sent, (name, args)) in spending_commands().into_iter().enumerate() {
             let env = IsolatedHome::new();
 
-            run(&env, &server, &args).success();
+            env.live_json(&server).args(&args).assert().success();
 
             assert_eq!(exchange_posts(&server).await, sent + 1, "{raw_mode} {name}");
         }
@@ -122,7 +96,9 @@ async fn a_pooled_account_is_refused_by_its_spot_available_balance() {
         for (name, args) in spending_commands() {
             let env = IsolatedHome::new();
 
-            run(&env, &server, &args)
+            env.live_json(&server)
+                .args(&args)
+                .assert()
                 .code(13)
                 .stdout(predicates::str::contains("insufficient balance"))
                 .stdout(predicates::str::contains("available spot USDC 50"));
@@ -142,12 +118,14 @@ async fn standard_and_dex_abstraction_accounts_keep_the_perp_withdrawable_check(
         for (sent, (name, args)) in spending_commands().into_iter().enumerate() {
             let env = IsolatedHome::new();
 
-            run(&env, &empty_perp, &args)
+            env.live_json(&empty_perp)
+                .args(&args)
+                .assert()
                 .code(13)
                 .stdout(predicates::str::contains("available perp withdrawable 20"));
             assert_eq!(exchange_posts(&empty_perp).await, 0, "{raw_mode} {name}");
 
-            run(&env, &funded_perp, &args).success();
+            env.live_json(&funded_perp).args(&args).assert().success();
             assert_eq!(
                 exchange_posts(&funded_perp).await,
                 sent + 1,
@@ -162,12 +140,35 @@ async fn spot_to_perp_never_reads_the_abstraction() {
     let env = IsolatedHome::new();
     let server = account_server("unifiedAccount", "0", "1000", "0").await;
 
-    run(
-        &env,
-        &server,
-        &["transfer", "spot-to-perp", "--amount", "100", "--yes"],
-    )
-    .success();
+    env.live_json(&server)
+        .args(["transfer", "spot-to-perp", "--amount", "100", "--yes"])
+        .assert()
+        .success();
 
     assert_eq!(server.info_requests("userAbstraction").await.len(), 0);
+}
+
+#[tokio::test]
+async fn usdc_is_the_spot_token_at_index_zero_not_any_balance_named_usdc() {
+    let env = IsolatedHome::new();
+    let server = ExchangeFixture::start().await;
+    server
+        .mount_info_containing(json!({"type": "userAbstraction"}), json!("unifiedAccount"))
+        .await;
+    server
+        .mount_info_containing(
+            json!({"type": "spotClearinghouseState"}),
+            json!({"balances": [
+                {"coin": "USDC", "token": 7, "hold": "0", "total": "1000", "entryNtl": "0"}
+            ]}),
+        )
+        .await;
+
+    env.live_json(&server)
+        .args([
+            "transfer", "send", "--to", RECIPIENT, "--amount", "100", "--yes",
+        ])
+        .assert()
+        .code(13)
+        .stdout(predicates::str::contains("available spot USDC 0"));
 }

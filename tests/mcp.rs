@@ -1,9 +1,12 @@
-use assert_cmd::Command;
+mod support;
+
+use hyperliquid_cli::env;
 use serde_json::{Value, json};
+use support::{IsolatedHome, json_stdout};
 
 #[test]
 fn stdio_initialize_list_and_call() {
-    let home = tempfile::tempdir().unwrap();
+    let home = IsolatedHome::new();
     let messages = [
         "{".to_string(),
         json!({"jsonrpc":"2.0","method":"notifications/cancelled"}).to_string(),
@@ -14,13 +17,9 @@ fn stdio_initialize_list_and_call() {
         json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"missing"}}).to_string(),
         json!({"jsonrpc":"2.0","id":5,"method":"missing"}).to_string(),
     ];
-    let output = Command::cargo_bin("hyperliquid")
-        .unwrap()
-        .env("HOME", home.path())
-        .env("XDG_CONFIG_HOME", home.path())
-        .env("XDG_DATA_HOME", home.path())
-        .env("HYPERLIQUID_NO_UPDATE_CHECK", "1")
-        .env_remove("HYPERLIQUID_MCP_ALLOW_UNSAFE")
+    let output = home
+        .command()
+        .env(env::NO_UPDATE_CHECK, "1")
         .arg("mcp")
         .write_stdin(messages.join("\n") + "\n")
         .assert()
@@ -33,6 +32,7 @@ fn stdio_initialize_list_and_call() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    // The notifications get no reply; the unparseable line gets an error with a null id.
     assert_eq!(responses.len(), 6);
     assert_eq!(responses[0]["id"], Value::Null);
     assert!(responses[0].get("id").is_some());
@@ -57,4 +57,29 @@ fn stdio_initialize_list_and_call() {
     );
     assert_eq!(responses[4]["error"]["code"], -32602);
     assert_eq!(responses[5]["error"]["code"], -32601);
+}
+
+#[test]
+fn an_unreadable_mcp_environment_exits_2_before_the_server_starts() {
+    let home = IsolatedHome::new();
+    for (name, value) in [
+        (env::MCP_TIMEOUT_MS, "soon"),
+        (env::MCP_TIMEOUT_MS, "0"),
+        (env::MCP_ALLOW_UNSAFE, "maybe"),
+    ] {
+        let assert = home
+            .command()
+            .env(env::NO_UPDATE_CHECK, "1")
+            .env(name, value)
+            .args(["--format", "json", "mcp"])
+            .write_stdin(json!({"jsonrpc":"2.0","id":1,"method":"ping"}).to_string() + "\n")
+            .assert()
+            .code(2);
+        let envelope = json_stdout(&assert);
+        assert_eq!(envelope["reason"], "invalid_config", "{name}={value}");
+        assert!(
+            envelope["error"].as_str().unwrap().contains(name),
+            "{envelope}"
+        );
+    }
 }
