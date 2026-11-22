@@ -2,7 +2,7 @@
 
 [![GitHub release](https://img.shields.io/github/v/release/hypurr-inc/hyperliquid-cli?label=release&color=orange)](https://github.com/hypurr-inc/hyperliquid-cli/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.93%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.94.1%2B-blue.svg)](https://www.rust-lang.org)
 [![Built on hypersdk](https://img.shields.io/badge/built%20on-hypersdk-blueviolet.svg)](https://github.com/infinitefield/hypersdk)
 
 Languages: [English](README.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | [日本語](README.ja-JP.md) | [한국어](README.ko-KR.md)
@@ -38,7 +38,7 @@ hyperliquid --version
 cargo install --path . --bin hyperliquid
 ```
 
-需要 Rust 1.93+。
+需要 Rust 1.94.1+。
 
 ## 快速開始
 
